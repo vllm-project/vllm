@@ -128,7 +128,7 @@ class InputBatch:
     nopython=True,
     cache=True,
 )
-def prepare_inputs(
+def _prepare_inputs(
         idx_mapping: np.ndarray,  # batch_idx -> req_idx
         token_ids: np.ndarray,  # [N, max_model_len]
         num_computed_tokens: np.ndarray,  # [N]
@@ -163,6 +163,41 @@ def prepare_inputs(
     query_start_loc[num_reqs + 1:].fill(cu_num_tokens)
     # Fill unused with 0 for full cuda graph mode.
     seq_lens[num_reqs:].fill(0)
+
+
+def prepare_inputs(
+    idx_mapping: np.ndarray,
+    prompt_token_ids: np.ndarray,
+    num_computed_tokens: np.ndarray,
+    num_scheduled_tokens: np.ndarray,
+    input_ids: CpuGpuBuffer,
+    positions: CpuGpuBuffer,
+    query_start_loc: CpuGpuBuffer,
+    seq_lens: CpuGpuBuffer,
+    num_tokens: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    _prepare_inputs(
+        idx_mapping,
+        prompt_token_ids,
+        num_computed_tokens,
+        num_scheduled_tokens,
+        input_ids.np,
+        positions.np,
+        query_start_loc.np,
+        seq_lens.np,
+    )
+    input_ids.copy_to_gpu(num_tokens)
+    positions.copy_to_gpu(num_tokens)
+    # NOTE(woosuk): We should copy the whole query_start_loc and seq_lens
+    # tensors from CPU to GPU, because they may include paddings needed
+    # for full CUDA graph mode.
+    query_start_loc.copy_to_gpu()
+    seq_lens.copy_to_gpu()
+
+    num_reqs = num_scheduled_tokens.shape[0]
+    max_query_len = int(num_scheduled_tokens.max())
+    max_seq_len = int(seq_lens.np[:num_reqs].max())
+    return max_query_len, max_seq_len
 
 
 @triton.jit

@@ -273,31 +273,24 @@ class GPUModelRunner:
         # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
 
-        prepare_inputs(
+        max_query_len, max_seq_len = prepare_inputs(
             idx_mapping_np,
             self.req_states.prompt_token_ids,
             self.req_states.num_computed_tokens,
             num_scheduled_tokens,
-            self.input_buffers.input_ids.np,
-            self.input_buffers.positions.np,
-            self.input_buffers.query_start_loc.np,
-            self.input_buffers.seq_lens.np,
+            self.input_buffers.input_ids,
+            self.input_buffers.positions,
+            self.input_buffers.query_start_loc,
+            self.input_buffers.seq_lens,
+            num_tokens,
         )
-        self.input_buffers.input_ids.copy_to_gpu(num_tokens)
-        self.input_buffers.positions.copy_to_gpu(num_tokens)
-        # NOTE(woosuk): We should copy the whole query_start_loc and seq_lens
-        # tensors from CPU to GPU, because they may include paddings needed
-        # for full CUDA graph mode.
-        self.input_buffers.query_start_loc.copy_to_gpu()
-        self.input_buffers.seq_lens.copy_to_gpu()
+
         query_start_loc = self.input_buffers.query_start_loc
         query_start_loc_gpu = query_start_loc.gpu[:num_reqs + 1]
         query_start_loc_cpu = query_start_loc.cpu[:num_reqs + 1]
-        max_query_len = int(num_scheduled_tokens.max())
         seq_lens_gpu = self.input_buffers.seq_lens.gpu[:num_reqs]
         seq_lens_cpu = self.input_buffers.seq_lens.np[:num_reqs]
         seq_lens_np = self.input_buffers.seq_lens.np[:num_reqs]
-        max_seq_len = int(seq_lens_np.max())
 
         # Some input token ids are directly read from the last sampled tokens.
         combine_last_token_ids(
