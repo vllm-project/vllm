@@ -1,32 +1,60 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import json
 import time
 from collections import Counter
 from contextlib import suppress
-from typing import Any
+from typing import Any, Optional
 
-from vllm.envs import VLLM_GC_DEBUG, VLLM_GC_DEBUG_TOP_COLLECTED_OBJECTS
+from vllm.envs import VLLM_GC_DEBUG
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+class GCDebugConfig:
+    """
+    Config for GC Debugger.
+    - 0: disable GC debugger
+    - 1: enable GC debugger with gc.collect elpased times
+    - {\"top_objects\":5}: enable GC debugger with top 5 collected objects
+    """
+
+    def __init__(self, gc_debug_conf: Optional[str] = None) -> None:
+        self.enabled: bool = False
+        self.top_objects: int = -1
+
+        if not gc_debug_conf or gc_debug_conf == "0":
+            pass
+        elif gc_debug_conf == "1":
+            self.enabled = True
+        else:
+            try:
+                json_conf = json.loads(gc_debug_conf)
+                self.enabled = True
+                self.top_objects = json_conf.get("top_objects", -1)
+            except Exception:
+                logger.error("Failed to parse VLLM_GC_DEBUG(%s)",
+                             VLLM_GC_DEBUG)
+                self.enabled = False
+        logger.info("GC Debug Config. %s", str(self))
+
+    def __repr__(self) -> str:
+        return f"enabled:{self.enabled},top_objects:{self.top_objects}"
 
 
 class GCDebugger:
     """
     Debugger for GC which logs helpful information for GC understanding.
     To enable, you should call maybe_attach_gc_debug_callback in the process.
-
-    Options:
-    - VLLM_GC_DEBUG=1: to enable basic GC elpased time logging
-    - VLLM_GC_DEBUG_TOP_COLLECTED_OBJECTS=<k>: to enable top collected objects
-      logging
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: GCDebugConfig) -> None:
+        self.config = config
         # Start time in micro second of this GC cycle
         self.start_time_ns: int = time.monotonic_ns()
-        # If VLLM_GC_DEBUG_TOP_COLLECTED_OBJECTS is positive,
+        # If config.top_objects is positive,
         # compute top collected objects by object types
         self.gc_top_collected_objects: str = ""
 
@@ -42,8 +70,7 @@ class GCDebugger:
             # and top collected objects
             self.start_time_ns = time.monotonic_ns()
             self.gc_top_collected_objects = _compute_top_gc_collected_objects(
-                gc.get_objects(generation),
-                VLLM_GC_DEBUG_TOP_COLLECTED_OBJECTS)
+                gc.get_objects(generation), self.config.top_objects)
         elif phase == "stop":
             # After GC finished, Record GC elapsed time and
             # optionally top collected objects
@@ -63,8 +90,9 @@ def maybe_attach_gc_debug_callback() -> None:
     """
     Attached a callback for GC debug when VLLM_GC_DEBUG is enabled.
     """
-    if VLLM_GC_DEBUG:
-        debugger: GCDebugger = GCDebugger()
+    config = GCDebugConfig(VLLM_GC_DEBUG)
+    if config.enabled:
+        debugger: GCDebugger = GCDebugger(config)
 
         def gc_callback(phase: str, info: dict[str, int]) -> None:
             debugger.handle(phase, info)
