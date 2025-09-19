@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 import numpy as np
 import torch
@@ -15,6 +15,7 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              BatchOrderSpec,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -313,6 +314,10 @@ class TorchSDPAMetadata(AttentionMetadata):
 
 class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
+    batch_order_spec: ClassVar[BatchOrderSpec] = \
+        BatchOrderSpec(reorder_required=True, decode_threshold=1,
+                       decode_first=False)
+
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -320,10 +325,6 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         self.scheduler_config = vllm_config.scheduler_config
 
         # For reorder
-        self.reorder_prompt_req_index_list = np.empty(
-            vllm_config.scheduler_config.max_num_seqs, dtype=np.int64)
-        self.reorder_decode_req_index_list = np.empty(
-            vllm_config.scheduler_config.max_num_seqs, dtype=np.int64)
         self.num_prompt_req: int = 0
 
         self.seq_start_loc_cpu = torch.zeros(

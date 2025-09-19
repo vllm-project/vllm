@@ -11,6 +11,7 @@ from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
+                                              BatchOrderSpec,
                                               CommonAttentionMetadata,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -61,8 +62,9 @@ class GDNAttentionMetadataBuilder(
         AttentionMetadataBuilder[GDNAttentionMetadata]):
 
     cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
-
-    reorder_batch_threshold: ClassVar[int] = 1
+    batch_order_spec: ClassVar[BatchOrderSpec] = \
+        BatchOrderSpec(reorder_required=True, decode_threshold=1,
+                       decode_first=True)
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -76,7 +78,7 @@ class GDNAttentionMetadataBuilder(
         else:
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
-        self.reorder_batch_threshold = self.num_spec + 1  # type: ignore[misc]
+        self.batch_order_spec.decode_threshold = self.num_spec + 1
 
         self.use_full_cuda_graph = \
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -147,7 +149,11 @@ class GDNAttentionMetadataBuilder(
 
         if spec_sequence_masks is None:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(m, decode_threshold=1))
+                split_decodes_and_prefills(m,
+                                           batch_order_spec=BatchOrderSpec(
+                                               reorder_required=True,
+                                               decode_threshold=1,
+                                               decode_first=True)))
             num_spec_decodes = 0
             num_spec_decode_tokens = 0
             spec_token_masks = None

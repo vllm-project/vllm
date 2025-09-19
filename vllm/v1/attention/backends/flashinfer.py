@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 # yapf: disable
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
+                                              BatchOrderSpec,
                                               CommonAttentionMetadata,
                                               get_kv_cache_layout,
                                               get_per_layer_parameters,
@@ -239,8 +240,9 @@ class FlashInferMetadata:
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-
-    reorder_batch_threshold: ClassVar[int] = 1
+    batch_order_spec: ClassVar[BatchOrderSpec] = \
+        BatchOrderSpec(reorder_required=True, decode_threshold=1,
+                       decode_first=True)
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -404,9 +406,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
               fast_build: bool = False) -> FlashInferMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
-            split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=self.reorder_batch_threshold)
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                batch_order_spec=self.batch_order_spec)
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len

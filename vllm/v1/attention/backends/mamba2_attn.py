@@ -163,10 +163,10 @@ class Mamba2AttentionMetadataBuilder(
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold))
+                batch_order_spec=self.batch_order_spec)
 
         # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
         if num_prefills > 0:

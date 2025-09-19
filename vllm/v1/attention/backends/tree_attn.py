@@ -14,6 +14,7 @@ from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              BatchOrderSpec,
                                               CommonAttentionMetadata,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -189,10 +190,13 @@ class TreeAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> TreeAttentionMetadata:
-        decode_threshold = self.tree_attn_bias.shape[0]
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+        batch_order_spec = BatchOrderSpec(
+            reorder_required=True,
+            decode_threshold=self.tree_attn_bias.shape[0],
+            decode_first=True)
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
             split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=decode_threshold))
+                                       batch_order_spec=batch_order_spec)
 
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         q_start_loc = common_attn_metadata.query_start_loc

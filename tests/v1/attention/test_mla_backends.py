@@ -347,7 +347,8 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         is_decode = []
         for i, backend in enumerate(BACKENDS_TO_TEST):
             builder_cls, _ = get_attention_backend(backend)
-            is_decode.append(q_len <= builder_cls.reorder_batch_threshold)
+            is_decode.append(
+                q_len <= builder_cls.batch_order_spec.decode_threshold)
 
         # Split q into nope and rope components
         q_nope, q_pe = q_c.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
