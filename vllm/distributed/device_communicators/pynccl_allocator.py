@@ -14,6 +14,7 @@ from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import find_nccl_include_paths
 
 logger = init_logger(__name__)
 
@@ -72,6 +73,7 @@ def compile_nccl_allocator():
     try:
         out_dir = tempfile.gettempdir()
         nccl_allocator_libname = "nccl_allocator"
+        nccl_include_paths = find_nccl_include_paths()
         load_inline(
             name=nccl_allocator_libname,
             cpp_sources=nccl_allocator_source,
@@ -80,8 +82,7 @@ def compile_nccl_allocator():
             verbose=envs.VLLM_LOGGING_LEVEL == "DEBUG",
             is_python_module=False,
             build_directory=out_dir,
-            extra_include_paths=[envs.VLLM_NCCL_INCLUDE_PATH]
-            if envs.VLLM_NCCL_INCLUDE_PATH else None,
+            extra_include_paths=nccl_include_paths,
         )
         _allocator_wrapper = CUDAPluggableAllocator(
             f"{out_dir}/{nccl_allocator_libname}.so",
