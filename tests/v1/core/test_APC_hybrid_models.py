@@ -87,26 +87,21 @@ def test_single_prompt(
     """
     MULTIPLE = 120
 
-    # Common prefix.
-    prefix = MULTIPLE * example_prompts[0]
-
     # Sample prompts.
-    generated_prompts = [prefix + prompt for prompt in example_prompts[1:]]
+    generated_prompts = [MULTIPLE * example_prompts[0]]
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
     vllm_runner_kwargs = _get_vllm_runner_params(model, mamba_ssm_cache_dtype,
                                                  enforce_eager, max_model_len,
                                                  dtype, tensor_parallel_size)
-    vllm_outputs_no_cache = _get_vLLM_output_logprobs(vllm_runner,
-                                                      vllm_runner_kwargs,
-                                                      [generated_prompts[0]],
-                                                      max_tokens,
-                                                      num_logprobs)[0][0]
+    vllm_outputs_no_cache, _ = _get_vLLM_output_logprobs(
+        vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
+        num_logprobs)
 
     vllm_runner_kwargs['enable_prefix_caching'] = True
     vllm_outputs_cache_rep, _ = _get_vLLM_output_logprobs(
-        vllm_runner, vllm_runner_kwargs, [generated_prompts[0]], max_tokens,
+        vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
         num_logprobs, n_repetitions)
 
     for r_idx, vllm_outputs_cache_itn in enumerate(vllm_outputs_cache_rep):
@@ -114,7 +109,7 @@ def test_single_prompt(
         # In the second repetition, these caches are reused
 
         check_logprobs_close(
-            outputs_0_lst=vllm_outputs_no_cache,
+            outputs_0_lst=vllm_outputs_no_cache[0],
             outputs_1_lst=vllm_outputs_cache_itn,
             name_0="vllm_no_cache",
             name_1=f"vllm_cache_it_{r_idx + 1}",
@@ -150,11 +145,8 @@ def test_single_prompt_mamba_size_alignment(
     """
     MULTIPLE = 120
 
-    # Common prefix.
-    prefix = MULTIPLE * example_prompts[0]
-
     # Sample prompts.
-    generated_prompts = [prefix + prompt for prompt in example_prompts[1:]]
+    generated_prompts = [MULTIPLE * example_prompts[0]]
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
@@ -162,8 +154,8 @@ def test_single_prompt_mamba_size_alignment(
                                                  enforce_eager, max_model_len,
                                                  dtype, tensor_parallel_size)
     vllm_outputs_no_cache, _ = _get_vLLM_output_logprobs(
-        vllm_runner, vllm_runner_kwargs, [generated_prompts[0]], max_tokens,
-        num_logprobs)[0][0]
+        vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
+        num_logprobs)
 
     vllm_runner_kwargs['enable_prefix_caching'] = True
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
@@ -183,8 +175,8 @@ def test_single_prompt_mamba_size_alignment(
                 'max_num_batched_tokens'] = multiple * mamba_block_size - \
                                             offsets
             vllm_outputs_cache_rep, _ = _get_vLLM_output_logprobs(
-                vllm_runner, vllm_runner_kwargs, [generated_prompts[0]],
-                max_tokens, num_logprobs, n_repetitions)
+                vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
+                num_logprobs, n_repetitions)
 
             # Check alignment of the output logits when using APC
             for r_idx, vllm_outputs_cache_itn in enumerate(
@@ -193,7 +185,7 @@ def test_single_prompt_mamba_size_alignment(
                 # In the second repetition, these caches are reused
 
                 check_logprobs_close(
-                    outputs_0_lst=vllm_outputs_no_cache,
+                    outputs_0_lst=vllm_outputs_no_cache[0],
                     outputs_1_lst=vllm_outputs_cache_itn,
                     name_0="vllm_no_cache",
                     name_1=f"vllm_cache_it_{r_idx + 1}",
@@ -229,11 +221,8 @@ def test_multiple_prompts_all_cached_output_logprobs(
     """
     MULTIPLE = 120
 
-    # Common prefix.
-    prefix = MULTIPLE * example_prompts[0]
-
     # Sample prompts.
-    generated_prompts = [prefix + prompt for prompt in example_prompts[1:]]
+    generated_prompts = [MULTIPLE * prompt for prompt in example_prompts]
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
@@ -242,7 +231,7 @@ def test_multiple_prompts_all_cached_output_logprobs(
                                                  dtype, tensor_parallel_size)
     vllm_outputs_no_cache, _ = _get_vLLM_output_logprobs(
         vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
-        num_logprobs)[0][0]
+        num_logprobs)
 
     vllm_runner_kwargs['enable_prefix_caching'] = True
     vllm_outputs_cache_rep, _ = _get_vLLM_output_logprobs(
@@ -254,7 +243,7 @@ def test_multiple_prompts_all_cached_output_logprobs(
         # In the second repetition, these caches are reused
 
         check_logprobs_close(
-            outputs_0_lst=vllm_outputs_no_cache,
+            outputs_0_lst=vllm_outputs_no_cache[0],
             outputs_1_lst=vllm_outputs_cache_itn,
             name_0="vllm_no_cache",
             name_1=f"vllm_cache_it_{r_idx + 1}",
@@ -290,11 +279,8 @@ def test_multiple_prompts_partial_cached_output_logprobs(
     """
     MULTIPLE = 120
 
-    # Common prefix.
-    prefix = MULTIPLE * example_prompts[0]
-
     # Sample prompts.
-    generated_prompts = [prefix + prompt for prompt in example_prompts[1:]]
+    generated_prompts = [MULTIPLE * prompt for prompt in example_prompts]
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
@@ -303,7 +289,7 @@ def test_multiple_prompts_partial_cached_output_logprobs(
                                                  dtype, tensor_parallel_size)
     vllm_outputs_no_cache, _ = _get_vLLM_output_logprobs(
         vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
-        num_logprobs)[0][0]
+        num_logprobs)
 
     # Cache only part of all the prompts
     vllm_runner_kwargs['enable_prefix_caching'] = True
@@ -312,7 +298,7 @@ def test_multiple_prompts_partial_cached_output_logprobs(
         num_logprobs)
 
     check_logprobs_close(
-        outputs_0_lst=vllm_outputs_no_cache[:3],
+        outputs_0_lst=vllm_outputs_no_cache[0][:3],
         outputs_1_lst=vllm_outputs_partial_cache[0],
         name_0="vllm_no_cache",
         name_1="vllm_partial_cache",
@@ -332,7 +318,7 @@ def test_multiple_prompts_partial_cached_output_logprobs(
         # In the second repetition, these caches are reused
 
         check_logprobs_close(
-            outputs_0_lst=vllm_outputs_no_cache,
+            outputs_0_lst=vllm_outputs_no_cache[0],
             outputs_1_lst=vllm_outputs_cache_itn,
             name_0="vllm_no_cache",
             name_1=f"vllm_cache_it_{r_idx + 1}",
