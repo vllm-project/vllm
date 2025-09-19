@@ -16,7 +16,7 @@ from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.processor import Processor
 
@@ -253,10 +253,7 @@ class OpenAIServing:
         if vllm_config.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config,
-                scheduler_config=vllm_config.scheduler_config,
-                lora_config=vllm_config.lora_config)
+            tokenizer = init_tokenizer_from_configs(vllm_config.model_config)
         self.processor = Processor(vllm_config, tokenizer)
 
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
@@ -912,7 +909,6 @@ class OpenAIServing:
         **kwargs,
     ):
         orig_priority = priority
-        from vllm.v1.engine.async_llm import AsyncLLM
         while True:
             self._log_inputs(
                 request_id,
@@ -920,40 +916,29 @@ class OpenAIServing:
                 params=sampling_params,
                 lora_request=lora_request,
             )
-            # TODO: remove AsyncLLM check and update EngineClient
-            # once we fully deprecate V0
-            if isinstance(self.engine_client, AsyncLLM):
-                await self._initialize_processor()
-                trace_headers = kwargs.get("trace_headers")
-                prompt_str, engine_request, tokenization_kwargs = (
-                    self._process_inputs(
-                        request_id,
-                        engine_prompt,
-                        sampling_params,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        priority=priority,
-                    ))
-
-                generator = self.engine_client.generate(
-                    engine_request,
-                    sampling_params,
+            await self._initialize_processor()
+            trace_headers = kwargs.get("trace_headers")
+            prompt_str, engine_request, tokenization_kwargs = (
+                self._process_inputs(
                     request_id,
-                    lora_request=lora_request,
-                    priority=priority,
-                    prompt_str=prompt_str,
-                    tokenization_kwargs=tokenization_kwargs,
-                    **kwargs,
-                )
-            else:
-                generator = self.engine_client.generate(
                     engine_prompt,
                     sampling_params,
-                    request_id,
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
                     priority=priority,
-                    **kwargs,
-                )
+                ))
+
+            generator = self.engine_client.generate(
+                engine_request,
+                sampling_params,
+                request_id,
+                lora_request=lora_request,
+                priority=priority,
+                prompt_str=prompt_str,
+                tokenization_kwargs=tokenization_kwargs,
+                **kwargs,
+            )
+
             async for res in generator:
                 context.append_output(res)
                 # NOTE(woosuk): The stop condition is handled by the engine.
