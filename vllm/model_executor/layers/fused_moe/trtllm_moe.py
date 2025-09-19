@@ -48,8 +48,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
+        curr_M: int,
         M: int,
         N: int,
         K: int,
@@ -57,14 +56,12 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # The workspaces for this implementation are managed by flashinfer.
-        # TODO(varun) : workspace1 is could be used as the output tensor. This
-        # is error-prone. Allow the `workspace_shapes` to return None workspaces
-        workspace1 = (M, K)
-        workspace2 = (0, 0)
+        workspace1 = ()
+        workspace2 = ()
         output = (M, K)
-        return (workspace1, workspace2, output, a.dtype)
+        return (workspace1, workspace2, output)
 
     def _get_tile_tokens_dim(self, x: torch.Tensor, top_k: int,
                              local_num_experts: int):
@@ -103,6 +100,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],

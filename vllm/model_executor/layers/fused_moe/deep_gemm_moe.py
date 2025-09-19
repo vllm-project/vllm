@@ -181,8 +181,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
+        curr_M: int,
         M: int,
         N: int,
         K: int,
@@ -190,17 +189,17 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.block_shape is not None
         block_m = self.block_shape[0]
-        M_sum = compute_aligned_M(M, topk, local_num_experts, block_m,
+        M_sum = compute_aligned_M(curr_M, topk, local_num_experts, block_m,
                                   expert_tokens_meta)
         assert M_sum % block_m == 0
 
         workspace1 = (M_sum, max(N, K))
         workspace2 = (M_sum, max(N // 2, K))
         output = (M, K)
-        return (workspace1, workspace2, output, a.dtype)
+        return (workspace1, workspace2, output)
 
     def apply(
         self,
@@ -214,13 +213,14 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
         assert a1q_scale is not None
-        assert self.a2_scale is None
+        assert a2_scale is None
         assert self.block_shape is not None
         assert self.w1_scale is not None
         assert self.w2_scale is not None

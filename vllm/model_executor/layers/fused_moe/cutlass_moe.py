@@ -241,6 +241,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
@@ -262,7 +263,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
         run_cutlass_moe_fp8(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
             global_num_experts, expert_map, self.w1_scale, self.w2_scale,
-            a1q_scale, self.a2_scale, self.ab_strides1, self.ab_strides2,
+            a1q_scale, a2_scale, self.ab_strides1, self.ab_strides2,
             self.c_strides1, self.c_strides2, workspace13, workspace2,
             expert_num_tokens,
             self.out_dtype if self.out_dtype is not None else in_dtype,
@@ -307,10 +308,12 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         # topk weights and reduction are fused in moe_unpermute cuda kernel
         return TopKWeightAndReduceNoOP()
 
+    def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
+        return self.out_dtype if self.out_dtype is not None else act_dtype
+
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
+        curr_M: int,
         M: int,
         N: int,
         K: int,
@@ -318,12 +321,11 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        workspace1 = (M * topk, max(N, K))
-        workspace2 = (M * topk, max(N // 2, K))
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        workspace1 = (curr_M * topk, max(N, K))
+        workspace2 = (curr_M * topk, max(N // 2, K))
         output = (M, K)
-        return (workspace1, workspace2, output,
-                self.out_dtype if self.out_dtype is not None else a.dtype)
+        return (workspace1, workspace2, output)
 
 
 class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
@@ -364,11 +366,12 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
     def supports_expert_map(self) -> bool:
         return False
 
-    # TODO(bnell): maybe remove need for passing aq to workspace_shapes
+    def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
+        return self.out_dtype if self.out_dtype is not None else act_dtype
+
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
+        curr_M: int,
         M: int,
         N: int,
         K: int,
@@ -376,17 +379,13 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        padded_M = aq.size(1)
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         num_dp = self.num_dispatchers
         assert num_dp is not None
-        workspace1 = (self.max_experts_per_worker, padded_M * num_dp,
-                      max(N, K))
-        workspace2 = (self.max_experts_per_worker, padded_M * num_dp,
-                      max(N // 2, K))
-        output = (self.max_experts_per_worker, padded_M, K)
-        return (workspace1, workspace2, output,
-                self.out_dtype if self.out_dtype is not None else a.dtype)
+        workspace1 = (self.max_experts_per_worker, M * num_dp, max(N, K))
+        workspace2 = (self.max_experts_per_worker, M * num_dp, max(N // 2, K))
+        output = (self.max_experts_per_worker, M, K)
+        return (workspace1, workspace2, output)
 
 
 def cutlass_moe_fp8(
@@ -666,10 +665,12 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
+    def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
+        return self.out_dtype if self.out_dtype is not None else act_dtype
+
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
+        curr_M: int,
         M: int,
         N: int,
         K: int,
@@ -677,21 +678,19 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         workspace1: tuple[int, ...] = ()
         workspace2: tuple[int, ...] = ()
         output: tuple[int, ...] = ()
         if self.use_batched_format:
-            padded_M = aq.size(1)
-            workspace1 = (self.max_experts_per_worker, padded_M, max(N, K))
-            workspace2 = (self.max_experts_per_worker, padded_M, (N // 2))
-            output = (self.max_experts_per_worker, padded_M, K)
+            workspace1 = (self.max_experts_per_worker, M, max(N, K))
+            workspace2 = (self.max_experts_per_worker, M, (N // 2))
+            output = (self.max_experts_per_worker, M, K)
         else:
-            workspace1 = (M * topk, max(2 * N, K))
-            workspace2 = (M * topk, N)
+            workspace1 = (curr_M * topk, max(2 * N, K))
+            workspace2 = (curr_M * topk, N)
             output = (M, K)
-        return (workspace1, workspace2, output,
-                self.out_dtype if self.out_dtype is not None else a.dtype)
+        return (workspace1, workspace2, output)
 
     def apply(
         self,
@@ -705,6 +704,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],  # unused
+        a2_scale: Optional[torch.Tensor],  # unused
         workspace13: Optional[torch.Tensor],
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
