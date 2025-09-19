@@ -49,7 +49,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
 
         if self.weight_block_size is not None:
+            assert not self.is_static_input_scheme
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+                weight_group_shape=self.weight_block_size,
+                act_quant_group_shape=GroupShape(1, self.weight_block_size[1]),
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
@@ -148,11 +151,11 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        if layer.weight_block_size is not None:
+        if self.weight_block_size is not None:
             return self.w8a8_block_fp8_linear.apply(
                 input=x,
                 weight=layer.weight,
-                block_size=layer.weight_block_size,
+                block_size=self.weight_block_size,
                 weight_scale=layer.weight_scale,
                 input_scale=layer.input_scale,
                 bias=bias,
