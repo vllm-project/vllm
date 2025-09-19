@@ -96,6 +96,7 @@ class QuantFP8(CustomOp):
     ):
         if self.is_group_quant:
             assert scale is None, "Group quantization is always dynamic"
+            assert self.use_ue8m0 is None or not self.use_ue8m0
             return self._quantize_group_native(x)
 
         assert (scale is not None) == self.static

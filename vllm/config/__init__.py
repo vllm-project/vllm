@@ -2824,6 +2824,10 @@ class VllmConfig:
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
+        custom_ops = self.compilation_config.custom_ops
+        if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
+            custom_ops.append("+quant_fp8")
+
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when

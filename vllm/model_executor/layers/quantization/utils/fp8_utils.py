@@ -210,6 +210,11 @@ class W8A8BlockFp8LinearOp:
         self.act_quant_group_shape = act_quant_group_shape
         self.is_deep_gemm_supported = is_deep_gemm_supported()
         self.is_hopper = current_platform.is_device_capability(90)
+
+        # Get the correct blockscale mul and input quant operations.
+        # We can't use _dispatch_w8a8_blockscale_op to figure out if we want
+        # to use deepgemm because we don't know the shape of weights (and
+        # whether deepgemm supports it) at the init time.
         self.w8a8_blockscale_op, self.input_quant_op = \
          self._dispatch_w8a8_blockscale_op(
             cutlass_block_fp8_supported, use_aiter_and_is_supported)
@@ -256,7 +261,7 @@ class W8A8BlockFp8LinearOp:
         import vllm.model_executor.layers.quantization.deepgemm  # noqa: F401
 
         assert self.deepgemm_input_quant_op is not None
-        q_input, x_scale = self.deepgemm_input_quant_op.forward_cuda(input_2d)
+        q_input, x_scale = self.deepgemm_input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_block_fp8_matmul_deepgemm(
             q_input,
             weight,
@@ -272,17 +277,15 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.input_quant_op is not None
-        q_input, x_scale = self.input_quant_op.forward_cuda(input_2d)
+        q_input, x_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
             output = torch.ops.vllm.padded_cutlass_scaled_mm(
                 q_input, weight, x_scale, weight_scale,
-                [self.weight_group_shape[0], self.weight_group_shape[1]],
-                input_2d.dtype)
+                tuple(self.weight_group_shape), input_2d.dtype)
         else:
-            output = cutlass_scaled_mm(
-                q_input, weight, x_scale, weight_scale,
-                [self.weight_group_shape[0], self.weight_group_shape[1]],
-                input_2d.dtype, False)
+            output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
+                                       tuple(self.weight_group_shape),
+                                       input_2d.dtype, False)
         return output
 
     def _run_aiter(
@@ -305,7 +308,7 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.input_quant_op is not None
-        q_input, x_scale = self.input_quant_op.forward_cuda(input_2d)
+        q_input, x_scale = self.input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_block_fp8_matmul_func(
             q_input, weight, x_scale, weight_scale, self.weight_group_shape,
             input_2d.dtype)
