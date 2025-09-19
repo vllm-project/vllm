@@ -33,8 +33,8 @@ def test_resample_audio_scipy(dummy_audio):
     out_up = resample_audio_scipy(dummy_audio, orig_sr=2, target_sr=4)
     out_same = resample_audio_scipy(dummy_audio, orig_sr=4, target_sr=4)
 
-    assert len(out_down) > 0
-    assert len(out_up) > 0
+    assert len(out_down) == 3  
+    assert len(out_up) == 10  
     assert np.all(out_same == dummy_audio)
 
 
@@ -108,9 +108,12 @@ def test_audio_media_io_load_file():
 def test_audio_media_io_encode_base64(dummy_audio):
     audio_io = AudioMediaIO()
     media = (dummy_audio, 16000)
-    with patch("vllm.multimodal.audio.soundfile.write") as mock_write:
-        out = audio_io.encode_base64(media)
-        # Ensure the output is a valid base64 string
-        decoded = base64.b64decode(out)
-        assert isinstance(decoded, bytes)
-        mock_write.assert_called_once()
+    with patch("vllm.multimodal.audio.soundfile.write") as mock_write:  
+        def write_to_buffer(buffer, *_args, **_kwargs):  
+            buffer.write(b"dummy_wav_data")  
+        mock_write.side_effect = write_to_buffer  
+
+        out = audio_io.encode_base64(media)  
+        decoded = base64.b64decode(out)  
+        assert decoded == b"dummy_wav_data"  
+        mock_write.assert_called_once()  
