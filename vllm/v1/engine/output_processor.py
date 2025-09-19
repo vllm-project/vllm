@@ -14,6 +14,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.tracing import (SpanAttributes, SpanKind, Tracer,
                           extract_trace_context)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -86,7 +87,8 @@ class RequestState:
         lora_name: Optional[str],
         output_kind: RequestOutputKind,
         prompt: Optional[str],
-        prompt_token_ids: list[int],
+        prompt_token_ids: Optional[list[int]],
+        prompt_embeds: Optional[torch.Tensor],
         logprobs_processor: Optional[LogprobsProcessor],
         detokenizer: Optional[IncrementalDetokenizer],
         max_tokens_param: Optional[int],
@@ -104,7 +106,9 @@ class RequestState:
         self.output_kind = output_kind
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
-        self.prompt_len = len(prompt_token_ids)
+        self.prompt_embeds = prompt_embeds
+        self.prompt_len = length_from_prompt_token_ids_or_embeds(
+            self.prompt_token_ids, self.prompt_embeds)
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
         self.max_tokens_param = max_tokens_param
@@ -165,6 +169,7 @@ class RequestState:
             output_kind=output_kind,
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
+            prompt_embeds=request.prompt_embeds,
             logprobs_processor=logprobs_processor,
             detokenizer=detokenizer,
             max_tokens_param=max_tokens_param,
@@ -223,6 +228,8 @@ class RequestState:
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
             assert len(outputs) == 1
+            # Prompt embeddings are currently not supported by pooling requests.
+            assert self.prompt_token_ids is not None
             return PoolingRequestOutput(
                 request_id=request_id,
                 outputs=first_output,
@@ -236,10 +243,15 @@ class RequestState:
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
 
+        # If prompt embeds were used, put placeholder prompt token ids
+        prompt_token_ids = self.prompt_token_ids
+        if prompt_token_ids is None and self.prompt_embeds is not None:
+            prompt_token_ids = [0] * len(self.prompt_embeds)
+
         return RequestOutput(
             request_id=request_id,
             prompt=self.prompt,
-            prompt_token_ids=self.prompt_token_ids,
+            prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
@@ -469,6 +481,8 @@ class OutputProcessor:
 
         arrival_time_nano_seconds = int(req_state.stats.arrival_time * 1e9)
         trace_context = extract_trace_context(engine_core_output.trace_headers)
+        prompt_length = length_from_prompt_token_ids_or_embeds(
+            req_state.prompt_token_ids, req_state.prompt_embeds)
         with (self.tracer.start_as_current_span(
                 "llm_request",
                 kind=SpanKind.SERVER,
@@ -488,7 +502,7 @@ class OutputProcessor:
             span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
                                queued_time)
             span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS,
-                               len(req_state.prompt_token_ids))
+                               prompt_length)
             span.set_attribute(SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
                                metrics.num_generation_tokens)
             span.set_attribute(
@@ -544,7 +558,8 @@ class OutputProcessor:
         assert req_state.stats is not None
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
-            num_prompt_tokens=len(req_state.prompt_token_ids),
+            num_prompt_tokens=length_from_prompt_token_ids_or_embeds(
+                req_state.prompt_token_ids, req_state.prompt_embeds),
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats)
         self.lora_states.finish_request(req_state)

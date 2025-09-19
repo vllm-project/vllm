@@ -13,6 +13,7 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -179,11 +180,12 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
         # Find a safe place to start.
-        prompt_suffix = request.prompt_token_ids
+        prompt_token_ids = request.prompt_token_ids or []
+        prompt_suffix = prompt_token_ids
         prompt_len = len(prompt_suffix)
         if prompt_len > 4:
             for i in range(4, min(prompt_len + 1, 24)):
-                suffix = request.prompt_token_ids[-i:]
+                suffix = prompt_token_ids[-i:]
                 if '�' not in self.tokenizer.decode(suffix):
                     prompt_suffix = suffix
                     break
@@ -260,16 +262,25 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         params = request.sampling_params
         assert params is not None
 
-        # Metadata for incremental detokenization.
-        self.tokens, self.prefix_offset, self.read_offset = (
-            convert_prompt_ids_to_tokens(
-                tokenizer=tokenizer,
-                prompt_ids=request.prompt_token_ids,
-                skip_special_tokens=params.skip_special_tokens,
-            ))
+        self.prompt_len = length_from_prompt_token_ids_or_embeds(
+            request.prompt_token_ids, request.prompt_embeds)
 
-        self.token_ids.extend(request.prompt_token_ids)
-        self.prompt_len = len(request.prompt_token_ids)
+        # Metadata for incremental detokenization.
+        if request.prompt_token_ids is not None:
+            self.tokens, self.prefix_offset, self.read_offset = (
+                convert_prompt_ids_to_tokens(
+                    tokenizer=tokenizer,
+                    prompt_ids=request.prompt_token_ids,
+                    skip_special_tokens=params.skip_special_tokens,
+                ))
+        else:
+            # Prompt embedding requests cannot be detokenized, in general.
+            self.tokens = [""] * self.prompt_len
+            self.prefix_offset = 0
+            self.read_offest = 0
+
+        self.token_ids.extend(request.prompt_token_ids
+                              or [0] * self.prompt_len)
 
         self.skip_special_tokens = params.skip_special_tokens
         self.spaces_between_special_tokens = (
