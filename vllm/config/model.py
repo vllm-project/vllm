@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 import json
 import warnings
 from dataclasses import InitVar, field
@@ -20,7 +19,7 @@ import vllm.envs as envs
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.pooler import PoolerConfig
-from vllm.config.utils import assert_hashable, config
+from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
