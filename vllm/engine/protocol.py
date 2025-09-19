@@ -61,7 +61,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    def minimal_generation(self) -> str:
+    async def minimal_generation(self) -> str:
         """Generate outputs for a minimal spec prompt"""
         ...
 
