@@ -944,17 +944,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             req_start_idx += num_scheduled_tokens
 
-        is_mm_embed = is_mm_embed[:padded_total_num_scheduled_tokens]
+        is_mm_embed = is_mm_embed[:padded_total_num_scheduled_tokens] \
+            .to(self.device)
 
-        if not len(mm_embeds) and is_mm_embed.any():
-            # Do this safety check here, on CPU, to avoid precompiling faulty
-            # cases to check on device tensors.
-            num_expected_tokens = is_mm_embed.sum().item()
-            raise ValueError(
-                f"Attempted to assign 0 "
-                f"multimodal tokens to {num_expected_tokens} placeholders")
-
-        is_mm_embed = is_mm_embed.to(self.device)
         return is_mm_embed, mm_embeds
 
     def _get_model_inputs(

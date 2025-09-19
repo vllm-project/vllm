@@ -16,7 +16,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (get_cuda_view_from_cpu_tensor, is_pin_memory_available,
                         is_uva_available)
@@ -420,15 +419,6 @@ def _merge_multimodal_embeddings(
         This updates ``inputs_embeds`` in place.
     """
     if len(multimodal_embeddings) == 0:
-        # On TPU, the .any check will force a device sync and graph break
-        # unless we precompile faulty cases.
-        if not current_platform.is_tpu() and is_multimodal.any():
-            num_expected_tokens = is_multimodal.sum().item()
-
-            raise ValueError(
-                f"Attempted to assign 0 "
-                f"multimodal tokens to {num_expected_tokens} placeholders")
-
         return inputs_embeds
 
     mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
