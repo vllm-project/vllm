@@ -6,6 +6,7 @@ from typing import ClassVar, Optional, Union
 
 import torch
 
+from vllm import envs
 from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.utils.fa_utils import (flash_attn_supports_mla,
@@ -97,7 +98,13 @@ class FlashAttnMLAMetadataBuilder(
             # When using cuda graph, we need to set the upper bound of the
             # number of splits so that large enough intermediate buffers are
             # pre-allocated during capture.
-            self.max_num_splits = _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
+            if envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH is not None:
+                logger.info_once("Getting flash attention max num splits for "
+                                 "cuda graph from environment variable, value=%s",
+                                 envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH)
+                self.max_num_splits = envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
+            else:
+                self.max_num_splits = _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
 
         # TODO(lucas): Until we add support for the DCP custom masking we need
         #   to restrict decodes to q_len == 1 when DCP is enabled.
