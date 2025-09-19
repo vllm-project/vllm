@@ -21,14 +21,14 @@ export UCX_TLS=all  # or specify specific transports like "rc,ud,sm,^cuda_ipc" .
 export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1,mlx5_1:1"
 ```
 
-!!! tode
+!!! tip
     When using UCX as the transport backend, NCCL environment variables (like `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`) are not applicable to NixlConnector, so configure UCX-specific environment variables instead of NCCL variables.
 
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration
 
-Start a prefiller instance that produces KV caches:
+Start a prefiller instance that produces KV caches
 
 ```bash
 # 1st GPU as prefiller
