@@ -564,10 +564,8 @@ class Processor:
         if not gpu_allocation:
             return
 
-        api_process_rank = parallel_config._api_process_rank
         device = mm_config.mm_processing_device
-
-        if mm_config.mm_processing_device != "cpu":
+        if device != "cpu":
             # Peak memory usage (required for this profiling)
             # is only tracked for CUDA
             if not current_platform.is_cuda_alike():
@@ -578,6 +576,7 @@ class Processor:
             # device.
             # Compared to running profiling on every Processor in parallel,
             # this avoids non-deterministic peak memory usage calculation.
+            api_process_rank = parallel_config._api_process_rank
             if api_process_rank != gpu_allocation.index(device):
                 return
 
@@ -625,7 +624,8 @@ class Processor:
             if memory_usage > diff.before_profile.free_memory:
                 raise ValueError(f"Not enough memory in {device} "
                                  f"for multi-modal processor. "
-                                 f"Try reducing `api_server_count`.")
+                                 f"Try reducing `api_server_count` or "
+                                 f"revert to CPU processing.")
 
     def clear_cache(self) -> None:
         self.input_preprocessor.clear_cache()
