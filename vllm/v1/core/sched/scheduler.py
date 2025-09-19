@@ -469,9 +469,8 @@ class Scheduler(SchedulerInterface):
                             in self.vllm_config.model_config.model.lower()), (
                                 "Whisper is the only supported "
                                 "encoder-decoder model.")
-                    num_encoder_tokens = MULTIMODAL_REGISTRY.\
-                        get_encdec_max_encoder_len(
-                        self.vllm_config.model_config)
+                    num_encoder_tokens =\
+                        self.scheduler_config.max_num_encoder_input_tokens
                 else:
                     num_encoder_tokens = 0
 
@@ -605,8 +604,7 @@ class Scheduler(SchedulerInterface):
             get_freed_mm_hashes(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
-            kv_prefix_aligned_groups=kv_prefix_aligned_groups
-        )
+            kv_prefix_aligned_groups=kv_prefix_aligned_groups)
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
