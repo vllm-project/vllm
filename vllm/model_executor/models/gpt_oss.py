@@ -253,6 +253,9 @@ class GptOssModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
+            # self.unpadded_vocab_Size = config.vocab_size
+            # if lora_config:
+            #     self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             if inputs_embeds is not None:
                 x = inputs_embeds
             else:
@@ -614,16 +617,12 @@ class GptOssModel(nn.Module):
 
 
 class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
-    packed_modules_mapping = {
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-        "fused_qkv_a_proj": [
-            "q_a_proj",
-            "kv_a_proj_with_mqa"
-        ],
-    }
+    packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"],
+                              "fused_qkv_a_proj": [ # Add LoRA Projection
+                                "q_a_proj",
+                                "kv_a_proj_with_mqa"
+                                ],
+                            }
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
@@ -712,7 +711,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_local_experts, #FIXME: pass through config: self.config.n_routed_experts
+            num_experts=self.config.num_local_experts,
             num_redundant_experts=0)
 
     def load_weights(self, weights: Iterable[tuple[str,
