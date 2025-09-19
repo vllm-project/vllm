@@ -96,7 +96,6 @@ class QuantFP8(CustomOp):
     ):
         if self.is_group_quant:
             assert scale is None, "Group quantization is always dynamic"
-            assert self.use_ue8m0 is None or not self.use_ue8m0
             return self._quantize_group_native(x)
 
         assert (scale is not None) == self.static
@@ -143,7 +142,10 @@ class QuantFP8(CustomOp):
 
         x_grouped = x.view(-1, num_groups, self.group_size)
         absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
-        scales = (absmax / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+        scale_raw = absmax / _FP8_MAX
+        if self.use_ue8m0:
+            scale_raw = torch.exp2(torch.ceil(torch.log2(scale_raw)))
+        scales = (scale_raw).clamp(min=_FP8_MIN_SCALING_FACTOR)
 
         x_scaled = x_grouped / scales
         x_quant = x_scaled.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
