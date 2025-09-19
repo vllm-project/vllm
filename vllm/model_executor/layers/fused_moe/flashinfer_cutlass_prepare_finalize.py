@@ -12,8 +12,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.utils.flashinfer import (
-    nvfp4_block_scale_interleave, has_flashinfer_all2all)
+from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 def get_local_sizes():
