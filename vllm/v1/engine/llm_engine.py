@@ -11,6 +11,7 @@ from typing_extensions import TypeVar
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
@@ -125,11 +126,11 @@ class LLMEngine:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
-        self.external_launcher_dp = (parallel_config.data_parallel_size > 1 and
-                                     executor_backend == "external_launcher")
         if self.external_launcher_dp:
-            from vllm.distributed.parallel_state import get_dp_group
+            # If we use DP in external launcher mode, we reuse the
+            # existing DP group used for data communication.
             self.dp_group = get_dp_group().cpu_group
+
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
 
