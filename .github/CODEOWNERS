@@ -67,10 +67,14 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Docs
 /docs/mkdocs @hmellor
-/docs/**.yaml @hmellor
-/docs/**.yml @hmellor
+/docs/**/*.yml @hmellor
 /requirements/docs.txt @hmellor
+.readthedocs.yaml @hmellor
 mkdocs.yaml @hmellor
+
+# Linting
+.markdownlint.yaml @hmellor
+.pre-commit-config.yaml @hmellor
 
 # CPU
 /vllm/v1/worker/cpu* @bigPYJ1151
