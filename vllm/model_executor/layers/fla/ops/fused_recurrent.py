@@ -172,7 +172,6 @@ def fused_recurrent_gated_delta_rule_fwd(
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
     num_stages = 3
-    num_warps = 1
 
     o = q.new_empty(NK, *v.shape)
     if inplace_final_state:
@@ -220,7 +219,6 @@ def fused_recurrent_gated_delta_rule_fwd(
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
-        num_warps=num_warps,
         num_stages=num_stages,
     )
     o = o.squeeze(0)
