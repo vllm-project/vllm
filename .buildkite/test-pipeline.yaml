@@ -1040,8 +1040,8 @@ steps:
     - pytest -v -s tests/distributed/test_context_parallel.py
 
 ##### RL Integration Tests #####
-- label: Prime-RL Integration Test # 5min
-  timeout_in_minutes: 15
+- label: Prime-RL Integration Test # 15min
+  timeout_in_minutes: 30
   optional: true
   num_gpus: 2
   working_dir: "/vllm-workspace"
