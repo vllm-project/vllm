@@ -51,8 +51,8 @@ class UBatchContext:
         self.cpu_wait_event.wait()
         self.cpu_wait_event.clear()
         self._restore_context()
-        # Assume we start on the compute stream
-        assert current_stream() == self.compute_stream
+        # Assume we want to start on the compute stream
+        self.update_stream(self.compute_stream)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
