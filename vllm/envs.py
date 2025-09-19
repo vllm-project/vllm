@@ -950,10 +950,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MLA_DISABLE":
     lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
 
-    # If set, vLLM will pick up the provided Flash Attention MLA max number splits
-    # for cuda graph decode
+    # If set, vLLM will pick up the provided Flash Attention MLA
+    # max number splits for cuda graph decode
     "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH":
-    lambda: int(os.getenv("VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH", "16")),
+    lambda: int(os.getenv("VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH",
+                          "16")),
 
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
