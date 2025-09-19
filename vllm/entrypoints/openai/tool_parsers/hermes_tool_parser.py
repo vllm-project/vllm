@@ -376,7 +376,7 @@ class Hermes2ProToolParser(ToolParser):
                     cur_arguments_json = match.group(1)
                 else:
                     cur_arguments_json = json.dumps(cur_arguments,
-                                                ensure_ascii=False)
+                                                    ensure_ascii=False)
 
                 logger.debug("finding %s in %s", delta_text,
                              cur_arguments_json)
