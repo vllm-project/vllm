@@ -187,7 +187,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
     @staticmethod
     def add_request(
-        params: SamplingParams, _: list[int], output_tok_ids: list[int]
+        params: SamplingParams, _: Optional[list[int]],
+        output_tok_ids: list[int]
     ) -> Optional[tuple[int, Sequence[int], set[int]]]:
         min_tokens = params.min_tokens
         if not min_tokens or len(output_tok_ids) >= min_tokens:
@@ -234,7 +235,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
 def process_dict_updates(
     req_entries: dict[int, T], batch_update: Optional[BatchUpdate],
-    new_state: Callable[[SamplingParams, list[int], list[int]], Optional[T]]
+    new_state: Callable[[SamplingParams, Optional[list[int]], list[int]],
+                        Optional[T]]
 ) -> bool:
     """Utility function to update dict state for sparse LogitsProcessors."""
 

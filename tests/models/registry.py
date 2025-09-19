@@ -414,6 +414,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
 
     # [Cross-encoder]
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2"),  # noqa: E501
+    "BertForTokenClassification": _HfExamplesInfo("boltuix/NeuroBERT-NER"),
     "GteNewForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-multilingual-reranker-base",  # noqa: E501
                                                        trust_remote_code=True,
                                                        hf_overrides={
