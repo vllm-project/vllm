@@ -830,8 +830,11 @@ class MambaMixer2(MambaBase, CustomOp):
                     chunk_stride = mamba_block_size // chunk_size
                     last_computed_token_block_offset = \
                         attn_metadata.last_computed_token_block_offset
-                    first_aligned_chunk = chunk_stride - 1 \
-                      - last_computed_token_block_offset[seq_idx] // chunk_size
+                    first_aligned_chunk = \
+                      torch.concat([torch.zeros(1, dtype=last_chunk_p.dtype, \
+                      device=last_chunk_p.device), last_chunk_p])[seq_idx] + 1 \
+                       + chunk_stride - 1 \
+                       - last_computed_token_block_offset[seq_idx] // chunk_size
                     from_where = states[
                         0, first_aligned_chunk:first_aligned_chunk +
                         n_blocks_to_fill[seq_idx] * chunk_stride:chunk_stride]
