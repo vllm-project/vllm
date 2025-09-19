@@ -71,8 +71,10 @@ PRODUCT_TOOLS = [{
 MESSAGES = [{"role": "user", "content": "What's the weather like in Boston?"}]
 
 PRODUCT_MESSAGES = [{
-    "role": "user", 
-    "content": "Hi! Do you have any detailed information about the product id "
+    "role":
+    "user",
+    "content":
+    "Hi! Do you have any detailed information about the product id "
     "7355608 and inserted true?"
 }]
 
@@ -194,7 +196,7 @@ async def test_non_streaming_product_tool_call():
         assert product_id == 7355608
         assert isinstance(inserted, bool)
         assert inserted is True
-        
+
         print("\n[Non-Streaming Product Test Passed]")
         print(f"Tool Call: {tool_call.function.name}")
         print(f"Arguments: {arguments}")
@@ -243,7 +245,7 @@ async def test_streaming_product_tool_call():
         arguments = json.loads(reconstructed_tool_call["arguments"])
         assert "product_id" in arguments
         assert "inserted" in arguments
-        
+
         # Handle type coercion for streaming test as well
         product_id = arguments.get("product_id")
         inserted = arguments.get("inserted")
@@ -252,7 +254,7 @@ async def test_streaming_product_tool_call():
         assert product_id == 7355608
         assert isinstance(inserted, bool)
         assert inserted is True
-        
+
         print("\n[Streaming Product Test Passed]")
         print(f"Reconstructed Tool Call: {reconstructed_tool_call['name']}")
         print(f"Reconstructed Arguments: {arguments}")
