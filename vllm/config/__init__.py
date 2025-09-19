@@ -31,9 +31,10 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
-from vllm.config.model import (ConvertOption, LogprobsMode, ModelConfig,
-                               ModelDType, ModelImpl, RunnerOption, TaskOption,
-                               TokenizerMode, iter_architecture_defaults,
+from vllm.config.model import (ConvertOption, HfOverrides, LogprobsMode,
+                               ModelConfig, ModelDType, ModelImpl,
+                               RunnerOption, TaskOption, TokenizerMode,
+                               iter_architecture_defaults,
                                try_match_architecture_defaults)
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
