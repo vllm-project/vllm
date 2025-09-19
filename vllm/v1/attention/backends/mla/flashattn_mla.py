@@ -99,9 +99,10 @@ class FlashAttnMLAMetadataBuilder(
             # number of splits so that large enough intermediate buffers are
             # pre-allocated during capture.
             if envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH is not None:
-                logger.info_once("Getting flash attention max num splits for "
-                                 "cuda graph from environment variable, value=%s",
-                                 envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH)
+                logger.info_once(
+                    "Getting flash attention max num splits for "
+                    "cuda graph from environment variable, value=%s",
+                    envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH)
                 self.max_num_splits = envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
             else:
                 self.max_num_splits = _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
