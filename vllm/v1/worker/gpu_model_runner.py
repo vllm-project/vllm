@@ -808,7 +808,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return cu_num_tokens, arange
 
-    def _prepare_input_ids(self, total_num_scheduled_tokens: int,
+    def _prepare_input_ids(self, num_input_tokens: int,
                            cu_num_tokens: np.ndarray) -> None:
         """Prepare the input IDs for the current batch.
         
@@ -818,7 +818,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
-            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            self.input_ids.copy_to_gpu(num_input_tokens)
             return
 
         # Async scheduling case, where some decode requests from the previous
@@ -840,10 +840,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 indices_match &= (prev_index == flattened_index)
                 max_flattened_index = max(max_flattened_index, flattened_index)
         num_commmon_tokens = len(flattened_indices)
-        if num_commmon_tokens < total_num_scheduled_tokens:
+        if num_commmon_tokens < num_input_tokens:
             # If not all requests are decodes from the last iteration,
             # We need to copy the input_ids_cpu to the GPU first.
-            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            self.input_ids.copy_to_gpu(num_input_tokens)
         if num_commmon_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids_cpu will have all the input ids.
@@ -945,10 +945,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_scheduled_tokens)
 
         # Get positions.
-        positions_np = self.positions.np[:total_num_scheduled_tokens]
+        positions_np = self.positions.np[:num_input_tokens]
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
-               out=positions_np)
+               out=positions_np[:total_num_scheduled_tokens])
+        # Pad extra positions with 0 for CUDA graphs
+        if num_input_tokens > total_num_scheduled_tokens:
+            positions_np[total_num_scheduled_tokens:].fill(0)
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -965,15 +968,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
+        # Pad token_indices if needed for CUDA graphs
+        if num_input_tokens > total_num_scheduled_tokens:
+            # Create padded token indices array
+            padded_token_indices = np.zeros(num_input_tokens, dtype=token_indices.dtype)
+            padded_token_indices[:total_num_scheduled_tokens] = token_indices
+            # Use first token as padding (safer than 0 which might be EOS)
+            if total_num_scheduled_tokens > 0:
+                padded_token_indices[total_num_scheduled_tokens:] = token_indices[0]
+            token_indices = padded_token_indices
+        
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices),
-                           out=self.input_ids.cpu[:total_num_scheduled_tokens])
+                           out=self.input_ids.cpu[:num_input_tokens])
 
         self.input_batch.block_table.compute_slot_mapping(
             req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(
-            total_num_scheduled_tokens)
+            num_input_tokens)
 
         # Prepare the attention metadata.
         self.query_start_loc.np[0] = 0
@@ -1018,16 +1031,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
 
         # Copy the tensors to the GPU.
-        self._prepare_input_ids(total_num_scheduled_tokens, cu_num_tokens)
+        self._prepare_input_ids(num_input_tokens, cu_num_tokens)
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
+            self.mrope_positions.gpu[:, :num_input_tokens].copy_(
+                self.mrope_positions.cpu[:, :num_input_tokens],
                 non_blocking=True)
         else:
             # Common case (1D positions)
-            self.positions.copy_to_gpu(total_num_scheduled_tokens)
+            self.positions.copy_to_gpu(num_input_tokens)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -1095,7 +1108,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     device=self.device,
                 )
                 slot_mapping = torch.zeros(
-                    (total_num_scheduled_tokens, ),
+                    (num_input_tokens, ),
                     dtype=torch.int64,
                     device=self.device,
                 )
@@ -1104,12 +1117,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs)
                 slot_mapping = blk_table.slot_mapping.gpu[:
-                                                          total_num_scheduled_tokens]
+                                                          num_input_tokens]
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
-                # graph mode.
-                blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(
-                    -1)
+                # graph mode. Only fill the padded region.
+                if num_input_tokens > total_num_scheduled_tokens:
+                    blk_table.slot_mapping.gpu[total_num_scheduled_tokens:num_input_tokens].fill_(-1)
                 num_common_prefix_blocks = (
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id])
