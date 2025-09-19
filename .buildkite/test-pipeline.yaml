@@ -677,15 +677,6 @@ steps:
   commands:
     - pytest -v -s models/language/pooling_mteb_test
 
-- label: Multi-Modal Test
-  mirror_hardwares: [amdexperimental]
-  optional: true
-  source_file_dependencies:
-  - vllm/
-  - tests/multimodal
-  commands:
-    - pytest -v -s tests/multimodal/test_audio.py
-
 - label: Multi-Modal Processor Test # 44min
   timeout_in_minutes: 60
   source_file_dependencies:
@@ -737,6 +728,15 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+- label: Multi-Modal Test
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/multimodal
+  commands:
+    - pytest -v -s multimodal/test_audio.py    
 
 - label: Quantized Models Test # 45 min
   timeout_in_minutes: 60
