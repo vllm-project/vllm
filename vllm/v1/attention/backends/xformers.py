@@ -119,6 +119,10 @@ class XFormersAttentionBackend(AttentionBackend):
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
 
+    @staticmethod
+    def use_multi_cascade_attention(*args, **kwargs) -> bool:
+        return False
+
 
 @dataclass
 class XFormersAttentionMetadata:
@@ -222,7 +226,8 @@ class XFormersAttentionMetadataBuilder(
 
     def build(
         self,
-        common_prefix_len: int,
+        group_indices: list[int],
+        common_prefix_lens: list[int],
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> XFormersAttentionMetadata:

@@ -272,3 +272,7 @@ class KVCacheConfig:
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
+    """
+    Enables grouping requests with common prefixes during scheduling.
+    """
+    enable_kv_prefix_trie: bool

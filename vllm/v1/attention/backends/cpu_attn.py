@@ -87,6 +87,10 @@ class TorchSDPABackend(AttentionBackend):
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
 
+    @staticmethod
+    def use_multi_cascade_attention(*args, **kwargs) -> bool:
+        return False
+
 
 @dataclass
 class TorchSDPAMetadata(AttentionMetadata):
@@ -380,7 +384,8 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         return True
 
     def build(self,
-              common_prefix_len: int,
+              group_indices: list[int],
+              common_prefix_lens: list[int],
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> TorchSDPAMetadata:
         num_reqs = common_attn_metadata.num_reqs

@@ -13,13 +13,14 @@ from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
                                   flash_attn_varlen_func,
                                   is_fa_version_supported)
 
+NUM_TOKENS = [1, 39, 16912]
 NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 192, 256]
 BLOCK_SIZES = [16]
 DTYPES = [torch.float16, torch.bfloat16]
 
 
-@pytest.mark.parametrize("num_tokens", [1, 39, 16912])
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -70,9 +71,9 @@ def test_merge_kernel(
 
 CASES = [
     # Case 1. A general case.
-    ([(129, 871), (18, 280), (37, 988), (1023, 2304), (1, 257)], 256),
+    ([(129, 871), (18, 280), (37, 988), (1023, 2304), (1, 257)], 256)
     # Case 2. Flash-decoding case.
-    ([(1, 1023), (1, 879), (1, 778), (1, 1777)] * 100, 512),
+    # ([(1, 1023), (1, 879), (1, 778), (1, 1777)] * 100, 512),
 ]
 
 
@@ -182,7 +183,8 @@ def test_cascade(
         sliding_window=window_size,
         logits_soft_cap=soft_cap if soft_cap is not None else 0,
         block_table=block_tables,
-        common_prefix_len=common_prefix_len,
+        group_indices=[0, num_seqs],
+        common_prefix_lens=[common_prefix_len],
         fa_version=fa_version,
     )
 

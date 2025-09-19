@@ -28,6 +28,8 @@ from typing_extensions import assert_never, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
+from vllm.config.attention import (MultiCascadeAllocateMethod,
+                                   MultiCascadeConfig)
 from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
@@ -375,6 +377,13 @@ class ModelConfig:
     preventing potential numerical issues. Note that even if this is set to
     False, cascade attention will be only used when the heuristic tells that
     it's beneficial."""
+    disable_multi_cascade_attn: bool = False
+    """Disable multi-cascade attention for V1. Multi-cascade attention is useful
+    when serving requests with multiple common prefixes in the same batch."""
+    multi_cascade_config: MultiCascadeConfig = field(
+        default_factory=MultiCascadeConfig)
+    """Multi-cascade config which controls behaviour of request grouping when
+    multi-cascade attention is enabled."""
     skip_tokenizer_init: bool = False
     """Skip initialization of tokenizer and detokenizer. Expects valid
     `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -413,6 +422,7 @@ class ModelConfig:
     """Initialize non-default pooling config or override default pooling config
     for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
     """
+
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
@@ -581,6 +591,22 @@ class ModelConfig:
                 "module was not found. See "
                 "https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile "  # noqa: E501
                 "for instructions on how to install it.")
+
+        if self.disable_cascade_attn and not \
+            self.disable_multi_cascade_attn:
+            logger.info("To enable multi-cascade attention, must also"
+                        "enable cascade attention.")
+            self.disable_multi_cascade_attn = True
+
+        if ((backend := envs.VLLM_ATTENTION_BACKEND)
+                and backend != "FLASH_ATTN"
+                and not self.disable_multi_cascade_attn):
+            logger.info(
+                "Multi-cascade attention can currently only be used with "
+                "FlashAttention. Set backend to FLASH_ATTN with "
+                "export VLLM_ATTENTION_BACKEND=FLASH_ATTN to enable FLASH_ATTN"
+                "backend.")
+            self.disable_multi_cascade_attn = True
 
         from vllm.platforms import current_platform
 

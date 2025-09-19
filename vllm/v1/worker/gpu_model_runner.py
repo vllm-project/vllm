@@ -63,7 +63,7 @@ from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
-    create_fast_prefill_custom_backend,
+    create_fast_prefill_custom_backend, reorder_batch_to_group_common_prefixes,
     reorder_batch_to_split_decodes_and_prefills, split_attn_metadata)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 # yapf conflicts with isort for this block
@@ -106,6 +106,7 @@ from .utils import (AttentionGroup, MultiModalBudget,
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.core.kv_cache_utils import KVPrefixAlignedGroups
     from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
@@ -225,6 +226,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.use_alibi = check_use_alibi(model_config)
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
+        self.multi_cascade_attn_enabled = not (
+            self.model_config.disable_multi_cascade_attn)
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -500,6 +503,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch,
                 scheduler_output,
                 decode_threshold=self.reorder_batch_threshold)
+
+        if self.multi_cascade_attn_enabled:
+            reorder_batch_to_group_common_prefixes(self.input_batch,
+                                                   scheduler_output)
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -1181,15 +1188,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 # Prepare for cascade attention if enabled & beneficial.
-                common_prefix_len = 0
+                group_indices = [0, num_reqs]
+                common_prefix_lens = [0]
                 builder = attn_group.get_metadata_builder()
                 if self.cascade_attn_enabled:
-                    common_prefix_len = self._compute_cascade_attn_prefix_len(
-                        num_scheduled_tokens,
-                        num_common_prefix_blocks,
-                        kv_cache_group_spec.kv_cache_spec,
-                        builder,
-                    )
+                    kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+                    if self.multi_cascade_attn_enabled:
+                        kv_prefix_aligned_groups = (
+                            scheduler_output.kv_prefix_aligned_groups)
+                        group_indices, common_prefix_lens = (
+                            self._compute_multi_cascade_attn_prefix_len(
+                                num_scheduled_tokens, kv_prefix_aligned_groups,
+                                kv_cache_spec, builder))
+                    else:
+                        group_indices = [0, num_reqs]
+                        common_prefix_len = \
+                            self._compute_cascade_attn_prefix_len(
+                                num_scheduled_tokens,
+                                num_common_prefix_blocks,
+                                kv_cache_spec,
+                                builder,
+                            )
+                        common_prefix_lens = [common_prefix_len]
 
                 extra_attn_metadata_args = {}
                 if use_spec_decode and isinstance(builder,
@@ -1208,7 +1228,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         assert common_attn_metadata.max_query_len == 1
                         attn_metadata_i = (attn_group.get_metadata_builder(
                             ubatch_id=ubid).build(
-                                common_prefix_len=common_prefix_len,
+                                group_indices=group_indices,
+                                common_prefix_lens=common_prefix_lens,
                                 common_attn_metadata=common_attn_metadata))
                         for layer_name in kv_cache_group_spec.layer_names:
                             assert type(attn_metadata) is list
@@ -1216,7 +1237,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     assert isinstance(attn_metadata, dict)
                     attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
+                        group_indices=group_indices,
+                        common_prefix_lens=common_prefix_lens,
                         common_attn_metadata=common_attn_metadata,
                         **extra_attn_metadata_args)
                     for layer_name in attn_group.layer_names:
@@ -1325,6 +1347,51 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_sms=self.num_sms,
         )
         return common_prefix_len if use_cascade else 0
+
+    def _compute_multi_cascade_attn_prefix_len(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        kv_prefix_aligned_groups: KVPrefixAlignedGroups,
+        kv_cache_spec: KVCacheSpec,
+        attn_metadata_builder: AttentionMetadataBuilder,
+    ) -> tuple[list[int], list[int]]:
+        if (not kv_prefix_aligned_groups or
+                not (groups_list := kv_prefix_aligned_groups.group_metadata)):
+            return [], []
+
+        prefix_kv_lens = [0 for i in range(len(groups_list))]
+        group_indices = [0 for i in range(len(groups_list) + 1)]
+        for i, num_common_blocks, start, end in enumerate(groups_list):
+            group_indices[i] = start
+            common_prefix_len = min(
+                num_common_blocks * kv_cache_spec.block_size,
+                self.input_batch.num_computed_tokens_cpu[start:end].min())
+            common_prefix_len = (common_prefix_len //
+                                 kv_cache_spec.block_size *
+                                 kv_cache_spec.block_size)
+            prefix_kv_lens[i] = common_prefix_len
+
+        use_sliding_window = (isinstance(kv_cache_spec, SlidingWindowSpec) or
+                              (isinstance(kv_cache_spec, FullAttentionSpec)
+                               and kv_cache_spec.sliding_window is not None))
+        assert isinstance(kv_cache_spec, AttentionSpec)
+        use_local_attention = (
+            isinstance(kv_cache_spec, ChunkedLocalAttentionSpec)
+            or (isinstance(kv_cache_spec, FullAttentionSpec)
+                and kv_cache_spec.attention_chunk_size is not None))
+        use_multi_cascade_attention = (
+            attn_metadata_builder.use_multi_cascade_attention(
+                common_prefix_lens=prefix_kv_lens,
+                query_lens=num_scheduled_tokens,
+                num_query_heads=self.num_query_heads,
+                num_kv_heads=kv_cache_spec.num_kv_heads,
+                use_alibi=self.use_alibi,
+                use_sliding_window=use_sliding_window,
+                use_local_attention=use_local_attention,
+                num_sms=self.num_sms,
+            ))
+        return (group_indices, prefix_kv_lens) if use_multi_cascade_attention \
+            else ([], [])
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0

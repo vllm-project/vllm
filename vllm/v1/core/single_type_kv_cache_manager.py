@@ -6,7 +6,7 @@ from collections import defaultdict
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock, KVPrefixTrie
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         CrossAttentionSpec, FullAttentionSpec,
                                         KVCacheSpec, MambaSpec,
@@ -25,6 +25,7 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_spec: KVCacheSpec,
         block_pool: BlockPool,
         kv_cache_group_id: int,
+        enable_kv_prefix_trie: bool,
         dcp_world_size: int = 1,
     ) -> None:
         """
@@ -40,6 +41,7 @@ class SingleTypeKVCacheManager(ABC):
             self.block_size *= dcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
+        self.kv_prefix_trie = KVPrefixTrie() if enable_kv_prefix_trie else None
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -139,12 +141,13 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
         """
-        num_cached_blocks = self.num_cached_block[request.request_id]
+        req_id = request.request_id
+        num_cached_blocks = self.num_cached_block[req_id]
         num_full_blocks = num_tokens // self.block_size
 
         self.block_pool.cache_full_blocks(
             request=request,
-            blocks=self.req_to_blocks[request.request_id],
+            blocks=self.req_to_blocks[req_id],
             num_cached_blocks=num_cached_blocks,
             num_full_blocks=num_full_blocks,
             block_size=self.block_size,
@@ -152,6 +155,11 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+
+        if self.kv_prefix_trie:
+            self.kv_prefix_trie.insert(
+                request,
+                self.req_to_blocks[req_id][num_cached_blocks:num_full_blocks])
 
     def free(self, request_id: str) -> None:
         """
@@ -169,6 +177,11 @@ class SingleTypeKVCacheManager(ABC):
 
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
+
+        self.kv_prefix_trie.remove(request_id)
+
+    def unschedule(self, request_id: str) -> None:
+        self.kv_prefix_trie.req_to_scheduled[request_id] = False
 
     @abstractmethod
     def get_num_common_prefix_blocks(self, request_id: str,

@@ -27,11 +27,12 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          EPLBConfig, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ModelImpl, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
-                         RunnerOption, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, StructuredOutputsConfig,
-                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs)
+                         ModelDType, ModelImpl, MultiCascadeConfig,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
+                         SchedulerPolicy, SpeculativeConfig,
+                         StructuredOutputsConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.config.utils import get_field
@@ -341,10 +342,14 @@ class EngineArgs:
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
+    enable_kv_prefix_trie: Optional[bool] = CacheConfig.enable_kv_prefix_trie
     prefix_caching_hash_algo: PrefixCachingHashAlgo = \
         CacheConfig.prefix_caching_hash_algo
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
+    disable_multi_cascade_attn: bool = ModelConfig.disable_multi_cascade_attn
+    multi_cascade_config: MultiCascadeConfig = \
+        get_field(ModelConfig, "multi_cascade_config")
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
@@ -553,6 +558,10 @@ class EngineArgs:
                                  **model_kwargs["disable_sliding_window"])
         model_group.add_argument("--disable-cascade-attn",
                                  **model_kwargs["disable_cascade_attn"])
+        model_group.add_argument("--disable-multi-cascade-attn",
+                                 **model_kwargs["disable_multi_cascade_attn"])
+        model_group.add_argument("--multi-cascade-config",
+                                 **model_kwargs["multi_cascade_config"])
         model_group.add_argument("--skip-tokenizer-init",
                                  **model_kwargs["skip_tokenizer_init"])
         model_group.add_argument("--enable-prompt-embeds",
@@ -772,6 +781,8 @@ class EngineArgs:
                                  **cache_kwargs["num_gpu_blocks_override"])
         cache_group.add_argument("--enable-prefix-caching",
                                  **cache_kwargs["enable_prefix_caching"])
+        cache_group.add_argument("--enable-kv-prefix-trie",
+                                 **cache_kwargs["enable_kv_prefix_trie"])
         cache_group.add_argument("--prefix-caching-hash-algo",
                                  **cache_kwargs["prefix_caching_hash_algo"])
         cache_group.add_argument("--cpu-offload-gb",
@@ -1016,6 +1027,8 @@ class EngineArgs:
             logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
+            disable_multi_cascade_attn=self.disable_multi_cascade_attn,
+            multi_cascade_config=self.multi_cascade_config,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
@@ -1222,6 +1235,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
+            enable_kv_prefix_trie=self.enable_kv_prefix_trie,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,

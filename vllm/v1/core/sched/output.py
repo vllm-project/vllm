@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.kv_cache_utils import KVPrefixAlignedGroups
     from vllm.v1.request import Request
 
 
@@ -164,3 +165,6 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+    # Metadata for requests grouped by common prefixes.
+    kv_prefix_aligned_groups: Optional[KVPrefixAlignedGroups] = None
