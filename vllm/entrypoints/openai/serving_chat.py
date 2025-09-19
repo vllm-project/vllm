@@ -309,41 +309,28 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
-                    # TODO: remove AsyncLLM check and update EngineClient
-                    # once we fully deprecate V0
-                    from vllm.v1.engine.async_llm import AsyncLLM
-                    if isinstance(self.engine_client, AsyncLLM):
-                        await self._initialize_processor()
+                    await self._initialize_processor()
 
-                        prompt_str, engine_request, tokenization_kwargs = (
-                            self._process_inputs(
-                                request_id,
-                                engine_prompt,
-                                sampling_params,
-                                lora_request=lora_request,
-                                trace_headers=trace_headers,
-                                priority=request.priority,
-                            ))
-
-                        generator = self.engine_client.generate(
-                            engine_request,
-                            sampling_params,
+                    prompt_str, engine_request, tokenization_kwargs = (
+                        self._process_inputs(
                             request_id,
-                            lora_request=lora_request,
-                            trace_headers=trace_headers,
-                            priority=request.priority,
-                            prompt_str=prompt_str,
-                            tokenization_kwargs=tokenization_kwargs,
-                        )
-                    else:
-                        generator = self.engine_client.generate(
                             engine_prompt,
                             sampling_params,
-                            request_id,
                             lora_request=lora_request,
                             trace_headers=trace_headers,
                             priority=request.priority,
-                        )
+                        ))
+
+                    generator = self.engine_client.generate(
+                        engine_request,
+                        sampling_params,
+                        request_id,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        priority=request.priority,
+                        prompt_str=prompt_str,
+                        tokenization_kwargs=tokenization_kwargs,
+                    )
 
                 generators.append(generator)
         except ValueError as e:
