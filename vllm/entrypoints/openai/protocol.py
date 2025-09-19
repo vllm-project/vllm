@@ -832,10 +832,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError("`prompt_logprobs=-1` is only supported with "
                                  "vLLM engine V1.")
         if (top_logprobs := data.get("top_logprobs")) is not None:
-            if top_logprobs < 0:
-                raise ValueError("`top_logprobs` must be a positive value.")
+            if top_logprobs < 0 and top_logprobs != -1:
+                raise ValueError(
+                    "`top_logprobs` must be a positive value or -1.")
 
-            if top_logprobs > 0 and not data.get("logprobs"):
+            if (top_logprobs == -1
+                    or top_logprobs > 0) and not data.get("logprobs"):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
@@ -971,7 +973,6 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: Optional[str] = None
     prompt: Optional[Union[list[int], list[list[int]], str, list[str]]] = None
-    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
@@ -1007,6 +1008,7 @@ class CompletionRequest(OpenAIBaseModel):
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
+    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     add_special_tokens: bool = Field(
         default=True,
         description=(
