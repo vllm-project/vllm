@@ -1043,6 +1043,7 @@ steps:
 - label: Prime-RL Integration Test # 5min
   timeout_in_minutes: 15
   optional: true
+  num_gpus: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
   - vllm/
