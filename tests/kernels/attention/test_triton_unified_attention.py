@@ -83,7 +83,7 @@ def ref_paged_attn(
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("sliding_window", [None, 256])
+@pytest.mark.parametrize("sliding_window", [None, 64, 128, 256])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("soft_cap", [None, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
