@@ -26,6 +26,7 @@
 #include "dispatch_utils.h"
 
 #include "cuda_utils.h"
+#include "launch_bounds_utils.h"
 #include "nvfp4_utils.cuh"
 
 namespace vllm {
@@ -63,7 +64,7 @@ __inline__ __device__ PackedVec<Type> compute_silu_mul(PackedVec<Type>& vec,
 
 // Use UE4M3 by default.
 template <class Type, bool UE8M0_SF = false>
-__global__ void __launch_bounds__(1024, 4)
+__global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
     silu_mul_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
                              float const* SFScale, uint32_t* out,
                              uint32_t* SFout) {
@@ -131,7 +132,8 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
   dim3 block(std::min(int(n / ELTS_PER_THREAD), 1024));
-  int const numBlocksPerSM = 2048 / block.x;
+  int const numBlocksPerSM =
+      vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
   dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
 
   VLLM_DISPATCH_HALF_TYPES(
