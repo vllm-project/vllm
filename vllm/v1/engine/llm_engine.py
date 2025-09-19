@@ -77,12 +77,14 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger = PrometheusStatLogger(vllm_config)
 
+        executor_backend = (
+            self.vllm_config.parallel_config.distributed_executor_backend)
         # important: init dp group before init the engine_core
         # In the decoupled engine case this is handled in EngineCoreProc.
         parallel_config = vllm_config.parallel_config
         if not multiprocess_mode and parallel_config.data_parallel_size > 1 \
-            and self.vllm_config.parallel_config.distributed_executor_backend != "external_launcher":
-                self.dp_group = parallel_config.stateless_init_dp_group()
+            and executor_backend != "external_launcher":
+            self.dp_group = parallel_config.stateless_init_dp_group()
         else:
             self.dp_group = None
         self.should_execute_dummy_batch = False
@@ -121,6 +123,10 @@ class LLMEngine:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
+        if parallel_config.data_parallel_size > 1 \
+            and executor_backend == "external_launcher":
+            from vllm.distributed.parallel_state import get_dp_group
+            self.dp_group = get_dp_group().cpu_group
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
 
