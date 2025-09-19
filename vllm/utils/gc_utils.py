@@ -35,9 +35,9 @@ class GCDebugConfig:
                 self.enabled = True
                 self.top_objects = json_conf.get("top_objects", -1)
             except Exception:
+                self.enabled = False
                 logger.error("Failed to parse VLLM_GC_DEBUG(%s)",
                              VLLM_GC_DEBUG)
-                self.enabled = False
         logger.info("GC Debug Config. %s", str(self))
 
     def __repr__(self) -> str:
