@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform
+from vllm.utils import is_torch_equal_or_newer
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -359,6 +360,11 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                                  use_inductor_graph_partition: bool,
                                  monkeypatch, dist_init, caplog_vllm):
     """Test AttentionStaticQuantPattern fusion pass"""
+
+    if use_inductor_graph_partition and not is_torch_equal_or_newer(
+            "2.9.0.dev"):
+        pytest.skip("inductor graph partition is only available "
+                    "in PyTorch 2.9+")
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
     if split_attention:

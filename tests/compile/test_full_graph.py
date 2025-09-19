@@ -131,6 +131,11 @@ def test_custom_compile_config(
     compilation_config: CompilationConfig,
     model_info: tuple[str, dict[str, Any]],
 ):
+    if (compilation_config.use_inductor_graph_partition
+            and not is_torch_equal_or_newer("2.9.0.dev")):
+        pytest.skip("inductor graph partition is only available "
+                    "in PyTorch 2.9+")
+
     model, model_kwargs = model_info
     print(f"MODEL={model}")
     run_model(compilation_config, model, model_kwargs)

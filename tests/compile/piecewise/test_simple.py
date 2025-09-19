@@ -15,6 +15,7 @@ from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          VllmConfig, set_current_vllm_config)
 from vllm.envs import VLLM_USE_V1
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.utils import is_torch_equal_or_newer
 
 # This import automatically registers `torch.ops.silly.attention`
 from ..silly_attention import get_global_counter, reset_global_counter
@@ -132,6 +133,10 @@ def test_simple_piecewise_compile(use_inductor):
 @pytest.mark.parametrize("splitting_ops", [["silly.attention"], []])
 def test_simple_inductor_graph_partition(splitting_ops):
     assert VLLM_USE_V1
+    if not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("inductor graph partition is only available "
+                    "in PyTorch 2.9+")
+
     _run_simple_model(
         # inductor graph partition automatically resets splitting_ops
         # to be an empty list
