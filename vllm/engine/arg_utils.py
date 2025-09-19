@@ -22,18 +22,18 @@ from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigType, ConvertOption, DecodingConfig,
-                         DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, EPLBConfig,
-                         GuidedDecodingBackend, HfOverrides, KVEventsConfig,
+                         ConfigType, ConvertOption, DetailedTraceModules,
+                         Device, DeviceConfig, DistributedExecutorBackend,
+                         EPLBConfig, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
                          ModelDType, ModelImpl, ObservabilityConfig,
                          ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
                          RunnerOption, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, TaskOption, TokenizerMode,
-                         VllmConfig, get_attr_docs)
+                         SpeculativeConfig, StructuredOutputsConfig,
+                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
+from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -326,8 +326,13 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_dbo: bool = ParallelConfig.enable_dbo
+    dbo_decode_token_threshold: int = \
+        ParallelConfig.dbo_decode_token_threshold
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
+    expert_placement_strategy: ExpertPlacementStrategy = \
+        ParallelConfig.expert_placement_strategy
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
@@ -412,12 +417,15 @@ class EngineArgs:
     disable_hybrid_kv_cache_manager: bool = (
         SchedulerConfig.disable_hybrid_kv_cache_manager)
 
-    guided_decoding_backend: GuidedDecodingBackend = DecodingConfig.backend
-    guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
-    guided_decoding_disable_any_whitespace: bool = \
-        DecodingConfig.disable_any_whitespace
-    guided_decoding_disable_additional_properties: bool = \
-        DecodingConfig.disable_additional_properties
+    structured_outputs_config: StructuredOutputsConfig = get_field(
+        VllmConfig, "structured_outputs_config")
+    reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
+    # Deprecated guided decoding fields
+    guided_decoding_backend: Optional[str] = None
+    guided_decoding_disable_fallback: Optional[bool] = None
+    guided_decoding_disable_any_whitespace: Optional[bool] = None
+    guided_decoding_disable_additional_properties: Optional[bool] = None
+
     logits_processor_pattern: Optional[
         str] = ModelConfig.logits_processor_pattern
 
@@ -456,7 +464,6 @@ class EngineArgs:
 
     additional_config: dict[str, Any] = \
         get_field(VllmConfig, "additional_config")
-    reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
@@ -612,28 +619,29 @@ class EngineArgs:
         load_group.add_argument('--pt-load-map-location',
                                 **load_kwargs["pt_load_map_location"])
 
-        # Guided decoding arguments
-        guided_decoding_kwargs = get_kwargs(DecodingConfig)
-        guided_decoding_group = parser.add_argument_group(
-            title="DecodingConfig",
-            description=DecodingConfig.__doc__,
+        # Structured outputs arguments
+        structured_outputs_kwargs = get_kwargs(StructuredOutputsConfig)
+        structured_outputs_group = parser.add_argument_group(
+            title="StructuredOutputsConfig",
+            description=StructuredOutputsConfig.__doc__,
         )
-        guided_decoding_group.add_argument("--guided-decoding-backend",
-                                           **guided_decoding_kwargs["backend"])
-        guided_decoding_group.add_argument(
-            "--guided-decoding-disable-fallback",
-            **guided_decoding_kwargs["disable_fallback"])
-        guided_decoding_group.add_argument(
-            "--guided-decoding-disable-any-whitespace",
-            **guided_decoding_kwargs["disable_any_whitespace"])
-        guided_decoding_group.add_argument(
-            "--guided-decoding-disable-additional-properties",
-            **guided_decoding_kwargs["disable_additional_properties"])
-        guided_decoding_group.add_argument(
+        structured_outputs_group.add_argument(
             "--reasoning-parser",
             # This choice is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
-            **guided_decoding_kwargs["reasoning_backend"])
+            **structured_outputs_kwargs["reasoning_parser"])
+        # Deprecated guided decoding arguments
+        for arg, type in [
+            ("--guided-decoding-backend", str),
+            ("--guided-decoding-disable-fallback", bool),
+            ("--guided-decoding-disable-any-whitespace", bool),
+            ("--guided-decoding-disable-additional-properties", bool),
+        ]:
+            structured_outputs_group.add_argument(
+                arg,
+                type=type,
+                help=(f"[DEPRECATED] {arg} will be removed in v0.12.0."),
+                deprecated=True)
 
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
@@ -692,10 +700,18 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
+        parallel_group.add_argument("--enable-dbo",
+                                    **parallel_kwargs["enable_dbo"])
+        parallel_group.add_argument(
+            "--dbo-decode-token-threshold",
+            **parallel_kwargs["dbo_decode_token_threshold"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config",
                                     **parallel_kwargs["eplb_config"])
+        parallel_group.add_argument(
+            "--expert-placement-strategy",
+            **parallel_kwargs["expert_placement_strategy"])
         parallel_group.add_argument(
             "--num-redundant-experts",
             type=int,
@@ -920,6 +936,8 @@ class EngineArgs:
                                 **vllm_kwargs["compilation_config"])
         vllm_group.add_argument("--additional-config",
                                 **vllm_kwargs["additional_config"])
+        vllm_group.add_argument('--structured-outputs-config',
+                                **vllm_kwargs["structured_outputs_config"])
 
         # Other arguments
         parser.add_argument('--disable-log-stats',
@@ -945,7 +963,6 @@ class EngineArgs:
         if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
                 and self.model in MODELS_ON_S3 and self.load_format == "auto"):
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
-            self.load_format = "runai_streamer"
 
         if self.disable_mm_preprocessor_cache:
             logger.warning(
@@ -1333,8 +1350,11 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_dbo=self.enable_dbo,
+            dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
+            expert_placement_strategy=self.expert_placement_strategy,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
@@ -1405,14 +1425,25 @@ class EngineArgs:
 
         load_config = self.create_load_config()
 
-        decoding_config = DecodingConfig(
-            backend=self.guided_decoding_backend,
-            disable_fallback=self.guided_decoding_disable_fallback,
-            disable_any_whitespace=self.guided_decoding_disable_any_whitespace,
-            disable_additional_properties=\
-                self.guided_decoding_disable_additional_properties,
-            reasoning_backend=self.reasoning_parser
-        )
+        # Pass reasoning_parser into StructuredOutputsConfig
+        if self.reasoning_parser:
+            self.structured_outputs_config.reasoning_parser = \
+                self.reasoning_parser
+
+        # Forward the deprecated CLI args to the StructuredOutputsConfig
+        so_config = self.structured_outputs_config
+        if self.guided_decoding_backend is not None:
+            so_config.guided_decoding_backend = \
+            self.guided_decoding_backend
+        if self.guided_decoding_disable_fallback is not None:
+            so_config.guided_decoding_disable_fallback = \
+            self.guided_decoding_disable_fallback
+        if self.guided_decoding_disable_any_whitespace is not None:
+            so_config.guided_decoding_disable_any_whitespace = \
+            self.guided_decoding_disable_any_whitespace
+        if self.guided_decoding_disable_additional_properties is not None:
+            so_config.guided_decoding_disable_additional_properties = \
+            self.guided_decoding_disable_additional_properties
 
         observability_config = ObservabilityConfig(
             show_hidden_metrics_for_version=(
@@ -1430,7 +1461,7 @@ class EngineArgs:
             lora_config=lora_config,
             speculative_config=speculative_config,
             load_config=load_config,
-            decoding_config=decoding_config,
+            structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
@@ -1481,12 +1512,6 @@ class EngineArgs:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)
                 return False
-
-        # No text embedding inputs so far.
-        if self.enable_prompt_embeds:
-            _raise_or_fallback(feature_name="--enable-prompt-embeds",
-                               recommend_to_remove=False)
-            return False
 
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
@@ -1620,6 +1645,13 @@ class EngineArgs:
                 "models in V0 and has been disabled.")
             self.enable_prefix_caching = False
 
+            if self.enable_prompt_embeds:
+                logger.warning(
+                    "--enable-prompt-embeds and --enable-prefix-caching "
+                    "are not supported together in V0. Prefix caching has "
+                    "been disabled.")
+                self.enable_prefix_caching = False
+
         # Set max_num_seqs to 256 for VLLM_V0.
         if self.max_num_seqs is None:
             self.max_num_seqs = 256
@@ -1633,6 +1665,17 @@ class EngineArgs:
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
             self.enable_chunked_prefill = True
+
+            # TODO: When prefix caching supports prompt embeds inputs, this
+            # check can be removed.
+            if (self.enable_prompt_embeds
+                    and self.enable_prefix_caching is not False):
+                logger.warning(
+                    "--enable-prompt-embeds and --enable-prefix-caching "
+                    "are not supported together in V1. Prefix caching has "
+                    "been disabled.")
+                self.enable_prefix_caching = False
+
             if self.enable_prefix_caching is None:
                 self.enable_prefix_caching = True
         else:

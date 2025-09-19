@@ -563,18 +563,6 @@ class CompilationConfig:
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
 
-        if envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput":
-            # exclude MoE dispatch/combine from capture by ensuring
-            # piecewise splitting includes them, so communication remains
-            # outside CUDA graphs while compute can still be graphed.
-            moe_ops = [
-                "vllm.moe_forward",
-                "vllm.moe_forward_shared",
-            ]
-            for op in moe_ops:
-                if op not in self.splitting_ops:
-                    self.splitting_ops.append(op)
-
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
             op in self.splitting_ops for op in self._attention_ops)

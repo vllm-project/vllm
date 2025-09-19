@@ -465,9 +465,8 @@ class Scheduler(SchedulerInterface):
                             in self.vllm_config.model_config.model.lower()), (
                                 "Whisper is the only supported "
                                 "encoder-decoder model.")
-                    num_encoder_tokens = MULTIMODAL_REGISTRY.\
-                        get_encdec_max_encoder_len(
-                        self.vllm_config.model_config)
+                    num_encoder_tokens =\
+                        self.scheduler_config.max_num_encoder_input_tokens
                 else:
                     num_encoder_tokens = 0
 

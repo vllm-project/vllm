@@ -391,8 +391,8 @@ class MultiHeadAttention(nn.Module):
             backend = _Backend.FLASH_ATTN
             use_upstream_fa = True
 
-        if current_platform.is_rocm():
-            # currently, only torch_sdpa is supported on rocm
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            # currently, only torch_sdpa is supported on rocm/xpu
             self.attn_backend = _Backend.TORCH_SDPA
         else:
 

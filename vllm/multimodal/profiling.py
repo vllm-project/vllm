@@ -209,7 +209,7 @@ class MultiModalProfiler(Generic[_I]):
         if processor.pad_dummy_encoder_prompt:
             num_tokens_to_pad = max(total_len, seq_len) - total_len
             encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
-        # NOTE: Whisper and Donut allows total_len > seq_len.
+        # NOTE: Whisper allows total_len > seq_len.
         elif total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
             logger.warning_once(
@@ -301,7 +301,7 @@ class MultiModalProfiler(Generic[_I]):
         Returns the maximum length of the multimodal (image placeholders+text)
         tokens, including any break/text tokens in-between image embeddings.
 
-        <im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>
+        `<im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>`
         Returns 9, even when the number of image embeddings is 6.
         
         This is important to take into account when profiling and

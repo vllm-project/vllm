@@ -11,6 +11,7 @@ from torch.nn.parameter import Parameter
 from vllm._ipex_ops import ipex_ops as ops
 from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -374,6 +375,10 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
             a2_scale_inv=layer.w2_input_scale,
             use_prepack=True,
         )
+
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return None
 
     def apply(
         self,
