@@ -19,7 +19,6 @@ def test_llama(vllm_runner, example_prompts, model_path, monkeypatch):
 
         vllm_outputs = vllm_model.generate_greedy(example_prompts,
                                                   max_tokens=20)
-        print(vllm_outputs)
         assert vllm_outputs
 
 
@@ -36,5 +35,4 @@ def test_qwen(vllm_runner, example_prompts, model_path, monkeypatch):
 
         vllm_outputs = vllm_model.generate_greedy(example_prompts,
                                                   max_tokens=20)
-        print(vllm_outputs)
         assert vllm_outputs
