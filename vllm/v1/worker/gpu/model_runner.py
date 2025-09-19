@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
@@ -106,6 +107,9 @@ class GPUModelRunner:
         logger.info("Model loading took %.4f GiB and %.6f seconds",
                     m.consumed_memory / GiB_bytes,
                     time_after_load - time_before_load)
+
+    def get_model(self) -> nn.Module:
+        return self.model
 
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config, self.kv_cache_dtype)
