@@ -10,7 +10,7 @@ import torch.nn as nn
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.compilation.wrapper import TorchCompileGuardsStripWrapper
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
@@ -32,11 +32,11 @@ def ignore_torch_compile(cls: _T) -> _T:
     a support_torch_compile decorator, but we don't want to
     compile the class `cls` that inherits the parent class.
     This only ignores compiling the forward of the class the
-    decorator is applied to. 
+    decorator is applied to.
 
     If the parent has ignore_torch_compile but the child has
     support_torch_compile, the child will still be compiled.
-    
+
     If the class has one or more submodules
     that have support_torch_compile decorator applied, compile will
     not be ignored for those submodules.
@@ -182,14 +182,14 @@ def _support_torch_compile(
     """
     A decorator to add support for compiling the forward method of a class.
     """
-    if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
+    if TorchCompileGuardsStripWrapper in cls.__bases__:
         # support decorating multiple times
         return cls
 
     # take care of method resolution order
     # make sure super().__init__ is called on the base class
-    #  other than TorchCompileWrapperWithCustomDispatcher
-    cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
+    #  other than TorchCompileGuardsStripWrapper
+    cls.__bases__ = cls.__bases__ + (TorchCompileGuardsStripWrapper, )
 
     old_init = cls.__init__
 
@@ -210,10 +210,34 @@ def _support_torch_compile(
             return
 
         compilation_counter.num_models_seen += 1
-        TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_level=vllm_config.compilation_config.level)
+        TorchCompileGuardsStripWrapper.__init__(self)
 
     cls.__init__ = __init__
+
+    def _mark_dynamic_inputs(mod, *args, **kwargs):
+        sig = inspect.signature(mod.__class__.forward)
+        bound_args = sig.bind(mod, *args, **kwargs)
+        bound_args.apply_defaults()
+        for k, dims in dynamic_arg_dims.items():
+            arg = bound_args.arguments.get(k)
+            if arg is not None:
+                dims = [dims] if isinstance(dims, int) else dims
+                if isinstance(arg, torch.Tensor):
+                    # In case dims is specified with negative indexing
+                    dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
+                    torch._dynamo.mark_dynamic(arg, dims)
+                elif isinstance(arg, IntermediateTensors):
+                    for tensor in arg.tensors.values():
+                        # In case dims is specified with negative indexing
+                        dims = [
+                            tensor.ndim + dim if dim < 0 else dim
+                            for dim in dims
+                        ]
+                        torch._dynamo.mark_dynamic(tensor, dims)
+                else:
+                    raise ValueError(
+                        "Unsupported dynamic dimensions"
+                        f" {dims} for argument {k} with type {type(arg)}.")
 
     def __call__(self, *args, **kwargs):
         # torch.compiler.is_compiling() means we are inside the compilation
@@ -222,95 +246,47 @@ def _support_torch_compile(
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
+        # This attributed is added by TorchCompileGuardsStripWrapper
+        if self.compiled:
+            return TorchCompileGuardsStripWrapper.__call__(
+                self, *args, **kwargs)
+
+        # This is the path for the first compilation.
+        _mark_dynamic_inputs(self, *args, **kwargs)
+
         # the first compilation needs to have dynamic shapes marked
-        if len(self.compiled_codes) < 1:
-            sig = inspect.signature(self.__class__.forward)
-            bound_args = sig.bind(self, *args, **kwargs)
-            bound_args.apply_defaults()
-            for k, dims in dynamic_arg_dims.items():
-                arg = bound_args.arguments.get(k)
-                if arg is not None:
-                    dims = [dims] if isinstance(dims, int) else dims
-                    if isinstance(arg, torch.Tensor):
-                        # In case dims is specified with negative indexing
-                        dims = [
-                            arg.ndim + dim if dim < 0 else dim for dim in dims
-                        ]
-                        torch._dynamo.mark_dynamic(arg, dims)
-                    elif isinstance(arg, IntermediateTensors):
-                        for tensor in arg.tensors.values():
-                            # In case dims is specified with negative indexing
-                            dims = [
-                                tensor.ndim + dim if dim < 0 else dim
-                                for dim in dims
-                            ]
-                            torch._dynamo.mark_dynamic(tensor, dims)
-                    else:
-                        raise ValueError(
-                            "Unsupported dynamic dimensions"
-                            f" {dims} for argument {k} with type {type(arg)}.")
-            # here, it is the starting point of the `torch.compile` process
-            start_monitoring_torch_compile(self.vllm_config)
-            logger.debug("Start compiling function %s",
-                         self.original_code_object)
+        start_monitoring_torch_compile(self.vllm_config)
+        logger.debug("Start compiling function %s",
+                     self.original_code_object())
 
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,
         # with the overhead of guard evaluation and recompilation.
-        if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
-            # it seems Dynamo reuse the compilation across instances,
-            # while we need to make sure the compiled code is not reused.
-            # we need to control all the compilation of the model.
-            torch._dynamo.eval_frame.remove_from_cache(
-                self.original_code_object)
 
-            # collect all relevant files traced by Dynamo,
-            # so that the compilation cache can trigger re-compilation
-            # properly when any of these files change.
+        # collect all relevant files traced by Dynamo,
+        # so that the compilation cache can trigger re-compilation
+        # properly when any of these files change.
 
-            # 1. the file containing the top-level forward function
+        # 1. the file containing the top-level forward function
+        self.vllm_config.compilation_config.traced_files.add(
+            self.original_code_object().co_filename)
+
+        # 2. every time Dynamo sees a function call, it will inline
+        # the function by calling InliningInstructionTranslator.inline_call
+        # we hijack this function to know all the functions called
+        # during Dynamo tracing, and their corresponding files
+        inline_call = InliningInstructionTranslator.inline_call
+
+        def patched_inline_call(parent, func, args, kwargs):
+            code = func.get_code()
             self.vllm_config.compilation_config.traced_files.add(
-                self.original_code_object.co_filename)
+                code.co_filename)
+            return inline_call(parent, func, args, kwargs)
 
-            # 2. every time Dynamo sees a function call, it will inline
-            # the function by calling InliningInstructionTranslator.inline_call
-            # we hijack this function to know all the functions called
-            # during Dynamo tracing, and their corresponding files
-            inline_call = InliningInstructionTranslator.inline_call
-
-            def patched_inline_call(parent, func, args, kwargs):
-                code = func.get_code()
-                self.vllm_config.compilation_config.traced_files.add(
-                    code.co_filename)
-                return inline_call(parent, func, args, kwargs)
-
-            # Disable the C++ compilation of symbolic shape guards. C++-fication
-            # of symbolic shape guards can improve guard overhead. But, since
-            # vllm skip guards anyways, setting this flag to False can improve
-            # compile time.
-            dynamo_config_patches = {}
-            try:
-                _ = torch._dynamo.config.enable_cpp_symbolic_shape_guards
-                dynamo_config_patches[
-                    "enable_cpp_symbolic_shape_guards"] = False
-            except AttributeError:
-                # Note: this config is not available in torch 2.6, we can skip
-                # if the config doesn't exist
-                logger.debug(
-                    "enable_cpp_symbolic_shape_guards config not available")
-
-            with patch.object(InliningInstructionTranslator, 'inline_call',
-                              patched_inline_call), torch._dynamo.config.patch(
-                                  **dynamo_config_patches):
-                output = self.compiled_callable(*args, **kwargs)
-            return output
-
-        # usually, capturing the model once is enough, and then we can
-        # dispatch to the compiled code directly, without going through
-        # the Dynamo guard mechanism.
-        with self.dispatch_to_code(0):
-            model_output = self.forward(*args, **kwargs)
-            return model_output
+        with patch.object(InliningInstructionTranslator, "inline_call",
+                          patched_inline_call):
+            return TorchCompileGuardsStripWrapper.__call__(
+                self, *args, **kwargs)
 
     cls.__call__ = __call__
     return cls

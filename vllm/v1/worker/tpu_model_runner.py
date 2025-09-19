@@ -18,7 +18,7 @@ import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.compilation.wrapper import TorchCompileGuardsStripWrapper
 from vllm.config import (ParallelConfig, VllmConfig,
                          get_layers_from_vllm_config, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -1679,11 +1679,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             compiled_model = self.model.get_language_model().model
         else:
             compiled_model = self.model.model
-        if isinstance(compiled_model, TorchCompileWrapperWithCustomDispatcher):
+        if isinstance(compiled_model, TorchCompileGuardsStripWrapper):
             logger.info("Clear dynamo cache and cached dynamo bytecode.")
             torch._dynamo.eval_frame.remove_from_cache(
-                compiled_model.original_code_object)
-            compiled_model.compiled_codes.clear()
+                compiled_model.original_code_object())
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def select_hidden_states(self, hidden_states, indices_do_sample):
@@ -1701,7 +1700,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self, logits: torch.Tensor,
             sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
         """
-        Sample with xla-friendly function. This function is to be traced 
+        Sample with xla-friendly function. This function is to be traced
         separately from `forward` for lighter compilation overhead.
         """
         if sampling_metadata.all_greedy:
@@ -1832,7 +1831,7 @@ def _get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
 
 def _get_token_paddings(min_token_size: int, max_token_size: int,
                         padding_gap: int) -> list[int]:
-    """Generate a list of padding size, starting from min_token_size, 
+    """Generate a list of padding size, starting from min_token_size,
     ending with a number that can cover max_token_size
 
     If padding_gap == 0 then:
