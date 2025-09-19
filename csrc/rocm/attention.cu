@@ -21,6 +21,14 @@
 #include <hip/hip_bf16.h>
 #include "../cuda_compat.h"
 
+#if HIP_FP8_TYPE_OCP
+typedef __hip_fp8_e4m3 __hip_fp8_e4m3;
+typedef __hip_fp8_e5m2 __hip_fp8_e5m2;
+#else
+typedef __hip_fp8_e4m3_fnuz __hip_fp8_e4m3;
+typedef __hip_fp8_e5m2_fnuz __hip_fp8_e5m2;
+#endif
+
 #include <algorithm>
 #include "../attention/dtype_fp8.cuh"
 #include "../quantization/fp8/amd/quant_utils.cuh"
@@ -324,8 +332,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
     const cache_t* __restrict__ k_cache,    // [num_blocks, num_kv_heads, head_size/x, block_size, x]
     const cache_t* __restrict__ v_cache,    // [num_blocks, num_kv_heads, head_size, block_size]
-    const int num_kv_heads,   
-    const float scale,    
+    const int num_kv_heads,
+    const float scale,
     const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,   // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
@@ -3648,7 +3656,7 @@ void paged_attention(
     torch::Tensor& query,       // [num_seqs, num_heads, head_size]
     torch::Tensor& key_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
     torch::Tensor& value_cache, // [num_blocks, num_heads, head_size, block_size]
-    int64_t num_kv_heads, 
+    int64_t num_kv_heads,
     double scale,
     torch::Tensor& block_tables, // [num_seqs, max_num_blocks_per_seq]
     torch::Tensor& seq_lens, // [num_seqs]

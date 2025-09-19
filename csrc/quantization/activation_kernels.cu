@@ -24,8 +24,16 @@ typedef __hip_bfloat162 __nv_bfloat162;
 typedef __hip_bfloat16 __nv_bfloat16;
 typedef __hip_bfloat16_raw __nv_bfloat16_raw;
 
+  #if HIP_FP8_TYPE_OCP
 typedef __hip_fp8_e4m3 __nv_fp8_e4m3;
 typedef __hip_fp8x4_e4m3 __nv_fp8x4_e4m3;
+typedef __hip_fp8_e5m2 __nv_fp8_e5m2;
+  #else
+typedef __hip_fp8_e4m3_fnuz __nv_fp8_e4m3;
+typedef __hip_fp8x4_e4m3_fnuz __nv_fp8x4_e4m3;
+typedef __hip_fp8_e5m2_fnuz __nv_fp8_e5m2;
+  #endif
+
 #endif
 
 #include "core/registration.h"
