@@ -98,8 +98,9 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
         return [FUSED_OPS[kNvfp4Quant]]
 
 
-@pytest.mark.parametrize("num_tokens", [64])
-@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("num_tokens", [32, 64])
+@pytest.mark.parametrize("hidden_size", [128, 256])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
     "model_class",
     cast(list[type], [TestSiluMulFp8QuantModel, TestSiluMulNvfp4QuantModel]
@@ -110,13 +111,13 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
                          [True, False] if cutlass_fp8_supported() else [True])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
                     reason="Only test on CUDA and ROCm")
-def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, model_class,
+def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, dtype, model_class,
                                    cuda_force_torch):
     if model_class == TestSiluMulNvfp4QuantModel and cuda_force_torch:
         pytest.skip("Duplicate tests for NVFP4")
 
     torch.set_default_device("cuda")
-    torch.set_default_dtype(torch.float16)
+    torch.set_default_dtype(dtype)
 
     x = torch.rand(num_tokens, hidden_size * 2)
 
@@ -145,8 +146,8 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, model_class,
     elif model_class == TestSiluMulNvfp4QuantModel:
         atol, rtol = 1e-1, 1e-1
 
-    torch.testing.assert_close(result[0].to(dtype=torch.float16),
-                               result2[0].to(dtype=torch.float16),
+    torch.testing.assert_close(result[0].to(dtype=dtype),
+                               result2[0].to(dtype=dtype),
                                atol=atol,
                                rtol=rtol)
 

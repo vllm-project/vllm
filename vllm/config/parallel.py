@@ -28,6 +28,7 @@ else:
 
 logger = init_logger(__name__)
 
+ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 
 
@@ -101,6 +102,15 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
+    expert_placement_strategy: ExpertPlacementStrategy = "linear"
+    """The expert placement strategy for MoE layers:\n
+    - "linear": Experts are placed in a contiguous manner. For example, with 4
+      experts and 2 ranks, rank 0 will have experts [0, 1] and rank 1 will have
+      experts [2, 3].\n
+    - "round_robin": Experts are placed in a round-robin manner. For example,
+      with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
+      will have experts [1, 3]. This strategy can help improve load balancing
+      for grouped expert models with no redundant experts."""
     num_redundant_experts: Optional[int] = None
     """`num_redundant_experts` is deprecated and has been replaced with
     `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
@@ -125,6 +135,14 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
+
+    enable_dbo: bool = False
+    """Enable microbatching for the model executor."""
+
+    dbo_decode_token_threshold: int = 32
+    """The threshold for microbatching. If the number of tokens in the
+    request is greater than this threshold, microbatching will be used.
+    Otherwise, the request will be processed in a single batch."""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -173,6 +191,25 @@ class ParallelConfig:
     """Number of decode context parallel groups, because the world size does
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
+
+    _api_process_count: int = 1
+    """
+    The number of API processes initialized.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
+
+    _api_process_rank: int = 0
+    """
+    The rank of this API process, or `-1` for engine core processes
+    under API server scale-out.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
 
     @property
     def world_size_across_dp(self) -> int:
@@ -427,6 +464,12 @@ class ParallelConfig:
 
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
+
+        if not -1 <= self._api_process_rank < self._api_process_count:
+            raise ValueError(
+                "Invalid value of `_api_process_rank`. "
+                f"Expected to be `-1` or `[0, {self._api_process_count})`, "
+                f"but found: {self._api_process_rank}")
 
     @property
     def use_ray(self) -> bool:
