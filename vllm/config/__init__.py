@@ -5,7 +5,7 @@ from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      CUDAGraphMode, PassConfig)
-from vllm.config.device import DeviceConfig
+from vllm.config.device import Device, DeviceConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
@@ -44,6 +44,7 @@ __all__ = [
     "CUDAGraphMode",
     "PassConfig",
     # From vllm.config.device
+    "Device",
     "DeviceConfig",
     # From vllm.config.kv_events
     "KVEventsConfig",
