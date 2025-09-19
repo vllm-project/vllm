@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Iterable, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
@@ -76,8 +76,8 @@ class EngineClient(ABC):
         include_stop_str_in_output = params.include_stop_str_in_output
 
         preprocessor = await self.get_input_preprocessor()
-        tokenizer_group = preprocessor.get_tokenizer_group()
-        tokenizer = await tokenizer_group.get_lora_tokenizer_async()
+        tokenizer = preprocessor.get_tokenizer()
+        eos_token_id = tokenizer.eos_token_id
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
@@ -104,7 +104,7 @@ class EngineClient(ABC):
         tokenized_length = len(prompt_token_ids)
 
         sort_beams_key = create_sort_beams_key_function(
-            tokenizer.eos_token_id, length_penalty)
+            eos_token_id, length_penalty)
 
         beam_search_params = SamplingParams(
             logprobs=2 * beam_width,
@@ -154,7 +154,7 @@ class EngineClient(ABC):
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     for token_id, logprob_obj in logprobs.items():
-                        if token_id == tokenizer.eos_token_id and \
+                        if token_id == eos_token_id and \
                             not ignore_eos:
                             completed.append(
                                 BeamSearchSequence(
@@ -166,7 +166,7 @@ class EngineClient(ABC):
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
                                     finish_reason="stop",
-                                    stop_reason=tokenizer.eos_token_id))
+                                    stop_reason=eos_token_id))
                         else:
                             new_beams.append(
                                 BeamSearchSequence(
@@ -189,14 +189,14 @@ class EngineClient(ABC):
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
-            if (beam.tokens[-1] == tokenizer.eos_token_id and not ignore_eos):
+            if (beam.tokens[-1] == eos_token_id and not ignore_eos):
                 # Skip the eos token in the text.
                 tokens = beam.tokens[tokenized_length:-1]
             else:
                 tokens = beam.tokens[tokenized_length:]
             beam.text = tokenizer.decode(tokens)
 
-        beam_search_output = RequestOutput(
+        yield RequestOutput(
             request_id=request_id,
             prompt=prompt_text,
             outputs=[
@@ -213,8 +213,6 @@ class EngineClient(ABC):
             finished=True,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=None)
-
-        yield beam_search_output
 
     @abstractmethod
     def encode(
@@ -251,21 +249,13 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def get_decoding_config(self) -> DecodingConfig:
-        """Get the decoding configuration of the vLLM engine."""
-        ...
-
-    @abstractmethod
     async def get_input_preprocessor(self) -> InputPreprocessor:
         """Get the input processor of the vLLM engine."""
         ...
 
     @abstractmethod
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        """Get the appropriate tokenizer for the request"""
+    async def get_tokenizer(self) -> AnyTokenizer:
+        """Get the tokenizer"""
         ...
 
     async def get_io_processor(self) -> IOProcessor:
