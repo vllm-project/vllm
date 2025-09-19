@@ -102,7 +102,6 @@ class OpenAIServingChat(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            enable_force_include_usage=enable_force_include_usage,
             log_error_stack=log_error_stack,
         )
 
@@ -380,7 +379,6 @@ class OpenAIServingChat(OpenAIServing):
                 conversation,
                 tokenizer,
                 request_metadata,
-                enable_force_include_usage=self.enable_force_include_usage,
             )
 
         try:
