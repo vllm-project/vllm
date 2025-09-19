@@ -7,6 +7,8 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.all_reduce_utils import (
+    should_nccl_symm_mem_allreduce)
 from vllm.distributed.device_communicators.pynccl import (
     register_nccl_symmetric_ops)
 from vllm.distributed.device_communicators.pynccl_allocator import (
@@ -116,7 +118,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
         if self.pynccl_comm is not None and \
-            self.pynccl_comm.should_nccl_symm_mem_allreduce(input_):
+            should_nccl_symm_mem_allreduce(self.pynccl_comm.world_size,input_):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
