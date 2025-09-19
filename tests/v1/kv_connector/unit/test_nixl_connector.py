@@ -867,7 +867,7 @@ class FakePlatform(Platform):
         Returns a mapping from device_type to a tuple of supported 
         kv_buffer_device for nixl.
         """
-        return {'oot': ('oot')}
+        return {'oot': ('oot', )}
 
     @classmethod
     def get_nixl_memory_type(cls) -> Optional[str]:
