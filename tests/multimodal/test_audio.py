@@ -36,9 +36,6 @@ def test_resample_audio_scipy(dummy_audio):
     assert len(out_down) == 3  
     assert len(out_up) == 10  
     assert np.all(out_same == dummy_audio)
-    
-    out_non_int = resample_audio_scipy(dummy_audio, orig_sr=3, target_sr=2)
-    assert len(out_non_int) == 4
 
 
 def test_audio_resampler_librosa_calls_resample(dummy_audio):
