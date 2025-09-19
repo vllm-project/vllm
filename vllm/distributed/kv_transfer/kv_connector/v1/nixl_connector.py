@@ -451,7 +451,9 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
-        self.nixl_backend = envs.VLLM_NIXL_BACKEND
+        self.nixl_backend = \
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "backend", "UCX")
         # Agent.
         config = nixl_agent_config(backends=[self.nixl_backend])
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
