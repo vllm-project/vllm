@@ -451,11 +451,11 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
-        self.nixl_backend = \
+        self.nixl_backends = \
             vllm_config.kv_transfer_config.get_from_extra_config(
-                "backend", "UCX")
+                "backends", ["UCX"])
         # Agent.
-        config = nixl_agent_config(backends=[self.nixl_backend])
+        config = nixl_agent_config(backends=self.nixl_backends)
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
@@ -777,7 +777,7 @@ class NixlConnectorWorker:
         descs = self.nixl_wrapper.get_reg_descs(caches_data,
                                                 self.nixl_memory_type)
         logger.debug("Registering descs: %s", caches_data)
-        self.nixl_wrapper.register_memory(descs, backends=[self.nixl_backend])
+        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
 
