@@ -19,7 +19,7 @@ from vllm.platforms import current_platform
 from vllm.v1.spec_decode.metrics import compute_acceptance_rate
 
 
-def get_test_prompts(mm_enabled: bool):
+def get_test_prompts(mm_enabled: bool, quiet: bool = False):
     prompt_types = ["repeat", "sentence"]
     if mm_enabled:
         prompt_types.append("mm")
@@ -28,7 +28,9 @@ def get_test_prompts(mm_enabled: bool):
 
     random.seed(0)
     random_prompt_type_choices = random.choices(prompt_types, k=num_prompts)
-    print(f"Prompt types: {random_prompt_type_choices}")
+
+    if not quiet:
+        print(f"Prompt types: {random_prompt_type_choices}")
 
     # Generate a mixed batch of prompts, some of which can be easily
     # predicted by n-gram matching and some which likely cannot.
@@ -270,12 +272,17 @@ cases = [
 
 @pytest.mark.parametrize("args", cases)
 @pytest.mark.parametrize("enforce_eager", [True, False])
-def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool,
-                                 monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
+def test_draft_model_correctness(
+    args: ArgsTest,
+    enforce_eager: bool,
+    disable_padded_drafter_batch: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Compare the outputs using and not using speculative decoding.
     In the greedy decoding case, the outputs must match EXACTLY."""
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    test_prompts = get_test_prompts(mm_enabled=False)
+    test_prompts = get_test_prompts(mm_enabled=False, quiet=True)
 
     spec_llm = LLM(
         model=args.model,
@@ -286,6 +293,7 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool,
             "max_model_len": args.max_model_len,
             "enforce_eager": enforce_eager,
             "tensor_parallel_size": args.draft_tensor_parallel_size,
+            "disable_padded_drafter_batch": disable_padded_drafter_batch,
         },
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
