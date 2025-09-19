@@ -49,7 +49,8 @@ PRODUCT_TOOLS = [{
     "type": "function",
     "function": {
         "name": "get_product_info",
-        "description": "Get detailed information of a product based on its product ID.",
+        "description": "Get detailed information of a product based on its "
+        "product ID.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -71,7 +72,8 @@ MESSAGES = [{"role": "user", "content": "What's the weather like in Boston?"}]
 
 PRODUCT_MESSAGES = [{
     "role": "user", 
-    "content": "Hi! Do you have any detailed information about the product id 7355608 and inserted true?"
+    "content": "Hi! Do you have any detailed information about the product id "
+    "7355608 and inserted true?"
 }]
 
 
@@ -184,14 +186,10 @@ async def test_non_streaming_product_tool_call():
         arguments = json.loads(tool_call.function.arguments)
         assert "product_id" in arguments
         assert "inserted" in arguments
-        
-        # Handle type coercion for cases where model returns strings instead of expected types
+
         product_id = arguments.get("product_id")
         inserted = arguments.get("inserted")
-        
-        # Verify product_id is either int or string that can be converted to int
-        if isinstance(product_id, str):
-            product_id = int(product_id)
+
         assert isinstance(product_id, int)
         assert product_id == 7355608
         assert isinstance(inserted, bool)
@@ -249,10 +247,7 @@ async def test_streaming_product_tool_call():
         # Handle type coercion for streaming test as well
         product_id = arguments.get("product_id")
         inserted = arguments.get("inserted")
-        
-        # Verify product_id is either int or string that can be converted to int
-        if isinstance(product_id, str):
-            product_id = int(product_id)
+
         assert isinstance(product_id, int)
         assert product_id == 7355608
         assert isinstance(inserted, bool)
