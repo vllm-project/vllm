@@ -67,7 +67,7 @@ class FlashAttnMLAMetadataBuilder(
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_BATCH
 
-    reorder_batch_threshold: ClassVar[int] = 512
+    reorder_batch_threshold: int = 512
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
