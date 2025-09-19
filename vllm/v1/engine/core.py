@@ -356,7 +356,7 @@ class EngineCore:
         return engine_core_outputs, model_executed
 
     def shutdown(self):
-        self.structured_output_manager.clear_backend()
+        self.structured_output_manager.shutdown()
         if self.model_executor:
             self.model_executor.shutdown()
         if self.scheduler:
@@ -446,11 +446,11 @@ class EngineCore:
                                                self.request_block_hasher)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
-            # `grammar_init` is only invoked in input processing thread. For
-            # `structured_output_manager`, each request is independent and
-            # grammar compilation is async. Scheduler always checks grammar
-            # compilation status before scheduling request.
-            self.structured_output_manager.grammar_init(req)
+            # `submit_grammar_init` is only invoked in input processing thread.
+            # For `structured_output_manager`, each request is independent
+            # and grammar compilation is async. Scheduler always checks
+            # grammar compilation status before scheduling request.
+            self.structured_output_manager.submit_grammar_init(req)
         return req, request.current_wave
 
 
