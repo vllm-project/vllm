@@ -206,7 +206,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
         do_async: bool,
-    ) -> Optional[Callable]:
+    ) -> tuple[Callable, Callable]:
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")
@@ -233,7 +233,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             return_recv_hook=do_recv_hook,
             out=output)
 
-        return recv_hook
+        return recv_hook, lambda: None
 
     def finalize_async(
         self,
@@ -243,8 +243,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> Callable:
-        recv_hook = self._finalize(
+    ) -> tuple[Callable, Callable]:
+        return self._finalize(
             output,
             fused_expert_output,
             topk_weights,
@@ -253,8 +253,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             weight_and_reduce_impl,
             do_async=True,
         )
-        assert recv_hook is not None
-        return recv_hook
 
     def finalize(
         self,

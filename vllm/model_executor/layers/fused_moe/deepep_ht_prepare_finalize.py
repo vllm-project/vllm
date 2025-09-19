@@ -14,7 +14,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.v1.worker.ubatching import (
-    dbo_current_ubatch_id, dbo_enabled, dbo_switch_to_compute_sync,
+    dbo_current_ubatch_id, dbo_enabled, dbo_switch_to_comm,
+    dbo_switch_to_compute, dbo_switch_to_compute_sync,
+    dbo_yield_and_switch_from_comm_to_compute,
     dbo_yield_and_switch_from_compute_to_comm)
 
 # yapf: enable
@@ -78,6 +80,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         has_scales = token_scales is not None
 
+        # We yield before launching the dispatch kernel since the dispatch
+        # kernel will block the CPU so we want to cue up all the compute for the
+        # other ubatch before the dispatch kernel starts.
         dbo_yield_and_switch_from_compute_to_comm()
 
         (num_tokens_per_rank, num_tokens_per_rdma_rank,
@@ -204,7 +209,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[Callable, mk.ReceiverType]:
+    ) -> mk.ReceiverType:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -230,14 +235,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = quant_config.a1_scale
 
-        return (lambda *args: None,
-                self._do_dispatch(tokens=a1q,
-                                  token_scales=a1q_scale,
-                                  rank_topk_ids=topk_ids,
-                                  rank_topk_weights=topk_weights,
-                                  num_experts=num_experts,
-                                  a1_scale=a1_post_scale,
-                                  quant_config=quant_config))
+        return self._do_dispatch(tokens=a1q,
+                                 token_scales=a1q_scale,
+                                 rank_topk_ids=topk_ids,
+                                 rank_topk_weights=topk_weights,
+                                 num_experts=num_experts,
+                                 a1_scale=a1_post_scale,
+                                 quant_config=quant_config)
 
     def prepare(
         self,
@@ -249,10 +253,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        (_, receiver) = self.prepare_async(a1, topk_weights, topk_ids,
-                                           num_experts, expert_map,
-                                           apply_router_weight_on_input,
-                                           quant_config)
+        receiver = self.prepare_async(a1, topk_weights, topk_ids, num_experts,
+                                      expert_map, apply_router_weight_on_input,
+                                      quant_config)
         return receiver()
 
     def _finalize(
@@ -292,20 +295,25 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             async_finish=do_async and not dbo_enabled(),
             allocate_on_comm_stream=False)
 
-        # TODO(lucas): refactor the modular kernel so this will be handled there
-        if dbo_enabled():
-            output.copy_(combined_x, non_blocking=True)
-            dbo_switch_to_compute_sync()
-            return (lambda: None) if do_async else None
-        elif do_async:
+        dbo_switch_to_compute()
+
+        if do_async:
 
             def _receiver():
-                event.current_stream_wait()
+                if event.event is not None:
+                    event.current_stream_wait()
+                dbo_switch_to_comm()
                 # Respect inplace outputs.
                 output.copy_(combined_x, non_blocking=True)
 
+                # TODO(lucas): refactor the modular kernel so this will be
+                # handled there
+                dbo_yield_and_switch_from_comm_to_compute()
+
             return _receiver
         else:
+            # TODO(lucas): support this case with the refactored modular kernel
+            assert not dbo_enabled()
             # Respect inplace outputs.
             output.copy_(combined_x, non_blocking=True)
             return None

@@ -145,7 +145,7 @@ class ParallelConfig:
     If the number of tokens in the request is greater than this threshold,
     microbatching will be used. Otherwise, the request will be processed in a
     single batch."""
-    dbo_prefill_token_threshold: int = 32
+    dbo_prefill_token_threshold: int = 512  # TODO(lucas): tune
     """The threshold for dual batch overlap for batches that contain one or more
     prefills. If the number of tokens in the request is greater than this
     threshold, microbatching will be used. Otherwise, the request will be

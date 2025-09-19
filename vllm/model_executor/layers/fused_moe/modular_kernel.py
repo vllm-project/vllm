@@ -224,7 +224,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[Callable, ReceiverType]:
+    ) -> Union[tuple[Callable, ReceiverType], ReceiverType]:
         """
         Perform any quantization (and/or) dispatching needed for this kernel
         but do not wait for results from other workers.
@@ -240,10 +240,21 @@ class FusedMoEPrepareAndFinalize(ABC):
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
 
-        Returns a callback that when invoked waits for results from other
-        workers and has the same return signature as `prepare`, e.g.
+        Returns a callback or a hook callback pair that when invoked waits for 
+        results from other workers and has the same return signature as 
+        `prepare`, if a hook is returned this is more lightweight check that
+        the recv is complete without doing extra work (used by DBO, will be 
+        refactored in the very near future)
+        
+        e.g.
 
-        receiver = obj.prepare_async(...)
+        ret = obj.prepare_async(...)
+        
+        if isinstance(ret, tuple):
+            hook, receiver = ret
+            hook()
+
+        if hook is not None:
         a, a_scales, expert_meta, topk_ids, topk_weights = receiver()
 
         is equivalent to:
@@ -285,7 +296,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
-    ) -> Callable:
+    ) -> Union[tuple[Callable, Callable], Callable]:
         """
         Perform any combine plus apply weights and perform a reduction on the
         fused experts output but do not wait for results from other workers.
@@ -299,11 +310,17 @@ class FusedMoEPrepareAndFinalize(ABC):
         - weight_and_reduce_impl: An optional TopKWeightAndReduce
           implementation.
 
-        Returns a callback that when invoked waits for results from other
-        workers and has the same return signature as `finalize`, e.g.
+        Returns a callback or a hook callback pair that when invoked waits for 
+        results from other workers and has the same return signature as 
+        `finalize`, if a hook is returned this is more lightweight check that
+        the recv is complete without doing extra work (used by DBO, will be 
+        refactored in the very near future)
 
-        receiver = obj.finalize_async(output, ...)
+        ret = obj.finalize_async(output, ...)
         ... output not valid yet ...
+        if isinstance(ret, tuple):
+            hook, receiver = ret
+            hook()
         receiver()
         ... output valid here ...
 
@@ -911,11 +928,10 @@ class FusedMoEModularKernel(torch.nn.Module):
             )
 
             # TODO(lucas): refactor this in the alternative schedules followup
-            if isinstance(prepare_ret, tuple):
-                hook, receiver = prepare_ret
-            else:
-                hook = None
-                receiver = prepare_ret
+            # currently unpack if we have hook + receiver pair or just
+            # receiver (see finalize_async docstring)
+            hook, receiver = prepare_ret \
+                if isinstance(prepare_ret, tuple) else (None, prepare_ret)
 
             if hook is not None:
                 if dbo_enabled():
@@ -978,7 +994,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
         else:
-            recv_hook = self.prepare_finalize.finalize_async(
+            finalize_ret = self.prepare_finalize.finalize_async(
                 output,
                 fused_out,
                 topk_weights,
@@ -990,11 +1006,23 @@ class FusedMoEModularKernel(torch.nn.Module):
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
 
-            assert recv_hook is not None
-            dbo_register_recv_hook(recv_hook)
-            dbo_yield()
-            if not dbo_enabled():
-                recv_hook()
+            # TODO(lucas): refactor this in the alternative schedules followup
+            # currently unpack if we have hook + receiver pair or just
+            # receiver (see finalize_async docstring)
+            hook, receiver = finalize_ret \
+                if isinstance(finalize_ret, tuple) else (None, finalize_ret)
+
+            if hook is not None:
+                if dbo_enabled():
+                    # If DBO is being used, register the hook with the ubatch
+                    # context and call it in dbo_maybe_run_recv_hook instead of
+                    #  passing it to the receiver.
+                    dbo_register_recv_hook(hook)
+                    dbo_yield()
+                else:
+                    hook()
+
+            receiver()
 
         if self.shared_experts is None:
             return output
