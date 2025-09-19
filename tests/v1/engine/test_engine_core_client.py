@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from threading import Thread
-from typing import Optional, Union
+from typing import Any, Optional, Union
 from unittest.mock import MagicMock
 
 import pytest
@@ -352,8 +352,7 @@ def echo_dc_nested(
     self,
     msg: str,
     structure_type: str = "list_of_dicts",
-) -> Union[MyDataclass, list[dict[str, MyDataclass]], dict[str,
-                                                           list[MyDataclass]]]:
+) -> Any:
     print(f"echo dc nested util function called: {msg}, "
           f"structure: {structure_type}")
     val = None if msg is None else MyDataclass(msg)
