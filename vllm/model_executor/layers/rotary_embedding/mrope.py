@@ -15,7 +15,7 @@ from .common import apply_rotary_emb_dispatch
 
 
 @triton.jit
-def _triton_qwen2vl_mrope_forward(
+def _triton_mrope_forward(
     q_ptr,
     k_ptr,
     cos,
@@ -30,12 +30,14 @@ def _triton_qwen2vl_mrope_forward(
     pad_hd: tl.constexpr,
     mrope_section_t: tl.constexpr,
     mrope_section_h: tl.constexpr,
+    mrope_section_w: tl.constexpr,
+    is_interleaved: tl.constexpr,
 ):
     # Adapted from
     # https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/qwen2vl_mrope.py
     # This version supports flatten input tensors from vllm
     # and supports cos and sin cache with shape (3, num_tokens, head_dim // 2)
-    # instead of (3, bsz, seq_len, head_dim)
+    # instead of (3, bsz, seq_len, head_dim), also supports interleaved rotary
     pid = tl.program_id(0)
     # locate start address
     q_ptr = q_ptr + pid * (n_qh * hd)
@@ -46,9 +48,6 @@ def _triton_qwen2vl_mrope_forward(
     # m of this program instance
     # ####################################################################
     # Note: cos and sin now have shape (3, num_tokens, head_dim // 2)
-
-    t_end = mrope_section_t
-    h_end = t_end + mrope_section_h
 
     # Updated stride calculation for half head_dim
     half_rd = rd // 2
@@ -61,9 +60,18 @@ def _triton_qwen2vl_mrope_forward(
 
     # Updated offsets for half head_dim
     cos_offsets = tl.arange(0, pad_hd // 2)
-    t_mask = cos_offsets < t_end
-    h_mask = (t_end <= cos_offsets) & (cos_offsets < h_end)
-    w_mask = (h_end <= cos_offsets) & (cos_offsets < half_rd)
+    if is_interleaved:
+        h_mask = (((cos_offsets % 3) == 1) &
+                  (cos_offsets <= 3 * mrope_section_h))
+        w_mask = (((cos_offsets % 3) == 2) &
+                  (cos_offsets <= 3 * mrope_section_w))
+        t_mask = ~(h_mask | w_mask)
+    else:
+        t_end = mrope_section_t
+        h_end = t_end + mrope_section_h
+        t_mask = cos_offsets < mrope_section_t
+        h_mask = (t_end <= cos_offsets) & (cos_offsets < h_end)
+        w_mask = (h_end <= cos_offsets) & (cos_offsets < half_rd)
 
     t_cos_row = tl.load(t_cos + cos_offsets, mask=t_mask, other=0)
     h_cos_row = tl.load(h_cos + cos_offsets, mask=h_mask, other=0)
@@ -131,6 +139,7 @@ def triton_mrope(
     mrope_section: list[int],
     head_size: int,
     rotary_dim: int,
+    mrope_interleaved: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Qwen2VL mrope kernel.
 
@@ -158,7 +167,7 @@ def triton_mrope(
     cos = cos.contiguous()
     sin = sin.contiguous()
 
-    _triton_qwen2vl_mrope_forward[(n_row, )](
+    _triton_mrope_forward[(n_row, )](
         q,
         k,
         cos,
@@ -173,6 +182,8 @@ def triton_mrope(
         pad_hd,
         mrope_section[0],
         mrope_section[1],
+        mrope_section[2],
+        mrope_interleaved,
     )
     return q, k
 
@@ -201,7 +212,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         is_neox_style: bool,
         dtype: torch.dtype,
         mrope_section: Optional[list[int]] = None,
-        mrope_interleaved: Optional[bool] = False,
+        mrope_interleaved: bool = False,
     ) -> None:
         # In Qwen2.5-VL, the maximum index value is related to the duration of
         # the input video. We enlarge max_position_embeddings to 4 times to get
@@ -282,10 +293,6 @@ class MRotaryEmbedding(RotaryEmbedding):
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
 
-        if self.mrope_interleaved:
-            # TODO: add triton implementation to support mrope-interleaved
-            return self.forward_native(positions, query, key)
-
         num_tokens = positions.shape[-1]
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
@@ -302,6 +309,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                 self.mrope_section,
                 self.head_size,
                 self.rotary_dim,
+                self.mrope_interleaved,
             )
 
             return q.reshape(query_shape), k.reshape(key_shape)
