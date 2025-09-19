@@ -133,7 +133,7 @@ class GrammarInitData:
         assert request.sampling_params is not None
         return cls(request_id=request.request_id,
                    guided_decoding_backend=request.sampling_params.
-                   guided_decoding.backend,
+                   structured_outputs._backend,
                    structured_output_key=request.structured_output_request.
                    structured_output_key)
 
@@ -321,15 +321,12 @@ class StructuredOutputManager:
 
         if not self.vllm_config.model_config.skip_tokenizer_init:
             self.tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config,
-                scheduler_config=vllm_config.scheduler_config,
-                lora_config=vllm_config.lora_config,
-            ).get_lora_tokenizer(None)
-
-            reasoning_backend = vllm_config.decoding_config.reasoning_backend
-            if reasoning_backend:
+                model_config=vllm_config.model_config)
+            reasoning_parser = \
+                    self.vllm_config.structured_outputs_config.reasoning_parser
+            if reasoning_parser:
                 reasoner_cls = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_backend)
+                    reasoning_parser)
                 self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
         # Set to track initialized grammars in main process
@@ -368,7 +365,8 @@ class StructuredOutputManager:
             scheduler_config=self.vllm_config.scheduler_config,
             model_config=self.vllm_config.model_config,
             speculative_config=self.vllm_config.speculative_config,
-            decoding_config=self.vllm_config.decoding_config,
+            structured_outputs_config=self.vllm_config.
+            structured_outputs_config,
             lora_config=self.vllm_config.lora_config,
         )
 
@@ -666,10 +664,7 @@ class StructuredOutputExecutor:
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
             self.tokenizer = init_tokenizer_from_configs(
-                model_config=self.vllm_config.model_config,
-                scheduler_config=self.vllm_config.scheduler_config,
-                lora_config=self.vllm_config.lora_config,
-            ).get_lora_tokenizer(None)
+                model_config=self.vllm_config.model_config)
 
     def _get_grammar(self, request_id: str) -> StructuredOutputGrammar:
         return self.request_id_to_grammar[request_id]
