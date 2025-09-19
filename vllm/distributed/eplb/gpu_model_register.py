@@ -5,11 +5,9 @@ import types
 
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.models.utils import (PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
-import typing
+from vllm.model_executor.models.utils import is_pp_missing_parameter
 from typing import Callable
+
 def set_eplb_state(
     self,
     expert_load_view: torch.Tensor,
@@ -51,7 +49,7 @@ def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         ckpt_gate_proj_name="gate_proj",
         ckpt_down_proj_name="down_proj",
         ckpt_up_proj_name="up_proj",
-        num_experts=self.config.n_routed_experts
+        num_experts=self.config.n_routed_experts,
         num_redundant_experts=self.num_redundant_experts)
 
 def load_expert_weight(self, mapping, loaded_weight, params_dict):
