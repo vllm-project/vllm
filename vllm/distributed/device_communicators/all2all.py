@@ -324,7 +324,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
 
         self.workspace_tensor = MnnvlMoe.get_moe_workspaces(
             self.mapping, dp_config)
-        self.prepare_workspace = MnnvlMoe.get_moe_prepare_workspace(
+        self.prepare_workspace_tensor = MnnvlMoe.get_moe_prepare_workspace(
             self.mapping, dp_config)
 
         self.world_size = world_size
@@ -365,6 +365,6 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 logger.warning("Failed to cleanup FlashInfer workspace: %s", e)
             finally:
                 self.workspace_tensor = None
-                self.self.prepare_workspace_tensor = None
+                self.prepare_workspace_tensor = None
                 self.mapping = None
                 self.initialized = False
