@@ -47,16 +47,15 @@ def test_chunked_local_attention_possible_cached_prefix():
             BlockHash(str(i).encode()) for i in range(len(block_is_cached))
         ]
 
-        block_pool.cached_block_hash_to_block.clear()
+        block_pool.cached_block_hash_to_block._cache.clear()
 
         # Mock the block pool with the cached blocks
         for i, (block_hash,
                 is_cached) in enumerate(zip(block_hash_list, block_is_cached)):
             if is_cached:
-                block_pool.cached_block_hash_to_block[
-                    make_block_hash_with_group_id(block_hash, 0)] = {
-                        i: block_pool.blocks[i + 10],
-                    }
+                block_pool.cached_block_hash_to_block.insert(
+                    make_block_hash_with_group_id(block_hash, 0),
+                    block_pool.blocks[i + 10])
 
         computed_blocks = manager.find_longest_cache_hit(
             block_hashes=block_hash_list,
@@ -112,16 +111,15 @@ def test_sliding_window_possible_cached_prefix():
             BlockHash(str(i).encode()) for i in range(len(block_is_cached))
         ]
 
-        block_pool.cached_block_hash_to_block.clear()
+        block_pool.cached_block_hash_to_block._cache.clear()
 
         # Mock the block pool with the cached blocks
         for i, (block_hash,
                 is_cached) in enumerate(zip(block_hash_list, block_is_cached)):
             if is_cached:
-                block_pool.cached_block_hash_to_block[
-                    make_block_hash_with_group_id(block_hash, 0)] = {
-                        i: block_pool.blocks[i + 10],
-                    }
+                block_pool.cached_block_hash_to_block.insert(
+                    make_block_hash_with_group_id(block_hash, 0),
+                    block_pool.blocks[i + 10])
 
         computed_blocks = manager.find_longest_cache_hit(
             block_hashes=block_hash_list,
