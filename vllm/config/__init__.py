@@ -40,8 +40,10 @@ from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
+from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
 from vllm.config.speculative import SpeculativeConfig
+from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -405,13 +407,6 @@ class ModelConfig:
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
-    pooler_config: Optional["PoolerConfig"] = field(init=False)
-    """Pooler config which controls the behaviour of output pooling in pooling
-    models."""
-    override_pooler_config: Optional[Union[dict, "PoolerConfig"]] = None
-    """Initialize non-default pooling config or override default pooling config
-    for the pooling model. e.g. `{"pooling_type": "mean", "normalize": false}`.
-    """
     logits_processor_pattern: Optional[str] = None
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
@@ -447,8 +442,18 @@ class ModelConfig:
     io_processor_plugin: Optional[str] = None
     """IOProcessor plugin name to load at model startup"""
 
+    # Pooler config
+    pooler_config: Optional[PoolerConfig] = None
+    """Pooler config which controls the behaviour of output pooling in pooling
+    models."""
+    override_pooler_config: Optional[Union[dict, PoolerConfig]] = None
+    """[DEPRECATED] Use `pooler_config` instead. This field will be removed in
+    v0.12.0 or v1.0.0, whichever is sooner."""
+
     # Multimodal config and init vars
     multimodal_config: Optional[MultiModalConfig] = None
+    """Configuration for multimodal model. If `None`, this will be inferred
+    from the architecture of `self.model`."""
     limit_mm_per_prompt: InitVar[Optional[dict[str, int]]] = None
     media_io_kwargs: InitVar[Optional[dict[str, dict[str, Any]]]] = None
     mm_processor_kwargs: InitVar[Optional[dict[str, Any]]] = None
@@ -706,7 +711,33 @@ class ModelConfig:
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
-        self.pooler_config = self._init_pooler_config()
+        # Init pooler config if needed
+        if self.runner_type == "pooling":
+            if self.override_pooler_config is not None:
+                logger.warning_once(
+                    "`override_pooler_config` is deprecated and will be "
+                    "removed in v0.12.0 or v1.0.0, whichever is sooner. "
+                    "Please use `pooler_config` instead.")
+
+                if isinstance(self.override_pooler_config, dict):
+                    self.pooler_config = PoolerConfig(
+                        **self.override_pooler_config)
+                else:
+                    self.pooler_config = self.override_pooler_config
+
+            if self.pooler_config is None:
+                self.pooler_config = PoolerConfig()
+
+            base_config = get_pooling_config(self.model, self.revision)
+            if base_config is not None:
+                # Only set values that are not overridden by the user
+                for k, v in base_config.items():
+                    if getattr(self.pooler_config, k) is None:
+                        setattr(self.pooler_config, k, v)
+
+            default_pooling_type = self._model_info.default_pooling_type
+            if self.pooler_config.pooling_type is None:
+                self.pooler_config.pooling_type = default_pooling_type
 
         self.dtype: torch.dtype = _get_and_verify_dtype(
             self.model,
@@ -865,29 +896,6 @@ class ModelConfig:
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
             self.model, self.revision)
-
-    def _init_pooler_config(self) -> Optional["PoolerConfig"]:
-        if self.runner_type == "pooling":
-            if isinstance(self.override_pooler_config, dict):
-                self.override_pooler_config = PoolerConfig(
-                    **self.override_pooler_config)
-
-            pooler_config = self.override_pooler_config or PoolerConfig()
-
-            base_config = get_pooling_config(self.model, self.revision)
-            if base_config is not None:
-                # Only set values that are not overridden by the user
-                for k, v in base_config.items():
-                    if getattr(pooler_config, k) is None:
-                        setattr(pooler_config, k, v)
-
-            default_pooling_type = self._model_info.default_pooling_type
-            if pooler_config.pooling_type is None:
-                pooler_config.pooling_type = default_pooling_type
-
-            return pooler_config
-
-        return None
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
@@ -1830,94 +1838,6 @@ class DeviceConfig:
             self.device = torch.device(self.device_type)
 
 
-@config
-@dataclass
-class PoolerConfig:
-    """Controls the behavior of output pooling in pooling models."""
-
-    pooling_type: Optional[str] = None
-    """
-    The pooling method of the pooling model. This should be a key in
-    [`vllm.model_executor.layers.pooler.PoolingType`][].
-    """
-
-    ## for embeddings models
-    normalize: Optional[bool] = None
-    """
-    Whether to normalize the embeddings outputs. Defaults to True.
-    """
-    dimensions: Optional[int] = None
-    """
-    Reduce the dimensions of embeddings if model
-    support matryoshka representation. Defaults to None.
-    """
-    enable_chunked_processing: Optional[bool] = None
-    """
-    Whether to enable chunked processing for long inputs that exceed the model's
-    maximum position embeddings. When enabled, long inputs will be split into
-    chunks, processed separately, and then aggregated using weighted averaging.
-    This allows embedding models to handle arbitrarily long text without CUDA
-    errors. Defaults to False.
-    """
-    max_embed_len: Optional[int] = None
-    """
-    Maximum input length allowed for embedding generation. When set, allows
-    inputs longer than max_embed_len to be accepted for embedding models.
-    When an input exceeds max_embed_len, it will be handled according to 
-    the original max_model_len validation logic. 
-    Defaults to None (i.e. set to max_model_len).
-    """
-
-    ## for classification models
-    activation: Optional[bool] = None
-    """
-    Whether to apply activation function to the classification outputs.
-    Defaults to True.
-    """
-    logit_bias: Optional[float] = None
-    """
-    If provided, apply classification logit biases. Defaults to None.
-    """
-
-    ## for reward models
-    softmax: Optional[bool] = None
-    """
-    Whether to apply softmax to the reward outputs.
-    Defaults to True.
-    """
-    step_tag_id: Optional[int] = None
-    """
-    If set, only the score corresponding to the ``step_tag_id`` in the
-    generated sentence should be returned. Otherwise, the scores for all tokens
-    are returned.
-    """
-    returned_token_ids: Optional[list[int]] = None
-    """
-    A list of indices for the vocabulary dimensions to be extracted,
-    such as the token IDs of ``good_token`` and ``bad_token`` in the
-    ``math-shepherd-mistral-7b-prm`` model.
-    """
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
     "float16": torch.float16,
@@ -2277,66 +2197,6 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines",
-                                "lm-format-enforcer"]
-
-
-@config
-@dataclass
-class DecodingConfig:
-    """Dataclass which contains the decoding strategy of the engine."""
-
-    backend: GuidedDecodingBackend = "auto"
-    """Which engine will be used for guided decoding (JSON schema / regex etc)
-    by default. With "auto", we will make opinionated choices based on request
-    contents and what the backend libraries currently support, so the behavior
-    is subject to change in each release."""
-
-    disable_fallback: bool = False
-    """If `True`, vLLM will not fallback to a different backend on error."""
-
-    disable_any_whitespace: bool = False
-    """If `True`, the model will not generate any whitespace during guided
-    decoding. This is only supported for xgrammar and guidance backends."""
-
-    disable_additional_properties: bool = False
-    """If `True`, the `guidance` backend will not use `additionalProperties`
-    in the JSON schema. This is only supported for the `guidance` backend and
-    is used to better align its behaviour with `outlines` and `xgrammar`."""
-
-    reasoning_backend: str = ""
-    """Select the reasoning parser depending on the model that you're using.
-    This is used to parse the reasoning content into OpenAI API format."""
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self):
-        if (self.disable_any_whitespace
-                and self.backend not in ("xgrammar", "guidance")):
-            raise ValueError("disable_any_whitespace is only supported for "
-                             "xgrammar and guidance backends.")
-        if (self.disable_additional_properties and self.backend != "guidance"):
-            raise ValueError("disable_additional_properties is only supported "
-                             "for the guidance backend.")
-
-
 DetailedTraceModules = Literal["model", "worker", "all"]
 
 
@@ -2425,6 +2285,7 @@ class ObservabilityConfig:
             list[DetailedTraceModules],
             self.collect_detailed_traces[0].split(","))
 
+    mfu_analysis_mode: str = "fast"
     """Setting `mfu_analysis_mode` to
        - "detailed" will capture the torch FX graph and attempt to properly
          count every flop and byte moved.  This is a very slow operation and
@@ -2434,14 +2295,13 @@ class ObservabilityConfig:
        - "manual" will require user specified `mfu_analysis_active_parameters`
          and also uses 2AND to approximate MFU.
          N = number of parameters, D = number of new tokens."""
-    mfu_analysis_mode: str = "fast"
+    mfu_analysis_interval: int = -1
     """Enable periodic MFU calculations every 'mfu_analysis_interval' model 
     executions.  Defaults to -1, which is disabling the calculation.
     Setting to 0 does the analysis for every step. """
-    mfu_analysis_interval: int = -1
+    mfu_analysis_active_parameters: float = 0
     """Used when `mfu_analysis_mode == "manual"` to specify how to calculate
     the total flops."""
-    mfu_analysis_active_parameters: float = 0
 
 
 @config
@@ -2469,8 +2329,9 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: Optional[SpeculativeConfig] = None
     """Speculative decoding configuration."""
-    decoding_config: DecodingConfig = field(default_factory=DecodingConfig)
-    """Decoding configuration."""
+    structured_outputs_config: StructuredOutputsConfig = field(
+        default_factory=StructuredOutputsConfig)
+    """Structured outputs configuration."""
     observability_config: Optional[ObservabilityConfig] = None
     """Observability configuration."""
     quant_config: Optional[QuantizationConfig] = None
@@ -2561,8 +2422,8 @@ class VllmConfig:
             vllm_factors.append(self.speculative_config.compute_hash())
         else:
             vllm_factors.append("None")
-        if self.decoding_config:
-            vllm_factors.append(self.decoding_config.compute_hash())
+        if self.structured_outputs_config:
+            vllm_factors.append(self.structured_outputs_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.observability_config:
@@ -3047,6 +2908,18 @@ class VllmConfig:
                 SequenceClassificationConfig)
             SequenceClassificationConfig.verify_and_update_config(self)
 
+        if hasattr(self.model_config, "model_weights") and is_runai_obj_uri(
+                self.model_config.model_weights):
+            if self.load_config.load_format == "auto":
+                logger.info("Detected Run:ai model config. "
+                            "Overriding `load_format` to 'runai_streamer'")
+                self.load_config.load_format = "runai_streamer"
+            elif self.load_config.load_format != "runai_streamer":
+                raise ValueError(f"To load a model from S3, 'load_format' "
+                                 f"must be 'runai_streamer', "
+                                 f"but got '{self.load_config.load_format}'. "
+                                 f"Model: {self.model_config.model}")
+
     def __str__(self):
         return (
             f"model={self.model_config.model!r}, "
@@ -3069,7 +2942,7 @@ class VllmConfig:
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
-            f"decoding_config={self.decoding_config!r}, "
+            f"structured_outputs_config={self.structured_outputs_config!r}, "
             f"observability_config={self.observability_config!r}, "
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "

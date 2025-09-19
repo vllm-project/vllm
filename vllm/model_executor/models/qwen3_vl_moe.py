@@ -315,12 +315,14 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         self.visual = Qwen3_VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=self._maybe_ignore_quant_config(quant_config),
             prefix=maybe_prefix(prefix, "visual"),
+            use_data_parallel=self.use_data_parallel,
         )
 
         self.language_model = Qwen3MoeLLMForCausalLM(vllm_config=vllm_config,
@@ -342,3 +344,5 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                         config.text_config.hidden_size)
             for _ in range(self.deepstack_num_level)
         ] if self.use_deepstack else None
+        self.visual_dim = config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level

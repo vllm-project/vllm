@@ -114,9 +114,8 @@ class MFUAnalyzerMixin:
 
     def maybe_wrap_with_mfu_analyzer(
             self, model: nn.Module, observability_config: ObservabilityConfig):
-        if not self.should_analyze_mfu():
-            return model
-        if observability_config.mfu_analysis_interval < 0:
+        if (not self.should_analyze_mfu()
+                or observability_config.mfu_analysis_interval < 0):
             return model
         # lazily compute the approximate active parameters
         if self._mfu_param_count_cache == 0:

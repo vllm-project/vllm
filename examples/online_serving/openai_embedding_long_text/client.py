@@ -13,7 +13,7 @@ Prerequisites:
    
    # MEAN pooling (processes all chunks, recommended for complete coverage)
    vllm serve intfloat/multilingual-e5-large \
-     --override-pooler-config \
+     --pooler-config \
       '{"pooling_type": "MEAN", "normalize": true, ' \
       '"enable_chunked_processing": true, "max_embed_len": 3072000}' \
      --served-model-name multilingual-e5-large \
@@ -23,7 +23,7 @@ Prerequisites:
 
    # OR CLS pooling (native CLS within chunks, MEAN aggregation across chunks)
    vllm serve BAAI/bge-large-en-v1.5 \
-     --override-pooler-config \
+     --pooler-config \
       '{"pooling_type": "CLS", "normalize": true, ' \
       '"enable_chunked_processing": true, "max_embed_len": 1048576}' \
      --served-model-name bge-large-en-v1.5 \

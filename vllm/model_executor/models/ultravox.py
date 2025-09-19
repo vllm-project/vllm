@@ -13,9 +13,7 @@ from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
-from vllm import envs
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader import DefaultModelLoader
@@ -37,8 +35,7 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings,
-                    merge_multimodal_embeddings_from_map)
+                    merge_multimodal_embeddings)
 
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
 _MAX_ENCODER_BATCH_SIZE = 16
@@ -568,17 +565,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             safe_input_ids)
         if multimodal_embeddings is not None and len(
                 multimodal_embeddings) > 0:
-
-            # TODO(ywang96): remove this block after v0 is deprecated.
-            if not envs.VLLM_USE_V1:
-                attn_metadata = get_forward_context().attn_metadata
-                merge_multimodal_embeddings_from_map(
-                    inputs_embeds, multimodal_embeddings,
-                    attn_metadata.multi_modal_placeholder_index_maps["audio"])
-            else:
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, multimodal_embeddings,
-                    self.config.audio_token_index)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.audio_token_index)
         return inputs_embeds
 
     def forward(self,
