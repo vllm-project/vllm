@@ -417,31 +417,6 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
     assert response.usage.output_tokens_details.tool_output_tokens > 0
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
-async def test_mcp_tool(client: OpenAI, model_name: str):
-    response = await client.responses.create(
-        model=model_name,
-        # TODO: Ideally should be able to set max tool calls
-        # to prevent multi-turn, but it is not currently supported
-        # would speed up the test
-        input=("What's the first 4 digits after the decimal point of "
-               "cube root of `19910212 * 20250910`? "
-               "Show only the digits. The python interpreter is not stateful "
-               "and you must print to see the output."),
-        tools=[{
-            "type": "mcp",
-            "server_label": "code_interpreter",
-            # URL unused for DemoToolServer
-            "server_url": "http://localhost:8888"
-        }],
-    )
-    assert response is not None
-    assert response.status == "completed"
-    assert response.usage.output_tokens_details.tool_output_tokens > 0
-
-
 def get_weather(latitude, longitude):
     response = requests.get(
         f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m"  # noqa

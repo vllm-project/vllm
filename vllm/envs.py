@@ -174,11 +174,11 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
-    VLLM_GPT_OSS_USE_CONTAINER_TOOL: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+    GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
 
 
 def get_default_cache_root():
@@ -1246,10 +1246,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
 
-    # Allows vllm use container tool
-    "VLLM_GPT_OSS_USE_CONTAINER_TOOL":
-    lambda: bool(int(os.getenv("VLLM_GPT_OSS_USE_CONTAINER_TOOL", "0"))),
-
     # Allows harmony instructions to be injected on system messages
     "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS":
     lambda: bool(
@@ -1269,6 +1265,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME":
     lambda: os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
                       "VLLM_OBJECT_STORAGE_SHM_BUFFER"),
+
+    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS":
+    lambda: ([] if "GPT_OSS_SYSTEM_TOOL_MCP_LABELS" not in os.environ
+            else os.environ["GPT_OSS_SYSTEM_TOOL_MCP_LABELS"].split(",")),
 }
 
 # --8<-- [end:env-vars-definition]
