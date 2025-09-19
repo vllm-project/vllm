@@ -267,7 +267,8 @@ class GptOssModel(nn.Module):
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             if i in self.aux_hidden_state_layers:
-                aux_hidden_states.append(x + residual)
+                aux_hidden_states.append(x if residual is None else x +
+                                         residual)
             x, residual = layer(x, positions, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
