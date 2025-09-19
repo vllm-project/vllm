@@ -256,7 +256,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
                          env_dict=env_dict,
                          seed=seed,
                          auto_port=auto_port,
-                         max_wait_seconds=max_wait_seconds)
+                         max_wait_seconds=max_wait_seconds + 1)
 
     def _poll(self) -> Optional[int]:
         return self.proc.exitcode
