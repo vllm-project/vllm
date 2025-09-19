@@ -31,6 +31,8 @@ from openai.types.responses import (
     ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
     ResponseStatus, ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent, ResponseWebSearchCallSearchingEvent)
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent)
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
@@ -259,26 +261,6 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
 ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
                                            ResponseReasoningItem,
                                            ResponseFunctionToolCall]
-
-StreamingResponsesResponse: TypeAlias = Union[
-    ResponseCreatedEvent,
-    ResponseInProgressEvent,
-    ResponseCompletedEvent,
-    ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent,
-    ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent,
-    ResponseReasoningTextDeltaEvent,
-    ResponseReasoningTextDoneEvent,
-    ResponseCodeInterpreterCallInProgressEvent,
-    ResponseCodeInterpreterCallCodeDeltaEvent,
-    ResponseWebSearchCallInProgressEvent,
-    ResponseWebSearchCallSearchingEvent,
-    ResponseWebSearchCallCompletedEvent,
-    ResponseCodeInterpreterCallCodeDoneEvent,
-    ResponseCodeInterpreterCallInterpretingEvent,
-    ResponseCodeInterpreterCallCompletedEvent,
-]
 
 
 class ResponsesRequest(OpenAIBaseModel):
@@ -1915,6 +1897,72 @@ class ResponsesResponse(OpenAIBaseModel):
             usage=usage,
         )
 
+
+# TODO: this code can be removed once
+# https://github.com/openai/openai-python/issues/2634 has been resolved
+class ResponseReasoningPartDoneEvent(OpenAIBaseModel):
+    content_index: int
+    """The index of the content part that is done."""
+
+    item_id: str
+    """The ID of the output item that the content part was added to."""
+
+    output_index: int
+    """The index of the output item that the content part was added to."""
+
+    part: ResponseReasoningTextContent
+    """The content part that is done."""
+
+    sequence_number: int
+    """The sequence number of this event."""
+
+    type: Literal["response.reasoning_part.done"]
+    """The type of the event. Always `response.reasoning_part.done`."""
+
+
+# TODO: this code can be removed once
+# https://github.com/openai/openai-python/issues/2634 has been resolved
+class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
+    content_index: int
+    """The index of the content part that is done."""
+
+    item_id: str
+    """The ID of the output item that the content part was added to."""
+
+    output_index: int
+    """The index of the output item that the content part was added to."""
+
+    part: ResponseReasoningTextContent
+    """The content part that is done."""
+
+    sequence_number: int
+    """The sequence number of this event."""
+
+    type: Literal["response.reasoning_part.added"]
+    """The type of the event. Always `response.reasoning_part.added`."""
+
+
+StreamingResponsesResponse: TypeAlias = Union[
+    ResponseCreatedEvent,
+    ResponseInProgressEvent,
+    ResponseCompletedEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent,
+    ResponseReasoningPartAddedEvent,
+    ResponseReasoningPartDoneEvent,
+    ResponseCodeInterpreterCallInProgressEvent,
+    ResponseCodeInterpreterCallCodeDeltaEvent,
+    ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent,
+    ResponseWebSearchCallCompletedEvent,
+    ResponseCodeInterpreterCallCodeDoneEvent,
+    ResponseCodeInterpreterCallInterpretingEvent,
+    ResponseCodeInterpreterCallCompletedEvent,
+]
 
 BatchRequestInputBody = Union[ChatCompletionRequest, EmbeddingRequest,
                               ScoreRequest, RerankRequest]
