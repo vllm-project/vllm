@@ -372,7 +372,11 @@ class Hermes2ProToolParser(ToolParser):
                     r'\{"name":\s*"' +
                     re.escape(function_name) + r'"\s*,\s*"arguments":\s*(.*)',
                     tool_call_portion.strip(), re.DOTALL)
-                cur_arguments_json = match.group(1)
+                if match:
+                    cur_arguments_json = match.group(1)
+                else:
+                    cur_arguments_json = json.dumps(cur_arguments,
+                                                ensure_ascii=False)
 
                 logger.debug("finding %s in %s", delta_text,
                              cur_arguments_json)
