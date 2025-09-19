@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from math import ceil
 from typing import Optional
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from typing_extensions import TypeAlias
+
+from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+CUDAGraphKey: TypeAlias = tuple[int, bool]
 
 
 class CudagraphDispatcher:
@@ -31,10 +38,11 @@ class CudagraphDispatcher:
         self.cudagraph_mode = self.compilation_config.cudagraph_mode
 
         # Dict to store valid cudagraph dispatching keys.
-        self.cudagraph_keys: dict[CUDAGraphMode, set[BatchDescriptor]] = {
-            CUDAGraphMode.PIECEWISE: set(),
-            CUDAGraphMode.FULL: set(),
-        }
+        self.cudagraph_keys: dict[CUDAGraphMode,
+                                  dict[CUDAGraphKey, BatchDescriptor]] = {
+                                      CUDAGraphMode.PIECEWISE: {},
+                                      CUDAGraphMode.FULL: {},
+                                  }
 
         not_use_piecewise_compilation = (
             not self.cudagraph_mode.requires_piecewise_compilation())
@@ -54,8 +62,9 @@ class CudagraphDispatcher:
     def add_cudagraph_key(self, runtime_mode: CUDAGraphMode,
                           batch_descriptor: BatchDescriptor):
         assert runtime_mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], \
-            f"Invalid cudagraph runtime mode for keys: {runtime_mode}"
-        self.cudagraph_keys[runtime_mode].add(batch_descriptor)
+            f"Invalid cudagraph runtime mode: {runtime_mode}"
+        key = (batch_descriptor.num_tokens, batch_descriptor.uniform_decode)
+        self.cudagraph_keys[runtime_mode][key] = batch_descriptor
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode,
                                   uniform_decode_query_len: int):
@@ -64,11 +73,19 @@ class CudagraphDispatcher:
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
-        if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
+        # Add mixed mode keys with proper num_reqs calculation
+        if (mixed_mode :=
+                cudagraph_mode.mixed_mode()) in (CUDAGraphMode.PIECEWISE,
+                                                 CUDAGraphMode.FULL):
             for bs in self.compilation_config.cudagraph_capture_sizes:
+                num_reqs = (self.calculate_num_reqs_for_tokens(
+                    bs, uniform_decode_query_len, False)
+                            if mixed_mode == CUDAGraphMode.FULL else None)
                 self.add_cudagraph_key(
-                    cudagraph_mode.mixed_mode(),
-                    BatchDescriptor(num_tokens=bs, uniform_decode=False))
+                    mixed_mode,
+                    BatchDescriptor(num_tokens=bs,
+                                    uniform_decode=False,
+                                    num_reqs=num_reqs))
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.
@@ -81,10 +98,35 @@ class CudagraphDispatcher:
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
             for bs in cudagraph_capture_sizes_for_decode:
+                num_reqs = self.calculate_num_reqs_for_tokens(
+                    bs, uniform_decode_query_len, True)
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,
-                    BatchDescriptor(num_tokens=bs, uniform_decode=True))
+                    BatchDescriptor(num_tokens=bs,
+                                    uniform_decode=True,
+                                    num_reqs=num_reqs))
+
         self.keys_initialized = True
+
+    def calculate_num_reqs_for_tokens(self, num_tokens: int,
+                                      uniform_decode_query_len: int,
+                                      uniform_decode: bool) -> int:
+        max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
+
+        if uniform_decode:
+            num_reqs = ceil(num_tokens / uniform_decode_query_len)
+            return min(num_reqs, max_num_seqs)
+        else:
+            return min(num_tokens, max_num_seqs)
+
+    def _is_compatible(self, batch_descriptor: BatchDescriptor,
+                       candidate: BatchDescriptor) -> bool:
+        """Check if candidate cudagraph can handle the batch request."""
+        if candidate.num_reqs is None:
+            return True
+        if batch_descriptor.num_reqs is None:
+            return False
+        return candidate.num_reqs >= batch_descriptor.num_reqs
 
     def dispatch(
         self,
@@ -101,21 +143,17 @@ class CudagraphDispatcher:
         if not self.keys_initialized:
             return CUDAGraphMode.NONE, None
 
-        non_uniform_key = batch_descriptor.non_uniform
-        # if a batch use cascade attention, bypass checking full cudagraphs
-        if not use_cascade_attn:
-            # check if key exists for full cudagraph
-            if batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
-                return CUDAGraphMode.FULL, batch_descriptor
+        num_tokens, uniform_decode = (batch_descriptor.num_tokens,
+                                      batch_descriptor.uniform_decode)
 
-            # otherwise, check if non-uniform key exists
-            if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.FULL]:
-                return CUDAGraphMode.FULL, non_uniform_key
+        candidates = [(CUDAGraphMode.FULL, (num_tokens, uniform_decode))]
+        if uniform_decode:
+            candidates.append((CUDAGraphMode.FULL, (num_tokens, False)))
+        candidates.append((CUDAGraphMode.PIECEWISE, (num_tokens, False)))
 
-        # also check if non-uniform key exists for more "general"
-        # piecewise cudagraph
-        if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
-            return CUDAGraphMode.PIECEWISE, non_uniform_key
+        for mode, key in candidates:
+            candidate = self.cudagraph_keys[mode].get(key)
+            if candidate and self._is_compatible(batch_descriptor, candidate):
+                return mode, candidate
 
-        # finally, just return no cudagraphs
         return CUDAGraphMode.NONE, None
