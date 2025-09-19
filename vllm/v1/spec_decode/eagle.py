@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.attention.backends.abstract import AttentionMetadataBuilder
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
@@ -67,6 +68,8 @@ class EagleProposer:
 
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
+
+        self.attn_metadata_builders = None
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
@@ -182,9 +185,13 @@ class EagleProposer:
 
         assert self.runner is not None
 
-        # Select the correct attention metadata builder for EAGLE layers.
+        # Select the correct attention metadata builders for EAGLE layers.
         ubatch_id = dbo_current_ubatch_id()
-        builder = self._get_attention_metadata_builder(ubatch_id)
+        # Get the attention metadata builders once and reuse for later.
+        self.attn_metadata_builders = (self._get_attention_metadata_builders()
+                                       if self.attn_metadata_builders is None
+                                       else self.attn_metadata_builders)
+        builder = self.attn_metadata_builders[ubatch_id]
 
         attn_metadata = builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0)
@@ -880,29 +887,30 @@ class EagleProposer:
             ])
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
-    def _get_attention_metadata_builder(self, ubatch_id):
-        """Find and return the attention metadata builder for EAGLE layers.
+    def _get_attention_metadata_builders(
+            self) -> list[AttentionMetadataBuilder]:
+        """Find and return the attention metadata builders for EAGLE layers.
         
         Returns:
-            The metadata builder for EAGLE layers.
+            The metadata builders for EAGLE layers.
             
         Raises:
-            AssertionError: If no metadata builder is found for EAGLE layers.
+            AssertionError: If no metadata builders are found for EAGLE layers.
         """
-        builder = None
+        builders = None
         chosen_layer = self.attn_layer_names[0]
 
         for kv_cache_group in self.runner.attn_groups:
             for attn_group in kv_cache_group:
                 if chosen_layer in attn_group.layer_names:
-                    builder = attn_group.metadata_builders[ubatch_id]
+                    builders = attn_group.metadata_builders
                     break
-            if builder is not None:
+            if builders is not None:
                 break
 
-        assert builder is not None, (
-            "Failed to find attention metadata builder for EAGLE layers.")
-        return builder
+        assert builders is not None, (
+            "Failed to find attention metadata builders for EAGLE layers.")
+        return builders
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
