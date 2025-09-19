@@ -54,6 +54,8 @@ from .utils import (AutoWeightsLoader, extract_layer_index,
 
 logger = init_logger(__name__)
 
+EPS = torch.tensor(torch.finfo().min)
+
 
 class Gemma3nAltUp(nn.Module):
     """Alternating updates (Altup)
@@ -550,29 +552,78 @@ class Gemma3nSelfDecoder(nn.Module):
         prefix: str = "",
         decoder_layers: list[Gemma3nDecoderLayer],
         layer_idx_start: int,
-        per_layer_model_projection: ColumnParallelLinear,
-        embed_scale_per_layer: torch.Tensor,
-        embed_tokens_per_layer: VocabParallelEmbedding,
-        per_layer_projection_norm: RMSNorm,
-        per_layer_input_scale: torch.Tensor,
-        altup_projections: nn.ModuleList,
-        eps: torch.Tensor,
-        embed_tokens: VocabParallelEmbedding,
-        embed_scale: torch.Tensor,
     ):
         super().__init__()
         self.decoder_layers = decoder_layers
         self.layer_idx_start = layer_idx_start
-        self.per_layer_model_projection = per_layer_model_projection
-        self.config = vllm_config.model_config.hf_config
-        self.embed_scale_per_layer = embed_scale_per_layer
-        self.embed_tokens_per_layer = embed_tokens_per_layer
-        self.per_layer_projection_norm = per_layer_projection_norm
-        self.per_layer_input_scale = per_layer_input_scale
-        self.altup_projections = altup_projections
-        self.eps = eps
-        self.embed_tokens = embed_tokens
-        self.embed_scale = embed_scale
+
+        config = vllm_config.model_config.hf_config
+        self.config = config
+        quant_config = vllm_config.quant_config
+
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
+        )
+        self.embed_scale = torch.tensor(
+            config.hidden_size**0.5,
+            dtype=self.embed_tokens.weight.dtype,
+        )
+        # Additional per-layer embeddings (PLE)
+        self.embed_tokens_per_layer = VocabParallelEmbedding(
+            config.vocab_size_per_layer_input,
+            config.num_hidden_layers * config.hidden_size_per_layer_input,
+            quant_config=quant_config,
+            prefix=f"{prefix}.per_layer_embed_tokens",
+        )
+        self.embed_scale_per_layer = torch.tensor(
+            config.hidden_size_per_layer_input**0.5,
+            dtype=self.embed_tokens.weight.dtype,
+        )
+        self.per_layer_model_projection = ColumnParallelLinear(
+            config.hidden_size,
+            config.num_hidden_layers * config.hidden_size_per_layer_input,
+            bias=False,
+            gather_output=True,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.per_layer_model_projection",
+        )
+        self.per_layer_projection_norm = RMSNorm(
+            hidden_size=config.hidden_size_per_layer_input,
+            eps=config.rms_norm_eps,
+        )
+        self.per_layer_input_scale = torch.rsqrt(torch.tensor(2.0)).to(
+            self.embed_tokens.weight.dtype)
+        self.per_layer_projection_scale = torch.tensor(
+            config.hidden_size**0.5,
+            dtype=self.embed_tokens.weight.dtype,
+        )
+        self.altup_projections = nn.ModuleList([
+            ColumnParallelLinear(
+                config.hidden_size,
+                config.hidden_size,
+                bias=False,
+                gather_output=True,
+                return_bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.altup_projections.{idx-1}",
+            ) for idx in range(1, self.config.altup_num_inputs)
+        ])
+
+    def get_per_layer_input_embeddings(
+            self, input_ids: torch.Tensor) -> torch.Tensor:
+        # Deal with the fact that vocab_size_per_layer_input < vocab_size
+        # which causes us to have some out of vocab tokens by setting
+        # those token ids to 0. This matches the HF implementation.
+        per_layer_inputs_mask = torch.logical_and(
+            input_ids >= 0, input_ids < self.config.vocab_size_per_layer_input)
+        per_layer_inputs_tokens = torch.where(per_layer_inputs_mask, input_ids,
+                                              torch.zeros_like(input_ids))
+        return self.embed_tokens_per_layer(
+            per_layer_inputs_tokens) * self.embed_scale_per_layer
 
     def get_per_layer_inputs(
         self,
@@ -609,7 +660,7 @@ class Gemma3nSelfDecoder(nn.Module):
                                        dim=-1,
                                        keepdim=True)**0.5
             hidden_states[i] *= target_magnitude / torch.maximum(
-                new_magnitude, self.eps)
+                new_magnitude, EPS)
         hidden_states = torch.stack(hidden_states, dim=-1)
         return hidden_states
 
@@ -704,57 +755,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.embed_tokens",
-        )
-        self.embed_scale = torch.tensor(
-            config.hidden_size**0.5,
-            dtype=self.embed_tokens.weight.dtype,
-        )
-        # Additional per-layer embeddings (PLE)
-        self.embed_tokens_per_layer = VocabParallelEmbedding(
-            config.vocab_size_per_layer_input,
-            config.num_hidden_layers * config.hidden_size_per_layer_input,
-            quant_config=quant_config,
-            prefix=f"{prefix}.per_layer_embed_tokens",
-        )
-        self.embed_scale_per_layer = torch.tensor(
-            config.hidden_size_per_layer_input**0.5,
-            dtype=self.embed_tokens.weight.dtype,
-        )
-        self.per_layer_model_projection = ColumnParallelLinear(
-            config.hidden_size,
-            config.num_hidden_layers * config.hidden_size_per_layer_input,
-            bias=False,
-            gather_output=True,
-            return_bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.per_layer_model_projection",
-        )
-        self.per_layer_projection_norm = RMSNorm(
-            hidden_size=config.hidden_size_per_layer_input,
-            eps=config.rms_norm_eps,
-        )
-        self.per_layer_input_scale = torch.rsqrt(torch.tensor(2.0)).to(
-            self.embed_tokens.weight.dtype)
-        self.per_layer_projection_scale = torch.tensor(
-            config.hidden_size**0.5,
-            dtype=self.embed_tokens.weight.dtype,
-        )
-        self.altup_projections = nn.ModuleList([
-            ColumnParallelLinear(
-                config.hidden_size,
-                config.hidden_size,
-                bias=False,
-                gather_output=True,
-                return_bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.altup_projections.{idx-1}",
-            ) for idx in range(1, self.config.altup_num_inputs)
-        ])
+
         self.altup_unembed_projections = nn.ModuleList([
             ColumnParallelLinear(
                 config.hidden_size,
@@ -767,14 +768,12 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
             ) for idx in range(1, self.config.altup_num_inputs)
         ])
 
-        # Transformer blocks.
+        # Allocate config.num_kv_shared_layers layers for self-decoder
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Gemma3nDecoderLayer(
                 config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
-
-        self.eps = torch.tensor(torch.finfo().min)
 
         first_kv_shared_layer_idx = (config.num_hidden_layers -
                                      config.num_kv_shared_layers)
@@ -790,15 +789,6 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
                 prefix=f"{prefix}.self_decoder",
                 decoder_layers=self.layers[:first_kv_shared_layer_idx],
                 layer_idx_start=0,
-                per_layer_model_projection=self.per_layer_model_projection,
-                embed_scale_per_layer=self.embed_scale_per_layer,
-                embed_tokens_per_layer=self.embed_tokens_per_layer,
-                per_layer_projection_norm=self.per_layer_projection_norm,
-                per_layer_input_scale=self.per_layer_input_scale,
-                altup_projections=self.altup_projections,
-                eps=self.eps,
-                embed_tokens=self.embed_tokens,
-                embed_scale=self.embed_scale,
             )
         # Layer idx 20-30 are cross-decoder layers in YOCO
         with set_model_tag("cross_decoder"):
@@ -837,17 +827,13 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
                 device=device,
             )
 
+    @property
+    def embed_tokens(self):
+        return self.self_decoder.embed_tokens
+
     def get_per_layer_input_embeddings(
             self, input_ids: torch.Tensor) -> torch.Tensor:
-        # Deal with the fact that vocab_size_per_layer_input < vocab_size
-        # which causes us to have some out of vocab tokens by setting
-        # those token ids to 0. This matches the HF implementation.
-        per_layer_inputs_mask = torch.logical_and(
-            input_ids >= 0, input_ids < self.config.vocab_size_per_layer_input)
-        per_layer_inputs_tokens = torch.where(per_layer_inputs_mask, input_ids,
-                                              torch.zeros_like(input_ids))
-        return self.embed_tokens_per_layer(
-            per_layer_inputs_tokens) * self.embed_scale_per_layer
+        return self.self_decoder.get_per_layer_input_embeddings(input_ids)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.self_decoder.get_input_embeddings(input_ids)
@@ -964,7 +950,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
                                        dim=-1,
                                        keepdim=True)**0.5
             hidden_states[..., i] *= target_magnitude / torch.maximum(
-                new_magnitude, self.eps)
+                new_magnitude, EPS)
         # [num_tokens,hidden_size, altup_num_inputs] -> [num_tokens,hidden_size]
         hidden_states = torch.mean(hidden_states, dim=-1)
         return hidden_states
@@ -1010,6 +996,13 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            # decoder layer weights, altup_unembed_projections and rmsnorm
+            # are initialized in text model, others are in self decoder
+            if (not name.startswith('layers')
+                    and not name.startswith('altup_unembed_projections')
+                    and not name.startswith('norm')):
+                name = f"self_decoder.{name}"
+
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache scales for compressed-tensors quantization
