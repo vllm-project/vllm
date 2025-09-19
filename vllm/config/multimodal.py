@@ -113,6 +113,12 @@ class MultiModalConfig:
             999 if envs.VLLM_USE_V1 else 1,
         )
 
+    def update_mm_processor_kwargs(self, value: dict[str, Any]) -> None:
+        if self.mm_processor_kwargs is None:
+            self.mm_processor_kwargs = {}
+
+        self.mm_processor_kwargs.update(value)
+
     def merge_mm_processor_kwargs(
         self,
         inference_kwargs: Mapping[str, object],

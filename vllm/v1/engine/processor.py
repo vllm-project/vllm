@@ -577,7 +577,7 @@ class Processor:
 
             logger.info("Multi-modal processor will be run on device %s",
                         new_device)
-            model_config.update_mm_processor_kwargs({"device": new_device})
+            mm_config.update_mm_processor_kwargs({"device": new_device})
 
             # Peak memory usage (required for this profiling)
             # is only tracked for CUDA
