@@ -335,6 +335,7 @@ steps:
 - label: Samplers Test # 56min
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: amd_mi325_1
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
