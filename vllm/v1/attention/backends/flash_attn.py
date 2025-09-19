@@ -7,8 +7,8 @@ from typing import Optional
 import numpy as np
 import torch
 
-from vllm import envs
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
