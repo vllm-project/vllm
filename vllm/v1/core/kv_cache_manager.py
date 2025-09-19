@@ -78,14 +78,14 @@ class KVCacheBlocks:
         """
         if allow_none and all(not group for group in self.blocks):
             return None
-        return tuple([blk.block_id for blk in (group or [])]
+        return tuple([blk.block_id for blk in group or []]
                      for group in self.blocks)
 
     def get_unhashed_block_ids(self) -> list[int]:
         """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
         assert len(self.blocks) == 1, "Only one group is supported"
         return [
-            block.block_id for block in (self.blocks[0] or [])
+            block.block_id for block in self.blocks[0] or []
             if block.block_hash is None
         ]
 
