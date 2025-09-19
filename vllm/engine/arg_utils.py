@@ -335,8 +335,6 @@ class EngineArgs:
         ParallelConfig.expert_placement_strategy
     _api_process_count: int = ParallelConfig._api_process_count
     _api_process_rank: int = ParallelConfig._api_process_rank
-    _renderer_gpu_allocation: Optional[
-        list[str]] = ParallelConfig._renderer_gpu_allocation
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
@@ -1375,7 +1373,6 @@ class EngineArgs:
             decode_context_parallel_size=self.decode_context_parallel_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
-            _renderer_gpu_allocation=self._renderer_gpu_allocation,
         )
 
         speculative_config = self.create_speculative_config(
