@@ -310,8 +310,7 @@ def as_seq_cls_model(cls: _T) -> _T:
                 params_dtype=vllm_config.model_config.head_dtype,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "score"),
-                return_bias=False
-            )
+                return_bias=False)
 
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
@@ -326,18 +325,22 @@ def as_seq_cls_model(cls: _T) -> _T:
                 "classify":
                 ClassifierPooler(
                     pooling=PoolingMethod.from_pooling_type(pooling_type),
-                    classifier=self.score,
+                    classifier=self._classifier,
                     act_fn=ClassifierPooler.act_fn_for_seq_cls(
                         vllm_config.model_config),
                 ),
                 "score":
                 ClassifierPooler(
                     pooling=PoolingMethod.from_pooling_type(pooling_type),
-                    classifier=self.score,
+                    classifier=self._classifier,
                     act_fn=ClassifierPooler.act_fn_for_cross_encoder(
                         vllm_config.model_config),
                 ),
             })
+
+        def _classifier(self, x: torch.Tensor):
+            x = self.score(x)
+            return x
 
         def forward(
             self,

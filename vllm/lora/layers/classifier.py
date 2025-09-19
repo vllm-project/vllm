@@ -73,8 +73,9 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
         """
         bias = (self.base_layer.bias
                 if not self.base_layer.skip_bias_add else None)
-  
-        org_output = self.base_layer.quant_method.apply(self.base_layer, input_, bias)
+
+        org_output = self.base_layer.quant_method.apply(
+            self.base_layer, input_, bias)
 
         y = torch.zeros(self.input_size,
                         self.max_class_label,
