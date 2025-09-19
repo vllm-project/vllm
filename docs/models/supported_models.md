@@ -17,9 +17,24 @@ These models are what we list in [supported-text-models][supported-text-models] 
 
 ### Transformers
 
-vLLM also supports model implementations that are available in Transformers. This does not currently work for all models, but most decoder language models and common vision language models are supported! Vision-language models currently accept only image inputs. Support for video inputs will be added in future releases.
+vLLM also supports model implementations that are available in Transformers. You should expect the performance of a Transformers model implementation used in vLLM to be within <1% of the performance of a dedicated vLLM model implementation. We call this feature the "Transformers backend".
 
-To check if the modeling backend is Transformers, you can simply do this:
+Currently, the Transformers backend works for the following:
+
+- Modalities: embedding models, language models and vision-language models*
+- Architectures: encoder-only, decoder-only
+- Attention types: full attention and/or sliding attention
+
+_*Vision-language models currently accept only image inputs. Support for video inputs will be added in a future release._
+
+If the Transformers model implementation follows all the steps in [writing a custom model](#writing-custom-models) then, when used with the Transformers backend, it will be compatible with the following features of vLLM:
+
+- All the features listed in the [compatibility matrix](../features/compatibility_matrix.md#feature-x-feature)
+- Any combination of the following vLLM parallelisation schemes:
+    - Pipeline parallel
+    - Tensor parallel
+
+Checking if the modeling backend is Transformers is as simple as:
 
 ```python
 from vllm import LLM
@@ -27,16 +42,12 @@ llm = LLM(model=...)  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
 ```
 
-If it is `TransformersForCausalLM` or `TransformersForMultimodalLM` then it means it's based on Transformers!
+If the printed type starts with `Transformers...` then it's using the Transformers model implementation!
 
-!!! tip
-    You can force the use of `TransformersForCausalLM` by setting `model_impl="transformers"` for [offline-inference](../serving/offline_inference.md) or `--model-impl transformers` for the [openai-compatible-server](../serving/openai_compatible_server.md).
-
-!!! note
-    vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
+If a model has a vLLM implementation but you would prefer to use the Transformers implementation via the Transformers backend, set `model_impl="transformers"` for [offline inference](../serving/offline_inference.md) or `--model-impl transformers` for the [online serving](../serving/openai_compatible_server.md).
 
 !!! note
-    In case of vision language models if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
+    For vision-language models, if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
 
 #### Custom models
 
@@ -66,10 +77,11 @@ This section details the necessary modifications to make to a Transformers compa
 To make your model compatible with the Transformers backend, it needs:
 
 1. `kwargs` passed down through all modules from `MyModel` to `MyAttention`.
+    1. If your model is encoder-only, you must also add `is_causal = False` to `MyAttention`.
 2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
 3. `MyModel` must contain `_supports_attention_backend = True`.
 
-<details>
+<details class="code">
 <summary>modeling_my_model.py</summary>
 
 ```python
@@ -78,6 +90,7 @@ from transformers import PreTrainedModel
 from torch import nn
 
 class MyAttention(nn.Module):
+    is_causal = False  # Only do this for encoder-only models
 
     def forward(self, hidden_states, **kwargs):
         ...
@@ -101,13 +114,13 @@ Here is what happens in the background when this model is loaded:
 
 1. The config is loaded.
 2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `is_backend_compatible()`.
-3. `MyModel` is loaded into `TransformersForCausalLM` or `TransformersForMultimodalLM` (see <gh-file:vllm/model_executor/models/transformers.py>) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
+3. `MyModel` is loaded into one of the Transformers backend classes in <gh-file:vllm/model_executor/models/transformers.py> which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
 
 That's it!
 
 For your model to be compatible with vLLM's tensor parallel and/or pipeline parallel features, you must add `base_model_tp_plan` and/or `base_model_pp_plan` to your model's config class:
 
-<details>
+<details class="code">
 <summary>configuration_my_model.py</summary>
 
 ```python
