@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import copy
 import logging
 import math
 import queue
@@ -11,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import msgspec
 import numpy as np
@@ -23,6 +24,8 @@ from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorStats)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -33,7 +36,6 @@ from vllm.platforms import _Backend, current_platform
 from vllm.utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -206,6 +208,18 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+            cls,
+            data: Optional[dict[str,
+                                Any]] = None) -> Optional[KVConnectorStats]:
+        return NixlKVConnectorStats(data=data) if data is not None \
+            else NixlKVConnectorStats()
+
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         assert self.connector_worker is not None
@@ -377,6 +391,7 @@ class NixlConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        from vllm.v1.request import RequestStatus
 
         params = request.kv_transfer_params
         logger.debug(
@@ -550,6 +565,7 @@ class NixlConnectorWorker:
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+        self.xfer_stats = NixlKVConnectorStats()
 
     def __del__(self):
         """Cleanup background threads on destruction."""
@@ -1097,6 +1113,8 @@ class NixlConnectorWorker:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
+                    # TODO (NickLucche) Get from NIXL telemetry once integrated
+                    self.xfer_stats.record_transfer()
                 elif xfer_state == "PROC":
                     in_progress = True
                     continue
@@ -1248,7 +1266,6 @@ class NixlConnectorWorker:
         self.nixl_wrapper.transfer(handle)
 
         # Use handle to check completion in future step().
-        # TODO (NickLucche) surface xfer elapsed time
         self._recving_transfers[request_id].append(
             (handle, time.perf_counter()))
 
@@ -1300,6 +1317,15 @@ class NixlConnectorWorker:
             block_len = self.block_len
         return block_len
 
+    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
+        """
+        Get the KV transfer stats for the connector.
+        """
+        # Clear stats for next iteration
+        if not self.xfer_stats.is_empty():
+            return self.xfer_stats.clone_and_reset()
+        return None
+
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
@@ -1318,3 +1344,39 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+
+
+@dataclass
+class NixlKVConnectorStats(KVConnectorStats):
+    """Container for transfer performance metrics"""
+
+    def __post_init__(self):
+        if "num_successful_transfers" not in self.data:
+            self.data["num_successful_transfers"] = 0
+
+    def reset(self):
+        self.data = {"num_successful_transfers": 0}
+
+    def record_transfer(self):
+        # TODO: record actual transfer stats when available
+        self.data["num_successful_transfers"] += 1
+
+    def clone_and_reset(self) -> "NixlKVConnectorStats":
+        old = copy.copy(self)
+        self.reset()
+        return old
+
+    def is_empty(self) -> bool:
+        return self.data["num_successful_transfers"] == 0
+
+    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        if not other.is_empty():
+            self.data["num_successful_transfers"] += other.data[
+                "num_successful_transfers"]
+        return self
+
+    def reduce(self) -> dict[str, Union[int, float]]:
+        # TODO: reduce stats to a single value, calculate latency/throughput
+        return {
+            "num_successful_transfers": self.data["num_successful_transfers"]
+        }

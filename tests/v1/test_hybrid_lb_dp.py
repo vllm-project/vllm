@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import requests
 
 from tests.utils import RemoteOpenAIServer
 from tests.v1.test_utils import check_request_balancing
@@ -92,6 +93,8 @@ class HybridLBServerManager:
                         sargs,
                         auto_port=False,
                         env_dict={
+                            "VLLM_SERVER_DEV_MODE":
+                            "1",
                             current_platform.device_control_env_var:
                             ",".join(
                                 str(
@@ -150,12 +153,20 @@ def default_server_args():
 
 
 @pytest.fixture(scope="module", params=[1, 4])
-def servers(request, default_server_args):
+def server_manager(request, default_server_args):
     api_server_count = request.param
-    with HybridLBServerManager(MODEL_NAME, DP_SIZE, api_server_count,
-                               default_server_args, DP_SIZE_LOCAL,
-                               TP_SIZE) as server_list:
-        yield server_list
+    server_manager = HybridLBServerManager(MODEL_NAME, DP_SIZE,
+                                           api_server_count,
+                                           default_server_args, DP_SIZE_LOCAL,
+                                           TP_SIZE)
+
+    with server_manager:
+        yield server_manager
+
+
+@pytest.fixture
+def servers(server_manager):
+    return server_manager.servers
 
 
 @pytest_asyncio.fixture
@@ -166,6 +177,39 @@ async def clients(servers: list[tuple[RemoteOpenAIServer, list[str]]]):
             await stack.enter_async_context(server.get_async_client())
             for server, _ in servers
         ]
+
+
+def _get_parallel_config(server: RemoteOpenAIServer):
+    response = requests.get(server.url_for("server_info?config_format=json"))
+    response.raise_for_status()
+
+    vllm_config = response.json()["vllm_config"]
+    return vllm_config["parallel_config"]
+
+
+def test_hybrid_dp_server_info(server_manager):
+    servers = server_manager.servers
+    api_server_count = server_manager.api_server_count
+
+    for i, (server, _) in enumerate(servers):
+        print(f"Testing {i=}")
+
+        # Each request will hit one of the API servers
+        # `n_reqs` is set so that there is a good chance each server
+        # receives at least one request
+        n_reqs = 2 * api_server_count * api_server_count
+        parallel_configs = [
+            _get_parallel_config(server) for _ in range(n_reqs)
+        ]
+        api_process_counts = [
+            c["_api_process_count"] for c in parallel_configs
+        ]
+        api_process_ranks = [c["_api_process_rank"] for c in parallel_configs]
+
+        assert all(c == api_server_count
+                   for c in api_process_counts), api_process_counts
+        assert all(0 <= r < api_server_count
+                   for r in api_process_ranks), api_process_ranks
 
 
 @pytest.mark.asyncio

@@ -306,7 +306,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             eps=self.layer_norm_epsilon,
             group_size=None,
             norm_before_gate=True,
-            device=torch.cuda.current_device(),
+            device=current_platform.current_device(),
             dtype=config.torch_dtype,
         )
 
