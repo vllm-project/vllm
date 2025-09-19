@@ -36,7 +36,6 @@ def default_server_args() -> list[str]:
         "--enforce-eager",
         # Prompt Embeds server args
         "--enable-prompt-embeds",
-        "--no-enable-chunked-prefill",
     ]
 
 

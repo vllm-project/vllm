@@ -56,7 +56,9 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, check_use_alibi, get_dtype_size,
-                        is_pin_memory_available, round_up, supports_dynamo)
+                        is_pin_memory_available,
+                        length_from_prompt_token_ids_or_embeds, round_up,
+                        supports_dynamo)
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -197,6 +199,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cache_config.cache_dtype]
 
         self.is_pooling_model = (model_config.runner_type == 'pooling')
+        self.enable_prompt_embeds = model_config.enable_prompt_embeds
         self.is_multimodal_raw_input_only_model = (
             model_config.is_multimodal_raw_input_only_model)
 
@@ -342,6 +345,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                self.hidden_size,
                                                dtype=self.dtype,
                                                numpy=False)
+        self.is_token_ids = self._make_buffer(self.max_num_tokens,
+                                              dtype=torch.bool)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs,
                                                          dtype=torch.int64)
         self.num_discarded_requests = 0
@@ -574,6 +579,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt_embeds=new_req_data.prompt_embeds,
                 mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
@@ -819,6 +825,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+            self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
 
         # Async scheduling case, where some decode requests from the previous
@@ -844,6 +852,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # If not all requests are decodes from the last iteration,
             # We need to copy the input_ids_cpu to the GPU first.
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+            self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_commmon_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids_cpu will have all the input ids.
@@ -857,6 +867,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.prev_sampled_token_ids[:num_commmon_tokens,
                                                         0],
                 non_blocking=True)
+            self.is_token_ids.gpu[:num_commmon_tokens] = True
             return
         # Upload the index tensors asynchronously
         # so the scatter can be non-blocking.
@@ -947,14 +958,60 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
+        token_indices_tensor = torch.from_numpy(token_indices)
 
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
-                           torch.from_numpy(token_indices),
+                           token_indices_tensor,
                            out=self.input_ids.cpu[:total_num_scheduled_tokens])
+        is_token_ids = self.input_batch.is_token_ids.flatten()
+        torch.index_select(
+            is_token_ids,
+            0,
+            token_indices_tensor,
+            out=self.is_token_ids.cpu[:total_num_scheduled_tokens])
+
+        # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
+        # the InputBatch, we need to fill in the prompt embeds into the expected
+        # spots in the GpuModelRunner's pre-allocated prompt_embeds tensor.
+        if self.input_batch.req_prompt_embeds:
+            output_idx = 0
+            for req_idx in range(num_reqs):
+                num_sched = num_scheduled_tokens[req_idx]
+
+                # Skip if this request doesn't have embeddings
+                if req_idx not in self.input_batch.req_prompt_embeds:
+                    output_idx += num_sched
+                    continue
+
+                # Skip if no tokens scheduled
+                if num_sched <= 0:
+                    output_idx += num_sched
+                    continue
+
+                req_embeds = self.input_batch.req_prompt_embeds[req_idx]
+                start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
+
+                # Skip if trying to read beyond available embeddings
+                if start_pos >= req_embeds.shape[0]:
+                    output_idx += num_sched
+                    continue
+
+                # Copy available embeddings
+                end_pos = start_pos + num_sched
+                actual_end = min(end_pos, req_embeds.shape[0])
+                actual_num_sched = actual_end - start_pos
+
+                if actual_num_sched > 0:
+                    self.inputs_embeds.cpu[output_idx:output_idx +
+                                           actual_num_sched].copy_(
+                                               req_embeds[start_pos:actual_end]
+                                           )
+
+                output_idx += num_sched
 
         self.input_batch.block_table.compute_slot_mapping(
             req_indices, positions_np)
@@ -1279,7 +1336,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.num_computed_tokens_cpu[index]
             num_scheduled_tokens = \
                 scheduler_output.num_scheduled_tokens[req_id]
-            num_prompt_tokens = len(req.prompt_token_ids)
+            num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+                req.prompt_token_ids, req.prompt_embeds)
 
             if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
                 prompt_part_len = max(0,
@@ -1845,6 +1903,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
+        elif (self.enable_prompt_embeds and get_pp_group().is_first_rank):
+            # Get the input embeddings for the tokens that are not input embeds,
+            # then put them into the appropriate positions.
+            # TODO(qthequartermasterman): Since even when prompt embeds are
+            # enabled, (a) not all requests will use prompt embeds, and (b)
+            # after the initial prompt is processed, the rest of the generated
+            # tokens will be token ids, it is not desirable to have the
+            # embedding layer outside of the CUDA graph all the time. The v0
+            # engine avoids this by "double compiling" the CUDA graph, once
+            # with input_ids and again with inputs_embeds, for all num_tokens.
+            # If a batch only has token ids, then including the embedding layer
+            # in the CUDA graph will be more performant (like in the else case
+            # below).
+            token_ids_idx = self.is_token_ids.gpu[:num_scheduled_tokens] \
+                .nonzero(as_tuple=False) \
+                .squeeze(1)
+            # Some tokens ids may need to become embeds
+            if token_ids_idx.numel() > 0:
+                token_ids = self.input_ids.gpu[token_ids_idx]
+                tokens_to_embeds = self.model.get_input_embeddings(
+                    input_ids=token_ids)
+                self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
+
+            inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
+            model_kwargs = self._init_model_kwargs(num_input_tokens)
+            input_ids = None
         else:
             # For text-only models, we use token ids as input.
             # While it is possible to use embeddings as input just like the
@@ -2023,6 +2107,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             self.input_batch.token_ids_cpu[req_idx,
                                            start_idx:end_idx] = sampled_ids
+            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
 
@@ -2570,6 +2655,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Get metadata for this request.
             request = self.requests[req_id]
+            if request.prompt_token_ids is None:
+                # Prompt logprobs is incompatible with prompt embeddings
+                continue
+
             num_prompt_tokens = len(request.prompt_token_ids)
             prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
                 self.device, non_blocking=True)
@@ -2922,6 +3011,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     **model_kwargs,
                     **self._dummy_mm_kwargs(num_reqs),
                 }
+            elif self.enable_prompt_embeds:
+                input_ids = None
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
+                model_kwargs = self._init_model_kwargs(num_tokens)
             else:
                 input_ids = self.input_ids.gpu[:num_tokens]
                 inputs_embeds = None

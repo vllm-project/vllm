@@ -1513,12 +1513,6 @@ class EngineArgs:
                                    recommend_to_remove=False)
                 return False
 
-        # No text embedding inputs so far.
-        if self.enable_prompt_embeds:
-            _raise_or_fallback(feature_name="--enable-prompt-embeds",
-                               recommend_to_remove=False)
-            return False
-
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
             _raise_or_fallback(feature_name=model_config.architectures,
@@ -1651,6 +1645,13 @@ class EngineArgs:
                 "models in V0 and has been disabled.")
             self.enable_prefix_caching = False
 
+            if self.enable_prompt_embeds:
+                logger.warning(
+                    "--enable-prompt-embeds and --enable-prefix-caching "
+                    "are not supported together in V0. Prefix caching has "
+                    "been disabled.")
+                self.enable_prefix_caching = False
+
         # Set max_num_seqs to 256 for VLLM_V0.
         if self.max_num_seqs is None:
             self.max_num_seqs = 256
@@ -1664,6 +1665,17 @@ class EngineArgs:
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
             self.enable_chunked_prefill = True
+
+            # TODO: When prefix caching supports prompt embeds inputs, this
+            # check can be removed.
+            if (self.enable_prompt_embeds
+                    and self.enable_prefix_caching is not False):
+                logger.warning(
+                    "--enable-prompt-embeds and --enable-prefix-caching "
+                    "are not supported together in V1. Prefix caching has "
+                    "been disabled.")
+                self.enable_prefix_caching = False
+
             if self.enable_prefix_caching is None:
                 self.enable_prefix_caching = True
         else:
