@@ -204,12 +204,16 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
     }),
     ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
 ])
-def test_mm_processing_gpu(model_id, modality, mm_init_kwargs):
+@pytest.mark.parametrize("image_urls",
+                         [[TEST_IMAGE_ASSETS[0], TEST_IMAGE_ASSETS[1]]],
+                         indirect=True)
+def test_mm_processing_gpu(model_id, modality, mm_init_kwargs,
+                           image_urls: list[str]):
     device = current_platform.device_name
 
     num_items = 2
     if modality == "image":
-        messages = dummy_messages_from_image_url(TEST_IMAGE_ASSETS[:num_items])
+        messages = dummy_messages_from_image_url(image_urls[:num_items])
     elif modality == "audio":
         messages = dummy_messages_from_audio_url(TEST_AUDIO_URLS[:num_items])
     else:
@@ -235,14 +239,16 @@ def test_mm_processing_gpu(model_id, modality, mm_init_kwargs):
     }),
     ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
 ])
-def test_mm_processing_gpu_bad_device(model_id, modality, mm_init_kwargs):
+@pytest.mark.parametrize("image_urls", [[TEST_IMAGE_ASSETS[0]]], indirect=True)
+def test_mm_processing_gpu_bad_device(model_id, modality, mm_init_kwargs,
+                                      image_urls: list[str]):
     device = current_platform.device_name
     if device == "cpu":
         pytest.skip("Not applicable to CPU")
 
     num_items = 1
     if modality == "image":
-        messages = dummy_messages_from_image_url(TEST_IMAGE_ASSETS[:num_items])
+        messages = dummy_messages_from_image_url(image_urls[:num_items])
     elif modality == "audio":
         messages = dummy_messages_from_audio_url(TEST_AUDIO_URLS[:num_items])
     else:
