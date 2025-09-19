@@ -574,18 +574,6 @@ class Gemma3nSelfDecoder(nn.Module):
         self.embed_tokens = embed_tokens
         self.embed_scale = embed_scale
 
-    def get_per_layer_input_embeddings(
-            self, input_ids: torch.Tensor) -> torch.Tensor:
-        # Deal with the fact that vocab_size_per_layer_input < vocab_size
-        # which causes us to have some out of vocab tokens by setting
-        # those token ids to 0. This matches the HF implementation.
-        per_layer_inputs_mask = torch.logical_and(
-            input_ids >= 0, input_ids < self.config.vocab_size_per_layer_input)
-        per_layer_inputs_tokens = torch.where(per_layer_inputs_mask, input_ids,
-                                              torch.zeros_like(input_ids))
-        return self.embed_tokens_per_layer(
-            per_layer_inputs_tokens) * self.embed_scale_per_layer
-
     def get_per_layer_inputs(
         self,
         hidden_states_0: torch.Tensor,
@@ -848,6 +836,18 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
                 dtype=self.embed_tokens.weight.dtype,
                 device=device,
             )
+
+    def get_per_layer_input_embeddings(
+            self, input_ids: torch.Tensor) -> torch.Tensor:
+        # Deal with the fact that vocab_size_per_layer_input < vocab_size
+        # which causes us to have some out of vocab tokens by setting
+        # those token ids to 0. This matches the HF implementation.
+        per_layer_inputs_mask = torch.logical_and(
+            input_ids >= 0, input_ids < self.config.vocab_size_per_layer_input)
+        per_layer_inputs_tokens = torch.where(per_layer_inputs_mask, input_ids,
+                                              torch.zeros_like(input_ids))
+        return self.embed_tokens_per_layer(
+            per_layer_inputs_tokens) * self.embed_scale_per_layer
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.self_decoder.get_input_embeddings(input_ids)
