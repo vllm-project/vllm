@@ -46,24 +46,18 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
-  - tests/mq_llm_engine
-  - tests/async_engine
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
   - tests/utils_
-  - tests/worker
   - tests/standalone_tests/lazy_imports.py
   - tests/transformers_utils
   commands:
   - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s mq_llm_engine # MQLLMEngine
-  - pytest -v -s async_engine # AsyncLLMEngine
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s multimodal
   - pytest -v -s utils_ # Utils
-  - pytest -v -s worker # Worker
   - pytest -v -s transformers_utils # transformers_utils
 
 - label: Python-only Installation Test # 10min
@@ -84,25 +78,12 @@ steps:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
   - tests/basic_correctness/test_cpu_offload
-  - tests/basic_correctness/test_preemption
   - tests/basic_correctness/test_cumem.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/test_cumem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
-  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
-
-- label: Core Test # 22min
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental]
-  fast_check: true
-  source_file_dependencies:
-  - vllm/core
-  - vllm/distributed
-  - tests/core
-  commands:
-  - pytest -v -s core
 
 - label: Entrypoints Unit Tests # 5min
   timeout_in_minutes: 10
@@ -127,8 +108,7 @@ steps:
   - tests/entrypoints/offline_mode
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
@@ -230,16 +210,14 @@ steps:
   num_gpus: 2
   source_file_dependencies:
   - vllm/
-  - tests/metrics
   - tests/v1/tracing
   commands:
-  - pytest -v -s metrics
   - "pip install \
       'opentelemetry-sdk>=1.26.0' \
       'opentelemetry-api>=1.26.0' \
       'opentelemetry-exporter-otlp>=1.26.0' \
       'opentelemetry-semantic-conventions-ai>=0.4.1'"
-  - pytest -v -s tracing
+  - pytest -v -s v1/tracing
 
 ##### fast check tests  #####
 #####  1 GPU test  #####
@@ -302,6 +280,7 @@ steps:
     # split the test to avoid interference
     - pytest -v -s v1/core
     - pytest -v -s v1/executor
+    - pytest -v -s v1/kv_offload
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
@@ -809,7 +788,7 @@ steps:
     # Quantization
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_silu_nvfp4_quant_fusion.py
+    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
@@ -820,6 +799,20 @@ steps:
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
+
+- label: GPT-OSS Eval (Blackwell)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  gpu: b200
+  optional: true # disable while debugging
+  source_file_dependencies:
+  - tests/evals/gpt_oss
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/v1/attention/backends/flashinfer.py
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58 --server-args '--tensor-parallel-size 2'
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -946,7 +939,6 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
-  # - pytest -v -s distributed/test_context_parallel.py # TODO: enable it on Hopper runners or add triton MLA support
 
 - label: LoRA TP Test (Distributed) # 17 min
   timeout_in_minutes: 30
@@ -1020,9 +1012,21 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: Qwen MoE EP Test # optional
+##### H200 test #####
+- label: Distrubted Tests (H200) # optional
   gpu: h200
   optional: true
+  working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 /vllm-workspace/examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+    - pytest -v -s tests/distributed/test_context_parallel.py
+    - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+
+##### B200 test #####
+- label: Distributed Tests (B200) # optional
+  gpu: b200
+  optional: true
+  working_dir: "/vllm-workspace/"
+  num_gpus: 2
+  commands:
+    - pytest -v -s tests/distributed/test_context_parallel.py
