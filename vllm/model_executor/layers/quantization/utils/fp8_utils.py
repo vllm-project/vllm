@@ -224,7 +224,6 @@ class W8A8BlockFp8LinearOp:
         self,
         input: torch.Tensor,
         weight: torch.Tensor,
-        block_size: GroupShape,
         weight_scale: torch.Tensor,
         input_scale: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,

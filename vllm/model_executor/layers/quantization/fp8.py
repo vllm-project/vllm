@@ -248,6 +248,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.block_quant:
             assert not self.act_q_static
+            assert self.weight_block_size is not None
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
                 weight_group_shape=GroupShape(self.weight_block_size[0],
                                               self.weight_block_size[1]),
@@ -412,7 +413,6 @@ class Fp8LinearMethod(LinearMethodBase):
             return self.w8a8_block_fp8_linear.apply(
                 input=x,
                 weight=layer.weight,
-                block_size=self.weight_block_size,
                 weight_scale=layer.weight_scale,
                 input_scale=layer.input_scale,
                 bias=bias,

@@ -156,7 +156,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             return self.w8a8_block_fp8_linear.apply(
                 input=x,
                 weight=layer.weight,
-                block_size=self.weight_block_size,
                 weight_scale=layer.weight_scale,
                 input_scale=layer.input_scale,
                 bias=bias,
