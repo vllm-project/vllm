@@ -3,7 +3,6 @@
 from typing import Optional
 
 import torch
-from flashinfer.comm.trtllm_alltoall import MnnvlMoe, MoEAlltoallInfo
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_dp_group, get_ep_group
@@ -13,7 +12,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.utils.flashinfer import (
+    nvfp4_block_scale_interleave, has_flashinfer_all2all)
 
 
 def get_local_sizes():
@@ -214,8 +214,8 @@ def flashinfer_alltoall_dispatch(
     top_k: int,
     num_experts: int,
     quant_config: FusedMoEQuantConfig,
-) -> tuple[MoEAlltoallInfo, torch.Tensor, torch.Tensor, torch.Tensor,
-           torch.Tensor]:
+):
+    from flashinfer.comm.trtllm_alltoall import MnnvlMoe
     assert (all2all_manager.ensure_alltoall_workspace_initialized()
             ), "FlashInfer AllToAll workspace not available"
 
@@ -271,6 +271,7 @@ def flashinfer_alltoall_combine(
     token_count: int,
     alltoall_info,
 ):
+    from flashinfer.comm.trtllm_alltoall import MnnvlMoe
     assert (all2all_manager.ensure_alltoall_workspace_initialized()
             ), "FlashInfer AllToAll workspace not available"
     return MnnvlMoe.mnnvl_moe_alltoallv_combine(
