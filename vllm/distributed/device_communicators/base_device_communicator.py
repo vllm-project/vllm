@@ -40,12 +40,17 @@ class All2AllManagerBase:
         # all2all lives in ep group, which is merged from dp and tp group
         self.dp_group = get_dp_group()
         self.tp_group = get_tp_group()
+
         # no self.ep_group since self.ep_group is still in construction
         # when we create this object
         self.dp_rank = self.dp_group.rank_in_group
         self.dp_world_size = self.dp_group.world_size
         self.rank = dist.get_rank(cpu_group)
         self.world_size = dist.get_world_size(cpu_group)
+
+        # Between Attn and MoE layers, we use sequence parallelism for the
+        # hidden states.
+        self.sp_world_size = self.tp_group.world_size
 
         # all2all communication often has separate implementations for
         # intra-node and inter-node communication
@@ -60,11 +65,15 @@ class All2AllManagerBase:
         # and reuse it for the same config.
         raise NotImplementedError
 
-    def dispatch(self, hidden_states: torch.Tensor,
-                 router_logits: torch.Tensor):
+    def dispatch(self,
+                 hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor,
+                 sp_size: int = 1):
         raise NotImplementedError
 
-    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def combine(self,
+                hidden_states: torch.Tensor,
+                sp_size: int = 1) -> torch.Tensor:
         raise NotImplementedError
 
     def destroy(self):

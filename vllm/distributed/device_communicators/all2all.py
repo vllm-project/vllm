@@ -5,7 +5,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-from vllm.distributed import get_dp_group
+from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import has_deep_ep, has_pplx
@@ -27,42 +27,41 @@ class NaiveAll2AllManager(All2AllManagerBase):
         super().__init__(cpu_group)
 
     def naive_multicast(self, x: torch.Tensor,
-                        cu_tokens_across_dp_cpu: torch.Tensor):
+                        cu_multicast_tokens_cpu: torch.Tensor):
         assert (len(x.shape) == 2)
-        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
+        buffer = torch.empty((cu_multicast_tokens_cpu[-1], x.size(1)),
                              device=x.device,
                              dtype=x.dtype)
 
-        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.dp_rank]
+        start = 0 if self.rank == 0 else cu_multicast_tokens_cpu[self.rank - 1]
+        end = cu_multicast_tokens_cpu[self.rank]
         buffer[start:end, :].copy_(x)
-        for idx in range(self.dp_world_size):
-            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
-            end = cu_tokens_across_dp_cpu[idx]
-            self.dp_group.broadcast(buffer[start:end, :], idx)
+        for idx in range(self.world_size):
+            start = 0 if idx == 0 else cu_multicast_tokens_cpu[idx - 1]
+            end = cu_multicast_tokens_cpu[idx]
+            get_ep_group().broadcast(buffer[start:end, :], idx)
 
         return buffer
 
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
-        cu_tokens_across_dp_cpu = get_forward_context(
-        ).dp_metadata.cu_tokens_across_dp_cpu
+        cu_dispatched_tokens_cpu = get_forward_context(
+        ).dp_metadata.cu_tokens_across_dp_cpu // self.sp_world_size
 
         hidden_states = self.naive_multicast(hidden_states,
-                                             cu_tokens_across_dp_cpu)
+                                             cu_dispatched_tokens_cpu)
         router_logits = self.naive_multicast(router_logits,
-                                             cu_tokens_across_dp_cpu)
+                                             cu_dispatched_tokens_cpu)
         return hidden_states, router_logits
 
     def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        cu_tokens_across_dp_cpu = get_forward_context(
-        ).dp_metadata.cu_tokens_across_dp_cpu
-        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.dp_rank]
+        cu_combined_tokens_cpu = get_forward_context(
+        ).dp_metadata.cu_tokens_across_dp_cpu // self.sp_world_size
 
-        all_hidden_states = self.dp_group.all_reduce(hidden_states)
+        start = 0 if self.rank == 0 else cu_combined_tokens_cpu[self.rank - 1]
+        end = cu_combined_tokens_cpu[self.dp_rank]
+
+        all_hidden_states = get_ep_group().all_reduce(hidden_states)
         hidden_states = all_hidden_states[start:end, :]
         return hidden_states
 
@@ -86,7 +85,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         sizes = get_forward_context(
         ).dp_metadata.get_chunk_sizes_across_dp_rank()
-        hidden_states, router_logits = get_dp_group().all_gatherv(
+        hidden_states, router_logits = get_ep_group().all_gatherv(
             [hidden_states, router_logits],
             dim=0,
             sizes=sizes,
@@ -99,7 +98,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         sizes = get_forward_context(
         ).dp_metadata.get_chunk_sizes_across_dp_rank()
-        hidden_states = get_dp_group().reduce_scatterv(hidden_states,
+        hidden_states = get_ep_group().reduce_scatterv(hidden_states,
                                                        dim=0,
                                                        sizes=sizes)
         return hidden_states
