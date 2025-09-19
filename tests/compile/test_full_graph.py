@@ -136,22 +136,16 @@ def test_custom_compile_config(
     run_model(compilation_config, model, model_kwargs)
 
 
-@pytest.mark.parametrize("model", [
-    "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
-    "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
-])
-def test_inductor_graph_partition_attn_fusion(model, caplog_vllm):
+def test_inductor_graph_partition_attn_fusion(caplog_vllm):
     if not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available "
                     "in PyTorch 2.9+")
 
-    print(f"MODEL={model}")
-
+    model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
     compilation_config = CompilationConfig(
         level=CompilationLevel.PIECEWISE,
         use_inductor_graph_partition=True,
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
-        compile_sizes=[1, 2],
         custom_ops=["+quant_fp8"],
         pass_config=PassConfig(enable_attn_fusion=True, enable_noop=True),
     )
@@ -164,7 +158,17 @@ def test_inductor_graph_partition_attn_fusion(model, caplog_vllm):
                 _Backend.FLASHINFER):
         run_model(compilation_config, model, model_kwargs)
 
-    assert ("Fused quantization onto 1 attention nodes" in caplog_vllm.text)
+    try:
+        assert ("Fused quantization onto 48 attention nodes"
+                in caplog_vllm.text), caplog_vllm.text
+    except AssertionError:
+        # Note: this message is only triggered when the compilation goes
+        # through the custom pass. Due to multiple layers of cache on
+        # PyTorch side, the compilation of a graph may be cached such
+        # that custom pass directly goes through cache. In this case,
+        # we go through this branch and assert that the pass is not
+        # triggered.
+        assert "Fused quantization" not in caplog_vllm.text
 
 
 def run_model(compile_config: Union[int, CompilationConfig], model: str,

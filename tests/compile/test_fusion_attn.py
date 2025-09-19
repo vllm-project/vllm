@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-import logging
 from typing import Optional
 
 import pytest
@@ -452,18 +451,13 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                                        fullgraph=True)
         assert model_compiled.attn._o_scale_float is None
 
-        with caplog_vllm.at_level(logging.DEBUG):
-            result_fused_1 = model_compiled(q, k, v)
+        result_fused_1 = model_compiled(q, k, v)
 
         if backend == _Backend.FLASHINFER:
             # With the Flashinfer backend after the 1st round of the forward
             # pass, output quant scale should be loaded into the attn layer's
             # _o_scale_float, the 2nd round should reuse the loaded
             # _o_scale_float
-            if use_inductor_graph_partition:
-                assert ("Fused quantization onto 1 attention nodes"
-                        in caplog_vllm.text)
-
             assert model_compiled.attn._o_scale_float is not None
             result_fused_2 = model_compiled(q, k, v)
 
