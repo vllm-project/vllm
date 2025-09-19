@@ -225,6 +225,11 @@ class OpenAIServingChat(OpenAIServing):
                 request_chat_template = (request.chat_template
                                          if self.trust_request_chat_template
                                          else None)
+                chat_template_kwargs = request.chat_template_kwargs
+                if not self.trust_request_chat_template and (
+                        chat_template_kwargs and
+                        chat_template_kwargs.get("chat_template") is not None):
+                    chat_template_kwargs.pop("chat_template")
                 (
                     conversation,
                     request_prompts,

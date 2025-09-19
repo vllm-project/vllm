@@ -52,7 +52,7 @@ from vllm.transformers_utils.chat_templates import (
 # yapf: enable
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import random_uuid
+from vllm.utils import random_uuid, supports_kw
 
 logger = init_logger(__name__)
 
@@ -1522,15 +1522,19 @@ def parse_chat_messages_futures(
 
 
 def resolve_chat_template_kwargs(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: str,
     chat_template_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
-    if chat_template_kwargs is None:
-        chat_template_kwargs = {}
+    fn_kw = {
+        k for k in chat_template_kwargs
+        if supports_kw(tokenizer.apply_chat_template, k)
+    }
 
     env = jinja2.Environment()
     parsed_content = env.parse(chat_template)
-    accept_vars = jinja2.meta.find_undeclared_variables(parsed_content)
+    template_vars = jinja2.meta.find_undeclared_variables(parsed_content)
+    accept_vars = fn_kw.intersection(template_vars)
     return {
         k: v for k, v in chat_template_kwargs.items() if k in accept_vars
     }
@@ -1562,6 +1566,7 @@ def apply_hf_chat_template(
 
     try:
         resolved_kwargs = resolve_chat_template_kwargs(
+            tokenizer=tokenizer,
             chat_template=hf_chat_template,
             chat_template_kwargs=kwargs,
         )
