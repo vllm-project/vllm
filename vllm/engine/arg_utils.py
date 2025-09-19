@@ -402,6 +402,7 @@ class EngineArgs:
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
+    ray_workers_use_unitrace: bool = ParallelConfig.ray_workers_use_unitrace
     num_gpu_blocks_override: Optional[
         int] = CacheConfig.num_gpu_blocks_override
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
@@ -745,6 +746,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--ray-workers-use-nsight",
             **parallel_kwargs["ray_workers_use_nsight"])
+        parallel_group.add_argument(
+            "--ray-workers-use-unitrace",
+            **parallel_kwargs["ray_workers_use_unitrace"])
         parallel_group.add_argument(
             "--disable-custom-all-reduce",
             **parallel_kwargs["disable_custom_all_reduce"])
@@ -1365,6 +1369,7 @@ class EngineArgs:
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
+            ray_workers_use_unitrace=self.ray_workers_use_unitrace,
             ray_runtime_env=ray_runtime_env,
             placement_group=placement_group,
             distributed_executor_backend=self.distributed_executor_backend,

@@ -145,6 +145,19 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         return ray_remote_kwargs
 
+    def _configure_ray_workers_use_unitrace(self,
+                                          ray_remote_kwargs) -> Dict[str, Any]:
+        # If unitrace profiling is enabled, we need to set the profiling
+        # configuration for the ray workers as runtime env.
+        runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
+        runtime_env.update({
+            "unitrace": {
+                "chrome-kernel-logging": "",
+            }
+        })
+
+        return ray_remote_kwargs
+
     # child class could overwrite this to return actual env vars.
     def _get_env_vars_to_be_updated(self):
         return self._env_vars_for_all_workers
@@ -166,6 +179,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         if self.parallel_config.ray_workers_use_nsight:
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
+                ray_remote_kwargs)
+
+        if self.parallel_config.ray_workers_use_unitrace:
+            ray_remote_kwargs = self._configure_ray_workers_use_unitrace(
                 ray_remote_kwargs)
 
         logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
