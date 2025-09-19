@@ -158,14 +158,15 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         return self.model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+
+        def transform(inputs):
+            name, loaded_weight = inputs
+            if "lm_head" not in name:
+                name = "model." + name
+            return name, loaded_weight
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,
         )
-
-        model_weights = {}
-        for name, loaded_weight in weights:
-            if "lm_head" not in name:
-                name = "model." + name
-            model_weights[name] = loaded_weight
-        loader.load_weights(model_weights.items())
+        loader.load_weights(map(transform, weights))
