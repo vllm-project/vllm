@@ -597,30 +597,13 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         _tensor_parallel(self.model)
 
-    def create_attention_instances(self) -> dict[int, Attention]:
+    def create_attention_instances(
+        self,
+        attn_type: AttentionType = AttentionType.DECODER
+    ) -> dict[int, Attention]:
         """
         Create `Attention` instances to inform KV cache allocation.
         """
-        # TODO(hmellor): Better way to detect encoder models
-        # In encoder models, the attention layers will have `is_causal=False`
-        is_encoder = lambda m: not getattr(m, "is_causal", True)
-        # vLLM does not support encoder-decoder models, so if any encoder layer
-        # is found, we assume the whole model is an encoder model
-        is_encoder_model = any(is_encoder(m) for m in self.model.modules())
-        attn_type = (AttentionType.ENCODER_ONLY
-                     if is_encoder_model else AttentionType.DECODER)
-
-        # Check minimum transformers version for encoder models support
-        if is_encoder_model:
-            import transformers
-            from packaging.version import Version
-            installed = Version(transformers.__version__)
-            required = Version("4.57.0.dev1")
-            if installed < required:
-                raise ValueError(
-                    "Encoder models with the Transformers backend require "
-                    f"transformers>={required}, but got {installed}")
-
         num_heads = self.model_config.get_num_attention_heads(
             self.parallel_config)
         head_size = self.model_config.get_head_size()
@@ -733,6 +716,29 @@ class TransformersModel(TransformersBase):
         # vLLM will always pass position_ids as an argument, so we skip loading
         # the buffer if it exists
         self.skip_substrs.append("position_ids")
+
+    def create_attention_instances(
+            self, attn_type: AttentionType = AttentionType.DECODER):
+        # TODO(hmellor): Better way to detect encoder models
+        # In encoder models, the attention layers will have `is_causal=False`
+        is_encoder = lambda m: not getattr(m, "is_causal", True)
+        # vLLM does not support encoder-decoder models, so if any encoder layer
+        # is found, we assume the whole model is an encoder model
+        if any(is_encoder(m) for m in self.model.modules()):
+            attn_type = AttentionType.ENCODER_ONLY
+
+        # Check minimum transformers version for encoder models support
+        if attn_type == AttentionType.ENCODER_ONLY:
+            import transformers
+            from packaging.version import Version
+            installed = Version(transformers.__version__)
+            required = Version("4.57.0.dev0")
+            if installed < required:
+                raise ValueError(
+                    "Encoder models with the Transformers backend require "
+                    f"transformers>={required}, but got {installed}")
+
+        return super().create_attention_instances(attn_type)
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
