@@ -83,9 +83,8 @@ async def test_mcp_tool_env_flag_enabled(mcp_enabled_client: OpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
-async def test_mcp_tool_env_flag_disabled(
-        mcp_disabled_client: OpenAI, model_name: str,
-        monkeypatch_module: pytest.MonkeyPatch):
+async def test_mcp_tool_env_flag_disabled(mcp_disabled_client: OpenAI,
+                                          model_name: str):
     response = await mcp_disabled_client.responses.create(
         model=model_name,
         # TODO: Ideally should be able to set max tool calls

@@ -257,6 +257,58 @@ def env_with_choices(
     return _get_validated_env
 
 
+def env_list_with_choices(
+        env_name: str,
+        default: list[str],
+        choices: Union[list[str], Callable[[], list[str]]],
+        case_sensitive: bool = True) -> Callable[[], list[str]]:
+    """
+    Create a lambda that validates environment variable 
+    containing comma-separated values against allowed choices
+    
+    Args:
+        env_name: Name of the environment variable
+        default: Default list of values if not set
+        choices: List of valid string options or callable that returns list
+        case_sensitive: Whether validation should be case sensitive
+        
+    Returns:
+        Lambda function for environment_variables
+        dict that returns list of strings
+    """
+
+    def _get_validated_env_list() -> list[str]:
+        value = os.getenv(env_name)
+        if value is None:
+            return default
+
+        # Split comma-separated values and strip whitespace
+        values = [v.strip() for v in value.split(",") if v.strip()]
+
+        if not values:
+            return default
+
+        # Resolve choices if it's a callable (for lazy loading)
+        actual_choices = choices() if callable(choices) else choices
+
+        # Validate each value
+        for val in values:
+            if not case_sensitive:
+                check_value = val.lower()
+                check_choices = [choice.lower() for choice in actual_choices]
+            else:
+                check_value = val
+                check_choices = actual_choices
+
+            if check_value not in check_choices:
+                raise ValueError(f"Invalid value '{val}' in {env_name}. "
+                                 f"Valid options: {actual_choices}.")
+
+        return values
+
+    return _get_validated_env_list
+
+
 def get_vllm_port() -> Optional[int]:
     """Get the port from VLLM_PORT environment variable.
 
@@ -1329,9 +1381,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
                       "VLLM_OBJECT_STORAGE_SHM_BUFFER"),
 
+    # Valid values are container,code_interpreter,web_search_preview
+    # ex GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
     "GPT_OSS_SYSTEM_TOOL_MCP_LABELS":
-    lambda: ([] if "GPT_OSS_SYSTEM_TOOL_MCP_LABELS" not in os.environ
-            else os.environ["GPT_OSS_SYSTEM_TOOL_MCP_LABELS"].split(",")),
+    env_list_with_choices("GPT_OSS_SYSTEM_TOOL_MCP_LABELS", [],
+                            ["container",
+                            "code_interpreter",
+                            "web_search_preview"]),
 }
 
 # --8<-- [end:env-vars-definition]
