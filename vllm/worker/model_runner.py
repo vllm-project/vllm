@@ -1820,7 +1820,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             return False
 
         if model_input.attn_metadata is None:
-            return False
+            raise ValueError("model_input.attn_metadata cannot be None")
 
         prefill_meta = model_input.attn_metadata.prefill_metadata
 
@@ -1849,7 +1849,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             return False
 
         if model_input.attn_metadata is None:
-            return False
+            raise ValueError("model_input.attn_metadata cannot be None")
 
         prefill_meta = model_input.attn_metadata.prefill_metadata
 
