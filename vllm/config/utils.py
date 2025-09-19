@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 import enum
 import hashlib
+import inspect
 import json
 import pathlib
-from collections.abc import Mapping, Sequence, Set
-import ast
-import inspect
 import textwrap
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import MISSING, Field, field, fields, is_dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -193,7 +193,10 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
     def pairwise(iterable):
         """
-        Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
+        Manually implement itertools.pairwise.
+
+        See: https://docs.python.org/3/library/itertools.html
+        #itertools.pairwise
 
         Can be removed when Python 3.9 support is dropped.
         """
