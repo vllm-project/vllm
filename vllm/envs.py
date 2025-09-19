@@ -204,8 +204,7 @@ if TYPE_CHECKING:
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
     VLLM_USE_FBGEMM: bool = False
-    VLLM_GC_DEBUG: bool = False
-    VLLM_GC_DEBUG_TOP_COLLECTED_OBJECTS: int = -1
+    VLLM_GC_DEBUG: str = ""
 
 
 def get_default_cache_root():
@@ -1472,14 +1471,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to enable FBGemm kernels on model execution
     "VLLM_USE_FBGEMM": lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
 
-    # Whether to enable GC debug callbacks. Default to disable.
-    "VLLM_GC_DEBUG": lambda: bool(int(os.getenv("VLLM_GC_DEBUG", "0"))),
-    # Logs top K GC collected objects for debugging purposes.
-    # Default to -1 (i.e. disable).
-    # NOTE: Debug only, due to the high overhead for top collected objects
-    # computations
-    "VLLM_GC_DEBUG_TOP_COLLECTED_OBJECTS":
-    lambda: int(os.getenv("VLLM_GC_DEBUG_TOP_COLLECTED_OBJECTS", "-1")),
+    # GC debug config
+    # - VLLM_GC_DEBUG=0: disable GC debugger
+    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+    # - VLLM_GC_DEBUG={\"top_objects\":5}: enable GC debugger with
+    #                                      top 5 collected objects
+    "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
 }
 
 # --8<-- [end:env-vars-definition]

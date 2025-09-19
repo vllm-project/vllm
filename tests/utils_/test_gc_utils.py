@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Any
 
-from vllm.utils.gc_utils import (_compute_detailed_type,
+from vllm.utils.gc_utils import (GCDebugConfig, _compute_detailed_type,
                                  _compute_top_gc_collected_objects)
 
 
@@ -53,3 +53,17 @@ def test_compute_top_gc_collected_objects():
         "    3:<class 'tests.utils_.test_gc_utils.Normal'>",
         "    1:<class 'set'>(size:2)"
     ])
+
+
+def test_gc_debug_config():
+    assert not GCDebugConfig(None).enabled
+    assert not GCDebugConfig("").enabled
+    assert not GCDebugConfig("0").enabled
+
+    config = GCDebugConfig("1")
+    assert config.enabled
+    assert config.top_objects == -1
+
+    config = GCDebugConfig("{\"top_objects\":5}")
+    assert config.enabled
+    assert config.top_objects == 5
