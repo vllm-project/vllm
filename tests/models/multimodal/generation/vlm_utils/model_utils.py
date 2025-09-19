@@ -884,20 +884,30 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         if videos is not None and is_list_of(videos, tuple):
             # batched multi videos
             do_sample_frames = {
-                video[1].pop("do_sample_frames")
+                video[1]["do_sample_frames"]
                 for video in videos
             }
             assert len(do_sample_frames) == 1
             if kwargs.get("do_sample_frames") is None:
                 kwargs["do_sample_frames"] = do_sample_frames
-            video_metadata = [[VideoMetadata(**video[1])] for video in videos]
+            video_metadata = [[
+                VideoMetadata(**{
+                    k: v
+                    for k, v in video[1].items() if k != "do_sample_frames"
+                })
+            ] for video in videos]
             videos = [[video[0]] for video in videos]
         elif videos is not None and isinstance(videos, tuple):
             # single video
-            do_sample_frames = videos[1].pop("do_sample_frames")
+            do_sample_frames = videos[1]["do_sample_frames"]
             if kwargs.get("do_sample_frames") is None:
                 kwargs["do_sample_frames"] = do_sample_frames
-            video_metadata = [[VideoMetadata(**videos[1])]]
+            video_metadata = [[
+                VideoMetadata(**{
+                    k: v
+                    for k, v in videos[1].items() if k != "do_sample_frames"
+                })
+            ]]
             videos = [[videos[0]]]
         else:
             video_metadata = None
