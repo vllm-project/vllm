@@ -4,9 +4,11 @@
 import os
 import shutil
 import signal
-import tempfile
+from pathlib import Path
 from typing import Optional
 
+from vllm import envs
+from vllm.assets.base import get_cache_dir
 from vllm.logger import init_logger
 from vllm.utils import PlaceholderModule
 
@@ -56,15 +58,22 @@ class ObjectStorageModel:
         pull_files(): Pull model from object storage to the temporary directory.
     """
 
-    def __init__(self) -> None:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            existing_handler = signal.getsignal(sig)
-            signal.signal(sig, self._close_by_signal(existing_handler))
+    def __init__(self, model_url: str) -> None:
+        if envs.VLLM_ASSETS_CACHE_MODEL_CLEAN:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                existing_handler = signal.getsignal(sig)
+                signal.signal(sig, self._close_by_signal(existing_handler))
 
-        self.dir = tempfile.mkdtemp()
-
-    def __del__(self):
-        self._close()
+        for scheme in SUPPORTED_SCHEMES:
+            if model_url.startswith(scheme):
+                parts = model_url.removeprefix(scheme).split('/')
+        model_name = '/'.join(parts[1:])
+        model_path = os.path.join(get_cache_dir(), "model_streamer",
+                                  model_name)
+        Path(model_path).mkdir(parents=True, exist_ok=True)
+        self.dir = model_path
+        logger.debug("Init object storage, model cache path is: %s",
+                     model_path)
 
     def _close(self) -> None:
         if os.path.exists(self.dir):
