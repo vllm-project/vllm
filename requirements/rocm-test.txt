@@ -1,5 +1,6 @@
 # Common dependencies
 -r common.txt
+tblib==3.1.0
 
 # entrypoints test
 # librosa==0.10.2.post1 # required by audio tests in entrypoints/openai

@@ -19,7 +19,7 @@ from typing import Callable, Optional, TypeVar, Union
 import torch.nn as nn
 import transformers
 
-from vllm.config import (ModelConfig, ModelImpl, iter_architecture_defaults,
+from vllm.config import (ModelConfig, iter_architecture_defaults,
                          try_match_architecture_defaults)
 from vllm.logger import init_logger
 from vllm.transformers_utils.dynamic_module import (
@@ -52,6 +52,7 @@ _TEXT_GENERATION_MODELS = {
     # baichuan-13b, lower case 'c' in the class name
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
+    "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
     "BambaForCausalLM": ("bamba", "BambaForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
@@ -146,10 +147,6 @@ _TEXT_GENERATION_MODELS = {
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
-    # [Encoder-decoder]
-    "BartModel": ("bart", "BartForConditionalGeneration"),
-    "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
-    "MBartForConditionalGeneration": ("bart", "MBartForConditionalGeneration"),
 }
 
 _EMBEDDING_MODELS = {
@@ -196,6 +193,7 @@ _EMBEDDING_MODELS = {
 
 _CROSS_ENCODER_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "BertForTokenClassification": ("bert", "BertForTokenClassification"),
     "GteNewForSequenceClassification": ("bert_with_rope",
                                         "GteNewForSequenceClassification"),
     "ModernBertForSequenceClassification": ("modernbert",
@@ -236,6 +234,7 @@ _MULTIMODAL_MODELS = {
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
+    "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
@@ -261,17 +260,15 @@ _MULTIMODAL_MODELS = {
     "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
     "Qwen2_5OmniModel": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
     "Qwen2_5OmniForConditionalGeneration": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
-    "UltravoxModel": ("ultravox", "UltravoxModel"),
+    "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),  # noqa: E501
+    "Qwen3VLMoeForConditionalGeneration": ("qwen3_vl_moe", "Qwen3VLMoeForConditionalGeneration"),  # noqa: E501
+    "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),  # noqa: E501
     "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),  # noqa: E501
     "Tarsier2ForConditionalGeneration": ("qwen2_vl", "Tarsier2ForConditionalGeneration"),  # noqa: E501
+    "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     # [Encoder-decoder]
-    "DonutForConditionalGeneration": ("donut", "DonutForConditionalGeneration"),
-    "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
-    "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
-    "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
-    "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
 
@@ -325,7 +322,17 @@ _SUBPROCESS_COMMAND = [
     sys.executable, "-m", "vllm.model_executor.models.registry"
 ]
 
-_PREVIOUSLY_SUPPORTED_MODELS = {"Phi3SmallForCausalLM": "0.9.2"}
+_PREVIOUSLY_SUPPORTED_MODELS = {
+    "Phi3SmallForCausalLM": "0.9.2",
+    # encoder-decoder models except whisper
+    # have been removed for V0 deprecation.
+    "BartModel": "0.10.2",
+    "BartForConditionalGeneration": "0.10.2",
+    "DonutForConditionalGeneration": "0.10.2",
+    "Florence2ForConditionalGeneration": "0.10.2",
+    "MBartForConditionalGeneration": "0.10.2",
+    "MllamaForConditionalGeneration": "0.10.2",
+}
 
 
 @dataclass(frozen=True)
@@ -580,7 +587,7 @@ class _ModelRegistry:
                     if model_module is not None:
                         break
             else:
-                if model_config.model_impl != ModelImpl.TRANSFORMERS:
+                if model_config.model_impl != "transformers":
                     return None
 
                 raise ValueError(
@@ -591,7 +598,7 @@ class _ModelRegistry:
                     "'auto_map' (relevant if the model is custom).")
 
         if not model_module.is_backend_compatible():
-            if model_config.model_impl != ModelImpl.TRANSFORMERS:
+            if model_config.model_impl != "transformers":
                 return None
 
             raise ValueError(
@@ -637,20 +644,20 @@ class _ModelRegistry:
             raise ValueError("No model architectures are specified")
 
         # Require transformers impl
-        if model_config.model_impl == ModelImpl.TRANSFORMERS:
+        if model_config.model_impl == "transformers":
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
                     return (model_info, arch)
-        elif model_config.model_impl == ModelImpl.TERRATORCH:
+        elif model_config.model_impl == "terratorch":
             model_info = self._try_inspect_model_cls("Terratorch")
             return (model_info, "Terratorch")
 
         # Fallback to transformers impl (after resolving convert_type)
         if (all(arch not in self.models for arch in architectures)
-                and model_config.model_impl == ModelImpl.AUTO
+                and model_config.model_impl == "auto"
                 and getattr(model_config, "convert_type", "none") == "none"):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
@@ -667,7 +674,7 @@ class _ModelRegistry:
 
         # Fallback to transformers impl (before resolving runner_type)
         if (all(arch not in self.models for arch in architectures)
-                and model_config.model_impl == ModelImpl.AUTO):
+                and model_config.model_impl == "auto"):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
@@ -688,14 +695,14 @@ class _ModelRegistry:
             raise ValueError("No model architectures are specified")
 
         # Require transformers impl
-        if model_config.model_impl == ModelImpl.TRANSFORMERS:
+        if model_config.model_impl == "transformers":
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
                     return (model_cls, arch)
-        elif model_config.model_impl == ModelImpl.TERRATORCH:
+        elif model_config.model_impl == "terratorch":
             arch = "Terratorch"
             model_cls = self._try_load_model_cls(arch)
             if model_cls is not None:
@@ -703,7 +710,7 @@ class _ModelRegistry:
 
         # Fallback to transformers impl (after resolving convert_type)
         if (all(arch not in self.models for arch in architectures)
-                and model_config.model_impl == ModelImpl.AUTO
+                and model_config.model_impl == "auto"
                 and getattr(model_config, "convert_type", "none") == "none"):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
@@ -720,7 +727,7 @@ class _ModelRegistry:
 
         # Fallback to transformers impl (before resolving runner_type)
         if (all(arch not in self.models for arch in architectures)
-                and model_config.model_impl == ModelImpl.AUTO):
+                and model_config.model_impl == "auto"):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
