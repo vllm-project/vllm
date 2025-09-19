@@ -585,10 +585,9 @@ class VllmBackend:
 
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
-        self.interpreter = PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
+        PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
                                     self.vllm_config,
-                                    self)
-        self.interpreter.run(*example_inputs)
+                                    self).run(*example_inputs)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
         if not os.path.exists(graph_path):
@@ -649,3 +648,11 @@ class VllmBackend:
             return self.split_gm(*list_args)
 
         return copy_and_call
+
+    def __del__(self):
+        # cleanup the backend explicitly to avoid hanging
+        # before program exits
+        if hasattr(self, 'split_gm'):
+            del self.split_gm
+        if hasattr(self, 'piecewise_graphs'):
+            del self.piecewise_graphs

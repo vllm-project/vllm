@@ -217,10 +217,13 @@ def _support_torch_compile(
 
     def __del__(self):
         assert self is not None
-        if self.backend is not None:
-            del self.backend.interpreter.module.__dict__
+        if hasattr(self, 'backend'):
+            # cleanup the backend explicitly to avoid hanging
+            # before program exits
+            del self.backend
         if old_del is not None:
             old_del(self)
+
     cls.__init__ = __init__
     cls.__del__ = __del__
 
