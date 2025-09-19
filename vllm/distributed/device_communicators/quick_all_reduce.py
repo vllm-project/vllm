@@ -268,7 +268,7 @@ class QuickAllReduce:
         return out
 
     def close(self):
-        if not self.disabled and getattr(self, "_ptr", None):
+        if not self.disabled and hasattr(self, "_ptr"):
             if ops is not None:
                 ops.qr_destroy(self._ptr)
             self._ptr = 0
