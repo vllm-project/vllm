@@ -381,7 +381,7 @@ class GPUModelRunner:
         tp_group = get_tp_group()
         tp_size = tp_group.world_size
         n = (num_reqs + tp_size - 1) // tp_size
-        use_dp_sampler = tp_size > 1 and n > 32
+        use_dp_sampler = tp_size > 1 and n > 32  # TODO(woosuk): Tune.
         if use_dp_sampler:
             # NOTE(woosuk): Make sure that no rank gets zero requests.
             tp_rank = tp_group.rank
