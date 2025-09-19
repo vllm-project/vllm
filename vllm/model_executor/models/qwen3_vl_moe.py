@@ -344,3 +344,5 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                         config.text_config.hidden_size)
             for _ in range(self.deepstack_num_level)
         ] if self.use_deepstack else None
+        self.visual_dim = config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level

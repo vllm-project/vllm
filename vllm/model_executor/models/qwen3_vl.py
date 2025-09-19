@@ -1075,6 +1075,8 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                         config.text_config.hidden_size)
             for _ in range(self.deepstack_num_level)
         ] if self.use_deepstack else None
+        self.visual_dim = config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
     def _get_deepstack_input_embeds(self,
                                     num_tokens: int) -> IntermediateTensors:
@@ -1313,12 +1315,8 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         ]
         multimodal_embeddings_cat = torch.cat(multimodal_embeddings, dim=0)
 
-        visual_dim = multimodal_embeddings_cat.shape[-1] // (
-            self.deepstack_num_level + 1)
-
-        main_dim, multi_dim = visual_dim, visual_dim * self.deepstack_num_level
         multimodal_embeddings_main, multimodal_embeddings_multiscale = torch.split(  # noqa:E501
-            multimodal_embeddings_cat, [main_dim, multi_dim],
+            multimodal_embeddings_cat, [self.visual_dim, self.multiscale_dim],
             dim=-1)
 
         multimodal_embeddings = torch.split(multimodal_embeddings_main,
@@ -1340,10 +1338,8 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             ],
         )
         deepstack_input_embeds = deepstack_input_embeds.view(
-            inputs_embeds.shape[0], self.deepstack_num_level,
-            visual_dim).contiguous()
-        deepstack_input_embeds = deepstack_input_embeds.permute(
-            1, 0, 2).contiguous()
+            inputs_embeds.shape[0], self.deepstack_num_level, self.visual_dim)
+        deepstack_input_embeds = deepstack_input_embeds.permute(1, 0, 2)
         return deepstack_input_embeds, multimodal_embeddings
 
     def get_input_embeddings(
@@ -1353,9 +1349,10 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         deepstack_input_embeds = None
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None and self.use_deepstack:
-            deepstack_input_embeds, multimodal_embeddings = self._compute_deepstack_embeds(  # noqa:E501
-                input_ids, inputs_embeds, multimodal_embeddings)
+        if multimodal_embeddings is not None:
+            if self.use_deepstack:
+                deepstack_input_embeds, multimodal_embeddings = self._compute_deepstack_embeds(  # noqa:E501
+                    input_ids, inputs_embeds, multimodal_embeddings)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 [self.config.image_token_id, self.config.video_token_id])
