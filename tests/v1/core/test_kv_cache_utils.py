@@ -30,6 +30,16 @@ from vllm.v1.request import Request
 # yapf: enable
 
 
+@pytest.fixture(autouse=True)
+def _auto_init_hash_fn(request):
+    hash_fn: Callable
+    if "hash_fn" in request.fixturenames:
+        hash_fn = init_none_hash(request.getfixturevalue("hash_fn"))
+    else:
+        hash_fn = sha256
+    init_none_hash(hash_fn)
+
+
 def make_request(
     request_id: str,
     prompt_token_ids: list[int],
@@ -280,9 +290,11 @@ def test_free_kv_cache_block_queue_popleft_n():
     # Pop 0 block
     # fake_head->b1->b3->b5->b4->b0->b2->fake_tail
     assert len(queue.popleft_n(0)) == 0
+    assert queue.num_free_blocks == 6
     # Pop 1 block
     # fake_head->b3->b5->b4->b0->b2->fake_tail
     result_blocks = queue.popleft_n(1)
+    assert queue.num_free_blocks == 5
     assert len(result_blocks) == 1
     assert result_blocks[0] is blocks[1]
     for block in result_blocks:
@@ -292,6 +304,7 @@ def test_free_kv_cache_block_queue_popleft_n():
     # fake_head->b4->b0->b2->fake_tail
     result_blocks = queue.popleft_n(2)
     assert len(result_blocks) == 2
+    assert queue.num_free_blocks == 3
     assert result_blocks[0] is blocks[3]
     assert result_blocks[1] is blocks[5]
     for block in result_blocks:
@@ -301,6 +314,7 @@ def test_free_kv_cache_block_queue_popleft_n():
     # fake_head->fake_tail
     result_blocks = queue.popleft_n(3)
     assert len(result_blocks) == 3
+    assert queue.num_free_blocks == 0
     assert result_blocks[0] is blocks[4]
     assert result_blocks[1] is blocks[0]
     assert result_blocks[2] is blocks[2]
@@ -420,7 +434,6 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_block_tokens(hash_fn):
-    init_none_hash(hash_fn)
     parent_block_hash = BlockHash(b"123")
     curr_block_token_ids = (1, 2, 3)
     extra_keys = ("key1", "key2")
@@ -433,8 +446,6 @@ def test_hash_block_tokens(hash_fn):
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_request_block_hasher(hash_fn):
-    kv_cache_utils.init_none_hash(hash_fn)
-
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
@@ -457,8 +468,6 @@ def test_request_block_hasher(hash_fn):
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_tokens_different_mm_input(hash_fn):
-    init_none_hash(hash_fn)
-
     request1 = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
@@ -487,8 +496,6 @@ def test_hash_tokens_different_mm_input(hash_fn):
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_request_tokens_no_mm_inputs(hash_fn):
-    kv_cache_utils.init_none_hash(hash_fn)
-
     request = make_request(
         request_id="0",
         prompt_token_ids=[_ for _ in range(6)],
@@ -506,27 +513,27 @@ def test_hash_request_tokens_no_mm_inputs(hash_fn):
     assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), None))
 
 
+def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:
+    return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
+
+
 def test_metrics():
     """
     Test the prefix caching metrics.
     """
-
-    def stats(requests, queries, hits):
-        return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
-
     metrics = PrefixCachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
-    metrics.observe(stats(1, 20, 9))
+    metrics.observe(_stats(1, 20, 9))
     # 9 / 20 = 0.45
     assert metrics.hit_rate == 0.45
 
-    metrics.observe(stats(4, 80, 16))
+    metrics.observe(_stats(4, 80, 16))
 
     # 25 / 100 = 0.25
     assert metrics.hit_rate == 0.25
 
-    metrics.observe(stats(1, 10, 2))
+    metrics.observe(_stats(1, 10, 2))
 
     # Remove (20, 9) and add (10, 2): 18 / 90 = 0.2
     assert metrics.aggregated_requests == 5
@@ -540,6 +547,38 @@ def test_metrics():
     assert metrics.aggregated_query_total == 0
     assert metrics.aggregated_query_hit == 0
     assert not metrics.query_queue
+
+
+def test_metrics_empty_stats():
+    """
+    Test the prefix caching metrics with empty stats.
+    """
+    metrics = PrefixCachingMetrics(max_recent_requests=5)
+    metrics.observe(_stats(0, 0, 0))
+    metrics.observe(_stats(1, 20, 9))
+    metrics.observe(_stats(0, 0, 0))
+    metrics.observe(_stats(4, 80, 16))
+    metrics.observe(_stats(0, 0, 0))
+    metrics.observe(_stats(1, 10, 2))
+    # Remove (20, 9) and add (10, 2): 18 / 90 = 0.2
+    assert metrics.aggregated_requests == 5
+    assert metrics.aggregated_query_total == 90
+    assert metrics.aggregated_query_hit == 18
+    assert metrics.hit_rate == 0.2
+
+    # Only the latest added stats preserved 10 / 20 = 0.5
+    metrics.observe(_stats(11, 20, 10))
+    assert metrics.aggregated_requests == 11
+    assert metrics.aggregated_query_total == 20
+    assert metrics.aggregated_query_hit == 10
+    assert metrics.hit_rate == 0.5
+
+    # Only the latest added stats preserved 30 / 40 = 0.75
+    metrics.observe(_stats(22, 40, 30))
+    assert metrics.aggregated_requests == 22
+    assert metrics.aggregated_query_total == 40
+    assert metrics.aggregated_query_hit == 30
+    assert metrics.hit_rate == 0.75
 
 
 def test_get_kv_cache_configs_multiple_workers():
