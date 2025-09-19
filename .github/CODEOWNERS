@@ -66,18 +66,25 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/models/test_transformers.py @hmellor
 
 # Docs
-/docs @hmellor
+/docs/mkdocs @hmellor
+/docs/**/*.yml @hmellor
+/requirements/docs.txt @hmellor
+.readthedocs.yaml @hmellor
 mkdocs.yaml @hmellor
 
+# Linting
+.markdownlint.yaml @hmellor
+.pre-commit-config.yaml @hmellor
+
 # CPU
-/vllm/v1/worker/^cpu @bigPYJ1151
+/vllm/v1/worker/cpu* @bigPYJ1151
 /csrc/cpu @bigPYJ1151
 /vllm/platforms/cpu.py @bigPYJ1151
 /cmake/cpu_extension.cmake @bigPYJ1151
 /docker/Dockerfile.cpu @bigPYJ1151
 
 # Intel GPU
-/vllm/v1/worker/^xpu @jikunshang
+/vllm/v1/worker/xpu* @jikunshang
 /vllm/platforms/xpu.py @jikunshang
 /docker/Dockerfile.xpu @jikunshang
 
