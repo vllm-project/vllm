@@ -832,7 +832,7 @@ class MambaMixer2(MambaBase, CustomOp):
                         attn_metadata.last_computed_token_block_offset
                     first_aligned_chunk = \
                       torch.concat([torch.zeros(1, dtype=last_chunk_p.dtype, \
-                      device=last_chunk_p.device), last_chunk_p])[seq_idx] + 1 \
+                      device=last_chunk_p.device), last_chunk_p + 1])[seq_idx] \
                        + chunk_stride - 1 \
                        - last_computed_token_block_offset[seq_idx] // chunk_size
                     from_where = states[
