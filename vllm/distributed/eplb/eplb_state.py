@@ -337,11 +337,12 @@ class EplbState:
         Args:
             model (MixtureOfExperts): The MoE model.
             is_dummy (bool): If `True`, this is a dummy step and the load
-              metrics recorded in this forward pass will not count. Defaults
-              to `False`.
+                metrics recorded in this forward pass will not count.
+                Defaults to `False`.
             is_profile (bool): If `True`, perform a dummy rearrangement
-              with maximum communication cost. This is used in `profile_run`
-              to reserve enough memory for the communication buffer.
+                with maximum communication cost. This is used in
+                `profile_run` to reserve enough memory
+                for the communication buffer.
             log_stats (bool): If `True`, log the expert load metrics.
 
         # Stats

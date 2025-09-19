@@ -33,7 +33,6 @@ def list_safetensors(path: str = "") -> list[str]:
 
     Args:
         path: The object storage path to list from.
-        allow_pattern: A list of patterns of which files to pull.
 
     Returns:
         list[str]: List of full object storage paths allowed by the pattern
@@ -54,8 +53,7 @@ class ObjectStorageModel:
         dir: The temporary created directory.
 
     Methods:
-        pull_files(): Pull model from object storage to the temporary
-        directory.
+        pull_files(): Pull model from object storage to the temporary directory.
     """
 
     def __init__(self) -> None:

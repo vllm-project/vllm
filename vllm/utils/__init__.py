@@ -163,6 +163,12 @@ STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
+MB_bytes = 1_000_000
+"""The number of bytes in one megabyte (MB)."""
+
+MiB_bytes = 1 << 20
+"""The number of bytes in one mebibyte (MiB)."""
+
 GB_bytes = 1_000_000_000
 """The number of bytes in one gigabyte (GB)."""
 
@@ -2076,6 +2082,7 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
+@lru_cache
 def supports_kw(
     callable: Callable[..., object],
     kw_name: str,
@@ -3436,3 +3443,30 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+def length_from_prompt_token_ids_or_embeds(
+    prompt_token_ids: Optional[list[int]],
+    prompt_embeds: Optional[torch.Tensor],
+) -> int:
+    """Calculate the request length (in number of tokens) give either 
+    prompt_token_ids or prompt_embeds.
+    """
+    prompt_token_len = None if prompt_token_ids is None else len(
+        prompt_token_ids)
+    prompt_embeds_len = \
+        None if prompt_embeds is None else len(prompt_embeds)
+
+    if prompt_token_len is None:
+        if prompt_embeds_len is None:
+            raise ValueError(
+                "Neither prompt_token_ids nor prompt_embeds were defined.")
+        return prompt_embeds_len
+    else:
+        if (prompt_embeds_len is not None
+                and prompt_embeds_len != prompt_token_len):
+            raise ValueError(
+                "Prompt token ids and prompt embeds had different lengths"
+                f" prompt_token_ids={prompt_token_len}"
+                f" prompt_embeds={prompt_embeds_len}")
+        return prompt_token_len

@@ -7,17 +7,17 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import (MultiModalCache,
                                    MultiModalProcessorCacheItem,
                                    MultiModalProcessorCacheItemMetadata,
-                                   processor_cache_from_config,
-                                   receiver_cache_from_config)
+                                   engine_receiver_cache_from_config,
+                                   processor_cache_from_config)
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargsItem,
                                     MultiModalKwargsItems,
                                     MultiModalSharedField)
 from vllm.multimodal.processing import PromptInsertion
-from vllm.multimodal.registry import MultiModalRegistry
 
 
 def _dummy_elem(
@@ -96,7 +96,9 @@ def _create_vllm_config(
     enable_ipc: bool,
 ):
     return VllmConfig(
-        model_config=ModelConfig(mm_processor_cache_gb=mm_processor_cache_gb),
+        model_config=ModelConfig(
+            model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            mm_processor_cache_gb=mm_processor_cache_gb),
         parallel_config=ParallelConfig(
             data_parallel_size=1 if enable_ipc else 2),
     )
@@ -113,15 +115,16 @@ def _compare_caches(
     n_iter: int = 100,
     seed: int = 0,
 ):
-    mm_registry = MultiModalRegistry()
-    cache_0_p0 = processor_cache_from_config(config_0, mm_registry)
-    cache_0_p1 = receiver_cache_from_config(config_0, mm_registry)
-    cache_1_p0 = processor_cache_from_config(config_1, mm_registry)
-    cache_1_p1 = receiver_cache_from_config(config_1, mm_registry)
+    cache_0_p0 = processor_cache_from_config(config_0, MULTIMODAL_REGISTRY)
+    cache_0_p1 = engine_receiver_cache_from_config(config_0,
+                                                   MULTIMODAL_REGISTRY)
+    cache_1_p0 = processor_cache_from_config(config_1, MULTIMODAL_REGISTRY)
+    cache_1_p1 = engine_receiver_cache_from_config(config_1,
+                                                   MULTIMODAL_REGISTRY)
 
     cache_size_gb = max(
-        config_0.model_config.mm_processor_cache_gb,
-        config_1.model_config.mm_processor_cache_gb,
+        config_0.model_config.multimodal_config.mm_processor_cache_gb,
+        config_1.model_config.multimodal_config.mm_processor_cache_gb,
     )
     item_size_gb = int(cache_size_gb / item_capacity)
 

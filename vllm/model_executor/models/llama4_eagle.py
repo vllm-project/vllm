@@ -205,23 +205,21 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> None:
+
+        def transform(inputs):
+            name, loaded_weight = inputs
+            name, weight = self.permute_qk_weight_for_rotary(
+                name, loaded_weight)
+            if "lm_head" not in name:
+                name = "model." + name
+            return name, weight
+
         loader = AutoWeightsLoader(
             self,
             # lm_head is tied with target model (Llama4ForCausalLM)
             skip_prefixes=(["lm_head."]),
         )
-
-        model_weights = {}
-        weights = [
-            self.permute_qk_weight_for_rotary(name, loaded_weight)
-            for name, loaded_weight in weights
-        ]
-        for name, loaded_weight in weights:
-            if "lm_head" not in name:
-                name = "model." + name
-            model_weights[name] = loaded_weight
-
-        loader.load_weights(model_weights.items())
+        loader.load_weights(map(transform, weights))
 
     def get_input_embeddings(
         self,
