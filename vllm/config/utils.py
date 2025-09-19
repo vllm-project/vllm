@@ -15,12 +15,12 @@ if TYPE_CHECKING:
 
     from vllm.config.vllm import VllmConfig
 
-    ConfigType = type[DataclassInstance]
 else:
+    DataclassInstance = Any
+
     VllmConfig = Any
 
-    ConfigType = type
-
+ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
 
 
@@ -192,11 +192,7 @@ def get_layers_from_vllm_config(
     }
 
 
-DataclassInstanceT = TypeVar("DataclassInstanceT", bound=DataclassInstance)
-
-
-def update_config(config: DataclassInstanceT,
-                  overrides: dict[str, Any]) -> DataclassInstanceT:
+def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
     processed_overrides = {}
     for field_name, value in overrides.items():
         assert hasattr(
