@@ -677,6 +677,15 @@ steps:
   commands:
     - pytest -v -s models/language/pooling_mteb_test
 
+- label: Multi-Modal Test
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/multimodal
+  commands:
+    - pytest -v -s tests/multimodal/test_audio.py
+
 - label: Multi-Modal Processor Test # 44min
   timeout_in_minutes: 60
   source_file_dependencies:
