@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -22,9 +23,14 @@ logger = init_logger(__name__)
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
-        self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
+    def __init__(self, vllm_config: "VllmConfig",
+                 kv_cache_config: KVCacheConfig, role: KVConnectorRole):
+        super().__init__(vllm_config=vllm_config,
+                         kv_cache_config=kv_cache_config,
+                         role=role)
+        self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config,
+                                                      kv_cache_config, role,
+                                                      self)
 
     # ==============================
     # Worker-side methods
@@ -153,7 +159,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        blocks: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
@@ -165,4 +171,4 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        return self._lmcache_engine.request_finished(request, block_ids)
+        return self._lmcache_engine.request_finished(request, blocks)
