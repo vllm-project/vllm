@@ -226,6 +226,10 @@ class TpuPlatform(Platform):
         torch.ops.xla.dynamo_set_buffer_donor_(src_cache, True)
         dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()
 
+    @classmethod
+    def use_sync_weight_loader(cls) -> bool:
+        return True
+
 
 try:
     from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
