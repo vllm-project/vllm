@@ -129,12 +129,14 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         temp: torch.Tensor,
+        all_random: bool,
     ) -> torch.Tensor:
         # Use in-place division to avoid creating a new tensor.
         # Avoid div by -1 (which is mask for greedy), because there may be
         # -inf in logits, which can cause nan in probs.
-        return logits.div_(
-            torch.where(temp < _SAMPLING_EPS, 1.0, temp).unsqueeze(dim=1))
+        if not all_random:
+            temp = torch.where(temp < _SAMPLING_EPS, 1.0, temp)
+        return logits.div_(temp.unsqueeze(dim=1))
 
     def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
@@ -168,7 +170,8 @@ class Sampler(nn.Module):
         assert sampling_metadata.temperature is not None
 
         # Apply temperature.
-        logits = self.apply_temperature(logits, sampling_metadata.temperature)
+        logits = self.apply_temperature(logits, sampling_metadata.temperature,
+                                        sampling_metadata.all_random)
 
         # Apply logits processors that only apply to random sampling
         # (argmax invariant)
