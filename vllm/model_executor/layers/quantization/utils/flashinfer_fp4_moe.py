@@ -7,7 +7,8 @@ import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
@@ -47,32 +48,23 @@ def reorder_w1w3_to_w3w1(weight: torch.Tensor,
 
 
 def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-    moe: FusedMoEConfig,
-    a1_gscale: torch.Tensor,
-) -> mk.FusedMoEPrepareAndFinalize:
+        moe: FusedMoEConfig) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1
-    return FlashInferCutlassMoEPrepareAndFinalize(use_dp, a1_gscale=a1_gscale)
+    return FlashInferCutlassMoEPrepareAndFinalize(use_dp)
 
 
 def select_nvfp4_gemm_impl(
     moe: FusedMoEConfig,
-    g1_alphas: torch.Tensor,
-    g2_alphas: torch.Tensor,
-    a1_gscale: torch.Tensor,
-    a2_gscale: torch.Tensor,
+    moe_quant_config: FusedMoEQuantConfig,
     allow_flashinfer: bool,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
     """Return a GEMM *experts* implementation for NV-FP4 fused-MoE layers"""
 
     if allow_flashinfer:
         return FlashInferExperts(
-            g1_alphas=g1_alphas,
-            g2_alphas=g2_alphas,
-            a1_gscale=a1_gscale,
-            a2_gscale=a2_gscale,
             out_dtype=moe.in_dtype,
-            quant_dtype="nvfp4",
+            quant_config=moe_quant_config,
             ep_rank=moe.moe_parallel_config.ep_rank,
             ep_size=moe.moe_parallel_config.ep_size,
             tp_rank=moe.moe_parallel_config.tp_rank,
