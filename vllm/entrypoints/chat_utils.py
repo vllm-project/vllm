@@ -1450,9 +1450,13 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
             and isinstance(message["tool_calls"], list)
         ):
             for item in message["tool_calls"]:
-                item["function"]["arguments"] = json.loads(
-                    item["function"]["arguments"]
-                )
+                arguments = item["function"]["arguments"]
+                function_name = item["function"]["name"]
+                try:
+                  item["function"]["arguments"] = json.loads(arguments)
+                except Exception as e:
+                  logger.exception(f"load function arguments to json error, info: {e}, function name: {function_name}, arguments: {arguments} !!!")
+                  raise ValueError(str(e)) from e
 
 
 def parse_chat_messages(
