@@ -222,3 +222,80 @@ def test_eagle_correctness(
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
+
+
+@pytest.mark.parametrize(["model_setup", "mm_enabled"], [
+    (("mimo_mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False),
+],
+                         ids=["mimo_mtp"])
+@pytest.mark.parametrize("attn_backend",
+                         get_attn_backend_list_based_on_platform())
+def test_mtp_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    model_setup: tuple[str, str, int],
+    mm_enabled: bool,
+    attn_backend: str,
+):
+    if attn_backend == "TREE_ATTN":
+        pytest.skip("MTP does not support tree-based speculative decoding")
+
+    if (attn_backend == "TRITON_ATTN_VLLM_V1"
+            and not current_platform.is_rocm()):
+        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+                    "multi-token MTP spec decode on current platform")
+
+    # Generate test prompts inside the function instead of using fixture
+    test_prompts = get_test_prompts(mm_enabled)
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using MTP speculative decoding.
+    model_setup: (method, model_name, tp_size)
+    '''
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        m.setenv("VLLM_MLA_DISABLE", "1")
+        m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+
+        if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+
+        method, model_name, tp_size = model_setup
+
+        ref_llm = LLM(model=model_name,
+                      max_model_len=2048,
+                      tensor_parallel_size=tp_size,
+                      trust_remote_code=True)
+        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+        del ref_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
+
+        spec_llm = LLM(
+            model=model_name,
+            trust_remote_code=True,
+            tensor_parallel_size=tp_size,
+            speculative_config={
+                "method": method,
+                "num_speculative_tokens": 1,
+                "max_model_len": 2048,
+            },
+            max_model_len=2048,
+        )
+        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+        matches = 0
+        misses = 0
+        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+            if ref_output.outputs[0].text == spec_output.outputs[0].text:
+                matches += 1
+            else:
+                misses += 1
+                print(f"ref_output: {ref_output.outputs[0].text}")
+                print(f"spec_output: {spec_output.outputs[0].text}")
+
+        # Heuristic: expect at least 80% of the prompts to match exactly
+        # Upon failure, inspect the outputs to check for inaccuracy.
+        assert matches > int(0.8 * len(ref_outputs))
+        del spec_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
