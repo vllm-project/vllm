@@ -185,7 +185,7 @@ Alternatively, follow these example steps to implement your own plugin:
                 self.s3_path_format = os.getenv("S3_PATH_TEMPLATE")
                 self.local_path_format = os.getenv("LOCAL_PATH_TEMPLATE")
 
-            async def resolve_lora(self, base_model_name, lora_name):
+            async def resolve_lora(self, base_model_name, lora_name, security_config):
                 s3_path = self.s3_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
                 local_path = self.local_path_format.format(base_model_name=base_model_name, lora_name=lora_name)
 
@@ -197,7 +197,8 @@ Alternatively, follow these example steps to implement your own plugin:
                 lora_request = LoRARequest(
                     lora_name=lora_name,
                     lora_path=local_path,
-                    lora_int_id=abs(hash(lora_name))
+                    lora_int_id=abs(hash(lora_name)),
+                    security_config=security_config
                 )
                 return lora_request
         ```

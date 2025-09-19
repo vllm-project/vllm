@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
+from vllm.config.security import SecurityConfig
 from vllm.entrypoints.openai.protocol import CompletionRequest, ErrorResponse
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
@@ -48,6 +49,7 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     skip_tokenizer_init: bool = False
+    security_config: Optional[SecurityConfig] = None
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -55,16 +57,20 @@ class MockModelConfig:
 
 class MockLoRAResolver(LoRAResolver):
 
-    async def resolve_lora(self, base_model_name: str,
-                           lora_name: str) -> Optional[LoRARequest]:
+    async def resolve_lora(
+            self, base_model_name: str, lora_name: str,
+            security_config: Optional[SecurityConfig]
+    ) -> Optional[LoRARequest]:
         if lora_name == "test-lora":
             return LoRARequest(lora_name="test-lora",
                                lora_int_id=1,
-                               lora_local_path="/fake/path/test-lora")
+                               lora_local_path="/fake/path/test-lora",
+                               security_config=security_config)
         elif lora_name == "invalid-lora":
             return LoRARequest(lora_name="invalid-lora",
                                lora_int_id=2,
-                               lora_local_path="/fake/path/invalid-lora")
+                               lora_local_path="/fake/path/invalid-lora",
+                               security_config=security_config)
         return None
 
 

@@ -248,7 +248,8 @@ class OpenAIServingModels:
             # Try to resolve using available resolvers
             for resolver in self.lora_resolvers:
                 lora_request = await resolver.resolve_lora(
-                    base_model_name, lora_name)
+                    base_model_name, lora_name,
+                    self.model_config.security_config)
 
                 if lora_request is not None:
                     found_adapter = True

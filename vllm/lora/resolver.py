@@ -6,6 +6,7 @@ from collections.abc import Set
 from dataclasses import dataclass, field
 from typing import Optional
 
+from vllm.config.security import SecurityConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 
@@ -22,8 +23,10 @@ class LoRAResolver(ABC):
     """
 
     @abstractmethod
-    async def resolve_lora(self, base_model_name: str,
-                           lora_name: str) -> Optional[LoRARequest]:
+    async def resolve_lora(
+            self, base_model_name: str, lora_name: str,
+            security_config: Optional[SecurityConfig]
+    ) -> Optional[LoRARequest]:
         """Abstract method to resolve and fetch a LoRA model adapter.
 
         Implements logic to locate and download LoRA adapter based on the name.
@@ -32,6 +35,7 @@ class LoRAResolver(ABC):
         Args:
             base_model_name: The name/identifier of the base model to resolve.
             lora_name: The name/identifier of the LoRA model to resolve.
+            security_config: optional SecurityConfig for signature verification
 
         Returns:
             Optional[LoRARequest]: The resolved LoRA model information, or None
