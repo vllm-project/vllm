@@ -32,7 +32,8 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
         value_layout, value_layout_opts = StridedLayout, dict()
         scale_layout, scale_layout_opts = StridedLayout, dict()
     elif current_platform.is_rocm():
-        from triton_kernels.tensor_details.layout import StridedLayout, GFX950MXScaleLayout
+        from triton_kernels.tensor_details.layout import (GFX950MXScaleLayout,
+                                                          StridedLayout)
         value_layout, value_layout_opts = StridedLayout, dict()
         scale_layout, scale_layout_opts = StridedLayout, dict()
         if envs.VLLM_ROCM_TRITON_HIP_PRESHUFFLE_SCALES:
