@@ -13,7 +13,7 @@ logger = init_logger(__name__)
 try:
     import intel_extension_for_pytorch as ipex
 except ImportError as e:
-    logger.warning("Import error msg: %s", e.msg)
+    logger.debug("Import error msg: %s", e.msg)
 
 
 class ipex_ops:
@@ -149,17 +149,6 @@ class ipex_ops:
                                                      is_neox, rot_dim)
 
     @staticmethod
-    def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
-                                 key: torch.Tensor, head_size: int,
-                                 cos_sin_cache: torch.Tensor, is_neox: bool,
-                                 rot_dim: int,
-                                 cos_sin_cache_offsets: torch.Tensor) -> None:
-        ipex.llm.functional.rotary_embedding_batched(positions, query, key,
-                                                     head_size, cos_sin_cache,
-                                                     is_neox, rot_dim,
-                                                     cos_sin_cache_offsets)
-
-    @staticmethod
     def rms_norm(input: torch.Tensor, weight: torch.Tensor,
                  epsilon: float) -> torch.Tensor:
         return ipex.llm.functional.rms_norm(input, weight, epsilon)
@@ -242,10 +231,9 @@ class ipex_ops:
         k_scale_float: float = 1.0,
         v_scale_float: float = 1.0,
     ) -> None:
-        assert kv_cache_dtype == "auto"
-        # TODO: support FP8 kv cache.
         ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
-            key, value, key_cache, value_cache, slot_mapping)
+            key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
+            k_scale_float, v_scale_float)
 
     @staticmethod
     def flash_attn_varlen_func(

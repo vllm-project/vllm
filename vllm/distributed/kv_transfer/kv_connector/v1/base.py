@@ -149,7 +149,7 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+                      **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -182,7 +182,8 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+                      attn_metadata: "AttentionMetadata",
+                      **kwargs: Any) -> None:
         """
         Start saving a layer of KV cache from vLLM's paged buffer 
         to the connector. This is called from within attention layer to
@@ -226,6 +227,14 @@ class KVConnectorBase_V1(ABC):
         """
         return None, None
 
+    def shutdown(self):
+        """
+        Shutdown the connector. This is called when the worker process
+        is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
+        """
+        return None
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -235,7 +244,7 @@ class KVConnectorBase_V1(ABC):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -247,8 +256,11 @@ class KVConnectorBase_V1(ABC):
 
         Returns:
             A tuple with the following elements:
-                - The number of tokens that can be loaded from the 
-                  external KV cache beyond what is already computed.
+                - An optional number of tokens that can be loaded from the 
+                  external KV cache beyond what is already computed. 
+                  If None, it means that the connector needs more time to
+                  determine the number of matched tokens, and the scheduler
+                  should query for this request again later.
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps). Must be
                   'False' if the first element is 0.
@@ -342,4 +354,15 @@ class KVConnectorBase_V1(ABC):
         if cls is KVConnectorBase_V1:
             raise TypeError("get_required_kvcache_layout should not be called "
                             "on the abstract base class")
+        return None
+
+    def get_finished_count(self) -> Optional[int]:
+        """
+        Get the count of requests expected to complete send/receive operations
+        via this connector.
+
+        Returns:
+            int: expected sending or receiving completion count.
+        """
+
         return None

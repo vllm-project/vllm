@@ -562,7 +562,9 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
         self.bert = BertPoolingModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "bert"),
                                      embedding_class=BertEmbedding)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = nn.Linear(config.hidden_size,
+                                    config.num_labels,
+                                    dtype=vllm_config.model_config.head_dtype)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -609,3 +611,55 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                          positions=positions,
                          inputs_embeds=inputs_embeds,
                          intermediate_tensors=intermediate_tensors)
+
+
+@default_pooling_type("ALL")
+class BertForTokenClassification(nn.Module):
+    is_pooling_model = True
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        self.head_dtype = vllm_config.model_config.head_dtype
+        self.num_labels = config.num_labels
+        self.bert = BertModel(vllm_config=vllm_config,
+                              prefix=maybe_prefix(prefix, "bert"),
+                              embedding_class=BertEmbedding)
+        self.classifier = nn.Linear(config.hidden_size,
+                                    config.num_labels,
+                                    dtype=self.head_dtype)
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+        })
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(self)
+        loaded_params = loader.load_weights(weights)
+        return loaded_params
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+
+        if token_type_ids is not None:
+            assert self.bert.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
+            assert input_ids is not None
+            _encode_token_type_ids(input_ids, token_type_ids)
+
+        hidden_states = self.bert(input_ids=input_ids,
+                                  positions=positions,
+                                  inputs_embeds=inputs_embeds,
+                                  intermediate_tensors=intermediate_tensors)
+
+        hidden_states = hidden_states.to(self.head_dtype)
+        return self.classifier(hidden_states)

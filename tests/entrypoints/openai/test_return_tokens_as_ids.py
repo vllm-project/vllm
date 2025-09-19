@@ -10,10 +10,30 @@ import pytest
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
-from .test_completion import default_server_args  # noqa: F401
-from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
-from .test_completion import zephyr_lora_files  # noqa: F401
-from .test_completion import MODEL_NAME
+
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+
+
+@pytest.fixture(scope="module")
+def default_server_args(zephyr_lora_files):
+    return [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--max-num-seqs",
+        "128",
+        "--enforce-eager",
+        # lora config
+        "--enable-lora",
+        "--lora-modules",
+        f"zephyr-lora={zephyr_lora_files}",
+        "--max-lora-rank",
+        "64",
+        "--max-cpu-loras",
+        "2",
+    ]
 
 
 @pytest.fixture(scope="module")

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# imports for guided decoding tests
+# imports for structured outputs tests
 import json
 from typing import Optional
 
@@ -12,11 +12,9 @@ import pytest_asyncio
 import regex as re
 import requests
 import torch
-from openai import BadRequestError, OpenAI
+from openai import BadRequestError
 
 from ...utils import RemoteOpenAIServer
-from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
-from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
@@ -30,15 +28,9 @@ def monkeypatch_module():
     mpatch.undo()
 
 
-@pytest.fixture(scope="module", params=[False, True])
-def server(
-        request,
-        monkeypatch_module,
-        zephyr_lora_files,  #noqa: F811
-        zephyr_lora_added_tokens_files):  # noqa: F811
-
-    use_v1 = request.param
-    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
+@pytest.fixture(scope="module")
+def server(monkeypatch_module, zephyr_lora_files):  #noqa: F811
+    monkeypatch_module.setenv('VLLM_USE_V1', '1')
 
     args = [
         # use half precision for speed and memory savings in CI environment
@@ -51,7 +43,6 @@ def server(
         "--enable-lora",
         "--lora-modules",
         f"zephyr-lora={zephyr_lora_files}",
-        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -64,13 +55,6 @@ def server(
         yield remote_server
 
 
-@pytest.fixture
-def is_v1_server(server):
-    import os
-    assert os.environ['VLLM_USE_V1'] in ['0', '1']
-    return os.environ['VLLM_USE_V1'] == '1'
-
-
 @pytest_asyncio.fixture
 async def client(server):
     async with server.get_async_client() as async_client:
@@ -81,7 +65,7 @@ async def client(server):
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_no_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
     messages = [{
@@ -487,10 +471,10 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_guided_choice_chat(client: openai.AsyncOpenAI,
-                                  sample_guided_choice, is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+async def test_structured_outputs_choice_chat(
+    client: openai.AsyncOpenAI,
+    sample_structured_outputs_choices,
+):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -505,9 +489,10 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         messages=messages,
         max_completion_tokens=10,
         temperature=0.7,
-        extra_body=dict(guided_choice=sample_guided_choice))
+        extra_body=dict(
+            structured_outputs={"choice": sample_structured_outputs_choices}))
     choice1 = chat_completion.choices[0].message.content
-    assert choice1 in sample_guided_choice
+    assert choice1 in sample_structured_outputs_choices
 
     messages.append({"role": "assistant", "content": choice1})
     messages.append({
@@ -519,18 +504,18 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI,
         messages=messages,
         max_completion_tokens=10,
         temperature=0.7,
-        extra_body=dict(guided_choice=sample_guided_choice))
+        extra_body=dict(
+            structured_outputs={"choice": sample_structured_outputs_choices}))
     choice2 = chat_completion.choices[0].message.content
-    assert choice2 in sample_guided_choice
+    assert choice2 in sample_structured_outputs_choices
     assert choice1 != choice2
 
 
 @pytest.mark.asyncio
-async def test_guided_json_chat(client: openai.AsyncOpenAI, sample_json_schema,
-                                is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
-
+async def test_structured_outputs_json_chat(
+    client: openai.AsyncOpenAI,
+    sample_json_schema,
+):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -545,7 +530,7 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI, sample_json_schema,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=1000,
-        extra_body=dict(guided_json=sample_json_schema))
+        extra_body=dict(structured_outputs={"json": sample_json_schema}))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json1 = json.loads(message.content)
@@ -562,7 +547,7 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI, sample_json_schema,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=1000,
-        extra_body=dict(guided_json=sample_json_schema))
+        extra_body=dict(structured_outputs={"json": sample_json_schema}))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json2 = json.loads(message.content)
@@ -572,10 +557,10 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI, sample_json_schema,
 
 
 @pytest.mark.asyncio
-async def test_guided_regex_chat(client: openai.AsyncOpenAI, sample_regex,
-                                 is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+async def test_structured_outputs_regex_chat(
+    client: openai.AsyncOpenAI,
+    sample_regex,
+):
 
     messages = [{
         "role": "system",
@@ -590,7 +575,7 @@ async def test_guided_regex_chat(client: openai.AsyncOpenAI, sample_regex,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=20,
-        extra_body=dict(guided_regex=sample_regex))
+        extra_body=dict(structured_outputs={"regex": sample_regex}))
     ip1 = chat_completion.choices[0].message.content
     assert ip1 is not None
     assert re.fullmatch(sample_regex, ip1) is not None
@@ -601,7 +586,7 @@ async def test_guided_regex_chat(client: openai.AsyncOpenAI, sample_regex,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=20,
-        extra_body=dict(guided_regex=sample_regex))
+        extra_body=dict(structured_outputs={"regex": sample_regex}))
     ip2 = chat_completion.choices[0].message.content
     assert ip2 is not None
     assert re.fullmatch(sample_regex, ip2) is not None
@@ -609,7 +594,7 @@ async def test_guided_regex_chat(client: openai.AsyncOpenAI, sample_regex,
 
 
 @pytest.mark.asyncio
-async def test_guided_decoding_type_error(client: openai.AsyncOpenAI):
+async def test_structured_outputs_type_error(client: openai.AsyncOpenAI):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -621,17 +606,19 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI):
     }]
 
     with pytest.raises(openai.BadRequestError):
-        _ = await client.chat.completions.create(model=MODEL_NAME,
-                                                 messages=messages,
-                                                 extra_body=dict(guided_regex={
-                                                     1: "Python",
-                                                     2: "C++"
-                                                 }))
+        _ = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            extra_body=dict(
+                structured_outputs={"regex": {
+                    1: "Python",
+                    2: "C++"
+                }}))
 
 
 @pytest.mark.asyncio
-async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
-                                           sample_guided_choice):
+async def test_structured_outputs_choice_chat_logprobs(
+        client: openai.AsyncOpenAI, sample_structured_outputs_choices):
 
     messages = [{
         "role": "system",
@@ -648,7 +635,8 @@ async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
         max_completion_tokens=10,
         logprobs=True,
         top_logprobs=5,
-        extra_body=dict(guided_choice=sample_guided_choice))
+        extra_body=dict(
+            structured_outputs={"choice": sample_structured_outputs_choices}))
 
     assert chat_completion.choices[0].logprobs is not None
     assert chat_completion.choices[0].logprobs.content is not None
@@ -660,20 +648,33 @@ async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_named_tool_use(client: openai.AsyncOpenAI, sample_json_schema,
-                              is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Tool use is only supported in v1 engine")
+async def test_named_tool_use(
+    client: openai.AsyncOpenAI,
+    sample_json_schema,
+):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
     }, {
         "role":
         "user",
-        "content":
-        f"Give an example JSON for an employee profile that "
-        f"fits this schema: {sample_json_schema}"
+        "content": ("Give an example JSON for an employee "
+                    "profile using the specified tool.")
     }]
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name",
+            "description": "This is a dummy function",
+            "parameters": sample_json_schema
+        }
+    }]
+    tool_choice = {
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name"
+        }
+    }
 
     # non-streaming
 
@@ -681,20 +682,8 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, sample_json_schema,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=1000,
-        tools=[{
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name",
-                "description": "This is a dummy function",
-                "parameters": sample_json_schema
-            }
-        }],
-        tool_choice={
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name"
-            }
-        },
+        tools=tools,
+        tool_choice=tool_choice,
     )
     message = chat_completion.choices[0].message
     assert len(message.content) == 0
@@ -712,25 +701,12 @@ async def test_named_tool_use(client: openai.AsyncOpenAI, sample_json_schema,
 
     # streaming
 
-    stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        max_completion_tokens=1000,
-        tools=[{
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name",
-                "description": "This is a dummy function",
-                "parameters": sample_json_schema
-            }
-        }],
-        tool_choice={
-            "type": "function",
-            "function": {
-                "name": "dummy_function_name"
-            }
-        },
-        stream=True)
+    stream = await client.chat.completions.create(model=MODEL_NAME,
+                                                  messages=messages,
+                                                  max_completion_tokens=1000,
+                                                  tools=tools,
+                                                  tool_choice=tool_choice,
+                                                  stream=True)
 
     output = []
     finish_reason_count = 0
@@ -833,11 +809,7 @@ async def test_response_format_json_object(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_response_format_json_schema(client: openai.AsyncOpenAI,
-                                           is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip(
-            "JSON schema response format is only supported in v1 engine")
+async def test_response_format_json_schema(client: openai.AsyncOpenAI):
     prompt = 'what is 1+1? The format is "result": 2'
     # Check that this prompt cannot lead to a valid JSON without json_schema
     for _ in range(2):
@@ -968,59 +940,6 @@ async def test_long_seed(client: openai.AsyncOpenAI):
 
         assert ("greater_than_equal" in exc_info.value.message
                 or "less_than_equal" in exc_info.value.message)
-
-
-@pytest.mark.asyncio
-async def test_http_chat_no_model_name_with_curl(server: RemoteOpenAIServer):
-    url = f"http://localhost:{server.port}/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-    }
-    data = {
-        # model_name is avoided here.
-        "messages": [{
-            "role": "system",
-            "content": "You are a helpful assistant."
-        }, {
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
-        "max_tokens":
-        5
-    }
-
-    response = requests.post(url, headers=headers, json=data)
-    response_data = response.json()
-    print(response_data)
-    assert response_data.get("model") == MODEL_NAME
-    choice = response_data.get("choices")[0]
-    message = choice.get("message")
-    assert message is not None
-    content = message.get("content")
-    assert content is not None
-    assert len(content) > 0
-
-
-@pytest.mark.asyncio
-async def test_http_chat_no_model_name_with_openai(server: RemoteOpenAIServer):
-    openai_api_key = "EMPTY"
-    openai_api_base = f"http://localhost:{server.port}/v1"
-
-    client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
-    )
-    messages = [
-        {
-            "role": "user",
-            "content": "Hello, vLLM!"
-        },
-    ]
-    response = client.chat.completions.create(
-        model="",  # empty string
-        messages=messages,
-    )
-    assert response.model == MODEL_NAME
 
 
 @pytest.mark.asyncio
