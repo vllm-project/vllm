@@ -433,9 +433,9 @@ class LLMEngine:
                     f"ExecutorBase. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
-            from vllm.executor.ray_distributed_executor import (
-                RayDistributedExecutor)
-            executor_class = RayDistributedExecutor
+            raise RuntimeError(
+                "The Ray distributed executor is only available in the v1 "
+                "engine. Enable it by setting 'VLLM_USE_V1=1'.")
         elif distributed_executor_backend == "mp":
             from vllm.executor.mp_distributed_executor import (
                 MultiprocessingDistributedExecutor)
