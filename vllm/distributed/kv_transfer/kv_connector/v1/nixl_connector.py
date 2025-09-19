@@ -1301,6 +1301,9 @@ class NixlConnectorWorker:
     def shutdown(self):
         """Shutdown the connector worker."""
         self._handshake_initiation_executor.shutdown(wait=False)
+        for handles in self._recving_transfers.values():
+            for handle, _ in handles:
+                self.nixl_wrapper.release_xfer_handle(handle)
         if self._nixl_handshake_listener_t:
             self._nixl_handshake_listener_t.join(timeout=0)
         if self.src_xfer_side_handle:
