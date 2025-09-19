@@ -594,6 +594,29 @@ class Platform:
         """
         return False
 
+    @classmethod
+    def use_sync_weight_loader(cls) -> bool:
+        """
+        Returns if the current platform needs to sync weight loader.
+        """
+        return False
+
+    @classmethod
+    def make_synced_weight_loader(cls, original_weight_loader):
+        """
+        Wrap the original weight loader to make it synced.
+        """
+        if not cls.use_sync_weight_loader():
+            return original_weight_loader
+
+        def _synced_weight_loader(param, *args, **kwargs):
+            out = original_weight_loader(param, *args, **kwargs)
+            if param.device != torch.device("cpu"):
+                torch._sync(param)
+            return out
+
+        return _synced_weight_loader
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
