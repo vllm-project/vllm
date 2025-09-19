@@ -150,12 +150,6 @@ def run_multi_api_server(args: argparse.Namespace):
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    parallel_config = vllm_config.parallel_config
-    dp_rank = parallel_config.data_parallel_rank
-    external_dp_lb = parallel_config.data_parallel_external_lb
-    hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
-    assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
-
     if num_api_servers > 1:
         if not envs.VLLM_USE_V1:
             raise ValueError("api_server_count > 1 is only supported for V1")
@@ -166,6 +160,12 @@ def run_multi_api_server(args: argparse.Namespace):
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
+
+    parallel_config = vllm_config.parallel_config
+    dp_rank = parallel_config.data_parallel_rank
+    external_dp_lb = parallel_config.data_parallel_external_lb
+    hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
+    assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
 
     api_server_manager: Optional[APIServerProcessManager] = None
 
