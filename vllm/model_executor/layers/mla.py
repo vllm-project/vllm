@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
 @CustomOp.register("multi_head_latent_attention")
-class MultiHeadLatentAttention(CustomOp):
+class MultiHeadLatentAttentionWrapper(CustomOp):
     """MLA layer registered as CustomOp.
     Note that currently MLA ignores the enable/disable mechanism of CustomOp
     because there is only one in-tree implementation in forward_native.

@@ -12,6 +12,7 @@ from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -140,48 +141,100 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = None
         self.layer_name = prefix
 
+        self.use_direct_call = not current_platform.opaque_attention_op()
+
     def forward(
         self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        output_shape: Optional[torch.Size] = None,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """
         Forward pass for MLA attention.
         
+        This method handles the complete MLA attention computation including:
+        - QKV projections and LoRA transformations
+        - Layer normalization
+        - Rotary embeddings
+        - Attention computation
+        - Output projection
+        
         Args:
-            query: Query tensor - contains the processed query
-            key: Key tensor - contains kv_c_normed
-            value: Value tensor - contains k_pe
-            output_shape: Optional output shape specification
+            positions: Position tensor for rotary embeddings
+            hidden_states: Input hidden states
             
         Returns:
             Output tensor after MLA attention computation
         """
-        # get the forward context to access attention metadata
-        from vllm.attention.layer import get_forward_context
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        if isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata[self.layer_name]
-        kv_cache = self.kv_cache[forward_context.virtual_engine]
+        q_c = None
+        kv_lora = None
 
-        # For MLA, the query, key, value are already processed by the model
-        q = query.view(-1, self.num_heads, self.qk_head_dim)
-        kv_c_normed = key  # normalized KV cache
-        k_pe = value.unsqueeze(1) if value.dim() == 2 else value
+        if self.q_lora_rank is not None:
+            assert self.fused_qkv_a_proj is not None, (
+                "fused_qkv_a_proj is required when q_lora_rank is not None")
+            assert self.q_a_layernorm is not None, (
+                "q_a_layernorm is required when q_lora_rank is not None")
+            assert self.q_b_proj is not None, (
+                "q_b_proj is required when q_lora_rank is not None")
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            q_c = self.q_a_layernorm(q_c)
+            q = self.q_b_proj(q_c)[0]
+        else:
+            assert self.kv_a_proj_with_mqa is not None, (
+                "kv_a_proj_with_mqa is required when q_lora_rank is None")
+            assert self.q_proj is not None, (
+                "q_proj is required when q_lora_rank is None")
+            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
+            q = self.q_proj(hidden_states)[0]
 
-        attn_out = self.impl.forward(
-            layer=self,
-            q=q,
-            k_c_normed=kv_c_normed,
-            k_pe=k_pe,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
-        return self.o_proj(attn_out)[0]
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
+                                   dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+
+        q = q.view(-1, self.num_heads, self.qk_head_dim)
+        # Add head dim of 1 to k_pe
+        k_pe = k_pe.unsqueeze(1)
+
+        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
+            positions, q[..., self.qk_nope_head_dim:], k_pe)
+
+        if self.use_direct_call:
+            # Get the forward context to access attention metadata
+            from vllm.attention.layer import get_forward_context
+            forward_context = get_forward_context()
+            attn_metadata = forward_context.attn_metadata
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata[self.layer_name]
+            kv_cache = self.kv_cache[forward_context.virtual_engine]
+
+            # Prepare tensors for the attention implementation
+            q_processed = q.view(-1, self.num_heads, self.qk_head_dim)
+            kv_c_normed_processed = kv_c_normed  # normalized KV cache
+            k_pe_processed = k_pe.unsqueeze(1) if k_pe.dim() == 2 else k_pe
+
+            attn_out = self.impl.forward(
+                layer=self,
+                q=q_processed,
+                k_c_normed=kv_c_normed_processed,
+                k_pe=k_pe_processed,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+            )
+            return self.o_proj(attn_out)[0]
+        else:
+            # Use unified MLA attention op (not implemented yet)
+            raise NotImplementedError(
+                "unified_mla_attention not yet implemented")
 
     def get_attn_backend(self) -> type:
         """Get the attention backend class for this MLA layer."""
         return self.attn_backend
+
+
+# TODO: Implement unified MLA attention custom ops as requested by @ProExpertProg:
+# - unified_mla_attention
+# - unified_mla_attention_with_output
+# - Add to splitting ops by default

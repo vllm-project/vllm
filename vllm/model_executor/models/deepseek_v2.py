@@ -48,7 +48,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttention
+from vllm.model_executor.layers.mla import (MLAModules,
+                                            MultiHeadLatentAttentionWrapper)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
@@ -592,7 +593,7 @@ class DeepseekV2MLAAttention(nn.Module):
             q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else None,
         )
-        self.mla_attn = MultiHeadLatentAttention(
+        self.mla_attn = MultiHeadLatentAttentionWrapper(
             self.hidden_size,
             self.num_local_heads,
             self.scaling,
