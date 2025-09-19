@@ -86,6 +86,11 @@ class BlockHashToBlockMap:
         if blocks is None:
             # block_hash not found in the cache
             return None
+        # TODO(Jialin): If key is found, block_id should always present
+        # in blocks. We currently keep the original behaviour for safety.
+        #
+        # Will add block_id == blocks.block_id assertion and
+        # use del blocks[block_id] instead as followup.
         if isinstance(blocks, KVCacheBlock):
             if blocks.block_id == block_id:
                 return blocks
