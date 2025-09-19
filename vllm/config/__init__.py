@@ -42,6 +42,7 @@ from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
 from vllm.config.speculative import SpeculativeConfig
+from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -449,6 +450,8 @@ class ModelConfig:
 
     # Multimodal config and init vars
     multimodal_config: Optional[MultiModalConfig] = None
+    """Configuration for multimodal model. If `None`, this will be inferred
+    from the architecture of `self.model`."""
     limit_mm_per_prompt: InitVar[Optional[dict[str, int]]] = None
     media_io_kwargs: InitVar[Optional[dict[str, dict[str, Any]]]] = None
     mm_processor_kwargs: InitVar[Optional[dict[str, Any]]] = None
@@ -845,7 +848,8 @@ class ModelConfig:
                 object_storage_model.pull_files(model,
                                                 ignore_pattern=[
                                                     "*.pt", "*.safetensors",
-                                                    "*.bin", "*.tensors"
+                                                    "*.bin", "*.tensors",
+                                                    "*.pth"
                                                 ])
                 self.tokenizer = object_storage_model.dir
                 return
@@ -853,9 +857,12 @@ class ModelConfig:
         # Only download tokenizer if needed and not already handled
         if is_runai_obj_uri(tokenizer):
             object_storage_tokenizer = ObjectStorageModel()
-            object_storage_tokenizer.pull_files(
-                model,
-                ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
+            object_storage_tokenizer.pull_files(model,
+                                                ignore_pattern=[
+                                                    "*.pt", "*.safetensors",
+                                                    "*.bin", "*.tensors",
+                                                    "*.pth"
+                                                ])
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self):
@@ -1086,22 +1093,6 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = me_quant.QUANTIZATION_METHODS
-        optimized_quantization_methods = [
-            "fp8",
-            "modelopt",
-            "gptq_marlin_24",
-            "gptq_marlin",
-            "awq_marlin",
-            "fbgemm_fp8",
-            "compressed-tensors",
-            "experts_int8",
-            "quark",
-            "modelopt_fp4",
-            "bitblas",
-            "gptq_bitblas",
-            "inc",
-            "petit_nvfp4",
-        ]
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods,
                                      self.quantization)
@@ -1183,11 +1174,6 @@ class ModelConfig:
                     f"be one of {supported_quantization}.")
             from vllm.platforms import current_platform
             current_platform.verify_quantization(self.quantization)
-            if self.quantization not in optimized_quantization_methods:
-                logger.warning(
-                    "%s quantization is not fully "
-                    "optimized yet. The speed can be slower than "
-                    "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
         # The `max_seq_len_to_capture` was incorrectly
@@ -2294,66 +2280,6 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines",
-                                "lm-format-enforcer"]
-
-
-@config
-@dataclass
-class DecodingConfig:
-    """Dataclass which contains the decoding strategy of the engine."""
-
-    backend: GuidedDecodingBackend = "auto"
-    """Which engine will be used for guided decoding (JSON schema / regex etc)
-    by default. With "auto", we will make opinionated choices based on request
-    contents and what the backend libraries currently support, so the behavior
-    is subject to change in each release."""
-
-    disable_fallback: bool = False
-    """If `True`, vLLM will not fallback to a different backend on error."""
-
-    disable_any_whitespace: bool = False
-    """If `True`, the model will not generate any whitespace during guided
-    decoding. This is only supported for xgrammar and guidance backends."""
-
-    disable_additional_properties: bool = False
-    """If `True`, the `guidance` backend will not use `additionalProperties`
-    in the JSON schema. This is only supported for the `guidance` backend and
-    is used to better align its behaviour with `outlines` and `xgrammar`."""
-
-    reasoning_backend: str = ""
-    """Select the reasoning parser depending on the model that you're using.
-    This is used to parse the reasoning content into OpenAI API format."""
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self):
-        if (self.disable_any_whitespace
-                and self.backend not in ("xgrammar", "guidance")):
-            raise ValueError("disable_any_whitespace is only supported for "
-                             "xgrammar and guidance backends.")
-        if (self.disable_additional_properties and self.backend != "guidance"):
-            raise ValueError("disable_additional_properties is only supported "
-                             "for the guidance backend.")
-
-
 DetailedTraceModules = Literal["model", "worker", "all"]
 
 
@@ -2468,8 +2394,9 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: Optional[SpeculativeConfig] = None
     """Speculative decoding configuration."""
-    decoding_config: DecodingConfig = field(default_factory=DecodingConfig)
-    """Decoding configuration."""
+    structured_outputs_config: StructuredOutputsConfig = field(
+        default_factory=StructuredOutputsConfig)
+    """Structured outputs configuration."""
     observability_config: Optional[ObservabilityConfig] = None
     """Observability configuration."""
     quant_config: Optional[QuantizationConfig] = None
@@ -2560,8 +2487,8 @@ class VllmConfig:
             vllm_factors.append(self.speculative_config.compute_hash())
         else:
             vllm_factors.append("None")
-        if self.decoding_config:
-            vllm_factors.append(self.decoding_config.compute_hash())
+        if self.structured_outputs_config:
+            vllm_factors.append(self.structured_outputs_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.observability_config:
@@ -3046,6 +2973,18 @@ class VllmConfig:
                 SequenceClassificationConfig)
             SequenceClassificationConfig.verify_and_update_config(self)
 
+        if hasattr(self.model_config, "model_weights") and is_runai_obj_uri(
+                self.model_config.model_weights):
+            if self.load_config.load_format == "auto":
+                logger.info("Detected Run:ai model config. "
+                            "Overriding `load_format` to 'runai_streamer'")
+                self.load_config.load_format = "runai_streamer"
+            elif self.load_config.load_format != "runai_streamer":
+                raise ValueError(f"To load a model from S3, 'load_format' "
+                                 f"must be 'runai_streamer', "
+                                 f"but got '{self.load_config.load_format}'. "
+                                 f"Model: {self.model_config.model}")
+
     def __str__(self):
         return (
             f"model={self.model_config.model!r}, "
@@ -3068,7 +3007,7 @@ class VllmConfig:
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
-            f"decoding_config={self.decoding_config!r}, "
+            f"structured_outputs_config={self.structured_outputs_config!r}, "
             f"observability_config={self.observability_config!r}, "
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
