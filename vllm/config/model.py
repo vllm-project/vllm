@@ -964,6 +964,9 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "petit_nvfp4",
+                # Ensure heavy backends are probed last to avoid unnecessary
+                # imports during override detection (e.g., MXFP4 imports Triton)
+                "mxfp4",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
