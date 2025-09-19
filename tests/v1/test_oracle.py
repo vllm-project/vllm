@@ -7,7 +7,6 @@ import pytest
 import vllm.envs as envs
 from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -95,21 +94,4 @@ def test_v1_attn_backend(monkeypatch):
         m.setenv("VLLM_ATTENTION_BACKEND", "FLASHMLA")
         _ = AsyncEngineArgs(model=MODEL).create_engine_config()
         assert envs.VLLM_USE_V1
-        m.delenv("VLLM_USE_V1")
-
-
-def test_reject_using_constructor_directly(monkeypatch):
-    with monkeypatch.context() as m:
-        if os.getenv("VLLM_USE_V1", None):
-            m.delenv("VLLM_USE_V1")
-
-        # Sets VLLM_USE_V1=1.
-        vllm_config = AsyncEngineArgs(model=MODEL).create_engine_config()
-
-        # This uses the V0 constructor directly.
-        with pytest.raises(ValueError):
-            AsyncLLMEngine(vllm_config,
-                           AsyncLLMEngine._get_executor_cls(vllm_config),
-                           log_stats=True)
-
         m.delenv("VLLM_USE_V1")

@@ -20,25 +20,33 @@ class PoolingParams(
     """API parameters for pooling models.
 
     Attributes:
+        truncate_prompt_tokens: Controls prompt truncation.
+            Set to -1 to use the model's default truncation size.
+            Set to k to keep only the last k tokens (left truncation).
+            Set to None to disable truncation.         
         normalize: Whether to normalize the embeddings outputs.
         dimensions: Reduce the dimensions of embeddings
-                    if model support matryoshka representation.
+            if model support matryoshka representation.
         activation: Whether to apply activation function to
-                    the classification outputs.
+            the classification outputs.
         softmax: Whether to apply softmax to the reward outputs.
     """
+
+    # --8<-- [start:common-pooling-params]
     truncate_prompt_tokens: Optional[Annotated[int,
                                                msgspec.Meta(ge=-1)]] = None
-    """If set to -1, will use the truncation size supported by the model. If
-    set to an integer k, will use only the last k tokens from the prompt
-    (i.e., left truncation). If set to `None`, truncation is disabled."""
+    # --8<-- [end:common-pooling-params]
 
     ## for embeddings models
+    # --8<-- [start:embedding-pooling-params]
     dimensions: Optional[int] = None
     normalize: Optional[bool] = None
+    # --8<-- [end:embedding-pooling-params]
 
-    ## for classification models
+    ## for classification, scoring and rerank
+    # --8<-- [start:classification-pooling-params]
     activation: Optional[bool] = None
+    # --8<-- [end:classification-pooling-params]
 
     ## for reward models
     softmax: Optional[bool] = None
