@@ -114,7 +114,7 @@ class ShardedStateLoader(BaseModelLoader):
             Set of key names that correspond to ignored parameters
         """
         # Only apply this logic for DeepSeek models
-        if "deepseek" in model_config.model.lower():
+        if model_config.is_deepseek_mla:
             # Filter out MLA scaling parameters for DeepSeek models - these
             # parameters are dynamically created during model initialization,
             # not loaded from checkpoints
