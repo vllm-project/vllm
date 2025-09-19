@@ -5,26 +5,11 @@
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "quantization/vectorization_utils.cuh"
+#include "quantization/fused_kernels/layernorm_utils.cuh"
 
 namespace vllm {
 
 constexpr int kVecBytes = 16;  // 128-bit phase
-
-template <typename T>
-__device__ __forceinline__ T warp_sum(T v) {
-#ifdef __HIP_PLATFORM_AMD__
-  const unsigned long long m = 0xffffffffffffffffull;
-#else
-  const unsigned m = 0xffffffffu;
-#endif
-  constexpr int kWidth = 32;
-  v += __shfl_down_sync(m, v, 16, kWidth);
-  v += __shfl_down_sync(m, v, 8, kWidth);
-  v += __shfl_down_sync(m, v, 4, kWidth);
-  v += __shfl_down_sync(m, v, 2, kWidth);
-  v += __shfl_down_sync(m, v, 1, kWidth);
-  return v;
-}
 
 template <typename T>
 __device__ __forceinline__ bool same_phase(const T* a, const T* b, int bytes) {
@@ -88,7 +73,6 @@ __device__ __forceinline__ void copy_row_to_shared_aligned(
   __syncthreads();
 }
 
-// functors for vectorized write
 template <int V, typename T>
 struct VecMulNormWeight {
   const vec_n_t<T, V>* __restrict__ wv;
@@ -540,13 +524,6 @@ poly_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
 
 }  // namespace vllm
 
-static inline int ln_block_threads_unified(int H) {
-  int threads = (H >= 1024)  ? 256
-                : (H >= 512) ? 512
-                             : std::min(1024, ((H + 31) / 32) * 32);
-  return std::min(1024, std::max(128, ((threads + 31) / 32) * 32));
-}
-
 void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& input,   // [..., hidden_size]
               torch::Tensor& weight,  // [hidden_size]
@@ -560,7 +537,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   const int64_t in_stride = input.stride(-2);
 
   dim3 grid(num_tokens);
-  dim3 block(ln_block_threads_unified(hidden_size));
+  dim3 block(vllm::ln_block_threads_unified(hidden_size));
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();

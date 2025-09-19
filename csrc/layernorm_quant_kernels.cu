@@ -8,29 +8,12 @@
 #include "type_convert.cuh"
 #include "quantization/fp8/common.cuh"
 #include "dispatch_utils.h"
-#include "cub_helpers.h"
-#include "quantization/vectorization_utils.cuh"
+#include "quantization/fused_kernels/layernorm_utils.cuh"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
 
 namespace vllm {
-
-template <typename T>
-__device__ __forceinline__ T warp_sum(T v) {
-#ifdef __HIP_PLATFORM_AMD__
-  const unsigned long long m = 0xffffffffffffffffull;  // HIP needs 64-bit mask
-#else
-  const unsigned m = 0xffffffffu;
-#endif
-  constexpr int kWidth = 32;  // keep reduction over 32 lanes everywhere
-  v += __shfl_down_sync(m, v, 16, kWidth);
-  v += __shfl_down_sync(m, v, 8, kWidth);
-  v += __shfl_down_sync(m, v, 4, kWidth);
-  v += __shfl_down_sync(m, v, 2, kWidth);
-  v += __shfl_down_sync(m, v, 1, kWidth);
-  return v;
-}
 
 // kernel unchanged (uses warp_sum + same math as unfused)
 template <typename scalar_t, typename fp8_type>
@@ -192,17 +175,6 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
 }  // namespace vllm
 
-// --- shared: match unfused launch exactly ---
-static inline int ln_block_threads_unified(int hidden_size) {
-  int threads = (hidden_size >= 1024) ? 256
-                : (hidden_size >= 512)
-                    ? 512
-                    : std::min(1024, ((hidden_size + 31) / 32) * 32);
-  // warp-align and clamp to [128, 1024]
-  threads = std::min(1024, std::max(128, ((threads + 31) / 32) * 32));
-  return threads;
-}
-
 void rms_norm_static_fp8_quant(torch::Tensor& out,     // [T, H]
                                torch::Tensor& input,   // [T, last_dim]
                                torch::Tensor& weight,  // [H]
@@ -218,7 +190,7 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [T, H]
   const int num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
-  dim3 block(ln_block_threads_unified(hidden_size));  // <-- match unfused
+  dim3 block(vllm::ln_block_threads_unified(hidden_size));  // <-- match unfused
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -235,7 +207,6 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [T, H]
                       num_tokens, hidden_size);
             });
       });
-  // TORCH_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                     \
