@@ -54,7 +54,7 @@ class UBatchWrapper:
         if runtime_mode is not CUDAGraphMode.NONE:
             self.cudagraph_wrapper = CUDAGraphWrapper(
                 runnable, vllm_config, runtime_mode=runtime_mode)
-            self.graph_pool = current_platform.get_global_graph_pool()
+            self.graph_pool = current_platform.graph_pool_handle()
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.

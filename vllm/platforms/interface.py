@@ -140,8 +140,6 @@ class Platform:
 
     additional_env_vars: list[str] = []
 
-    _global_graph_pool: Optional[Any] = None
-
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         """Returns the supported dtypes for the current platform."""
@@ -539,10 +537,7 @@ class Platform:
         """
         Return the global graph pool for this platform.
         """
-        cls = self.__class__
-        if cls._global_graph_pool is None:
-            cls._global_graph_pool = self.graph_pool_handle()
-        return cls._global_graph_pool
+        return self.graph_pool_handle()
 
     @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
