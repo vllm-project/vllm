@@ -20,7 +20,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 
 from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
@@ -505,6 +506,21 @@ class SiglipVisionModel(nn.Module):
                 layer_idx = int(name.split(".")[3])
                 if layer_idx >= layer_count:
                     continue
+
+            # Check if this is a scale parameter that needs remapping first
+            if name.endswith(
+                (".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
+                # Try to remap the scale name first
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is not None and remapped_name in params_dict:
+                    # Successfully remapped, use the remapped name
+                    param = params_dict[remapped_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(remapped_name)
+                    continue
+                # If remapping failed, continue with normal processing
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
