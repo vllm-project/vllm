@@ -55,7 +55,6 @@ class LoRAModelRunnerMixin:
             lora_config,
             device,
             model.embedding_modules,
-            model.embedding_padding_modules,
             max_position_embeddings=text_config.max_position_embeddings,
         )
         return self.lora_manager.create_lora_manager(model)
