@@ -2552,10 +2552,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.model_config)
             if self.lora_config:
-                self.model = self.load_lora_model(self.model,
-                                                  self.model_config,
-                                                  self.scheduler_config,
-                                                  self.lora_config,
+                self.model = self.load_lora_model(self.model, self.vllm_config,
                                                   self.device)
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
