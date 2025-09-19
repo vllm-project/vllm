@@ -4,6 +4,7 @@
 import pytest
 
 from vllm.inputs import zip_enc_dec_prompts
+from vllm.inputs.data import is_singleton_prompt
 from vllm.inputs.parse import parse_and_batch_prompt
 
 STRING_INPUTS = [
@@ -78,3 +79,38 @@ def test_zip_enc_dec_prompts(mm_processor_kwargs, expected_mm_kwargs):
         assert zipped['encoder_prompt'] == enc
         assert zipped['decoder_prompt'] == dec
         assert zipped['mm_processor_kwargs'] == exp_kwargs
+
+
+@pytest.mark.parametrize(
+    'prompt,expected',
+    [
+        # SingletonPrompt cases (should return True)
+        ({
+            "prompt_token_ids": [1, 2, 3]
+        }, True),
+        ({
+            "prompt_token_ids": [1]
+        }, True),
+        ({
+            "prompt_token_ids": []
+        }, True),
+        ({
+            "prompt_token_ids": [1, 2, 3],
+            "prompt": "Hello world"
+        }, True),
+        # ExplicitEncoderDecoderPrompt cases (should return False)
+        ({
+            "encoder_prompt": "Encoder text",
+            "decoder_prompt": "Decoder text"
+        }, False),
+        ({
+            "encoder_prompt": "Encoder text",
+            "decoder_prompt": None
+        }, False),
+        ({
+            "decoder_prompt": "Decoder text"
+        }, False),
+    ])
+def test_is_singleton_prompt(prompt, expected):
+    """Test is_singleton_prompt function."""
+    assert is_singleton_prompt(prompt) is expected

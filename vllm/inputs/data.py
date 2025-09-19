@@ -120,15 +120,15 @@ Note that "singleton" is as opposed to a data structure
 which encapsulates multiple prompts, i.e. of the sort
 which may be utilized for encoder/decoder models when
 the user desires to express both the encoder & decoder
-prompts explicitly, i.e. 
+prompts explicitly, i.e.
 [`ExplicitEncoderDecoderPrompt`][vllm.inputs.data.ExplicitEncoderDecoderPrompt]
 
-A prompt of type [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] may be 
+A prompt of type [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] may be
 employed as (1) input to a decoder-only model, (2) input to
 the encoder of an encoder/decoder model, in the scenario
 where the decoder-prompt is not specified explicitly, or
 (3) as a member of a larger data structure encapsulating
-more than one prompt, i.e. 
+more than one prompt, i.e.
 [`ExplicitEncoderDecoderPrompt`][vllm.inputs.data.ExplicitEncoderDecoderPrompt]
 """
 
@@ -194,6 +194,17 @@ both decoder-only and encoder/decoder input types:
 - A single data structure containing both an encoder and a decoder prompt
   ([`ExplicitEncoderDecoderPrompt`][vllm.inputs.data.ExplicitEncoderDecoderPrompt])
 """
+
+
+def is_singleton_prompt(prompt: PromptType) -> TypeIs[SingletonPrompt]:
+    """Return True if the given prompt is SingletonPrompt."""
+    if isinstance(prompt, dict):
+        # Explicit encoder/decoder prompt → not a singleton
+        if "encoder_prompt" in prompt or "decoder_prompt" in prompt:
+            return False
+        # TokensPrompt: must contain "prompt_token_ids"
+        return "prompt_token_ids" in prompt
+    return False
 
 
 class TokenInputs(TypedDict):
@@ -287,7 +298,7 @@ class EncoderDecoderInputs(TypedDict):
 
 SingletonInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
-A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be 
+A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be
 passed to [`vllm.sequence.Sequence`][].
 """
 
