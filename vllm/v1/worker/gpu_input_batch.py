@@ -29,7 +29,7 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 class CachedRequestState:
 
     req_id: str
-    prompt_token_ids: list[int]
+    prompt_token_ids: Optional[list[int]]
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]

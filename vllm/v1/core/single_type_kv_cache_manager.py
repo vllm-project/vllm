@@ -84,7 +84,7 @@ class SingleTypeKVCacheManager(ABC):
         # it as needed to be allocated.
         num_evictable_computed_blocks = sum(
             blk.ref_cnt == 0 and not blk.is_null
-            for blk in new_computed_blocks or [])
+            for blk in (new_computed_blocks or []))
         return num_new_blocks + num_evictable_computed_blocks
 
     def save_new_computed_blocks(
@@ -592,7 +592,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # it as needed to be allocated.
         num_evictable_computed_blocks = sum(
             blk.ref_cnt == 0 and not blk.is_null
-            for blk in new_computed_blocks or [])
+            for blk in (new_computed_blocks or []))
         return num_new_blocks + num_evictable_computed_blocks
 
     def allocate_new_blocks(self, request_id: str,

@@ -19,26 +19,18 @@ class KVCacheBlocks:
     The allocation result of KVCacheManager, work as the interface between
     Scheduler and KVCacheManager, to hide KVCacheManager's internal data
     structure from the Scheduler.
-    """
-    blocks: tuple[Optional[list[KVCacheBlock]], ...]
-    """
-    `blocks[i][j]` refers to the i-th kv_cache_group
-    and the j-th block of tokens.We don't use block of
-    tokens as the outer dimension because it assumes all
-    kv_cache_groups have the same number of blocks, which is true for now but 
-    will be broken if we want to give different block_size to different 
-    kv_cache_groups in the future.
+
+    blocks[i][j] refers to the i-th kv_cache_group and the j-th block of
+    tokens.
+    We don't use block of tokens as the outer dimension because it assumes
+    all kv_cache_groups have the same number of blocks, which is true for now
+    but will be broken if we want to give different block_size to
+    different kv_cache_groups in the future.
     """
 
     def __init__(
             self, blocks_per_group: tuple[Optional[list[KVCacheBlock]],
                                           ...]) -> None:
-        # blocks[i][j] refers to the i-th kv_cache_group and the j-th block
-        # of tokens.
-        # We don't use block of tokens as the outer dimension because it
-        # assumes all kv_cache_groups have the same number of blocks,
-        # which is true for now but will be broken if we want to give different
-        # block_size to different kv_cache_groups in the future.
         self.blocks: tuple[Optional[list[KVCacheBlock]],
                            ...] = tuple(blocks if blocks else None
                                         for blocks in blocks_per_group)
@@ -78,14 +70,14 @@ class KVCacheBlocks:
         """
         if allow_none and all(not group for group in self.blocks):
             return None
-        return tuple([blk.block_id for blk in group or []]
+        return tuple([blk.block_id for blk in (group or [])]
                      for group in self.blocks)
 
     def get_unhashed_block_ids(self) -> list[int]:
         """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
         assert len(self.blocks) == 1, "Only one group is supported"
         return [
-            block.block_id for block in self.blocks[0] or []
+            block.block_id for block in (self.blocks[0] or [])
             if block.block_hash is None
         ]
 

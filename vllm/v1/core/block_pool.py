@@ -242,7 +242,7 @@ class BlockPool:
             blocks: A list of blocks to touch.
         """
         for blocks_per_group in blocks:
-            for block in blocks_per_group or []:
+            for block in (blocks_per_group or []):
                 # ref_cnt=0 means this block is in the free list (i.e. eviction
                 # candidate), so remove it.
                 if block.ref_cnt == 0 and not block.is_null:
