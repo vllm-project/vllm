@@ -245,39 +245,6 @@ class DecoderPromptType(Enum):
 
 
 @pytest.fixture
-def example_encoder_decoder_prompts(
-) -> dict[DecoderPromptType, list[ExplicitEncoderDecoderPrompt]]:
-    '''
-    Returns an encoder prompt list and a decoder prompt list, wherein each pair
-    of same-index entries in both lists corresponds to an (encoder prompt,
-    decoder prompt) tuple.
-
-    Returns:
-
-    * Encoder prompt list
-    * Decoder prompt list (reverse of encoder prompt list)
-    '''
-
-    encoder_prompts = []
-    for filename in _TEST_PROMPTS:
-        encoder_prompts += _read_prompts(filename)
-
-    custom_decoder_prompts = encoder_prompts[::-1]
-    empty_str_decoder_prompts = [""] * len(encoder_prompts)
-    none_decoder_prompts = [None] * len(encoder_prompts)
-
-    # NONE decoder prompt type
-    return {
-        DecoderPromptType.NONE:
-        zip_enc_dec_prompts(encoder_prompts, none_decoder_prompts),
-        DecoderPromptType.EMPTY_STR:
-        zip_enc_dec_prompts(encoder_prompts, empty_str_decoder_prompts),
-        DecoderPromptType.CUSTOM:
-        zip_enc_dec_prompts(encoder_prompts, custom_decoder_prompts),
-    }
-
-
-@pytest.fixture
 def example_long_prompts() -> list[str]:
     prompts = []
     for filename in _LONG_PROMPTS:
@@ -690,68 +657,6 @@ class HfRunner:
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
 
-    def generate_encoder_decoder_greedy_logprobs_limit(
-        self,
-        encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
-        max_tokens: int,
-        num_logprobs: Optional[int],
-        images: Optional[PromptImageInput] = None,
-        **kwargs: Any,
-    ) -> list[TokensTextLogprobs]:
-        '''
-        Greedy logprobs generation for vLLM encoder/decoder models
-        '''
-
-        all_logprobs: list[list[dict[int, float]]] = []
-        all_output_ids: list[list[int]] = []
-        all_output_strs: list[str] = []
-
-        for i, (encoder_prompt, decoder_prompt) in enumerate(
-                to_enc_dec_tuple_list(encoder_decoder_prompts)):
-            processor_kwargs: dict[str, Any] = {
-                "text": encoder_prompt,
-                "return_tensors": "pt",
-            }
-            if images is not None and images[i] is not None:
-                processor_kwargs["images"] = images[i]
-
-            encoder_inputs = self.processor(**processor_kwargs)
-            encoder_inputs = self.wrap_device(encoder_inputs)
-
-            if decoder_prompt is None:
-                decoder_input_ids = None
-            else:
-                decoder_inputs = self.tokenizer(decoder_prompt,
-                                                return_tensors="pt")
-                decoder_input_ids = self.wrap_device(decoder_inputs.input_ids)
-
-            output = self.model.generate(
-                decoder_input_ids=decoder_input_ids,
-                use_cache=True,
-                do_sample=False,
-                max_new_tokens=max_tokens,
-                output_hidden_states=True,
-                return_dict_in_generate=True,
-                **encoder_inputs,
-                **kwargs,
-            )
-
-            (
-                seq_logprobs_lst,
-                output_len,
-            ) = self._hidden_states_to_logprobs(output.decoder_hidden_states,
-                                                num_logprobs)
-
-            all_logprobs.append(seq_logprobs_lst)
-            seq_ids = output.sequences[0]
-            output_ids = seq_ids[-output_len:]
-            all_output_ids.append(output_ids.tolist())
-            all_output_strs.append(self.tokenizer.decode(output_ids))
-
-        outputs = zip(all_output_ids, all_output_strs, all_logprobs)
-        return [(output_ids, output_str, output_logprobs)
-                for output_ids, output_str, output_logprobs in outputs]
-
     def encode(self, prompts: list[str], *args,
                **kwargs) -> list[list[torch.Tensor]]:
         return self.model.encode(prompts, *args, **kwargs)
@@ -940,26 +845,6 @@ class VllmRunner:
                 if sampling_params.prompt_logprobs is None else
                 toks_str_logsprobs_prompt_logprobs)
 
-    def generate_encoder_decoder_w_logprobs(
-        self,
-        encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
-        sampling_params: SamplingParams,
-    ) -> Union[list[TokensTextLogprobs],
-               list[TokensTextLogprobsPromptLogprobs]]:
-        '''
-        Logprobs generation for vLLM encoder/decoder models
-        '''
-
-        assert sampling_params.logprobs is not None
-        req_outputs = self.llm.generate(encoder_decoder_prompts,
-                                        sampling_params=sampling_params)
-        toks_str_logsprobs_prompt_logprobs = (
-            self._final_steps_generate_w_logprobs(req_outputs))
-        # Omit prompt logprobs if not required by sampling params
-        return ([x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
-                if sampling_params.prompt_logprobs is None else
-                toks_str_logsprobs_prompt_logprobs)
-
     def generate_greedy(
         self,
         prompts: Union[list[str], list[torch.Tensor]],
@@ -1036,29 +921,6 @@ class VllmRunner:
             perplexities.append(perplexity)
 
         return perplexities
-
-    def generate_encoder_decoder_greedy_logprobs(
-        self,
-        encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
-        max_tokens: int,
-        num_logprobs: Optional[int],
-        num_prompt_logprobs: Optional[int] = None,
-        skip_special_tokens: bool = True,
-    ) -> Union[list[TokensTextLogprobs],
-               list[TokensTextLogprobsPromptLogprobs]]:
-        greedy_logprobs_params = SamplingParams(
-            temperature=0.0,
-            max_tokens=max_tokens,
-            logprobs=num_logprobs,
-            prompt_logprobs=(num_prompt_logprobs),
-            skip_special_tokens=skip_special_tokens,
-        )
-        '''
-        Greedy logprobs generation for vLLM encoder/decoder models
-        '''
-
-        return self.generate_encoder_decoder_w_logprobs(
-            encoder_decoder_prompts, greedy_logprobs_params)
 
     def generate_beam_search(
         self,
