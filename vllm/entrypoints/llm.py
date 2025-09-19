@@ -151,9 +151,11 @@ class LLM:
             multi-modal processor obtained from `AutoProcessor.from_pretrained`.
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
-        override_pooler_config: Initialize non-default pooling config or
-            override default pooling config for the pooling model.
-            e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+        pooler_config: Initialize non-default pooling config for the pooling
+            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+        override_pooler_config: [DEPRECATED] Use `pooler_config` instead. This
+            argument is deprecated and will be removed in v0.12.0 or v1.0.0,
+            whichever is sooner.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -191,6 +193,7 @@ class LLM:
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        pooler_config: Optional[PoolerConfig] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
         structured_outputs_config: Optional[Union[dict[
             str, Any], StructuredOutputsConfig]] = None,
@@ -288,6 +291,7 @@ class LLM:
             hf_token=hf_token,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
+            pooler_config=pooler_config,
             override_pooler_config=override_pooler_config,
             structured_outputs_config=structured_outputs_instance,
             compilation_config=compilation_config_instance,
