@@ -3474,6 +3474,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     CUDAGraphMode.NONE
             logger.warning(msg)
 
+        if self.model_config.is_encoder_decoder:
+            if cudagraph_mode in (CUDAGraphMode.FULL,
+                                  CUDAGraphMode.FULL_AND_PIECEWISE):
+                logger.warning(
+                    "CUDA graph decode-only mode required for encoder-decoder "
+                    "models; setting cudagraph_mode=FULL_DECODE_ONLY")
+                cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.FULL_DECODE_ONLY
+            elif cudagraph_mode == CUDAGraphMode.PIECEWISE:
+                logger.warning(
+                    "Encoder-decoder models do not support cudagraph prefill "
+                    "capture; setting cudagraph_mode=NONE")
+                cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.NONE
+
         # double check that we can support full cudagraph if they are requested
         # even after automatic downgrades
         if cudagraph_mode.has_full_cudagraphs() \
