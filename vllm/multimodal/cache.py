@@ -494,7 +494,8 @@ def _enable_processor_cache(
 
 def _enable_ipc_cache(vllm_config: "VllmConfig") -> bool:
     parallel_config = vllm_config.parallel_config
-    supports_ipc_cache = (parallel_config.data_parallel_size == 1
+    supports_ipc_cache = ((parallel_config._api_process_count == 1
+                           and parallel_config.data_parallel_size == 1)
                           or parallel_config.data_parallel_external_lb)
 
     return supports_ipc_cache

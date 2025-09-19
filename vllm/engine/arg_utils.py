@@ -333,6 +333,8 @@ class EngineArgs:
     enable_eplb: bool = ParallelConfig.enable_eplb
     expert_placement_strategy: ExpertPlacementStrategy = \
         ParallelConfig.expert_placement_strategy
+    _api_process_count: int = ParallelConfig._api_process_count
+    _api_process_rank: int = ParallelConfig._api_process_rank
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
@@ -952,7 +954,10 @@ class EngineArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+        engine_args = cls(**{
+            attr: getattr(args, attr)
+            for attr in attrs if hasattr(args, attr)
+        })
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
@@ -1366,6 +1371,8 @@ class EngineArgs:
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
+            _api_process_count=self._api_process_count,
+            _api_process_rank=self._api_process_rank,
         )
 
         speculative_config = self.create_speculative_config(
