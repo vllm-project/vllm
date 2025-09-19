@@ -272,15 +272,18 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
+        assert self.input_quant_op is not None
         q_input, x_scale = self.input_quant_op.forward_cuda(input_2d)
         if self.is_hopper:
             output = torch.ops.vllm.padded_cutlass_scaled_mm(
                 q_input, weight, x_scale, weight_scale,
-                self.weight_group_shape, input_2d.dtype)
+                [self.weight_group_shape[0], self.weight_group_shape[1]],
+                input_2d.dtype)
         else:
-            output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
-                                       self.weight_group_shape, input_2d.dtype,
-                                       False)
+            output = cutlass_scaled_mm(
+                q_input, weight, x_scale, weight_scale,
+                [self.weight_group_shape[0], self.weight_group_shape[1]],
+                input_2d.dtype, False)
         return output
 
     def _run_aiter(
@@ -302,6 +305,7 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
+        assert self.input_quant_op is not None
         q_input, x_scale = self.input_quant_op.forward_cuda(input_2d)
         return torch.ops.vllm.w8a8_block_fp8_matmul_func(
             q_input, weight, x_scale, weight_scale, self.weight_group_shape,
