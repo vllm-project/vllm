@@ -30,7 +30,7 @@ from vllm.config.scheduler import SchedulerConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.config.utils import SupportsHash, config
-from vllm.logger import get_logger
+from vllm.logger import init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 
@@ -44,7 +44,7 @@ else:
 
     QuantizationConfig = Any
 
-logger = get_logger(__name__)
+logger = init_logger(__name__)
 
 
 @config
@@ -760,15 +760,5 @@ def get_current_vllm_config() -> VllmConfig:
         # we don't set the vllm config. In that case, we set a default
         # config.
         logger.warning("Current vLLM config is not set.")
-        from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config
-
-
-def get_current_model_prefix() -> str:
-    """
-    Get the prefix of the model that's currently being initialized.
-    """
-    assert _current_prefix is not None, \
-        "Current model prefix is not set. "
-    return _current_prefix
