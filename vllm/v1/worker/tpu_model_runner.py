@@ -1178,9 +1178,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "or sharding the weights on more chips. "
                     f"See the detailed error: {e}") from e
         if self.lora_config is not None:
-            model = self.load_lora_model(model, self.model_config,
-                                         self.scheduler_config,
-                                         self.lora_config, self.device)
+            model = self.load_lora_model(model, self.vllm_config, self.device)
             replace_set_lora(model)
 
         # Sync all pending XLA execution during model initialization and weight
