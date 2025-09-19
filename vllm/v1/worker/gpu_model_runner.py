@@ -2125,6 +2125,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             invalid_req_indices,
         )
 
+    def model_forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **model_kwargs,
+    ) -> Any:
+        """Helper method to call the model forward pass.
+
+        This method can be overridden by subclasses for model execution.
+
+        Args:
+            input_ids: Input token IDs
+            positions: Token positions
+            intermediate_tensors: Tensors from previous pipeline stages
+            inputs_embeds: Input embeddings (alternative to input_ids)
+            **model_kwargs: Additional model arguments
+
+        Returns:
+            Model output tensor
+        """
+        return self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **model_kwargs,
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2196,7 +2226,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), record_function_or_nullcontext("Forward"),
               self.maybe_get_kv_connector_output(scheduler_output) as
               kv_connector_output):
-            model_output = self.model(
+            model_output = self.model_forward(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
