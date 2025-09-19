@@ -57,7 +57,6 @@ class Processor:
         self.lora_config = vllm_config.lora_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
-        self.decoding_config = vllm_config.decoding_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.tokenizer = tokenizer
 
