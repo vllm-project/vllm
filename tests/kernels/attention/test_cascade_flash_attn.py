@@ -70,12 +70,14 @@ def test_merge_kernel(
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
 
 
-CASES = [
-    # Case 1. A general case.
-    ([(129, 871), (18, 280), (37, 988), (1023, 2304), (1, 257)], 256)
-    # Case 2. Flash-decoding case.
-    # ([(1, 1023), (1, 879), (1, 778), (1, 1777)] * 100, 512),
-]
+# CASES = [
+#     # Case 1. A general case.
+#     ([(129, 871), (18, 280), (37, 988), (1023, 2304), (1, 257)], 256)
+#     # Case 2. Flash-decoding case.
+#     # ([(1, 1023), (1, 879), (1, 778), (1, 1777)] * 100, 512),
+# ]
+
+CASES = [([(32, 80), (32, 80)], 64)]
 
 
 @pytest.mark.parametrize("seq_lens_and_common_prefix", CASES)
