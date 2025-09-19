@@ -1918,7 +1918,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                Optional[torch.Tensor], torch.Tensor,
                Optional[IntermediateTensors], dict[str, Any]]:
 
-        preprocess_start = time.perf_counter()
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if ubatch_slices:
             assert num_tokens_after_padding is not None
@@ -2006,7 +2005,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             encoder_inputs = self._extract_encoder_inputs(scheduler_output)
             model_kwargs.update(encoder_inputs)
 
-        preprocess_result = (
+        return (
             num_scheduled_tokens,
             num_input_tokens,
             num_tokens_after_padding,
@@ -2017,17 +2016,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_kwargs,
         )
 
-        logger.info("[perf] preprocess took %.2f ms",
-                    (time.perf_counter() - preprocess_start) * 1e3)
-
-        return preprocess_result
-
     def _sample(
             self, logits: Optional[torch.Tensor],
             spec_decode_metadata: Optional[SpecDecodeMetadata]
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
-        sample_start = time.perf_counter()
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
             sampler_output = self.sampler(
@@ -2060,9 +2053,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             sampler_output.sampled_token_ids = output_token_ids
             self._update_states_after_model_execute(output_token_ids)
-
-        logger.info("[perf] sampling took %.2f ms",
-                    (time.perf_counter() - sample_start) * 1e3)
 
         return sampler_output
 
@@ -2258,7 +2248,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), record_function_or_nullcontext("Forward"),
               self.maybe_get_kv_connector_output(scheduler_output) as
               kv_connector_output):
-            forward_start = time.perf_counter()
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -2266,8 +2255,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
-            logger.info("[perf] model forward took %.2f ms",
-                        (time.perf_counter() - forward_start) * 1e3)
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
