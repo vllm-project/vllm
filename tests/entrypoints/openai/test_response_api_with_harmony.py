@@ -515,6 +515,7 @@ async def test_function_calling(client: OpenAI, model_name: str):
         model=model_name,
         input="What's the weather like in Paris today?",
         tools=tools,
+        temperature=0.0,
     )
     assert response is not None
     assert response.status == "completed"
