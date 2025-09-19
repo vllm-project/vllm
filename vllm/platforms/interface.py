@@ -594,6 +594,13 @@ class Platform:
         """
         return False
 
+    @classmethod
+    def support_graph_mode(cls) -> bool:
+        """
+        Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
