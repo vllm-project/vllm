@@ -3526,7 +3526,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     CUDAGraphMode.NONE
             logger.warning(msg)
 
-
         # double check that we can support full cudagraph if they are requested
         # even after automatic downgrades
         if cudagraph_mode.has_full_cudagraphs() \
