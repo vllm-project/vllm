@@ -437,7 +437,7 @@ class MPClient(EngineCoreClient):
             self.engines_running = False
 
             self.stats_update_address: Optional[str] = None
-            if client_addresses is not None:
+            if client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
@@ -774,6 +774,7 @@ class AsyncMPClient(MPClient):
             client_addresses=client_addresses,
         )
 
+        self.client_count = client_count
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[Union[EngineCoreOutputs,
                                                  Exception]]()
