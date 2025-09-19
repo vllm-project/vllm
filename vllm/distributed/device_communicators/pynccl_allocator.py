@@ -80,7 +80,8 @@ def compile_nccl_allocator():
             verbose=envs.VLLM_LOGGING_LEVEL == "DEBUG",
             is_python_module=False,
             build_directory=out_dir,
-            extra_include_paths=[envs.VLLM_NCCL_INCLUDE_PATH],
+            extra_include_paths=[envs.VLLM_NCCL_INCLUDE_PATH]
+            if envs.VLLM_NCCL_INCLUDE_PATH else None,
         )
         _allocator_wrapper = CUDAPluggableAllocator(
             f"{out_dir}/{nccl_allocator_libname}.so",
