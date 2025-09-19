@@ -14,6 +14,51 @@ from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 logger = init_logger(__name__)
 
+no_func_reaonsing_tag = {
+    "type": "structural_tag",
+    "format": {
+        "type":
+        "triggered_tags",
+        "tags": [{
+            "begin": "<|channel|>analysis<|message|>",
+            "content": {
+                "type": "any_text"
+            },
+            "end": "<|end|>"
+        }],
+        "triggers": ["<|channel|>analysis"],
+        "stop_after_first":
+        False
+    }
+}
+
+
+def from_builtin_tool_to_tag(tool: str) -> list[dict]:
+    tag = [{
+        "begin": f"<|channel|>commentary to={tool}",
+        "content": {
+            "type": "any_text"
+        },
+        "end": "<|end|>"
+    }, {
+        "begin": f"<|channel|>analysis to={tool}",
+        "content": {
+            "type": "any_text"
+        },
+        "end": "<|end|>"
+    }]
+    return tag
+
+
+def tag_with_builtin_funcs(tag: dict, builtin_tool_list: list[str]) -> str:
+    new_tag = no_func_reaonsing_tag
+    new_tag["format"]["triggers"].append("<|channel|>commentary to=")
+
+    for tool in builtin_tool_list:
+        new_tag["format"]["tags"].extend( \
+            from_builtin_tool_to_tag(tool))
+    return new_tag
+
 
 @ReasoningParserManager.register_module("openai_gptoss")
 class GptOssReasoningParser(ReasoningParser):
@@ -88,42 +133,32 @@ class GptOssReasoningParser(ReasoningParser):
     def prepare_structured_tag(self, original_tag: Optional[str],
                                tool_server: Optional[ToolServer]) -> str:
         #TODO Hanchen
-        no_func_reaonsing_tag = """      
-        {
-            "type": "structural_tag",
-            "format": {
-                "type": "triggered_tags",
-                "tags": [
-                    {           
-                        "begin": "<|channel|>analysis<|message|>",
-                        "content": {
-                            "type": "any_text"
-                        },  
-                        "end": "<|end|>"
-                    }
-                ],
-                "triggers": ["<|channel|>analysis"],
-                "stop_after_first": false
-                }
-        }
-        """
-        import xgrammar
-        from_structural_tag = xgrammar.Grammar.from_structural_tag(
-            no_func_reaonsing_tag)
-        logger.info("from_structural_tag:\%s", from_structural_tag)
+        import json
+
         # assert original_tag is None, "original_tag is not None"
         if original_tag is None:
             if tool_server is None:
-                return no_func_reaonsing_tag
+                return json.dumps(no_func_reaonsing_tag)
             else:
-                #TODO Hanchen need to add the tool server + structural tag
+                #TODO Hanchen need to add general MCP server
                 builtin_tool_list: list[str] = []
                 if tool_server.has_tool("browser"):
                     builtin_tool_list.append("browser")
-                if self.tool_server.has_tool("python"):
+                if tool_server.has_tool("python"):
                     builtin_tool_list.append("python")
-                if self.tool_server.has_tool("container"):
+                if tool_server.has_tool("container"):
                     builtin_tool_list.append("container")
 
-                return original_tag
-        return original_tag
+                if len(builtin_tool_list) > 0:
+                    logger.info("builtin_tool_list:\%s", builtin_tool_list)
+                    func_tag = json.dumps( \
+                        tag_with_builtin_funcs(no_func_reaonsing_tag, \
+                            builtin_tool_list))
+                else:
+                    logger.info("builtin_tool_list is empty")
+                    func_tag = json.dumps(no_func_reaonsing_tag)
+
+                return func_tag
+        else:
+            #TODO Hanchen need to add tag on top of the original tag
+            return original_tag

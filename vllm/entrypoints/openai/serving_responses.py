@@ -387,7 +387,8 @@ class OpenAIServingResponses(OpenAIServing):
                         self.tool_server)
                     sampling_params.guided_decoding.structural_tag = \
                         updated_structural_tag
-
+                logger.info("updated_structural_tag:\%s",
+                            updated_structural_tag)
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     request_prompt=request_prompts[i],
