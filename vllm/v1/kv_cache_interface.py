@@ -11,7 +11,6 @@ from typing_extensions import Self
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils import cdiv, get_dtype_size
 
 logger = init_logger(__name__)
@@ -86,6 +85,12 @@ class FullAttentionSpec(AttentionSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
+        dcp_world_size = \
+            vllm_config.parallel_config.decode_context_parallel_size
+        # Note(hc): each dcp rank only need save
+        # (max_model_len//dcp_world_size) tokens locally.
+        if dcp_world_size > 1:
+            max_model_len = cdiv(max_model_len, dcp_world_size)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
     @classmethod
@@ -162,6 +167,8 @@ class SlidingWindowSpec(AttentionSpec):
         assert not self.use_mla, "MLA is not supported for sliding window"
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        assert vllm_config.parallel_config.decode_context_parallel_size == 1, \
+            "DCP not support sliding window."
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
@@ -186,6 +193,7 @@ class MambaSpec(KVCacheSpec):
     dtypes: tuple[torch.dtype]
     page_size_padded: Optional[int] = None
     mamba_type: str = "mamba2"
+    num_speculative_blocks: int = 0
 
     @property
     def page_size_bytes(self) -> int:
@@ -221,8 +229,8 @@ class CrossAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # For cross-attention, we need to cache encoder states
         # Get encoder length (e.g., 1500 for Whisper).
-        max_encoder_len = MULTIMODAL_REGISTRY.\
-            get_encdec_max_encoder_len(vllm_config.model_config)
+        max_encoder_len = vllm_config.scheduler_config.\
+            max_num_encoder_input_tokens
         return cdiv(max_encoder_len, self.block_size) * self.page_size_bytes
 
 

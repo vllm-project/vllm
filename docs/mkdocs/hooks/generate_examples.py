@@ -106,12 +106,40 @@ class Example:
 
     def determine_title(self) -> str:
         if not self.is_code:
-            with open(self.main_file) as f:
+            # Specify encoding for building on Windows
+            with open(self.main_file, encoding="utf-8") as f:
                 first_line = f.readline().strip()
             match = re.match(r'^#\s+(?P<title>.+)$', first_line)
             if match:
                 return match.group('title')
         return fix_case(self.path.stem.replace("_", " ").title())
+
+    def fix_relative_links(self, content: str) -> str:
+        """
+        Fix relative links in markdown content by converting them to gh-file
+        format.
+        
+        Args:
+            content (str): The markdown content to process
+            
+        Returns:
+            str: Content with relative links converted to gh-file format
+        """
+        # Regex to match markdown links [text](relative_path)
+        # This matches links that don't start with http, https, ftp, or #
+        link_pattern = r'\[([^\]]*)\]\((?!(?:https?|ftp)://|#)([^)]+)\)'
+
+        def replace_link(match):
+            link_text = match.group(1)
+            relative_path = match.group(2)
+
+            # Make relative to repo root
+            gh_file = (self.main_file.parent / relative_path).resolve()
+            gh_file = gh_file.relative_to(ROOT_DIR)
+
+            return f'[{link_text}](gh-file:{gh_file})'
+
+        return re.sub(link_pattern, replace_link, content)
 
     def generate(self) -> str:
         content = f"# {self.title}\n\n"
@@ -120,14 +148,16 @@ class Example:
         # Use long code fence to avoid issues with
         # included files containing code fences too
         code_fence = "``````"
-        # Skip the title from md snippets as it's been included above
-        start_line = 2
+
         if self.is_code:
-            content += f"{code_fence}{self.main_file.suffix[1:]}\n"
-            start_line = 1
-        content += f'--8<-- "{self.main_file}:{start_line}"\n'
-        if self.is_code:
-            content += f"{code_fence}\n"
+            content += (f"{code_fence}{self.main_file.suffix[1:]}\n"
+                        f'--8<-- "{self.main_file}"\n'
+                        f"{code_fence}\n")
+        else:
+            with open(self.main_file) as f:
+                # Skip the title from md snippets as it's been included above
+                main_content = f.readlines()[1:]
+            content += self.fix_relative_links("".join(main_content))
         content += "\n"
 
         if not self.other_files:
@@ -174,6 +204,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         doc_path = EXAMPLE_DOC_DIR / example.category / example_name
         if not doc_path.parent.exists():
             doc_path.parent.mkdir(parents=True)
-        with open(doc_path, "w+") as f:
+        # Specify encoding for building on Windows
+        with open(doc_path, "w+", encoding="utf-8") as f:
             f.write(example.generate())
         logger.debug("Example generated: %s", doc_path.relative_to(ROOT_DIR))

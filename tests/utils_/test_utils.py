@@ -379,9 +379,9 @@ def test_duplicate_dict_args(caplog_vllm, parser):
 def test_supports_kw(callable,kw_name,requires_kw_only,
                      allow_var_kwargs,is_supported):
     assert supports_kw(
-        callable=callable,
-        kw_name=kw_name,
-        requires_kw_only=requires_kw_only,
+            callable=callable,
+            kw_name=kw_name,
+            requires_kw_only=requires_kw_only,
         allow_var_kwargs=allow_var_kwargs
     ) == is_supported
 
@@ -499,34 +499,6 @@ def test_bind_kv_cache_non_attention():
     bind_kv_cache(ctx, [kv_cache])
     assert ctx['model.layers.20.attn'].kv_cache[0] is kv_cache[0]
     assert ctx['model.layers.28.attn'].kv_cache[0] is kv_cache[1]
-
-
-def test_bind_kv_cache_encoder_decoder(monkeypatch: pytest.MonkeyPatch):
-    # V1 TESTS: ENCODER_DECODER is not supported on V1 yet.
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-
-        from vllm.attention import Attention, AttentionType
-
-        # example from bart
-        ctx = {
-            'encoder.layers.0.self_attn.attn':
-                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
-            'decoder.layers.0.encoder_attn.attn':
-                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
-            'decoder.layers.0.self_attn.attn':
-                Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
-        }
-
-        kv_cache = [
-            torch.zeros((1, )),
-        ]
-        encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
-
-        bind_kv_cache(ctx, [kv_cache])
-        assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
-        assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
-        assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
 
 
 def test_bind_kv_cache_pp():
@@ -835,22 +807,20 @@ def test_model_specification(parser_with_config, cli_config_file,
 
 @pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
                                    (None, bool, [1, 2, 3])])
-@pytest.mark.parametrize("output", [0, 1, 2])
-def test_sha256(input: tuple, output: int):
-    hash = sha256(input)
-    assert hash is not None
-    assert isinstance(hash, int)
-    assert hash != 0
+def test_sha256(input: tuple):
+    digest = sha256(input)
+    assert digest is not None
+    assert isinstance(digest, bytes)
+    assert digest != b""
 
-    bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    assert hash == int.from_bytes(hashlib.sha256(bytes).digest(),
-                                  byteorder="big")
+    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    assert digest == hashlib.sha256(input_bytes).digest()
 
     # hashing again, returns the same value
-    assert hash == sha256(input)
+    assert digest == sha256(input)
 
     # hashing different input, returns different value
-    assert hash != sha256(input + (1, ))
+    assert digest != sha256(input + (1, ))
 
 
 @pytest.mark.parametrize(
@@ -946,6 +916,36 @@ def test_split_host_port():
 def test_join_host_port():
     assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
     assert join_host_port("::1", 5555) == "[::1]:5555"
+
+
+def test_json_count_leaves():
+    """Test json_count_leaves function from jsontree utility."""
+    from vllm.utils.jsontree import json_count_leaves
+
+    # Single leaf values
+    assert json_count_leaves(42) == 1
+    assert json_count_leaves("hello") == 1
+    assert json_count_leaves(None) == 1
+
+    # Empty containers
+    assert json_count_leaves([]) == 0
+    assert json_count_leaves({}) == 0
+    assert json_count_leaves(()) == 0
+
+    # Flat structures
+    assert json_count_leaves([1, 2, 3]) == 3
+    assert json_count_leaves({"a": 1, "b": 2}) == 2
+    assert json_count_leaves((1, 2, 3)) == 3
+
+    # Nested structures
+    nested_dict = {"a": 1, "b": {"c": 2, "d": 3}}
+    assert json_count_leaves(nested_dict) == 3
+
+    nested_list = [1, [2, 3], 4]
+    assert json_count_leaves(nested_list) == 4
+
+    mixed_nested = {"list": [1, 2], "dict": {"x": 3}, "value": 4}
+    assert json_count_leaves(mixed_nested) == 4
 
 
 def test_convert_ids_list_to_tokens():

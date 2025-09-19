@@ -3,14 +3,14 @@
 
 import enum
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping
 from typing import Any, Optional, Union
 
 import msgspec
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
@@ -47,10 +47,8 @@ class EngineCoreRequest(
         gc=False):  # type: ignore[call-arg]
 
     request_id: str
-    prompt_token_ids: list[int]
-    mm_kwargs: Optional[Sequence[Optional[MultiModalKwargsItem]]]
-    mm_hashes: Optional[list[str]]
-    mm_placeholders: Optional[list[PlaceholderRange]]
+    prompt_token_ids: Optional[list[int]]
+    mm_features: Optional[list[MultiModalFeatureSpec]]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     eos_token_id: Optional[int]
@@ -58,6 +56,7 @@ class EngineCoreRequest(
     lora_request: Optional[LoRARequest]
     cache_salt: Optional[str]
     data_parallel_rank: Optional[int]
+    prompt_embeds: Optional[torch.Tensor] = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
@@ -68,6 +67,8 @@ class EngineCoreRequest(
     # a wave finished notification is received.
     current_wave: int = 0
     priority: int = 0
+
+    trace_headers: Optional[Mapping[str, str]] = None
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -114,6 +115,7 @@ class EngineCoreOutput(
     events: Optional[list[EngineCoreEvent]] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
 
+    trace_headers: Optional[Mapping[str, str]] = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
@@ -147,7 +149,7 @@ class EngineCoreOutputs(
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 
-    #NOTE(Nick): We could consider ways to make this more compact,
+    # NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 
     engine_index: int = 0

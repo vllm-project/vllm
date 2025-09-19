@@ -9,7 +9,8 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 
 from ..openai.test_audio import TEST_AUDIO_URLS, dummy_messages_from_audio_url
-from ..openai.test_vision import TEST_IMAGE_URLS, dummy_messages_from_image_url
+from ..openai.test_vision import (TEST_IMAGE_ASSETS,
+                                  dummy_messages_from_image_url)
 
 
 @pytest.fixture(scope="function")
@@ -97,7 +98,8 @@ def vision_llm():
 
 
 @pytest.mark.parametrize("image_urls",
-                         [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]])
+                         [[TEST_IMAGE_ASSETS[0], TEST_IMAGE_ASSETS[1]]],
+                         indirect=True)
 def test_chat_multi_image(vision_llm, image_urls: list[str]):
     messages = [{
         "role":
@@ -207,7 +209,7 @@ def test_mm_processing_gpu(model_id, modality, mm_init_kwargs):
 
     num_items = 2
     if modality == "image":
-        messages = dummy_messages_from_image_url(TEST_IMAGE_URLS[:num_items])
+        messages = dummy_messages_from_image_url(TEST_IMAGE_ASSETS[:num_items])
     elif modality == "audio":
         messages = dummy_messages_from_audio_url(TEST_AUDIO_URLS[:num_items])
     else:
@@ -240,7 +242,7 @@ def test_mm_processing_gpu_bad_device(model_id, modality, mm_init_kwargs):
 
     num_items = 1
     if modality == "image":
-        messages = dummy_messages_from_image_url(TEST_IMAGE_URLS[:num_items])
+        messages = dummy_messages_from_image_url(TEST_IMAGE_ASSETS[:num_items])
     elif modality == "audio":
         messages = dummy_messages_from_audio_url(TEST_AUDIO_URLS[:num_items])
     else:

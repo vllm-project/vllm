@@ -516,10 +516,11 @@ class FlexAttentionMetadataBuilder(
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
-        self.device = device
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config)
@@ -689,7 +690,8 @@ class FlexAttentionImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -718,6 +720,15 @@ class FlexAttentionImpl(AttentionImpl):
                 (query, key, value),
             )
 
+            query = query[:, :, :num_actual_tokens, :]
+            if ((key_tensor.size(-2) > num_actual_tokens)
+                    or (value_tensor.size(-2) > num_actual_tokens)):
+                # In the encoder-only model with torch.compile,
+                # qkv might be padded, which might cause exception.
+                # see: https://github.com/vllm-project/vllm/pull/24872#discussion_r2353252290
+                key_tensor = key_tensor[:, :, :num_actual_tokens, :]
+                value_tensor = value_tensor[:, :, :num_actual_tokens, :]
+
         else:
             assert self.attn_type == AttentionType.DECODER
             key_cache, value_cache = kv_cache.unbind(0)
@@ -742,7 +753,8 @@ class FlexAttentionImpl(AttentionImpl):
                 (query, key_cache, value_cache),
             )
 
-        query = query[:, :, :num_actual_tokens, :]
+            query = query[:, :, :num_actual_tokens, :]
+
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
@@ -788,6 +800,7 @@ def get_kernel_options(query, block_m, block_n,
             device_props = torch.cuda.get_device_properties()
             max_shared_memory = device_props.shared_memory_per_block_optin
             if max_shared_memory < 144 * 1024:
-                kernel_options["BLOCK_M"] = 32
-                kernel_options["BLOCK_N"] = 32
+                kernel_options["BLOCK_M"] = kernel_options["BLOCK_M"] // 2
+                kernel_options["BLOCK_N"] = kernel_options["BLOCK_N"] // 2
+
     return kernel_options

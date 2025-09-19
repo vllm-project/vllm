@@ -7,19 +7,20 @@ import time
 from collections.abc import Generator, Iterable
 from typing import Optional, cast
 
-import huggingface_hub
 import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm import envs
-from vllm.config import LoadConfig, ModelConfig
+from vllm.config import ModelConfig
+from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     fastsafetensors_weights_iterator, filter_duplicate_safetensors_files,
-    filter_files_not_needed_for_inference, get_lock, np_cache_weights_iterator,
+    filter_files_not_needed_for_inference, maybe_download_from_modelscope,
+    multi_thread_pt_weights_iterator,
+    multi_thread_safetensors_weights_iterator, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.platforms import current_platform
 
@@ -28,6 +29,9 @@ logger = init_logger(__name__)
 
 class DefaultModelLoader(BaseModelLoader):
     """Model loader that can load different file types from disk."""
+
+    # default number of thread when enable multithread weight loading
+    DEFAULT_NUM_THREADS = 8
 
     @dataclasses.dataclass
     class Source:
@@ -53,38 +57,15 @@ class DefaultModelLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
-        if load_config.model_loader_extra_config:
-            raise ValueError(f"Model loader extra config is not supported for "
-                             f"load format {load_config.load_format}")
 
-    def _maybe_download_from_modelscope(
-            self, model: str, revision: Optional[str]) -> Optional[str]:
-        """Download model from ModelScope hub if VLLM_USE_MODELSCOPE is True.
+        extra_config = load_config.model_loader_extra_config
+        allowed_keys = {"enable_multithread_load", "num_threads"}
+        unexpected_keys = set(extra_config.keys()) - allowed_keys
 
-        Returns the path to the downloaded model, or None if the model is not
-        downloaded from ModelScope."""
-        if envs.VLLM_USE_MODELSCOPE:
-            # download model from ModelScope hub,
-            # lazy import so that modelscope is not required for normal use.
-            # pylint: disable=C.
-            from modelscope.hub.snapshot_download import snapshot_download
-
-            # Use file lock to prevent multiple processes from
-            # downloading the same model weights at the same time.
-            with get_lock(model, self.load_config.download_dir):
-                if not os.path.exists(model):
-                    model_path = snapshot_download(
-                        model_id=model,
-                        cache_dir=self.load_config.download_dir,
-                        local_files_only=huggingface_hub.constants.
-                        HF_HUB_OFFLINE,
-                        revision=revision,
-                        ignore_file_pattern=self.load_config.ignore_patterns,
-                    )
-                else:
-                    model_path = model
-            return model_path
-        return None
+        if unexpected_keys:
+            raise ValueError(f"Unexpected extra config keys for load format "
+                             f"{load_config.load_format}: "
+                             f"{unexpected_keys}")
 
     def _prepare_weights(
         self,
@@ -96,7 +77,7 @@ class DefaultModelLoader(BaseModelLoader):
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
-        model_name_or_path = (self._maybe_download_from_modelscope(
+        model_name_or_path = (maybe_download_from_modelscope(
             model_name_or_path, revision) or model_name_or_path)
 
         is_local = os.path.isdir(model_name_or_path)
@@ -175,6 +156,7 @@ class DefaultModelLoader(BaseModelLoader):
             self, source: "Source"
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
+        extra_config = self.load_config.model_loader_extra_config
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path, source.revision, source.fall_back_to_pt,
             source.allow_patterns_overrides)
@@ -195,23 +177,42 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.use_tqdm_on_load,
                 )
             else:
-                weights_iterator = safetensors_weights_iterator(
+                if extra_config.get("enable_multithread_load"):
+                    weights_iterator = (
+                        multi_thread_safetensors_weights_iterator(
+                            hf_weights_files,
+                            self.load_config.use_tqdm_on_load,
+                            max_workers=extra_config.get(
+                                "num_threads", self.DEFAULT_NUM_THREADS),
+                        ))
+                else:
+                    weights_iterator = safetensors_weights_iterator(
+                        hf_weights_files,
+                        self.load_config.use_tqdm_on_load,
+                        self.load_config.safetensors_load_strategy,
+                    )
+        else:
+            if extra_config.get("enable_multithread_load"):
+                weights_iterator = multi_thread_pt_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
+                    self.load_config.pt_load_map_location,
+                    max_workers=extra_config.get("num_threads",
+                                                 self.DEFAULT_NUM_THREADS),
                 )
-        else:
-            weights_iterator = pt_weights_iterator(
-                hf_weights_files,
-                self.load_config.use_tqdm_on_load,
-                self.load_config.pt_load_map_location,
-            )
+            else:
+                weights_iterator = pt_weights_iterator(
+                    hf_weights_files,
+                    self.load_config.use_tqdm_on_load,
+                    self.load_config.pt_load_map_location,
+                )
 
         if current_platform.is_tpu():
             from vllm.platforms.tpu import USE_TPU_COMMONS
 
             if not USE_TPU_COMMONS:
                 # In PyTorch XLA, we should call `xm.mark_step`
-                # requently so that not too many ops are accumulated
+                # frequently so that not too many ops are accumulated
                 # in the XLA program. import torch_xla.core.xla_model
                 # as xm
                 import torch_xla.core.xla_model as xm
