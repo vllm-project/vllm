@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, SchedulerConfig
+from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -31,9 +31,7 @@ class LoRAModelRunnerMixin:
 
     LORA_WARMUP_RANK = 8
 
-    def load_lora_model(self, model: nn.Module, model_config: ModelConfig,
-                        scheduler_config: SchedulerConfig,
-                        lora_config: LoRAConfig,
+    def load_lora_model(self, model: nn.Module, vllm_config: VllmConfig,
                         device: torch.device) -> nn.Module:
 
         if not supports_lora(model):
@@ -44,19 +42,12 @@ class LoRAModelRunnerMixin:
             logger.warning("Regarding multimodal models, vLLM currently "
                            "only supports adding LoRA to language model.")
 
-        # Use get_text_config() in case of multimodal models
-        text_config = model_config.hf_config.get_text_config()
-
         # Add LoRA Manager to the Model Runner
         self.lora_manager = LRUCacheWorkerLoRAManager(
-            scheduler_config.max_num_seqs,
-            scheduler_config.max_num_batched_tokens,
-            model_config.get_vocab_size(),
-            lora_config,
+            vllm_config,
             device,
             model.embedding_modules,
             model.embedding_padding_modules,
-            max_position_embeddings=text_config.max_position_embeddings,
         )
         return self.lora_manager.create_lora_manager(model)
 

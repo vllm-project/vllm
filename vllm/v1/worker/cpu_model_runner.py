@@ -107,9 +107,8 @@ class CPUModelRunner(GPUModelRunner):
         self.model = get_model(vllm_config=self.vllm_config)
 
         if self.lora_config:
-            self.model = self.load_lora_model(self.model, self.model_config,
-                                              self.scheduler_config,
-                                              self.lora_config, self.device)
+            self.model = self.load_lora_model(self.model, self.vllm_config,
+                                              self.device)
 
     def get_model(self) -> nn.Module:
         return self.model
