@@ -1451,10 +1451,8 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
         ):
             for item in message["tool_calls"]:
                 # if arguments is None or empty string, set to {}
-                if item["function"].get("arguments"):
-                    item["function"]["arguments"] = json.loads(
-                        item["function"]["arguments"]
-                    )
+                if content := item["function"].get("arguments"):
+                    item["function"]["arguments"] = json.loads(content)
                 else:
                     item["function"]["arguments"] = {}
 
