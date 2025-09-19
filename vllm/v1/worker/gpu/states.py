@@ -18,14 +18,14 @@ class SamplingMetadata:
 
     temperature: torch.Tensor
 
-    top_p: Optional[torch.Tensor]
-    top_k: Optional[torch.Tensor]
+    top_p: torch.Tensor | None
+    top_k: torch.Tensor | None
 
     seeds: torch.Tensor
     pos: torch.Tensor
 
     # None means no logprobs, 0 means sampled token logprobs only
-    max_num_logprobs: Optional[int]
+    max_num_logprobs: int | None
 
     @classmethod
     def make_dummy(
