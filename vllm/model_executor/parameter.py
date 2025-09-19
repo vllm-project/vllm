@@ -52,8 +52,7 @@ class BasevLLMParameter(Parameter):
         # This sometimes causes OOM errors during model loading. To avoid this,
         # we sync the param tensor after its weight loader is called.
         from vllm.platforms import current_platform
-        if current_platform.is_tpu(
-        ) or current_platform.use_sync_weight_loader():
+        if current_platform.use_sync_weight_loader():
             weight_loader = current_platform.make_synced_weight_loader(
                 weight_loader)
 

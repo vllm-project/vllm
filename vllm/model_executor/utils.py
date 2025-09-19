@@ -44,9 +44,8 @@ def set_weight_attrs(
         # TODO(woosuk): Remove this hack once we have a better solution.
         from vllm.platforms import current_platform
 
-        if (current_platform.is_tpu()
-                or current_platform.use_sync_weight_loader()
-            ) and key == "weight_loader":
+        if current_platform.use_sync_weight_loader(
+        ) and key == "weight_loader":
             value = current_platform.make_synced_weight_loader(value)
         setattr(weight, key, value)
 
