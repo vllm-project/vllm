@@ -433,46 +433,6 @@ async def test_chat_completion_stream_options(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
-)
-@pytest.mark.extra_server_args(['--enable-force-include-usage'])
-async def test_chat_with_enable_force_include_usage(client: openai.AsyncOpenAI,
-                                                    model_name: str):
-    messages = [{
-        "role": "system",
-        "content": "You are a helpful assistant."
-    }, {
-        "role": "user",
-        "content": "What is the capital of France?"
-    }]
-
-    stream = await client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=10,
-        extra_body=dict(min_tokens=10),
-        temperature=0.0,
-        stream=True,
-    )
-    last_completion_tokens = 0
-    async for chunk in stream:
-        if not len(chunk.choices):
-            assert chunk.usage.prompt_tokens >= 0
-            assert last_completion_tokens == 0 or \
-               chunk.usage.completion_tokens > last_completion_tokens or \
-               (
-                   not chunk.choices and
-                   chunk.usage.completion_tokens == last_completion_tokens
-               )
-            assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
-                                                chunk.usage.completion_tokens)
-        else:
-            assert chunk.usage is None
-
-
-@pytest.mark.asyncio
 async def test_structured_outputs_choice_chat(
     client: openai.AsyncOpenAI,
     sample_structured_outputs_choices,

@@ -46,7 +46,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="transcribe",
             log_error_stack=log_error_stack,
-            enable_force_include_usage=enable_force_include_usage
+            enable_force_include_usage=enable_force_include_usage,
         )
 
     async def create_transcription(
@@ -107,7 +107,7 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="translate",
             log_error_stack=log_error_stack,
-            enable_force_include_usage=enable_force_include_usage
+            enable_force_include_usage=enable_force_include_usage,
         )
 
     async def create_translation(
