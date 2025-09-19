@@ -107,8 +107,6 @@ from .utils import (AttentionGroup, MultiModalBudget,
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
-else:
-    xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
 
