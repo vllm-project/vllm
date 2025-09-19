@@ -142,7 +142,6 @@ def _apply_gumbel_kernel(
     seed = tl.load(seeds_ptr + req_idx)
     pos = tl.load(pos_ptr + req_idx)
     gumbel_seed = seed ^ (pos * 0x9E3779B9)
-    gumbel_seed = gumbel_seed & 0xFFFFFFFF
 
     block_id = tl.program_id(1)
     r_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
