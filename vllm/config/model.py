@@ -46,9 +46,6 @@ if TYPE_CHECKING:
     from vllm.config.scheduler import RunnerType
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.v1.sample.logits_processor import LogitsProcessor
-
-    HfOverrides = Union[dict, Callable[[type], type]]
-
 else:
     PretrainedConfig = Any
 
@@ -61,8 +58,6 @@ else:
     RunnerType = Any
     QuantizationMethods = Any
     LogitsProcessor = Any
-
-    HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
 logger = init_logger(__name__)
 
@@ -77,6 +72,7 @@ TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal["raw_logits", "raw_logprobs", "processed_logits",
                        "processed_logprobs"]
+HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 
 _RUNNER_TASKS: dict[RunnerType, list[TaskOption]] = {
