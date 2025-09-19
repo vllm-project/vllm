@@ -66,6 +66,7 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
+WITH_V32 = True
 
 class DeepseekV2MLP(nn.Module):
 
