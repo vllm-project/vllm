@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
                     cast)
 
+import jinja2
+import jinja2.meta
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
 # yapf conflicts with isort for this block
@@ -1519,6 +1521,21 @@ def parse_chat_messages_futures(
     return conversation, mm_tracker.all_mm_data(), mm_tracker.all_mm_uuids()
 
 
+def resolve_chat_template_kwargs(
+    chat_template: str,
+    chat_template_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    if chat_template_kwargs is None:
+        chat_template_kwargs = {}
+
+    env = jinja2.Environment()
+    parsed_content = env.parse(chat_template)
+    accept_vars = jinja2.meta.find_undeclared_variables(parsed_content)
+    return {
+        k: v for k, v in chat_template_kwargs.items() if k in accept_vars
+    }
+
+
 def apply_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     conversation: list[ConversationMessage],
@@ -1544,12 +1561,16 @@ def apply_hf_chat_template(
         )
 
     try:
+        resolved_kwargs = resolve_chat_template_kwargs(
+            chat_template=hf_chat_template,
+            chat_template_kwargs=kwargs,
+        )
         return tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
             chat_template=hf_chat_template,
             tokenize=tokenize,
-            **kwargs,
+            **resolved_kwargs,
         )
 
     # External library exceptions can sometimes occur despite the framework's
