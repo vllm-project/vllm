@@ -560,10 +560,12 @@ class Processor:
             return
 
         parallel_config = self.parallel_config
-        api_process_rank = parallel_config._api_process_rank
         gpu_allocation = parallel_config._renderer_gpu_allocation
-        device = gpu_allocation[api_process_rank]
-        mm_config.update_mm_processor_kwargs({"device": device})
+        if not gpu_allocation:
+            return
+
+        api_process_rank = parallel_config._api_process_rank
+        device = mm_config.mm_processing_device
 
         if mm_config.mm_processing_device != "cpu":
             # Peak memory usage (required for this profiling)

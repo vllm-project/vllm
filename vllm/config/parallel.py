@@ -212,7 +212,7 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
-    _renderer_gpu_allocation: list[str] = field(default_factory=list)
+    _renderer_gpu_allocation: Optional[list[str]] = None
     """
     The GPU allocated to the renderer of each API process.
 

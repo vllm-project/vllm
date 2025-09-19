@@ -647,6 +647,18 @@ class VllmConfig:
             "the VLLM_ALL2ALL_BACKEND environment variable to "\
             "deepep_low_latency and install the DeepEP kerenls."
 
+        if (mm_config := self.model_config.multimodal_config):
+            if self.parallel_config._renderer_gpu_allocation is None:
+                assert self.parallel_config._api_process_count == 1
+                assert self.parallel_config._api_process_rank == 0
+                self.parallel_config._renderer_gpu_allocation = [
+                    mm_config.mm_processing_device
+                ]
+            else:
+                device = self.parallel_config._renderer_gpu_allocation[
+                    self.parallel_config._api_process_rank]
+                mm_config.update_mm_processor_kwargs({"device": device})
+
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
