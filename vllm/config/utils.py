@@ -52,7 +52,7 @@ def get_field(cls: ConfigType, name: str) -> Field:
         f"{cls.__name__}.{name} must have a default value or default factory.")
 
 
-def contains_object_print(text):
+def contains_object_print(text: str) -> bool:
     """
     Check if the text looks like a printed Python object, e.g.
     contains any substring matching the pattern: "at 0xFFFFFFF>"
@@ -70,7 +70,7 @@ def contains_object_print(text):
     return match is not None
 
 
-def assert_hashable(text):
+def assert_hashable(text: str) -> bool:
     if not contains_object_print(text):
         return True
     raise AssertionError(
