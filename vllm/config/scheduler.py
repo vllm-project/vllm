@@ -3,7 +3,7 @@
 
 import hashlib
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from pydantic import SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
@@ -15,13 +15,9 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                         POOLING_MODEL_MAX_NUM_BATCHED_TOKENS)
 
-if TYPE_CHECKING:
-    from vllm.config import RunnerType
-else:
-    RunnerType = Any
-
 logger = init_logger(__name__)
 
+RunnerType = Literal["generate", "pooling", "draft"]
 PreemptionMode = Literal["swap", "recompute"]
 SchedulerPolicy = Literal["fcfs", "priority"]
 
