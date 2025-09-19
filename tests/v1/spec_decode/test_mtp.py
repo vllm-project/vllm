@@ -96,9 +96,7 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers,
 @pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("num_speculative_tokens", [1])
-def test_mtp_propose_returns_hidden_states(attn_backend,
-                                           num_speculative_tokens,
-                                           monkeypatch):
+def test_mtp_propose(attn_backend, num_speculative_tokens, monkeypatch):
     """Test that MTP's forward method returns hidden states directly"""
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)

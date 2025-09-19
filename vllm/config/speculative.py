@@ -319,8 +319,7 @@ class SpeculativeConfig:
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
                 elif (self.draft_model_config.hf_config.model_type
-                      in ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp",
-                          "ernie_mtp", "qwen3_next_mtp")):
+                      in MTP_MODEL_TYPES):
                     self.method = "mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
