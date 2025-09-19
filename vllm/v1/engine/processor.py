@@ -593,8 +593,9 @@ class Processor:
             # Only check init memory if we are sure that the EngineCore is not
             # loading weights or running profiling on the same GPU
             new_device_index = torch.device(device).index or 0
-            local_engine_count = parallel_config.data_parallel_size_local
-            if new_device_index < local_engine_count:
+            local_gpu_count = (parallel_config.data_parallel_size_local *
+                               parallel_config.world_size)
+            if new_device_index < local_gpu_count:
                 logger.warning(
                     "Both EngineCore and multi-modal processor are using "
                     "the same GPU (%s). This may result in inaccurate memory "

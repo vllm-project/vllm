@@ -84,6 +84,10 @@ class MultiModalConfig:
         kwargs = self.mm_processor_kwargs or {}
         return str(kwargs.get("device", "cpu"))
 
+    @mm_processing_device.setter
+    def mm_processing_device(self, device: str) -> None:
+        self.update_mm_processor_kwargs({"device": device})
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

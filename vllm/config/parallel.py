@@ -218,7 +218,7 @@ class ParallelConfig:
 
     Note:
         This is an internal config that is only valid for and
-        should only be set by API server scale-out.
+        should only be set internally.
     """
 
     @property

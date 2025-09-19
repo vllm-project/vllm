@@ -647,17 +647,31 @@ class VllmConfig:
             "the VLLM_ALL2ALL_BACKEND environment variable to "\
             "deepep_low_latency and install the DeepEP kerenls."
 
-        if (mm_config := self.model_config.multimodal_config):
-            if self.parallel_config._renderer_gpu_allocation is None:
-                assert self.parallel_config._api_process_count == 1
-                assert self.parallel_config._api_process_rank == 0
-                self.parallel_config._renderer_gpu_allocation = [
-                    mm_config.mm_processing_device
-                ]
-            else:  # GPU allocation is already set by API server scale-out
-                device = self.parallel_config._renderer_gpu_allocation[
-                    self.parallel_config._api_process_rank]
-                mm_config.update_mm_processor_kwargs({"device": device})
+        mm_config = self.model_config.multimodal_config
+        if mm_config and mm_config.mm_processing_device != "cpu":
+            api_process_count = self.parallel_config._api_process_count
+            api_process_rank = self.parallel_config._api_process_rank
+            local_gpu_count = (self.parallel_config.data_parallel_size_local *
+                               self.parallel_config.world_size)
+
+            if api_process_rank != -1:
+                from vllm.multimodal.utils import allocate_gpu_mm_processors
+
+                device_count = current_platform.device_count()  # type: ignore
+
+                gpu_allocation = allocate_gpu_mm_processors(
+                    mm_config.mm_processing_device,
+                    api_process_count,
+                    available_device_count=device_count,
+                    engine_device_count=local_gpu_count,
+                )
+                device = gpu_allocation[api_process_rank]
+
+                logger.info("Multi-modal processor will be run on device %s",
+                            device)
+
+                self.parallel_config._renderer_gpu_allocation = gpu_allocation
+                mm_config.mm_processing_device = device
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]

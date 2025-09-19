@@ -17,8 +17,6 @@ from vllm.entrypoints.openai.cli_args import (make_arg_parser,
 from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
                                     show_filtered_argument_or_group_from_help)
 from vllm.logger import init_logger
-from vllm.multimodal.utils import allocate_gpu_mm_processors
-from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, decorate_logs, get_tcp_uri,
                         set_process_title)
@@ -165,30 +163,6 @@ def run_multi_api_server(args: argparse.Namespace):
         if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
             raise ValueError("VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
                              "with api_server_count > 1")
-
-        mm_config = vllm_config.model_config.multimodal_config
-        if mm_config and mm_config.mm_processing_device != "cpu":
-            device_count = current_platform.device_count()  # type: ignore
-
-            gpu_allocation = allocate_gpu_mm_processors(
-                mm_config.mm_processing_device,
-                parallel_config._api_process_count,
-                available_device_count=device_count,
-                engine_device_count=parallel_config.world_size_across_dp,
-            )
-
-            for i, device in enumerate(gpu_allocation):
-                logger.info(
-                    "Multi-modal processor for APIServer_%s will be run "
-                    "on device %s",
-                    i,
-                    device,
-                )
-
-            # Note: `engine_args` is sent to API servers
-            # while vllm_config is sent to EngineCore
-            engine_args._renderer_gpu_allocation = gpu_allocation
-            parallel_config._renderer_gpu_allocation = gpu_allocation
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
