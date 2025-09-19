@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from vllm import LLM
-from vllm.config import ModelImpl
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
@@ -111,8 +110,8 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             # these tests seem to produce leftover memory
             gpu_memory_utilization=0.80,
             load_format="dummy",
-            model_impl=ModelImpl.TRANSFORMERS
-            if model_arch in _TRANSFORMERS_BACKEND_MODELS else ModelImpl.VLLM,
+            model_impl="transformers"
+            if model_arch in _TRANSFORMERS_BACKEND_MODELS else "vllm",
             hf_overrides=hf_overrides_fn,
             max_num_seqs=model_info.max_num_seqs)
 
