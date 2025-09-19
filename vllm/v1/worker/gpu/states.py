@@ -160,7 +160,7 @@ class RequestState:
         seeds = self.seeds.copy_np_to_gpu(seeds)
 
         num_logprobs = self.num_logprobs[idx_mapping]
-        max_num_logprobs = np.max(num_logprobs)
+        max_num_logprobs = int(np.max(num_logprobs))
         if max_num_logprobs == -1:
             max_num_logprobs = None
 

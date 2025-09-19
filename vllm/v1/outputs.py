@@ -12,11 +12,11 @@ import torch
 class LogprobsLists(NamedTuple):
 
     # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids: list[list[int]]
+    logprob_token_ids: np.ndarray
     # [num_reqs, max_num_logprobs + 1]
-    logprobs: list[list[float]]
+    logprobs: np.ndarray
     # [num_reqs]
-    sampled_token_ranks: list[int]
+    sampled_token_ranks: np.ndarray
 
     def slice(self, start: int, end: int):
         return LogprobsLists(
@@ -37,9 +37,9 @@ class LogprobsTensors(NamedTuple):
 
     def tolists(self):
         return LogprobsLists(
-            self.logprob_token_ids.tolist(),
-            self.logprobs.tolist(),
-            self.selected_token_ranks.tolist(),
+            self.logprob_token_ids.cpu().numpy(),
+            self.logprobs.cpu().numpy(),
+            self.selected_token_ranks.cpu().numpy(),
         )
 
     @staticmethod

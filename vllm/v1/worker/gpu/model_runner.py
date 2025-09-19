@@ -376,11 +376,14 @@ class GPUModelRunner:
         sampler_output = self.sample(logits, input_batch)
         sampled_token_ids_np, num_sampled_tokens = self.postprocess(
             sampler_output, input_batch)
+        logprobs = None
+        if sampler_output.logprobs_tensors is not None:
+            logprobs = sampler_output.logprobs_tensors.tolists()
         return ModelRunnerOutput(
             req_ids=input_batch.req_ids,
             sampled_token_ids=sampled_token_ids_np,
             num_sampled_tokens=num_sampled_tokens,
-            logprobs=sampler_output.logprobs_tensors,
+            logprobs=logprobs,
             prompt_logprobs_dict={},
             pooler_output=[],
             kv_connector_output=None,
