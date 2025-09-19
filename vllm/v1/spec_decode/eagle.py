@@ -69,7 +69,7 @@ class EagleProposer:
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
 
-        self.attn_metadata_builders = None
+        self.attn_metadata_builders: Optional[list[AttentionMetadataBuilder]] = None
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
