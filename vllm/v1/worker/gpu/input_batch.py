@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,6 +69,43 @@ class InputBatch:
 
     # [num_reqs]
     logits_indices: torch.Tensor
+
+    @classmethod
+    def make_dummy(
+        cls,
+        num_reqs: int,
+        num_tokens: int,
+        device: torch.device,
+    ) -> "InputBatch":
+        assert 0 < num_reqs <= num_tokens
+        req_ids = [f"req_{i}" for i in range(num_reqs)]
+        idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
+        idx_mapping = torch.tensor(idx_mapping_np, device=device)
+        num_scheduled_tokens = np.full(num_reqs,
+                                       num_tokens // num_reqs,
+                                       dtype=np.int32)
+        num_scheduled_tokens[-1] += num_tokens % num_reqs
+        is_chunked_prefilling = np.zeros(num_reqs, dtype=np.bool_)
+        input_ids = torch.zeros(num_tokens, dtype=torch.int32, device=device)
+        positions = torch.zeros(num_tokens, dtype=torch.int64, device=device)
+        attn_metadata = defaultdict(lambda: None)
+        logits_indices = torch.arange(num_reqs,
+                                      dtype=torch.int32,
+                                      device=device)
+        return cls(
+            req_ids=req_ids,
+            num_reqs=num_reqs,
+            idx_mapping=idx_mapping,
+            idx_mapping_np=idx_mapping_np,
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_tokens=num_tokens,
+            num_tokens_after_padding=num_tokens,
+            is_chunked_prefilling=is_chunked_prefilling,
+            input_ids=input_ids,
+            positions=positions,
+            attn_metadata=attn_metadata,
+            logits_indices=logits_indices,
+        )
 
 
 # NOTE: With the type annotations, this function is pre-compiled

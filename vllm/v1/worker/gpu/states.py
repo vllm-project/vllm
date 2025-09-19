@@ -29,6 +29,30 @@ class SamplingMetadata:
     # None means no logprobs, 0 means sampled token logprobs only
     max_num_logprobs: Optional[int]
 
+    @classmethod
+    def make_dummy(
+        cls,
+        num_reqs: int,
+        device: torch.device,
+    ) -> "SamplingMetadata":
+        assert num_reqs > 0
+        temperature = torch.zeros(num_reqs, dtype=torch.float32, device=device)
+        temperature[0] = 0.5
+        top_p = torch.ones(num_reqs, dtype=torch.float32, device=device)
+        top_p[0] = 0.99
+        top_k = torch.ones(num_reqs, dtype=torch.int32, device=device)
+        seeds = torch.zeros(num_reqs, dtype=torch.int64, device=device)
+        pos = torch.zeros(num_reqs, dtype=torch.int64, device=device)
+        max_num_logprobs = 20
+        return cls(
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            seeds=seeds,
+            pos=pos,
+            max_num_logprobs=max_num_logprobs,
+        )
+
 
 class RequestState:
 

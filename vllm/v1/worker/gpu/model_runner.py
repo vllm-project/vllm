@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import time
 from copy import deepcopy
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -24,7 +25,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import (InputBatch, InputBuffers,
                                             prepare_inputs)
 from vllm.v1.worker.gpu.sampler import Sampler
-from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.gpu.states import RequestState, SamplingMetadata
 
 logger = init_logger(__name__)
 
@@ -129,15 +130,58 @@ class GPUModelRunner:
             self.device,
         )
 
-    def _dummy_run(self, num_tokens: int, *args, **kwargs) -> None:
-        return None, None
+    def _dummy_run(
+        self,
+        num_tokens: int,
+        *args,
+        input_batch: Optional[InputBatch] = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if input_batch is None:
+            input_batch = InputBatch.make_dummy(
+                num_reqs=min(num_tokens, self.max_num_reqs),
+                num_tokens=num_tokens,
+                device=self.device,
+            )
 
-    def _dummy_sampler_run(self, hidden_states: torch.Tensor, *args,
-                           **kwargs) -> None:
-        return None
+        with set_forward_context(
+                input_batch.attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens,
+        ):
+            hidden_states = self.model(
+                input_ids=input_batch.input_ids[:num_tokens],
+                positions=input_batch.positions[:num_tokens],
+            )
+        sample_hidden_states = hidden_states[input_batch.logits_indices]
+        return hidden_states, sample_hidden_states
 
-    def profile_run(self):
-        pass
+    def _dummy_sampler_run(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> None:
+        num_reqs = hidden_states.shape[0]
+        sampling_metadata = SamplingMetadata.make_dummy(
+            num_reqs=num_reqs,
+            device=self.device,
+        )
+        logits = self.model.compute_logits(hidden_states, None)
+        self.sampler(logits, sampling_metadata)
+
+    def profile_run(self) -> None:
+        input_batch = InputBatch.make_dummy(
+            num_reqs=self.max_num_reqs,
+            num_tokens=self.max_num_tokens,
+            device=self.device,
+        )
+        hidden_states, sample_hidden_states = self._dummy_run(
+            self.max_num_tokens,
+            input_batch=input_batch,
+        )
+        self._dummy_sampler_run(sample_hidden_states)
+        torch.cuda.synchronize()
+        del hidden_states, sample_hidden_states
+        gc.collect()
 
     def update_states(self, scheduler_output: SchedulerOutput) -> None:
         # for req_id in scheduler_output.preempted_req_ids:
