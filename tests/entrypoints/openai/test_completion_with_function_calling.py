@@ -308,7 +308,7 @@ async def test_no_args_tool_call(client: openai.AsyncOpenAI, model_name: str,
     }]
     messages = [{"role": "user", "content": "What time is it now?"}]
     # Step 2: Send user message and let model decide whether to call the tool
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=model_name,
         messages=messages,
         tools=tools,
@@ -334,7 +334,7 @@ async def test_no_args_tool_call(client: openai.AsyncOpenAI, model_name: str,
                 "content": result,
             })
             # Step 5: Send tool result back to model to continue conversation
-            final_response = client.chat.completions.create(
+            final_response = await client.chat.completions.create(
                 model=model_name,
                 messages=messages,
             )
