@@ -125,8 +125,8 @@
         max_tokens: 20
         max_completion_tokens: 30
     requests:
-      - "role": "user" 
-        "content": >
+      - role: "user" 
+        content: >
           You will act as a professional sentiment analysis expert. Based on the text content, tone, and context of the input sentence, complete the sentiment analysis task in strict accordance with the following rules:
           Analysis Scope: Focus only on the explicit emotional expressions in the input sentence itself. Do not extend to unmentioned background information or add subjective speculations (e.g., unstated underlying emotions of the speaker, unexpressed intentions not implied by the sentence).
           Sentiment Classification: Categorize sentiment into 3 types, and select results only from these 3 options:
