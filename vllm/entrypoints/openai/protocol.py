@@ -973,7 +973,6 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: Optional[str] = None
     prompt: Optional[Union[list[int], list[list[int]], str, list[str]]] = None
-    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
@@ -1009,6 +1008,7 @@ class CompletionRequest(OpenAIBaseModel):
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
+    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     add_special_tokens: bool = Field(
         default=True,
         description=(
