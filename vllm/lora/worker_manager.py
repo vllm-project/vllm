@@ -80,6 +80,8 @@ class WorkerLoRAManager:
         return lora_manager.model
 
     def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
+        # On load verify the signature, if the policy requires it
+        lora_request.maybe_verify_signature()
         try:
             supported_lora_modules = (
                 self._adapter_manager.supported_lora_modules)

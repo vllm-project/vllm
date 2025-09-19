@@ -136,9 +136,11 @@ class OpenAIServingModels:
 
             lora_path = request.lora_path
             unique_id = self.lora_id_counter.inc(1)
-            lora_request = LoRARequest(lora_name=lora_name,
-                                       lora_int_id=unique_id,
-                                       lora_path=lora_path)
+            lora_request = LoRARequest(
+                lora_name=lora_name,
+                lora_int_id=unique_id,
+                lora_path=lora_path,
+                security_config=self.model_config.security_config)
             if base_model_name is not None and self.is_base_model(
                     base_model_name):
                 lora_request.base_model_name = base_model_name

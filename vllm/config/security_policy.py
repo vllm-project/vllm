@@ -37,6 +37,9 @@ SECURITY_POLICY_SCHEMA: dict[str, Any] = {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
+                        "loras": {
+                            "$ref": "#/definitions/signed-object"
+                        },
                         "models": {
                             "$ref": "#/definitions/signed-object"
                         },
@@ -336,7 +339,10 @@ class SignatureVerificationConfig:
             logger.info("Signature verification succeeded on %s", model)
 
 
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class SecurityPolicy:
+
+    policy_json: Optional[dict] = None
 
     def __init__(self, policy_json) -> None:
         self.policy_json = policy_json
@@ -346,6 +352,9 @@ class SecurityPolicy:
         self.regex_map = {}
         self.validate()
         self.models_verified = set()
+
+    def __post_init__(self) -> None:
+        self.init()
 
     def validate(self: Self) -> None:
         """Validate the policy with scheme and correctness of regular
@@ -358,6 +367,7 @@ class SecurityPolicy:
             .get("signatures", {}).get("signers", {}).keys()
 
         self.compile_regexs("models", signers)
+        self.compile_regexs("loras", signers)
 
     def compile_regexs(self, object_types: str, signers: list[str]) -> None:
         """Compile the regular expressions and while walking all the entries
@@ -452,6 +462,13 @@ class SecurityPolicy:
             .get("signatures", {})\
             .get("models") is not None
 
+    def lora_signature_verification_requested(self: Self) -> bool:
+        """LoRA signature verification is requested if loras are specified
+        in the policy."""
+        return self.policy_json.get("policy", {})\
+            .get("signatures", {})\
+            .get("loras") is not None
+
     def model_need_verification(self: Self, model_path: str) -> bool:
         """Check whether a model with the given path  still needs to be
         verified."""
@@ -469,3 +486,8 @@ class SecurityPolicy:
         svc.verify_signature(model_path)
 
         self.models_verified.add(model_path)
+
+    def verify_lora_signature(self: Self, model_path: str) -> None:
+        """Verify the signature on a LoRA given its path."""
+        svc = self.getSignatureVerificationConfig("loras", model_path)
+        svc.verify_signature(model_path)

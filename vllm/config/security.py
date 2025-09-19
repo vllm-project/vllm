@@ -51,3 +51,12 @@ class SecurityConfig:
            os.path.exists(model_path) and \
            os.path.isdir(model_path):
             security_policy.verify_model_signature(model_path)
+
+    def maybe_verify_lora_signature(self, model_path: str) -> None:
+        """If there's a security policy that requires LoRA signature
+           verification then verify its signature. The LoRA adapter
+           is assumed to be existing at the given path."""
+        security_policy = self.getSecurityPolicy()
+        if security_policy and \
+           security_policy.lora_signature_verification_requested():
+            security_policy.verify_lora_signature(model_path)

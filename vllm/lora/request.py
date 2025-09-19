@@ -6,6 +6,8 @@ from typing import Optional
 
 import msgspec
 
+from vllm.config.security import SecurityConfig
+
 
 class LoRARequest(
         msgspec.Struct,
@@ -29,6 +31,7 @@ class LoRARequest(
     long_lora_max_len: Optional[int] = None
     base_model_name: Optional[str] = msgspec.field(default=None)
     tensorizer_config_dict: Optional[dict] = None
+    security_config: Optional[SecurityConfig] = None
 
     def __post_init__(self):
         if self.lora_int_id < 1:
@@ -95,3 +98,10 @@ class LoRARequest(
         identified by their names across engines.
         """
         return hash(self.lora_name)
+
+    def maybe_verify_signature(self) -> None:
+        """Verify the signature on an adapter if the security policy requires
+        it."""
+        if not self.security_config:
+            return
+        self.security_config.maybe_verify_lora_signature(self.lora_path)

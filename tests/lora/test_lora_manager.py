@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
+import tempfile
 
+import model_signing
 import pytest
 import torch
 from safetensors.torch import load_file
@@ -10,6 +13,8 @@ from torch import nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.security import SecurityConfig
+from vllm.config.security_policy import SignatureVerificationError
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)
@@ -677,3 +682,141 @@ def test_packed_loras(dist_init, dummy_model_gate_up, device):
                                model_lora_clone1.get_lora("up_proj").lora_a)
     torch.testing.assert_close(packed_lora1.lora_b[1],
                                model_lora_clone1.get_lora("up_proj").lora_b)
+
+
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
+KEYS_PATH = os.path.join(BASE_PATH, "../security/keys")
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        (
+            {
+                "policy": {
+                    "signatures": {}
+                }
+            },
+            None,
+            None  # No 'loras' listed in policy
+        ),
+        (
+            {
+                "policy": {
+                    "signatures": {
+                        "loras": {}
+                    }
+                }
+            },
+            None,
+            ValueError  # 'loras' in policy but no rule
+        ),
+        (
+            {
+                "policy": {
+                    "signatures": {
+                        "signers": {
+                            "s1": {
+                                "verification_method": "sigstore",
+                                "identity": "foo@bar.com",
+                                "identity_provider": "https://foo.bar"
+                            }
+                        },
+                        "loras": {
+                            "regex:.*": {
+                                "signer": "s1"
+                            }
+                        }
+                    }
+                }
+            },
+            None,
+            SignatureVerificationError  # Missing signature
+        ),
+        (
+            {
+                "policy": {
+                    "signatures": {
+                        "signers": {
+                            "s1": {
+                                "verification_method":
+                                "certificate",
+                                "certificate_chain":
+                                [os.path.join(KEYS_PATH, "ca-cert.pem")],
+                            }
+                        },
+                        "loras": {
+                            "regex:.*": {
+                                "signer": "s1"
+                            }
+                        }
+                    }
+                }
+            },
+            (os.path.join(KEYS_PATH, "signing-key.pem"),
+             os.path.join(KEYS_PATH, "signing-key-cert.pem"),
+             os.path.join(KEYS_PATH, "int-ca-cert.pem")),
+            None  # Signature is available
+        ),
+    ])
+def test_worker_adapter_manager_security_policy(dist_init, dummy_model_gate_up,
+                                                tmp_path, parameters):
+    # Should remove every LoRA not specified in the request.
+    lora_config = LoRAConfig(max_lora_rank=8,
+                             max_cpu_loras=4,
+                             max_loras=4,
+                             lora_dtype=DEFAULT_DTYPE)
+    model_config = ModelConfig(max_model_len=16)
+
+    sp_json, signing_parameters, exc = parameters
+
+    with tempfile.NamedTemporaryFile(mode="w") as file:
+        file.write(json.dumps(sp_json))
+        file.flush()
+
+        security_config = SecurityConfig(security_policy=file.name)
+        vllm_config = VllmConfig(model_config=model_config,
+                                 lora_config=lora_config,
+                                 security_config=security_config)
+
+        worker_adapter_manager = WorkerLoRAManager(vllm_config, "cpu",
+                                                   EMBEDDING_MODULES,
+                                                   EMBEDDING_PADDING_MODULES)
+        worker_adapter_manager.create_lora_manager(dummy_model_gate_up)
+
+        dummy_lora_files = f"{tmp_path}/lora_adapter"
+        os.makedirs(dummy_lora_files, exist_ok=True)
+        create_peft_lora(
+            dummy_model_gate_up,
+            save_dir=dummy_lora_files,
+            target_modules=["layer1.dense1", "dense2"],
+            lora_dtype=DEFAULT_DTYPE,
+        )
+
+        if signing_parameters:
+            private_key, signing_certificate, certificate = \
+                signing_parameters
+            signature = os.path.join(dummy_lora_files, "model.sig")
+            model_path = dummy_lora_files
+
+            model_signing.signing.Config().use_certificate_signer(
+                private_key=private_key,
+                signing_certificate=signing_certificate,
+                certificate_chain=[certificate],
+            ).set_hashing_config(model_signing.hashing.Config()).sign(
+                model_path, signature)
+
+        mapping = LoRAMapping([], [])
+        if exc:
+            with pytest.raises(exc):
+                worker_adapter_manager.set_active_adapters([
+                    LoRARequest("1",
+                                1,
+                                dummy_lora_files,
+                                security_config=security_config)
+                ], mapping)
+        else:
+            worker_adapter_manager.set_active_adapters([
+                LoRARequest(
+                    "1", 1, dummy_lora_files, security_config=security_config)
+            ], mapping)

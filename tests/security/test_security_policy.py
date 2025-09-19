@@ -207,6 +207,47 @@ from vllm.config.security_policy import SecurityPolicy
          '    }'
          ' }'
          '}}', None),
+        ('{"policy":{'
+         '"signatures":{'
+         '    "loras":{'
+         '    }'
+         ' }'
+         '}}', None),
+        (
+            '{"policy":{'
+            '"signatures":{'
+            '    "loras":{'
+            '        "/foo/bar": {'  # missing 'signer'
+            '        }'
+            '    }'
+            ' }'
+            '}}',
+            ValidationError),
+        (
+            '{"policy":{'
+            '"signatures":{'
+            '    "loras":{'
+            '        "/foo/bar": {'
+            '            "signer": "signer1"'  # signer1 not available
+            '        }'
+            '    }'
+            ' }'
+            '}}',
+            ValueError),
+        ('{"policy":{'
+         '"signatures":{'
+         '    "signers":{'
+         '        "signer1": {'
+         '            "verification_method": "skip"'
+         '        }'
+         '    },'
+         '    "loras":{'
+         '        "/foo/bar": {'
+         '            "signer": "signer1"'
+         '        }'
+         '    }'
+         ' }'
+         '}}', None),
     ])
 def test_validate_security_policy(parameters):
     policy_str, exc = parameters
