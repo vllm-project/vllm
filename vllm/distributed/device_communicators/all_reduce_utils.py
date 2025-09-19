@@ -10,7 +10,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from itertools import product
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -57,7 +57,7 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     }
 }
 
-NCCL_SYMM_MEM_ALL_REDUCE_CONFIG = {
+NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
     "min_world_size": 4,
     "thresholds": {
         4: 2 * MiB,  # 2 MB
