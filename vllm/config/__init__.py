@@ -654,7 +654,7 @@ class VllmConfig:
                 self.parallel_config._renderer_gpu_allocation = [
                     mm_config.mm_processing_device
                 ]
-            else:
+            else:  # GPU allocation is already set by API server scale-out
                 device = self.parallel_config._renderer_gpu_allocation[
                     self.parallel_config._api_process_rank]
                 mm_config.update_mm_processor_kwargs({"device": device})
