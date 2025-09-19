@@ -23,7 +23,7 @@
 
 #include <algorithm>
 #include "../attention/dtype_fp8.cuh"
-#include "../quantization/fp8/amd/quant_utils.cuh"
+#include "../quantization/w8a8/fp8/amd/quant_utils.cuh"
 
 #if defined(__HIPCC__) && \
     (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))

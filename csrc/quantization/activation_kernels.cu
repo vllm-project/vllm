@@ -7,7 +7,7 @@
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
 
-#include "quantization/fp8/common.cuh"
+#include "quantization/w8a8/fp8/common.cuh"
 
 #include <c10/util/Float8_e4m3fn.h>
 
