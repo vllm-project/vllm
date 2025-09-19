@@ -49,10 +49,42 @@ def server(monkeypatch_module, zephyr_lora_files):  #noqa: F811
         "2",
         "--max-num-seqs",
         "128",
+        "--gpu-memory-utilization",
+        "0.7"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
+
+
+@pytest.fixture(scope="function")
+def server_with_force_include_usage(request):  #noqa: F811
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "128",
+        "--enforce-eager",
+        "--max-num-seqs",
+        "1",
+        "--enable-force-include-usage",
+        "--port",
+        "55857",
+        "--gpu-memory-utilization",
+        "0.2"
+    ]
+
+    with RemoteOpenAIServer("Qwen/Qwen3-0.6B", args,
+                            auto_port=False) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client_with_force_include_usage(server_with_force_include_usage):
+    async with server_with_force_include_usage.get_async_client(
+    ) as async_client:
+        yield async_client
 
 
 @pytest_asyncio.fixture
@@ -471,13 +503,8 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
-)
-@pytest.mark.extra_server_args(['--enable-force-include-usage'])
-async def test_chat_with_enable_force_include_usage(client: openai.AsyncOpenAI,
-                                                    model_name: str):
+async def test_chat_with_enable_force_include_usage(
+        client_with_force_include_usage: openai.AsyncOpenAI):
     messages = [{
         "role": "system",
         "content": "You are a helpful assistant."
@@ -486,8 +513,8 @@ async def test_chat_with_enable_force_include_usage(client: openai.AsyncOpenAI,
         "content": "What is the capital of France?"
     }]
 
-    stream = await client.chat.completions.create(
-        model=model_name,
+    stream = await client_with_force_include_usage.chat.completions.create(
+        model="Qwen/Qwen3-0.6B",
         messages=messages,
         max_completion_tokens=10,
         extra_body=dict(min_tokens=10),
