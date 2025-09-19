@@ -95,19 +95,19 @@ def test_single_prompt(
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model,
-                                                    mamba_ssm_cache_dtype,
-                                                    enforce_eager,
-                                                    max_model_len, dtype,
-                                                    tensor_parallel_size)
-    vllm_outputs_no_cache = _get_vLLM_output_logprobs(
-        vllm_runner, vllm_runner_kwargs, [generated_prompts[0]],
-        max_tokens, num_logprobs)[0][0]
+    vllm_runner_kwargs = _get_vllm_runner_params(model, mamba_ssm_cache_dtype,
+                                                 enforce_eager, max_model_len,
+                                                 dtype, tensor_parallel_size)
+    vllm_outputs_no_cache = _get_vLLM_output_logprobs(vllm_runner,
+                                                      vllm_runner_kwargs,
+                                                      [generated_prompts[0]],
+                                                      max_tokens,
+                                                      num_logprobs)[0][0]
 
     vllm_runner_kwargs['enable_prefix_caching'] = True
     vllm_outputs_cache_rep, _ = _get_vLLM_output_logprobs(
-        vllm_runner, vllm_runner_kwargs, [generated_prompts[0]],
-        max_tokens, num_logprobs, n_repetitions)
+        vllm_runner, vllm_runner_kwargs, [generated_prompts[0]], max_tokens,
+        num_logprobs, n_repetitions)
 
     for r_idx, vllm_outputs_cache_itn in enumerate(vllm_outputs_cache_rep):
         # In the first repetition, the caches are filled
@@ -158,14 +158,12 @@ def test_single_prompt_mamba_size_alignment(
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model,
-                                                    mamba_ssm_cache_dtype,
-                                                    enforce_eager,
-                                                    max_model_len, dtype,
-                                                    tensor_parallel_size)
+    vllm_runner_kwargs = _get_vllm_runner_params(model, mamba_ssm_cache_dtype,
+                                                 enforce_eager, max_model_len,
+                                                 dtype, tensor_parallel_size)
     vllm_outputs_no_cache, _ = _get_vLLM_output_logprobs(
-        vllm_runner, vllm_runner_kwargs, [generated_prompts[0]],
-        max_tokens, num_logprobs)[0][0]
+        vllm_runner, vllm_runner_kwargs, [generated_prompts[0]], max_tokens,
+        num_logprobs)[0][0]
 
     vllm_runner_kwargs['enable_prefix_caching'] = True
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
@@ -239,11 +237,9 @@ def test_multiple_prompts_all_cached_output_logprobs(
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model,
-                                                    mamba_ssm_cache_dtype,
-                                                    enforce_eager,
-                                                    max_model_len, dtype,
-                                                    tensor_parallel_size)
+    vllm_runner_kwargs = _get_vllm_runner_params(model, mamba_ssm_cache_dtype,
+                                                 enforce_eager, max_model_len,
+                                                 dtype, tensor_parallel_size)
     vllm_outputs_no_cache, _ = _get_vLLM_output_logprobs(
         vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
         num_logprobs)[0][0]
@@ -302,11 +298,9 @@ def test_multiple_prompts_partial_cached_output_logprobs(
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model,
-                                                    mamba_ssm_cache_dtype,
-                                                    enforce_eager,
-                                                    max_model_len, dtype,
-                                                    tensor_parallel_size)
+    vllm_runner_kwargs = _get_vllm_runner_params(model, mamba_ssm_cache_dtype,
+                                                 enforce_eager, max_model_len,
+                                                 dtype, tensor_parallel_size)
     vllm_outputs_no_cache, _ = _get_vLLM_output_logprobs(
         vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
         num_logprobs)[0][0]
@@ -325,8 +319,13 @@ def test_multiple_prompts_partial_cached_output_logprobs(
     )
 
     vllm_outputs_cache_rep, _ = _get_vLLM_output_logprobs(
-        vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
-        num_logprobs, n_repetitions, vllm_model=vllm_model)
+        vllm_runner,
+        vllm_runner_kwargs,
+        generated_prompts,
+        max_tokens,
+        num_logprobs,
+        n_repetitions,
+        vllm_model=vllm_model)
 
     for r_idx, vllm_outputs_cache_itn in enumerate(vllm_outputs_cache_rep):
         # In the first repetition, the caches are filled
@@ -377,14 +376,12 @@ def test_specific_prompts_output_logprobs(
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model,
-                                                    mamba_ssm_cache_dtype,
-                                                    enforce_eager,
-                                                    max_model_len, dtype,
-                                                    tensor_parallel_size)
+    vllm_runner_kwargs = _get_vllm_runner_params(model, mamba_ssm_cache_dtype,
+                                                 enforce_eager, max_model_len,
+                                                 dtype, tensor_parallel_size)
     vllm_outputs_logprobs_no_cache, _ = _get_vLLM_output_logprobs(
         vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
-        num_logprobs)[0][0]
+        num_logprobs)
 
     # Cache only part of all the prompts
     vllm_runner_kwargs['enable_prefix_caching'] = True
@@ -398,7 +395,7 @@ def test_specific_prompts_output_logprobs(
         # In the second repetition, these caches are reused
 
         check_logprobs_close(
-            outputs_0_lst=vllm_outputs_logprobs_no_cache,
+            outputs_0_lst=vllm_outputs_logprobs_no_cache[0],
             outputs_1_lst=vllm_outputs_logprobs_cache_itn,
             name_0="vllm_no_cache",
             name_1=f"vllm_cache_it_{r_idx + 1}",
