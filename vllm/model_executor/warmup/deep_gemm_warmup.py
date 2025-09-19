@@ -36,7 +36,7 @@ def _extract_data_from_linear_base_module(
     assert m.quant_method.quant_config is not None
 
     w = m.weight
-    ws = m.weight_scale_inv
+    ws = m.weight_scale
     quant_block_size = m.quant_method.quant_config.weight_block_size
 
     assert isinstance(w, torch.Tensor)
