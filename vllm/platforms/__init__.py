@@ -213,7 +213,7 @@ def resolve_current_platform_cls_qualname() -> str:
     elif len(activated_builtin_plugins) == 1:
         platform_cls_qualname = builtin_platform_plugins[
             activated_builtin_plugins[0]]()
-        logger.info("Automatically detected platform %s.",
+        logger.info("!bang_c, Dude! Automatically detected platform %s.",
                     activated_builtin_plugins[0])
     else:
         platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"

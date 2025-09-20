@@ -641,7 +641,7 @@ class EngineCoreProc(EngineCore):
             }))
 
         # Receive initialization message.
-        logger.info("Waiting for init message from front-end.")
+        logger.info("!bang DUDE Waiting for init message from front-end.")
         if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
             raise RuntimeError("Did not receive response from front-end "
                                f"process within {HANDSHAKE_TIMEOUT_MINS} "
