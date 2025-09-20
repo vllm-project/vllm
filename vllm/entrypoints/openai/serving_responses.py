@@ -475,9 +475,14 @@ class OpenAIServingResponses(OpenAIServing):
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
 
+        input_messages = None
+        output_messages = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
+            if request.enable_response_messages:
+                input_messages = context.messages[:context.num_init_messages]
+                output_messages = context.messages[context.num_init_messages:]
             num_tool_output_tokens = context.num_tool_output_tokens
             if len(output) > 0:
                 if context.finish_reason == "length":
@@ -496,6 +501,12 @@ class OpenAIServingResponses(OpenAIServing):
             output = self._make_response_output_items(request, final_output,
                                                       tokenizer)
 
+            # TODO: context for non-gptoss models doesn't use messages
+            # so we can't get them out yet
+            if request.enable_response_messages:
+                raise NotImplementedError(
+                    "enable_response_messages is currently"
+                    " only supported for gpt-oss")
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
@@ -519,6 +530,8 @@ class OpenAIServingResponses(OpenAIServing):
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
+            input_messages=input_messages,
+            output_messages=output_messages,
             model_name=model_name,
             created_time=created_time,
             output=output,
