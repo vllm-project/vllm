@@ -582,6 +582,37 @@ class EplbState:
 
         return global_expert_load, old_global_expert_indices
 
+    @classmethod
+    def get_epp_state(
+        cls,
+        parallel_config: ParallelConfig,
+        eep_scale_up: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[int, int]]:
+        if not eep_scale_up:
+            return None, None, None
+        num_local_physical_experts = torch.empty(1,
+                                                 dtype=torch.int32,
+                                                 device="cpu")
+        torch.distributed.broadcast(num_local_physical_experts,
+                                    group=get_ep_group().cpu_group,
+                                    group_src=0)
+        num_local_physical_experts = int(num_local_physical_experts.item())
+        new_ep_size = get_ep_group().world_size
+        global_expert_load, old_global_expert_indices = (
+            EplbState.recv_state())
+        num_logical_experts = global_expert_load.shape[1]
+        parallel_config.eplb_config.num_redundant_experts = (
+            num_local_physical_experts * new_ep_size - num_logical_experts)
+        assert old_global_expert_indices.shape[
+            1] % num_local_physical_experts == 0
+        old_ep_size = old_global_expert_indices.shape[
+            1] // num_local_physical_experts
+        rank_mapping = {
+            old_ep_rank: old_ep_rank
+            for old_ep_rank in range(old_ep_size)
+        }
+        return global_expert_load, old_global_expert_indices, rank_mapping
+
 
 def _node_count_with_rank_mapping(
     pg: Union[ProcessGroup, StatelessProcessGroup],
