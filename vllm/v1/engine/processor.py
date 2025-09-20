@@ -5,6 +5,8 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal, Optional, Union
 
+import torch
+
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
@@ -16,10 +18,13 @@ from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils import (GiB_bytes, MemorySnapshot,
+                        length_from_prompt_token_ids_or_embeds,
+                        memory_profiling)
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
@@ -29,6 +34,7 @@ from vllm.v1.structured_output.backend_outlines import (
     validate_structured_output_request_outlines)
 from vllm.v1.structured_output.backend_xgrammar import (
     validate_xgrammar_grammar)
+from vllm.v1.worker.utils import MultiModalBudget, check_enough_init_memory
 
 logger = init_logger(__name__)
 
@@ -46,6 +52,8 @@ class Processor:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.tokenizer = tokenizer
 
@@ -62,6 +70,8 @@ class Processor:
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
+
+        self.profile_run()
 
     def _validate_logprobs(
         self,
@@ -541,6 +551,81 @@ class Processor:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def profile_run(self) -> None:
+        model_config = self.model_config
+        mm_config = model_config.multimodal_config
+
+        if not mm_config:
+            return
+
+        parallel_config = self.parallel_config
+        gpu_allocation = parallel_config._renderer_gpu_allocation
+        if not gpu_allocation:
+            return
+
+        device = mm_config.mm_processing_device
+        if device != "cpu":
+            # Peak memory usage (required for this profiling)
+            # is only tracked for CUDA
+            if not current_platform.is_cuda_alike():
+                return
+
+            # Only run profiling on the first Processor for each device,
+            # then multiply the usage by the number of processors for that
+            # device.
+            # Compared to running profiling on every Processor in parallel,
+            # this avoids non-deterministic peak memory usage calculation.
+            api_process_rank = parallel_config._api_process_rank
+            if api_process_rank != gpu_allocation.index(device):
+                return
+
+            scheduler_config = self.scheduler_config
+            mm_budget = MultiModalBudget(
+                model_config,
+                scheduler_config,
+                self.mm_registry,
+            )
+
+            baseline_snapshot = MemorySnapshot(device=device)
+
+            # Only check init memory if we are sure that the EngineCore is not
+            # loading weights or running profiling on the same GPU
+            new_device_index = torch.device(device).index or 0
+            local_gpu_count = (parallel_config.data_parallel_size_local *
+                               parallel_config.world_size)
+            if new_device_index < local_gpu_count:
+                logger.warning(
+                    "Both EngineCore and multi-modal processor are using "
+                    "the same GPU (%s). This may result in inaccurate memory "
+                    "profiling, and resource contention during inference.",
+                    device,
+                )
+            else:
+                check_enough_init_memory(baseline_snapshot, self.cache_config)
+
+            with memory_profiling(baseline_snapshot) as diff:
+                for modality, max_items_per_prompt in (
+                        mm_budget.max_items_per_prompt_by_modality.items()):
+                    self.mm_registry.get_decoder_dummy_data(
+                        model_config=model_config,
+                        seq_len=scheduler_config.max_num_batched_tokens,
+                        mm_counts={modality: max_items_per_prompt},
+                    )
+
+            usage_mult = gpu_allocation.count(device)
+            memory_usage = diff.torch_peak_increase * usage_mult
+            logger.info(
+                "Multi-modal processing took %.4f GiB and %.6f seconds on %s",
+                memory_usage / GiB_bytes,
+                diff.profile_time,
+                device,
+            )
+            if memory_usage > diff.before_profile.free_memory:
+                raise ValueError(f"Not enough memory in {device} "
+                                 f"for multi-modal processor. "
+                                 f"Try reducing `api_server_count` or "
+                                 f"revert to CPU processing.")
 
     def clear_cache(self) -> None:
         self.input_preprocessor.clear_cache()

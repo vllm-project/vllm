@@ -6,7 +6,6 @@ import math
 import mimetypes
 import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
-from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import pytest
@@ -20,15 +19,13 @@ from vllm.distributed.parallel_state import (init_distributed_environment,
                                              initialize_model_parallel)
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.multimodal.utils import (MediaConnector, argsort_mm_positions,
+from vllm.multimodal.utils import (MediaConnector, allocate_gpu_mm_processors,
+                                   argsort_mm_positions,
                                    get_load_balance_assignment,
                                    run_dp_sharded_mrope_vision_model,
                                    run_dp_sharded_vision_model)
 from vllm.platforms import current_platform
 from vllm.utils import get_open_port, update_environment_variables
-
-if TYPE_CHECKING:
-    from vllm.multimodal.inputs import MultiModalPlaceholderDict
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
@@ -230,18 +227,126 @@ async def test_fetch_video_http_with_dynamic_loader(
         assert metadata_sync["video_backend"] == "opencv_dynamic"
 
 
-# Used for `test_argsort_mm_positions`.
-class TestCase(NamedTuple):
-    mm_positions: "MultiModalPlaceholderDict"
-    expected_modality_idxs: list[tuple[str, int]]
+# yapf: disable
+@pytest.mark.parametrize(
+    "case",
+    [
+        # Basic
+        dict(
+            mm_processor_device="cuda",
+            mm_processor_count=0,
+            available_device_count=1,
+            engine_device_count=1,
+            expected_gpu_allocation=[],
+        ),
+        dict(
+            mm_processor_device="cuda",
+            mm_processor_count=1,
+            available_device_count=1,
+            engine_device_count=1,
+            expected_gpu_allocation=["cuda:0"],
+        ),
+        # Use Engine GPUs
+        dict(
+            mm_processor_device="cuda",
+            mm_processor_count=2,
+            available_device_count=1,
+            engine_device_count=1,
+            expected_gpu_allocation=["cuda:0", "cuda:0"],
+        ),
+        dict(
+            mm_processor_device="cuda",
+            mm_processor_count=2,
+            available_device_count=1,
+            engine_device_count=2,
+            expected_gpu_allocation=["cuda:0", "cuda:0"],
+        ),
+        dict(
+            mm_processor_device="cuda",
+            mm_processor_count=2,
+            available_device_count=2,
+            engine_device_count=2,
+            expected_gpu_allocation=["cuda:0", "cuda:1"],
+        ),
+        dict(
+            mm_processor_device="cuda",
+            mm_processor_count=3,
+            available_device_count=2,
+            engine_device_count=2,
+            expected_gpu_allocation=["cuda:0", "cuda:1", "cuda:0"],
+        ),
+        # Use excess GPUs
+        dict(
+            mm_processor_device="cuda",
+            mm_processor_count=2,
+            available_device_count=3,
+            engine_device_count=2,
+            expected_gpu_allocation=["cuda:2", "cuda:2"],
+        ),
+        dict(
+            mm_processor_device="cuda",
+            mm_processor_count=2,
+            available_device_count=4,
+            engine_device_count=2,
+            expected_gpu_allocation=["cuda:2", "cuda:3"],
+        ),
+        dict(
+            mm_processor_device="cuda",
+            mm_processor_count=3,
+            available_device_count=4,
+            engine_device_count=2,
+            expected_gpu_allocation=["cuda:2", "cuda:3", "cuda:2"],
+        ),
+        # Specific device
+        dict(
+            mm_processor_device="cuda:0",
+            mm_processor_count=2,
+            available_device_count=4,
+            engine_device_count=2,
+            expected_gpu_allocation=["cuda:0", "cuda:0"],
+        ),
+        dict(
+            mm_processor_device="cuda:2",
+            mm_processor_count=2,
+            available_device_count=4,
+            engine_device_count=2,
+            expected_gpu_allocation=["cuda:2", "cuda:2"],
+        ),
+        # Out-of-bounds device
+        dict(
+            mm_processor_device="cuda:4",
+            mm_processor_count=2,
+            available_device_count=4,
+            engine_device_count=2,
+            expected_gpu_allocation=["cuda:4", "cuda:4"],
+        ),
+    ],
+)
+# yapf: enable
+def test_allocate_gpu_mm_processors(case):
+    mm_processor_device = case["mm_processor_device"]
+    mm_processor_count = case["mm_processor_count"]
+    available_device_count = case["available_device_count"]
+    engine_device_count = case["engine_device_count"]
+    expected_gpu_allocation = case["expected_gpu_allocation"]
+
+    gpu_allocation = allocate_gpu_mm_processors(
+        mm_processor_device,
+        mm_processor_count,
+        available_device_count=available_device_count,
+        engine_device_count=engine_device_count,
+    )
+
+    assert gpu_allocation == expected_gpu_allocation
 
 
-def test_argsort_mm_positions():
-
-    test_cases = [
+# yapf: disable
+@pytest.mark.parametrize(
+    "case",
+    [
         # Single modality
         ## Internally sorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=0, length=2),
@@ -254,7 +359,7 @@ def test_argsort_mm_positions():
             ],
         ),
         ## Internally unsorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=3, length=2),
@@ -269,7 +374,7 @@ def test_argsort_mm_positions():
 
         # Two modalities
         ## Internally sorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=7, length=4),
@@ -288,7 +393,7 @@ def test_argsort_mm_positions():
             ],
         ),
         ## Interleaved, internally sorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=0, length=4),
@@ -307,7 +412,7 @@ def test_argsort_mm_positions():
             ],
         ),
         ## Interleaved, internally unsorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=8, length=2),
@@ -328,7 +433,7 @@ def test_argsort_mm_positions():
 
         # Three modalities
         ## Internally sorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=15, length=7),
@@ -353,7 +458,7 @@ def test_argsort_mm_positions():
             ],
         ),
         ## Interleaved, internally sorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=0, length=2),
@@ -375,8 +480,8 @@ def test_argsort_mm_positions():
                 ("image", 2),
             ],
         ),
-        ## Interleaved, internally sunorted
-        TestCase(
+        ## Interleaved, internally unsorted
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=0, length=2),
@@ -398,12 +503,16 @@ def test_argsort_mm_positions():
                 ("image", 1),
             ],
         ),
-    ]
+    ],
+)
+# yapf: enable
+def test_argsort_mm_positions(case):
+    mm_positions = case["mm_positions"]
+    expected_modality_idxs = case["expected_modality_idxs"]
 
-    for mm_positions, expected_modality_idxs in test_cases:
-        modality_idxs = argsort_mm_positions(mm_positions)
+    modality_idxs = argsort_mm_positions(mm_positions)
 
-        assert modality_idxs == expected_modality_idxs
+    assert modality_idxs == expected_modality_idxs
 
 
 class SimpleLinearModel(torch.nn.Module):
