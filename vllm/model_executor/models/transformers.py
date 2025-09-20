@@ -53,8 +53,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
-from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
-                         SupportsQuant)
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP, SupportsQuant)
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     flatten_bn, make_empty_intermediate_tensors_factory,
                     maybe_prefix)
@@ -731,6 +731,9 @@ class TransformersForCausalLM(TransformersBase):
         else:
             self.lm_head = PPMissingLayer()
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings()(input_ids)
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -872,3 +875,46 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
                 ]
 
             return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        do_language_embed_multimodal: bool = True,
+    ) -> torch.Tensor:
+        """
+        Apply token embeddings to `input_ids`.
+
+        If `multimodal_embeddings` is passed, scatter them into
+        `input_ids` according to the mask `is_multimodal`.
+
+        In case the multi-modal token IDs exceed the vocabulary size of
+        the language model, you can set `do_language_embed_multimodal=False`
+        to avoid calling the language model's `get_input_embeddings` method
+        on those tokens.
+        """
+        from .utils import _merge_multimodal_embeddings
+
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.model.get_input_embeddings(),
+            is_multimodal=is_multimodal,
+            do_language_embed_multimodal=do_language_embed_multimodal,
+        )
+
+        if multimodal_embeddings is None:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229.")
+
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )

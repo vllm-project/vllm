@@ -720,6 +720,9 @@ class GraniteSpeechForConditionalGeneration(
         # Split variable length features into a tuple
         return torch.split(masked_embeds, audio_input["audio_embed_sizes"])
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
         self,
         **kwargs: object,
