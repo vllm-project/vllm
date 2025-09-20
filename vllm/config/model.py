@@ -325,13 +325,13 @@ class ModelConfig:
 
         # hf_config can control how the model looks!
         try:
-            hf_config_json = self.hf_config.to_json_string()
+            hf_config_json = self.hf_config.to_json_string(use_diff=False)
         except TypeError:
             from transformers import PretrainedConfig
 
             from vllm.utils.jsontree import json_map_leaves
 
-            # Handle nested HF configs gracefully
+            # Handle nested HF configs with unserializable values gracefully
             hf_config_json = json.dumps(
                 json_map_leaves(
                     lambda v: v.to_dict()
