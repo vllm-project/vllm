@@ -9,7 +9,8 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.attention.backends.cpu_attn import TorchSDPAMetadataBuilderV1
+from vllm.v1.attention.backends.utils import (
+    reorder_batch_to_split_decodes_and_prefills)
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -64,19 +65,13 @@ class CPUModelRunner(GPUModelRunner):
         if not self.attn_groups[0]:
             return
 
-        mb = getattr(self.attn_groups[0][0], "metadata_builders", None)
-        if isinstance(mb, list):
-            if not isinstance(mb[0], TorchSDPAMetadataBuilderV1):
-                return
-            mb[0].reorder_batch(self.input_batch, scheduler_output)
-            return
-        elif not isinstance(mb, TorchSDPAMetadataBuilderV1):
-            # Encoder-only / rerank models do not benefit from reordering,
-            # so we safely skip here.
-            return
-
-        # Safe path for decoder/attention-heavy models
-        mb.reorder_batch(self.input_batch, scheduler_output)
+        # Reorder the batch in place and update the input batch.
+        # If the batch order spec indicates no reordering is needed,
+        # this function is a no-op.
+        reorder_batch_to_split_decodes_and_prefills(
+            self.input_batch,
+            scheduler_output,
+            batch_order_spec=self.batch_order_spec)
 
     def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors

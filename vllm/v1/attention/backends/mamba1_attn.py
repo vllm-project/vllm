@@ -49,10 +49,10 @@ class Mamba1AttentionMetadataBuilder(
         context_lens_tensor = common_attn_metadata.num_computed_tokens_cpu.to(
             query_start_loc.device)
 
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold))
+                batch_order_spec=self.batch_order_spec)
 
         has_initial_states = None
         padded_decodes = num_decodes

@@ -9,6 +9,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
+                                              BatchOrderSpec,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
@@ -16,9 +17,11 @@ M = TypeVar("M")
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
-    reorder_batch_threshold: ClassVar[int] = 1
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    batch_order_spec: ClassVar[BatchOrderSpec] = \
+        BatchOrderSpec(reorder_required=True, decode_threshold=1,
+                       decode_first=True)
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):

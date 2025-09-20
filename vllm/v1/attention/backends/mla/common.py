@@ -214,6 +214,7 @@ from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              BatchOrderSpec,
                                               CommonAttentionMetadata,
                                               get_per_layer_parameters,
                                               infer_global_hyperparameters,
@@ -434,7 +435,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
-    reorder_batch_threshold: ClassVar[int] = 1
+    batch_order_spec: ClassVar[BatchOrderSpec] = \
+        BatchOrderSpec(reorder_required=True, decode_threshold=1,
+                       decode_first=True)
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
@@ -629,11 +632,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         """
         m = common_attn_metadata
         assert m.num_reqs <= (m.num_actual_tokens *
-                              self.reorder_batch_threshold), \
+                              self.batch_order_spec.decode_threshold), \
             "MLA only supports decode-only full CUDAGraph capture. " \
             "Make sure all cudagraph capture sizes <= max_num_seq."
 
-        assert m.max_query_len <= self.reorder_batch_threshold  # decode only
+        # decode only
+        assert m.max_query_len <= self.batch_order_spec.decode_threshold
 
         return self.build(0, m)
 
@@ -664,8 +668,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                                    query_seq_lens_cpu)
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=self.reorder_batch_threshold)
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                batch_order_spec=self.batch_order_spec)
 
         # Note(hc): update seq_lens of decode reqs under DCP.
         if self.dcp_world_size > 1:

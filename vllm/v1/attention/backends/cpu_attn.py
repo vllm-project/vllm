@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 import numpy as np
 import torch
@@ -15,10 +15,9 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              BatchOrderSpec,
                                               CommonAttentionMetadata)
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.gpu_input_batch import InputBatch
 
 try:
     import intel_extension_for_pytorch.llm.modules as ipex_modules
@@ -315,6 +314,10 @@ class TorchSDPAMetadata(AttentionMetadata):
 
 class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
+    batch_order_spec: ClassVar[BatchOrderSpec] = \
+        BatchOrderSpec(reorder_required=True, decode_threshold=1,
+                       decode_first=False)
+
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -322,10 +325,6 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         self.scheduler_config = vllm_config.scheduler_config
 
         # For reorder
-        self.reorder_prompt_req_index_list = np.empty(
-            vllm_config.scheduler_config.max_num_seqs, dtype=np.int64)
-        self.reorder_decode_req_index_list = np.empty(
-            vllm_config.scheduler_config.max_num_seqs, dtype=np.int64)
         self.num_prompt_req: int = 0
 
         self.seq_start_loc_cpu = torch.zeros(
@@ -334,50 +333,6 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
             device="cpu",
         )
         self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
-
-    def reorder_batch(self, input_batch: InputBatch,
-                      scheduler_output: SchedulerOutput) -> bool:
-        prompt_list_idx = 0
-        decode_list_idx = 0
-        for req_index in range(input_batch.num_reqs):
-            if input_batch.num_computed_tokens_cpu[
-                    req_index] < input_batch.num_prompt_tokens[req_index]:
-                # prompt stage
-                self.reorder_prompt_req_index_list[prompt_list_idx] = req_index
-                prompt_list_idx += 1
-            else:
-                # decode stage
-                self.reorder_decode_req_index_list[decode_list_idx] = req_index
-                decode_list_idx += 1
-        assert decode_list_idx + prompt_list_idx == input_batch.num_reqs
-
-        # Update prompt requests number
-        self.num_prompt_req = prompt_list_idx
-
-        reorder_req_num = 0
-        for req_index in range(decode_list_idx):
-            if self.reorder_decode_req_index_list[req_index] < prompt_list_idx:
-                reorder_req_num += 1
-            else:
-                break
-
-        if reorder_req_num == 0:
-            return False
-
-        reorder_prompt_list = (
-            self.reorder_prompt_req_index_list[:prompt_list_idx]
-            [-reorder_req_num:])
-        reorder_decode_list = (
-            self.reorder_decode_req_index_list[:decode_list_idx]
-            [:reorder_req_num])
-        assert reorder_decode_list.size == reorder_prompt_list.size
-
-        for idx in range(reorder_req_num):
-            prompt_req_index = reorder_prompt_list[idx].item()
-            decode_req_index = reorder_decode_list[idx].item()
-            input_batch.swap_states(prompt_req_index, decode_req_index)
-
-        return True
 
     def build(self,
               common_prefix_len: int,
