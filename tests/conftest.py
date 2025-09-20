@@ -307,6 +307,35 @@ class HfRunner:
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
+        # Set this to avoid hanging issue
+        default_torch_num_threads: Optional[int] = None,
+    ) -> None:
+        init_ctx = (nullcontext() if default_torch_num_threads is None else
+                    set_default_torch_num_threads(default_torch_num_threads))
+
+        with init_ctx:
+            self._init(
+                model_name=model_name,
+                dtype=dtype,
+                model_kwargs=model_kwargs,
+                trust_remote_code=trust_remote_code,
+                is_sentence_transformer=is_sentence_transformer,
+                is_cross_encoder=is_cross_encoder,
+                skip_tokenizer_init=skip_tokenizer_init,
+                auto_cls=auto_cls,
+            )
+
+    def _init(
+        self,
+        model_name: str,
+        dtype: str = "auto",
+        *,
+        model_kwargs: Optional[dict[str, Any]] = None,
+        trust_remote_code: bool = True,
+        is_sentence_transformer: bool = False,
+        is_cross_encoder: bool = False,
+        skip_tokenizer_init: bool = False,
+        auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
     ) -> None:
         model_name = maybe_model_redirect(model_name)
         self.model_name = model_name

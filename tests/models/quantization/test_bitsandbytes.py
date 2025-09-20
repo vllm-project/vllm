@@ -5,10 +5,7 @@
 Run `pytest tests/quantization/test_bitsandbytes.py`.
 '''
 
-import gc
-
 import pytest
-import torch
 from transformers import BitsAndBytesConfig
 
 from tests.quantization.utils import is_quant_method_supported
@@ -131,12 +128,15 @@ def test_4bit_bnb_moe_model(hf_runner, vllm_runner, example_prompts,
     ))
     with vllm_runner(model_name,
                      quantization='bitsandbytes',
-                     enforce_eager=False) as llm:
+                     enforce_eager=False,
+                     default_torch_num_threads=1) as llm:
         vllm_outputs = llm.generate_greedy_logprobs(example_prompts,
                                                     max_tokens=32,
                                                     num_logprobs=5)
 
-    with hf_runner(model_name, model_kwargs=hf_model_kwargs) as llm:
+    with hf_runner(model_name,
+                   model_kwargs=hf_model_kwargs,
+                   default_torch_num_threads=1) as llm:
         transformers_outputs = llm.generate_greedy_logprobs_limit(
             example_prompts, max_tokens=32, num_logprobs=5)
     check_logprobs_close(
@@ -227,10 +227,6 @@ def validate_generated_texts(hf_runner,
         vllm_outputs = llm.generate_greedy(prompts, max_tokens)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
 
-    # Clean up the GPU memory for the next test
-    gc.collect()
-    torch.cuda.empty_cache()
-
     if hf_model_kwargs is None:
         hf_model_kwargs = {}
 
@@ -239,9 +235,6 @@ def validate_generated_texts(hf_runner,
         hf_outputs = llm.generate_greedy(prompts, max_tokens)
         hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
 
-    # Clean up the GPU memory for the next test
-    gc.collect()
-    torch.cuda.empty_cache()
     # Compare the generated strings
     for hf_log, vllm_log in zip(hf_logs, vllm_logs):
         hf_str = hf_log["generated_text"]
