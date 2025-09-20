@@ -63,6 +63,19 @@ def _check_vllm_model_init(model: Union[type[object], object]) -> bool:
     return supports_kw(model_init, "vllm_config")
 
 
+def _check_vllm_model_get_input_embeddings(
+        model: Union[type[object], object]) -> bool:
+    model_get_input_embeddings = getattr(model, "get_input_embeddings", None)
+    if not callable(model_get_input_embeddings):
+        logger.warning(
+            "The model (%s) is missing the `get_input_embeddings` method.",
+            model,
+        )
+        return False
+
+    return True
+
+
 def _check_vllm_model_forward(model: Union[type[object], object]) -> bool:
     model_forward = getattr(model, "forward", None)
     if not callable(model_forward):
@@ -97,7 +110,9 @@ def is_vllm_model(model: object) -> TypeIs[VllmModel]:
 def is_vllm_model(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[VllmModel]], TypeIs[VllmModel]]:
-    return _check_vllm_model_init(model) and _check_vllm_model_forward(model)
+    return (_check_vllm_model_init(model)
+            and _check_vllm_model_get_input_embeddings(model)
+            and _check_vllm_model_forward(model))
 
 
 @runtime_checkable

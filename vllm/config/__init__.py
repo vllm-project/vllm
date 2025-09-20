@@ -671,9 +671,14 @@ class ModelConfig:
                 else:  # task == "auto"
                     pass
             else:
+                info = {
+                    "architectures": architectures,
+                    "is_generative_model": is_generative_model,
+                    "is_pooling_model": is_pooling_model,
+                }
                 raise AssertionError("The model should be a generative or "
                                      "pooling model when task is set to "
-                                     f"{self.task!r}.")
+                                     f"{self.task!r}. Found: {info}")
 
             self.runner = runner
             self.convert = convert
