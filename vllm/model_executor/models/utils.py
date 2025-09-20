@@ -465,16 +465,14 @@ def merge_multimodal_embeddings(
         This updates ``inputs_embeds`` in place.
     """
     if isinstance(placeholder_token_id, list):
-        return _merge_multimodal_embeddings(
-            inputs_embeds,
-            isin_list(input_ids, placeholder_token_id),
-            multimodal_embeddings,
-        )
+        is_multimodal = isin_list(input_ids, placeholder_token_id)
+    else:
+        is_multimodal = (input_ids == placeholder_token_id)
 
     return _merge_multimodal_embeddings(
         inputs_embeds,
-        (input_ids == placeholder_token_id),
-        multimodal_embeddings,
+        multimodal_embeddings=multimodal_embeddings,
+        is_multimodal=is_multimodal,
     )
 
 
