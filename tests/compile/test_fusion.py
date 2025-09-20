@@ -64,7 +64,8 @@ class TestModel(torch.nn.Module):
                                    input_scale=self.scale[0])
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
-
+        # TODO another fp8 linear + rmsnorm to make sure fusion
+        #  works for residual output as well
         x3 = self.fp8_linear.apply(y2,
                                    self.w[1],
                                    self.wscale[1],
