@@ -39,9 +39,12 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 
 from vllm.attention.layer import check_upstream_fa_availability
+from vllm.compilation.backends import set_model_tag
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -350,8 +353,8 @@ class Qwen2_5_VisionAttention(nn.Module):
             x: torch.Tensor,
             cu_seqlens: torch.Tensor,
             rotary_pos_emb: torch.Tensor,
-            max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-            seqlens: Optional[list[int]] = None,  # Only used for xFormers
+            max_seqlen: torch.Tensor,  # Only used for Flash Attention
+            seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -368,67 +371,103 @@ class Qwen2_5_VisionAttention(nn.Module):
             qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
-        if self.is_flash_attn_backend:
-            if self.attn_backend == _Backend.ROCM_AITER_FA:
-                from aiter import flash_attn_varlen_func
-            else:
-                if self.use_upstream_fa:
-                    from flash_attn import flash_attn_varlen_func
-                else:
-                    from vllm.vllm_flash_attn import flash_attn_varlen_func
-
-            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-
-            output = flash_attn_varlen_func(q,
-                                            k,
-                                            v,
-                                            cu_seqlens_q=cu_seqlens,
-                                            cu_seqlens_k=cu_seqlens,
-                                            max_seqlen_q=max_seqlen,
-                                            max_seqlen_k=max_seqlen,
-                                            dropout_p=0.0,
-                                            causal=False)
-
-            context_layer = rearrange(output,
-                                      "(b s) h d -> s b (h d)",
-                                      b=batch_size).contiguous()
-        elif self.attn_backend == _Backend.TORCH_SDPA:
-            # Execute attention entry by entry for speed & less VRAM.
-            outputs = []
-            for i in range(1, len(cu_seqlens)):
-                start_idx = cu_seqlens[i - 1]
-                end_idx = cu_seqlens[i]
-                q_i = q[:, start_idx:end_idx]
-                k_i = k[:, start_idx:end_idx]
-                v_i = v[:, start_idx:end_idx]
-                q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
-                                 for x in [q_i, k_i, v_i])
-                output_i = F.scaled_dot_product_attention(q_i,
-                                                          k_i,
-                                                          v_i,
-                                                          dropout_p=0.0)
-                output_i = rearrange(output_i, "b h s d -> b s h d ")
-                outputs.append(output_i)
-            context_layer = torch.cat(outputs, dim=1)
-            context_layer = rearrange(context_layer,
-                                      "b s h d -> s b (h d)").contiguous()
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-            attn_bias = BlockDiagonalMask.from_seqlens(q_seqlen=seqlens,
-                                                       kv_seqlen=None,
-                                                       device=q.device)
-
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None)
-            context_layer = rearrange(context_layer,
-                                      "b s h d -> s b (h d)").contiguous()
+        context_layer = torch.ops.mylib.custom_vision_attention(
+            q, k, v, cu_seqlens, max_seqlen, seqlens, batch_size,
+            self.is_flash_attn_backend,
+            self.attn_backend == _Backend.ROCM_AITER_FA,
+            self.attn_backend == _Backend.TORCH_SDPA,
+            self.attn_backend == _Backend.XFORMERS, self.use_upstream_fa)
 
         output, _ = self.proj(context_layer)
         return output
 
 
+@torch.library.custom_op("mylib::custom_vision_attention", mutates_args=())
+def custom_vision_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                            cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor,
+                            seqlens: torch.Tensor, batch_size: int,
+                            is_flash_attn: bool, is_rocm_aiter: bool,
+                            is_sdpa: bool, is_xformers: bool,
+                            use_upstream_fa: bool) -> torch.Tensor:
+    if is_flash_attn:
+        if is_rocm_aiter:
+            from aiter import flash_attn_varlen_func
+        else:
+            if use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
+        q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+
+        output = flash_attn_varlen_func(q,
+                                        k,
+                                        v,
+                                        cu_seqlens_q=cu_seqlens,
+                                        cu_seqlens_k=cu_seqlens,
+                                        max_seqlen_q=max_seqlen.item(),
+                                        max_seqlen_k=max_seqlen.item(),
+                                        dropout_p=0.0,
+                                        causal=False)
+
+        context_layer = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
+    elif is_sdpa:
+        # Execute attention entry by entry for speed & less VRAM.
+        outputs = []
+        for i in range(1, len(cu_seqlens)):
+            start_idx = cu_seqlens[i - 1]
+            end_idx = cu_seqlens[i]
+            q_i = q[:, start_idx:end_idx]
+            k_i = k[:, start_idx:end_idx]
+            v_i = v[:, start_idx:end_idx]
+            q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
+                             for x in [q_i, k_i, v_i])
+            output_i = F.scaled_dot_product_attention(q_i,
+                                                      k_i,
+                                                      v_i,
+                                                      dropout_p=0.0)
+            output_i = rearrange(output_i, "b h s d -> b s h d ")
+            outputs.append(output_i)
+        context_layer = torch.cat(outputs, dim=1)
+    elif is_xformers:
+        from xformers import ops as xops
+        from xformers.ops.fmha.attn_bias import BlockDiagonalMask
+
+        attn_bias = BlockDiagonalMask.from_seqlens(q_seqlen=seqlens.tolist(),
+                                                   kv_seqlen=None,
+                                                   device=q.device)
+
+        context_layer = xops.memory_efficient_attention_forward(
+            q, k, v, attn_bias=attn_bias, p=0, scale=None)
+    else:
+        raise NotImplementedError("Attention type is not supported")
+    context_layer = rearrange(context_layer,
+                              "b s h d -> s b (h d)").contiguous()
+    return context_layer
+
+
+@torch.library.register_fake("mylib::custom_vision_attention")
+def custom_vision_attention_fake(q: torch.Tensor, k: torch.Tensor,
+                                 v: torch.Tensor, cu_seqlens: torch.Tensor,
+                                 max_seqlen: torch.Tensor,
+                                 seqlens: torch.Tensor, batch_size: int,
+                                 is_flash_attn: bool, is_rocm_aiter: bool,
+                                 is_sdpa: bool, is_xformers: bool,
+                                 use_upstream_fa: bool) -> torch.Tensor:
+    return torch.empty((
+        q.shape[1],
+        batch_size,
+        q.shape[2] * q.shape[3],
+    ),
+                       dtype=q.dtype,
+                       device=q.device)
+
+
+@set_model_tag("Qwen2_5_VisionBlock")
+@support_torch_compile(dynamic_arg_dims={
+    "x": 0,
+    "cu_seqlens": 0,
+    "rotary_pos_emb": 0,
+})
 class Qwen2_5_VisionBlock(nn.Module):
 
     def __init__(
@@ -467,8 +506,8 @@ class Qwen2_5_VisionBlock(nn.Module):
             x: torch.Tensor,
             cu_seqlens: torch.Tensor,
             rotary_pos_emb: torch.Tensor,
-            max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-            seqlens: Optional[list[int]] = None,  # Only used for xFormers
+            max_seqlen: torch.Tensor,  # Only used for Flash Attention
+            seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         x_attn = self.attn(self.norm1(x),
                            cu_seqlens=cu_seqlens,
@@ -480,6 +519,10 @@ class Qwen2_5_VisionBlock(nn.Module):
         return x
 
 
+@set_model_tag("Qwen2_5_VisionPatchEmbed")
+@support_torch_compile(dynamic_arg_dims={
+    "x": 0,
+})
 class Qwen2_5_VisionPatchEmbed(nn.Module):
 
     def __init__(
@@ -509,6 +552,10 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         return x
 
 
+@set_model_tag("Qwen2_5_VisionPatchMerger")
+@support_torch_compile(dynamic_arg_dims={
+    "x": 0,
+})
 class Qwen2_5_VisionPatchMerger(nn.Module):
 
     def __init__(
@@ -727,18 +774,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return (rotary_pos_emb_thw, window_index_thw, cu_seqlens_window_thw,
                 cu_seqlens_thw)
 
-    def compute_attn_mask_seqlen(
-        self,
-        cu_seqlens: torch.Tensor,
-    ) -> tuple[Optional[int], Optional[list[int]]]:
-        max_seqlen, seqlens = None, None
-        if (self.attn_backend == _Backend.FLASH_ATTN
-                or self.attn_backend == _Backend.ROCM_AITER_FA):
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        return max_seqlen, seqlens
-
     @staticmethod
     def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
         # building the inverse permutation in O(n) time
@@ -747,6 +782,20 @@ class Qwen2_5_VisionTransformer(nn.Module):
                                  device=perm.device,
                                  dtype=perm.dtype)
         return inv
+
+    def compute_attn_mask_seqlen(
+        self,
+        cu_seqlens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        max_seqlen, seqlens = torch.zeros(
+            1, device=cu_seqlens.device), torch.zeros(1,
+                                                      device=cu_seqlens.device)
+        if (self.attn_backend == _Backend.FLASH_ATTN
+                or self.attn_backend == _Backend.ROCM_AITER_FA):
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        elif self.attn_backend == _Backend.XFORMERS:
+            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1])
+        return max_seqlen, seqlens
 
     def forward(
         self,
@@ -950,12 +999,13 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
+        self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
 
         if multimodal_config.get_limit_per_prompt("image") or \
             multimodal_config.get_limit_per_prompt("video"):
             self.visual = Qwen2_5_VisionTransformer(
-                config.vision_config,
+                vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self._maybe_ignore_quant_config(
                     self.quant_config),
@@ -1081,8 +1131,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                          grid_thw_list,
                                                          rope_type="rope_3d")
             else:
-                image_embeds = self.visual(pixel_values,
-                                           grid_thw=grid_thw_list)
+                with set_forward_context(None, self.vllm_config):
+                    image_embeds = self.visual(pixel_values,
+                                               grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
@@ -1110,8 +1161,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                          grid_thw_list,
                                                          rope_type="rope_3d")
             else:
-                video_embeds = self.visual(pixel_values_videos,
-                                           grid_thw=grid_thw_list)
+                with set_forward_context(None, self.vllm_config):
+                    video_embeds = self.visual(pixel_values_videos,
+                                               grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
