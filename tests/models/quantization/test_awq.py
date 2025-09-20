@@ -7,7 +7,6 @@ import pytest
 import torch
 
 from vllm.multimodal.image import rescale_image_size
-from vllm.utils import set_default_torch_num_threads
 
 from ...conftest import IMAGE_ASSETS, ImageTestAssets, VllmRunner
 from ..utils import check_logprobs_close
@@ -46,17 +45,15 @@ def run_awq_test(
     # will hurt multiprocessing backend with fork method (the default method).
 
     # max_model_len should be greater than image_feature_size
-    with set_default_torch_num_threads(1):
-        vllm_model = vllm_runner(
+    with vllm_runner(
             source_model,
             max_model_len=4096,
             dtype=dtype,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend=distributed_executor_backend,
             enforce_eager=True,
-        )
-
-    with vllm_model:
+            default_torch_num_threads=1,
+    ) as vllm_model:
         source_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
@@ -65,8 +62,7 @@ def run_awq_test(
             for prompts, images in inputs_per_image
         ]
 
-    with set_default_torch_num_threads(1):
-        vllm_model = vllm_runner(
+    with vllm_runner(
             quant_model,
             quantization="awq",
             max_model_len=4096,
@@ -74,9 +70,8 @@ def run_awq_test(
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend=distributed_executor_backend,
             enforce_eager=True,
-        )
-
-    with vllm_model:
+            default_torch_num_threads=1,
+    ) as vllm_model:
         quant_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
