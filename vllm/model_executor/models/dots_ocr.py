@@ -15,7 +15,8 @@ from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear, MergedColumnParallelLinear, QKVParallelLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -38,6 +39,8 @@ from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import (DotsOCRConfig,
                                                      DotsVisionConfig)
+
+IMAGE_TOKEN = "<|imgpad|>"
 
 
 class DotsOCRImagePixelInputs(TypedDict):
@@ -69,6 +72,10 @@ DotsOCRImageInputs = Union[DotsOCRImagePixelInputs,
 
 
 class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
+
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+        return IMAGE_TOKEN * num_images
 
     def get_dummy_mm_data(
         self,
@@ -117,12 +124,12 @@ class DotsOCRProcessingInfo(Qwen2VLProcessingInfo):
         **kwargs: object,
     ) -> Qwen2VLProcessor:
         self.get_tokenizer(
-        ).image_token = "<|imgpad|>"  # Ensure image token is set
+        ).image_token = IMAGE_TOKEN  # Ensure image token is set
         processor = self.ctx.get_hf_processor(
             Qwen2VLProcessor,
             **kwargs,
         )
-        processor.image_token = "<|imgpad|>"
+        processor.image_token = IMAGE_TOKEN
         processor.video_token = "<|video_pad|>"
         return processor
 
@@ -368,13 +375,12 @@ class DotsSwiGLUFFN(nn.Module):
         bias = config.use_bias
 
         # Referenced aimv2.py AIMv2SwiGLUFFN
-        self.fc13 = MergedColumnParallelLinear(
-            in_features,
-            [hidden_features] * 2,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc13",
-            disable_tp=True)
+        self.fc13 = MergedColumnParallelLinear(in_features,
+                                               [hidden_features] * 2,
+                                               bias=bias,
+                                               quant_config=quant_config,
+                                               prefix=f"{prefix}.fc13",
+                                               disable_tp=True)
         self.fc2 = RowParallelLinear(hidden_features,
                                      in_features,
                                      bias=bias,
@@ -383,14 +389,14 @@ class DotsSwiGLUFFN(nn.Module):
                                      disable_tp=True)
         self.act_fn = SiluAndMul()
 
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.fc13(x)
         x = self.act_fn(x)
         x, _ = self.fc2(x)
         return x
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params = dict(self.named_parameters())
         loaded: set[str] = set()
         for name, w in weights:
