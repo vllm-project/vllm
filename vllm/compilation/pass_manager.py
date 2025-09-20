@@ -94,14 +94,15 @@ class PostGradPassManager(CustomGraphPass):
             if self.pass_config.enable_async_tp:
                 self.passes += [AsyncTPPass(config)]
 
+        if self.pass_config.enable_fi_allreduce_fusion:
+            self.passes += [AllReduceFusionPass(config)]
+
         if self.pass_config.enable_fusion:
             self.passes += [RMSNormQuantFusionPass(config)]
             self.passes += [ActivationQuantFusionPass(config)]
 
         if self.pass_config.enable_attn_fusion:
             self.passes += [AttnFusionPass(config)]
-        if self.pass_config.enable_fi_allreduce_fusion:
-            self.passes += [AllReduceFusionPass(config)]
 
         # needs a functional graph
         self.post_cleanup = PostCleanupPass(config)
