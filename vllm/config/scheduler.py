@@ -29,6 +29,11 @@ class SchedulerConfig:
 
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
+    max_waiting_queue_length: Optional[int] = None
+    """The maximum number of requests allowed in the waiting queue.
+    If the waiting queue is full, new requests will be rejected.
+    If None, the waiting queue size is unlimited.
+    """
 
     max_num_batched_tokens: SkipValidation[int] = None  # type: ignore
     """Maximum number of tokens to be processed in a single iteration.
@@ -296,5 +301,9 @@ class SchedulerConfig:
                 f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
                 "must be greater than or equal to 1 and less than or equal to "
                 f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
-
+        if self.max_waiting_queue_length is not None and \
+            self.max_waiting_queue_length < 1:
+            raise ValueError(
+                f"max_waiting_queue_length ({self.max_waiting_queue_length})"
+                " must be greater than or equal to 1 or None.")
         return self
