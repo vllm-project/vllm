@@ -17,10 +17,13 @@ from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
-from vllm.lora.utils import (from_layer, from_layer_logits_processor,
+from vllm.lora.utils import (from_layer, from_layer_classifier,
+                             from_layer_logits_processor,
                              get_supported_lora_modules,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
+from vllm.lora.weights import (ClassifierLoRALayerWeights, LoRALayerWeights,
+                               PackedLoRALayerWeights)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
@@ -498,10 +501,17 @@ class LoRAModelManager:
                 continue
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
-            new_module = replace_submodule(
-                self.model, module_name,
-                from_layer(module, self.lora_slots, self.lora_config,
-                           packed_moduled_lst, self.model.config))
+            if "score" in module_name and self.is_pooling_model:
+                new_module = replace_submodule(
+                    self.model, module_name,
+                    from_layer_classifier(module, self.lora_slots,
+                                          self.lora_config, self.model.config))
+            else:
+
+                new_module = replace_submodule(
+                    self.model, module_name,
+                    from_layer(module, self.lora_slots, self.lora_config,
+                               packed_moduled_lst, self.model.config))
 
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
@@ -575,6 +585,16 @@ class LoRAModelManager:
                         "cpu",
                         embeddings_tensor_dim=embeddings_tensor_dim,
                         bias_enabled=bias_enabled)
+                elif self.is_pooling_model and parts[-1] == "score":
+                    lora = ClassifierLoRALayerWeights.create_dummy_lora_weights(
+                        module_name,
+                        module.lora_a_stacked[0].shape[-1],
+                        module.lora_a_stacked[0].shape[-2],
+                        module.lora_a_stacked[0].dtype,
+                        "cpu",
+                        embeddings_tensor_dim=None,
+                        bias_enabled=bias_enabled,
+                    )
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,

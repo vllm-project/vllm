@@ -483,6 +483,8 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
 
+    max_num_labels: Optional[int] = LoRAConfig.max_num_labels
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -848,6 +850,9 @@ class EngineArgs:
                                 **lora_kwargs["fully_sharded_loras"])
         lora_group.add_argument("--default-mm-loras",
                                 **lora_kwargs["default_mm_loras"])
+
+        lora_group.add_argument("--max-num-labels",
+                                **lora_kwargs["max_num_labels"])
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1425,8 +1430,9 @@ class EngineArgs:
             fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             lora_dtype=self.lora_dtype,
-            max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
-            and self.max_cpu_loras > 0 else None) if self.enable_lora else None
+            max_cpu_loras=self.max_cpu_loras
+            if self.max_cpu_loras and self.max_cpu_loras > 0 else None,
+            max_num_labels=self.max_num_labels) if self.enable_lora else None
 
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":
