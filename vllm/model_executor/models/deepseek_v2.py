@@ -42,7 +42,7 @@ from vllm.distributed import (get_ep_group, get_pp_group,
                               tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm, LayerNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                ReplicatedLinear,
@@ -475,6 +475,29 @@ class DeepseekV2Attention(nn.Module):
         return output
 
 
+class Indexer(nn.Module):
+    def __init__(self, config: Union[DeepseekV2Config, DeepseekV3Config],
+                 parent_attn_mod: nn.Module,
+                 prefix: str = ""):
+        super().__init__()
+        self.config = config
+        self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
+        self.topk_tokens = config.attn_module_list_cfg[0]["topk_tokens"]
+        self.n_heads = self.indexer_cfg["n_heads"] # 64
+        self.head_dim = self.indexer_cfg["head_dim"] # 128
+        self.rope_dim = self.indexer_cfg["rope_dim"] # 64
+        self.q_lora_rank = parent_attn_mod.q_lora_rank # 1536
+        # no tensor parallel, just replicated
+        self.wq_b = ReplicatedLinear(self.q_lora_rank, self.head_dim * self.n_heads, prefix=f"{prefix}.wq_b")
+        self.wk = ReplicatedLinear(parent_attn_mod.hidden_size, self.head_dim, prefix=f"{prefix}.wk")
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        self.weights_proj = ReplicatedLinear(parent_attn_mod.hidden_size, self.n_heads, prefix=f"{prefix}.weights_proj")
+        self.softmax_scale = self.head_dim ** -0.5
+
+    def forward(self, hidden_states: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(hidden_states)[:, :self.topk_tokens].contiguous()
+
+
 class DeepseekV2MLAAttention(nn.Module):
     """
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
@@ -579,6 +602,12 @@ class DeepseekV2MLAAttention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
+        if hasattr(config, "attn_module_list_cfg") and "attn_index" in config.attn_module_list_cfg[0]:
+            # DSv3.2
+            self.indexer = Indexer(config, self, f"{prefix}.indexer")
+        else:
+            self.indexer = None
+
         mla_modules = MLAModules(
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
@@ -592,7 +621,9 @@ class DeepseekV2MLAAttention(nn.Module):
             if self.q_lora_rank is not None else None,
             q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else None,
+            indexer=self.indexer,
         )
+
         self.mla_attn = MultiHeadLatentAttention(
             self.hidden_size,
             self.num_local_heads,

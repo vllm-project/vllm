@@ -24,6 +24,7 @@ class MLAModules:
     q_a_layernorm: Optional[torch.nn.Module]
     q_b_proj: Optional[torch.nn.Module]
     q_proj: Optional[torch.nn.Module]
+    indexer: Optional[torch.nn.Module]
 
 
 @CustomOp.register("multi_head_latent_attention")
