@@ -309,6 +309,26 @@ class CompilationConfig:
     instead.
     """
 
+    use_inductor_graph_partition: bool = False
+    """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
+    This partition happens at inductor codegen time after all passes and fusions
+    are finished. It generates a single `call` function which wraps
+    cudagraph-safe ops into partition functions and leave cudagraph-unsafe ops
+    outside the partition functions. For a graph with N cudagraph-unsafe ops
+    (e.g., Attention), there would be N+1 partitions. To mark an op as
+    cudagraph unsafe, we can add `tags=(torch._C.Tag.cudagraph_unsafe)` when
+    register the custom op. 
+
+    This config supports both full cudagraph and piecewise cudagraph without
+    compiling twice. For piecewise cudagraph, it applies vLLM CUDAGraph wrapper
+    to each partition. For N+1 partitions, there would be N+1
+    CUDAGraph wrapper instances.
+
+    For full CUDAGraph, we always apply a single CUDAGraph wrapper outside the
+    inductor `call` function in the model runner. The top-level full cudagraph
+    capture ignores all partitioning.
+    """
+
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
@@ -473,6 +493,12 @@ class CompilationConfig:
                                  "since full_cuda_graph is deprecated.")
             self.cudagraph_mode = CUDAGraphMode.FULL
 
+        if (self.use_inductor_graph_partition
+                and not is_torch_equal_or_newer("2.9.0.dev")):
+            raise ValueError("use_inductor_graph_partition is only "
+                             "supported with torch>=2.9.0.dev. Set "
+                             "use_inductor_graph_partition=False instead.")
+
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
@@ -552,31 +578,48 @@ class CompilationConfig:
             "set_splitting_ops_for_v1 should only be called when "
             "level is CompilationLevel.PIECEWISE")
 
+        use_inductor_graph_partition_msg = (
+            "When use_inductor_graph_partition=True, splitting_ops "
+            "are ignored and set to an empty list. Instead, "
+            "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
+            "used to annotate custom ops for graph partition.")
+
         if self.splitting_ops is None:
-            # NOTE: When using full cudagraph, instead of setting an empty
-            # list and capture the full cudagraph inside the flattened fx
-            # graph, we keep the piecewise fx graph structure but capture the
-            # full cudagraph outside the fx graph. This reduces some cpu
-            # overhead when the runtime batch_size is not cudagraph captured.
-            # see https://github.com/vllm-project/vllm/pull/20059 for details.
-            if self.pass_config.enable_attn_fusion:
+            if self.use_inductor_graph_partition:
+                # When using inductor graph partition, we set splitting_ops
+                # to be empty and rely on torch._C.Tag.cudagraph_unsafe to
+                # annotate custom ops as splitting ops.
+                logger.warning_once(use_inductor_graph_partition_msg)
+                self.splitting_ops = []
+            elif self.pass_config.enable_attn_fusion:
                 self.splitting_ops = []
                 if self.cudagraph_mode.has_piecewise_cudagraphs():
                     logger.warning_once(
-                        "When enable_attn_fusion, splitting_ops will be set "
-                        "to empty list, and cudagraph_mode containing "
-                        "PIECEWISE will be treated as FULL cudagraph_mode. "
+                        "enable_attn_fusion is incompatible with piecewise "
+                        "cudagraph when use_inductor_graph_partition is off."
+                        "In this case, splitting_ops will be set to empty "
+                        "list, and cudagraph_mode will be set to FULL. "
                         "Please ensure you are using attention backends that "
                         "support cudagraph or set cudagraph_mode to NONE "
                         "explicitly if encountering any problems.")
                     self.cudagraph_mode = CUDAGraphMode.FULL
-            else:
-                # copy to avoid mutating the class-level list via reference.
+             else:
+                # NOTE: When using full cudagraph, instead of setting an empty
+                # list and capture the full cudagraph inside the flattened fx
+                # graph, we keep the piecewise fx graph structure but capture
+                # the full cudagraph outside the fx graph. This reduces some
+                # cpu overhead when the runtime batch_size is not cudagraph
+                # captured. see https://github.com/vllm-project/vllm/pull/20059
+                # for details. Make a copy to avoid mutating the class-level
+                # list via reference.
                 self.splitting_ops = list(self._attention_ops)
         elif len(self.splitting_ops) == 0:
-            logger.info_once("Using piecewise compilation with empty "
-                             "splitting_ops.")
-            if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            logger.warning_once(
+                "Using piecewise compilation with empty "
+                "splitting_ops and use_inductor_graph_partition"
+                f"={self.use_inductor_graph_partition}.")
+            if (self.cudagraph_mode == CUDAGraphMode.PIECEWISE
+                    and not self.use_inductor_graph_partition):
                 logger.warning_once(
                     "Piecewise compilation with empty splitting_ops do not" \
                     "contains piecewise cudagraph. Setting cudagraph_"
@@ -593,6 +636,9 @@ class CompilationConfig:
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
         else:  # len(self.splitting_ops) > 0:
+            if self.use_inductor_graph_partition:
+                logger.warning_once(use_inductor_graph_partition_msg)
+                self.splitting_ops = []
             assert not self.pass_config.enable_attn_fusion or \
                 not self.splitting_ops_contain_attention(), (
                 "attention ops should not be in splitting_ops "
@@ -601,3 +647,19 @@ class CompilationConfig:
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
             op in self.splitting_ops for op in self._attention_ops)
+
+    def is_attention_compiled_piecewise(self) -> bool:
+        use_fx_graph_piecewise_compilation = (
+            self.level == CompilationLevel.PIECEWISE
+            and self.splitting_ops_contain_attention())
+
+        inductor_used = (self.level == CompilationLevel.PIECEWISE
+                         and self.use_inductor) or (
+                             self.level >= CompilationLevel.DYNAMO_AS_IS
+                             and self.backend == "inductor")
+        use_inductor_piecewise_compilation = (
+            inductor_used and self.use_inductor_graph_partition
+            and not self.splitting_ops_contain_attention())
+
+        return use_fx_graph_piecewise_compilation or \
+            use_inductor_piecewise_compilation
