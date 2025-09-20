@@ -296,6 +296,10 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _TRANSFORMERS_SUPPORTED_MODELS = {
+    # Embedding models
+    "AlbertForMaskedLM": ("transformers", "TransformersModel"),
+    "CamembertForMaskedLM": ("transformers", "TransformersModel"),
+    "ElectraForPreTraining": ("transformers", "TransformersModel"),
     # Text generation models
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models

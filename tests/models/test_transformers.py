@@ -168,8 +168,11 @@ def test_embed_loading(vllm_runner, model):
 @pytest.mark.parametrize(
     "model",
     [
-        # Encoder model
+        # Encoder models
         "BAAI/bge-base-en-v1.5",
+        "albert/albert-base-v2",
+        "almanach/camembert-base",
+        "google/electra-base-discriminator",
     ])
 def test_embed_correctness(hf_runner, vllm_runner, example_prompts, model):
     import transformers
@@ -180,8 +183,18 @@ def test_embed_correctness(hf_runner, vllm_runner, example_prompts, model):
         pytest.skip("Encoder models with the Transformers backend require "
                     f"transformers>={required}, but got {installed}")
 
-    with vllm_runner(model, max_model_len=512,
-                     model_impl="transformers") as vllm_model:
+    kwargs = {
+        "max_model_len": 512,
+        "compilation_config": {
+            "cudagraph_capture_sizes": [8]
+        },
+    }
+
+    # Force model with vLLM implementation
+    if model == "BAAI/bge-base-en-v1.5":
+        kwargs["model_impl"] = "transformers"
+
+    with vllm_runner(model, **kwargs) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
 
@@ -195,7 +208,6 @@ def test_embed_correctness(hf_runner, vllm_runner, example_prompts, model):
         embeddings_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
-        tol=1e-2,
     )
 
 
