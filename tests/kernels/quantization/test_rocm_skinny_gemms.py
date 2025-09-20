@@ -6,6 +6,8 @@ import math
 
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    rocm_per_tensor_w8a8_scaled_mm_impl)
 from vllm.platforms import current_platform
 
 DTYPES = [torch.bfloat16, torch.float16]
@@ -204,6 +206,10 @@ def test_rocm_wvsplitk_fp8_bias2D_kernel(n, k, m, dtype, seed):
     A, scale_a = ref_dynamic_per_tensor_fp8_quant(A)
     B, scale_b = ref_dynamic_per_tensor_fp8_quant(B)
 
+    bias = torch.rand(1, m, dtype=dtype, device="cuda") if use_bias else None
+
+    output = rocm_per_tensor_w8a8_scaled_mm_impl(A, B.t(), dtype, scale_a,
+                                                 scale_b, bias)
     ref_out = torch._scaled_mm(A,
                                B.t(),
                                out_dtype=dtype,
@@ -213,3 +219,4 @@ def test_rocm_wvsplitk_fp8_bias2D_kernel(n, k, m, dtype, seed):
                         current_platform.get_cu_count(), BIAS)
 
     assert torch.allclose(out, ref_out, rtol=0.01)
+
