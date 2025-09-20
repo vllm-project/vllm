@@ -19,7 +19,7 @@ from typing_extensions import TypeAlias
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, MultipleOf
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
@@ -307,6 +307,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
+            kernel_block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(
                 self.vllm_config, self.device, self.pin_memory,
@@ -3620,6 +3621,59 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     self.reorder_batch_threshold = reorder_batch_threshold_i
 
+    def _select_kernel_block_size(self, kv_manager_block_size: int,
+                                  backend_cls: type[AttentionBackend]) -> int:
+        """
+        Select the optimal kernel block size for a given physical block size.
+
+        Args:
+            kv_manager_block_size: The physical block size of the KV cache
+            backend_cls: The attention backend class
+
+        Returns:
+            The selected kernel block size (largest available)
+
+        Raises:
+            ValueError: If no valid kernel block size can be found that
+                       satisfies the backend's constraints
+        """
+        supported_constraints = backend_cls.get_supported_block_size()
+        selected_kernel_size = kv_manager_block_size
+        constraint_satisfied = False
+        valid_constraints = []
+
+        for constraint in supported_constraints:
+            if (isinstance(constraint, int)
+                    and kv_manager_block_size % constraint == 0):
+                valid_constraints.append(constraint)
+            elif (isinstance(constraint, MultipleOf)
+                  and kv_manager_block_size % constraint.base == 0):
+                valid_constraints.append(constraint.base)
+
+        if valid_constraints:
+            selected_kernel_size = max(valid_constraints)
+            constraint_satisfied = True
+
+        if not constraint_satisfied and supported_constraints:
+            # Only raise error if there are actual constraints to satisfy
+            # and none of them were met
+            constraint_strs = []
+            for constraint in supported_constraints:
+                if isinstance(constraint, int):
+                    constraint_strs.append(f"{constraint}")
+                elif isinstance(constraint, MultipleOf):
+                    constraint_strs.append(f"multiple of {constraint.base}")
+
+            raise ValueError(
+                f"Physical block size {kv_manager_block_size} does not "
+                f"satisfy any constraints for {backend_cls.__name__} "
+                f"backend. Supported constraints: "
+                f"{', '.join(constraint_strs)}. "
+                f"The physical block size must be compatible with at least "
+                f"one constraint.")
+
+        return selected_kernel_size
+
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:
         """
@@ -3633,8 +3687,39 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         block_sizes = [
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
+            if not isinstance(kv_cache_group.kv_cache_spec,
+                              EncoderOnlyAttentionSpec)
         ]
-        if block_sizes != [self.cache_config.block_size]:
+
+        # Generate kernel_block_sizes that matches each block_size
+        # For attention backends that support virtual block splitting,
+        # use the supported block sizes from the backend
+        # For other backends (like Mamba), use [0] (no splitting)
+        kernel_block_sizes = []
+        for kv_cache_group_id, kv_cache_group in enumerate(
+                kv_cache_config.kv_cache_groups):
+            if isinstance(kv_cache_group.kv_cache_spec,
+                          EncoderOnlyAttentionSpec):
+                continue
+            elif isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
+                # This is an attention backend that supports virtual
+                # block splitting. Get the supported block sizes from
+                # the backend.
+                attn_groups = self.attn_groups[kv_cache_group_id]
+                kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+                backend_cls = attn_groups[0].backend
+                selected_kernel_size = self._select_kernel_block_size(
+                    kv_manager_block_size, backend_cls)
+                kernel_block_sizes.append(selected_kernel_size)
+            else:
+                # This is likely Mamba or other non-attention cache,
+                # no splitting.
+                kernel_block_sizes.append(
+                    kv_cache_group.kv_cache_spec.block_size)
+
+        if block_sizes != [
+                self.cache_config.block_size
+        ] or kernel_block_sizes != [self.cache_config.block_size]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
@@ -3647,6 +3732,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                kernel_block_sizes=kernel_block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
                 is_pooling_model=self.is_pooling_model,
@@ -3724,8 +3810,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                               kv_cache_spec.page_size_bytes)
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
+                    kv_manager_block_size = kv_cache_spec.block_size
+                    logical_kernel_size = self._select_kernel_block_size(
+                        kv_manager_block_size, attn_backend)
+                    num_blocks_per_phys_block = (kv_manager_block_size //
+                                                 logical_kernel_size)
+                    logical_num_blocks = num_blocks * num_blocks_per_phys_block
+
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        num_blocks, kv_cache_spec.block_size,
+                        logical_num_blocks, logical_kernel_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
                     try:
@@ -3875,10 +3968,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
-        self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
+        # Reinitialize need to after initialize_attn_backend
+        self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if self.speculative_config and self.speculative_config.use_eagle():

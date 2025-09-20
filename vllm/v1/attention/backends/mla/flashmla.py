@@ -6,7 +6,8 @@ from typing import ClassVar, Optional, Union
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
+                                              MultipleOf)
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
@@ -40,6 +41,10 @@ class FlashMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashMLAImpl"]:
         return FlashMLAImpl
+
+    @staticmethod
+    def get_supported_block_size() -> list[Union[int, MultipleOf]]:
+        return [64]
 
 
 @dataclass
