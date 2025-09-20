@@ -12,11 +12,13 @@ import torch.nn as nn
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
@@ -62,6 +64,9 @@ class EagleProposer:
         self.method = self.speculative_config.method
 
         self.runner = runner
+        self.eplb_state: Optional[EplbState] = None
+        self.device = device
+
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
@@ -370,6 +375,9 @@ class EagleProposer:
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
+
+        # EPLB step
+        self.eplb_step()
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
@@ -798,7 +806,13 @@ class EagleProposer:
 
         return spec_common_attn_metadata, token_indices
 
-    def load_model(self, target_model: nn.Module) -> None:
+    def load_model(self,
+                   target_model: nn.Module,
+                   eep_scale_up: bool = False) -> None:
+        global_expert_load, old_global_expert_indices, rank_mapping = \
+            EplbState.get_epp_state(self.vllm_config.parallel_config,
+            eep_scale_up)
+
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
         target_attn_layer_names = set(
@@ -859,10 +873,45 @@ class EagleProposer:
             logger.info("Loading EAGLE LM head weights from the target model.")
             self.model.lm_head = target_language_model.lm_head
 
+        if is_mixture_of_experts(
+                self.model) and self.vllm_config.parallel_config.enable_eplb:
+            logger.info("EPLB is enabled for Eagle drafter model %s.",
+                        draft_model_config.model)
+
+            self.eplb_state = EplbState.build(
+                self.model,
+                self.device,
+                self.vllm_config.parallel_config,
+                global_expert_load,
+                old_global_expert_indices,
+                rank_mapping,
+            )
+
+    def eplb_step(self,
+                  is_dummy: bool = False,
+                  is_profile: bool = False) -> None:
+        """
+        Step for the EPLB (Expert Parallelism Load Balancing) state.
+        """
+        if not self.vllm_config.parallel_config.enable_eplb:
+            return
+
+        assert self.eplb_state is not None
+        assert is_mixture_of_experts(self.model)
+        self.eplb_state.step(
+            self.model,
+            is_dummy,
+            is_profile,
+            log_stats=self.vllm_config.parallel_config.eplb_config.
+            log_balancedness,
+        )
+
     @torch.inference_mode()
     def dummy_run(
         self,
         num_tokens: int,
+        skip_eplb: bool = False,
+        is_profile: bool = False,
     ) -> None:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
@@ -879,6 +928,8 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
+        if not skip_eplb:
+            self.eplb_step(is_dummy=True, is_profile=is_profile)
 
     def validate_same_kv_cache_group(self,
                                      kv_cache_config: KVCacheConfig) -> None:
