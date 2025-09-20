@@ -219,7 +219,7 @@ As they are deprecated and will be removed in the next major or minor release, i
 
 ### NOTE for attention ops fusion
 
-Currently, the default behavior of cudagraph_mode != `NONE` would always keep the attention ops in the splitting_ops to get a piecewise FX graph, causing attention ops fusion to be incompatible with piecewise CUDA Graphs. In case one needs attention ops fusion, one can just manually pass `splitting_ops=[]` to compilation_config to retain the flattened FX graph, and use cudagraph_mode = "FULL" or "FULL_DECODE_ONLY" (should just avoid the PIECEWISE in mode even though we are using -O3). Currently, this RFC <gh-issue:23261> is tracking the progress of making attention ops fusion compatible with piecewise CUDA Graphs to allow `FULL_AND_PIECEWISE` mode.
+Attention ops fusion is compatiable with piecewise cudagraph only when using inductor graph partition, i.e., passing `--compilation_config '{"use_inductor_graph_partition":true}'` (Note: this is an experimental and will be avaliable after Pytorch version>=2.9). Otherwise, piecewise cudagraph do not support attention fusion by vllm custom graph partition. In the later case (which is also current state), one should manually pass `splitting_ops=[]` to compilation_config to retain an complete FX graph for custom pass, and use cudagraph_mode = "FULL" or "FULL_DECODE_ONLY" when enabling attention fusion, since the default behavior of cudagraph_mode != `NONE` is always keeping the attention ops in the splitting_ops to get a piecewise FX graph.
 
 ## About the Performance
 
