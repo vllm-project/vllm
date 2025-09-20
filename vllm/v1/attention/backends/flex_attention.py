@@ -758,8 +758,7 @@ class FlexAttentionImpl(AttentionImpl):
                 # in direct block mask building code path.
                 logger.warning_once(
                     "Using direct block mask building with sliding window, "
-                    "which is suboptimal now. Performance may be degraded."
-                )
+                    "which is suboptimal now. Performance may be degraded.")
                 # update mask mod in attention metadata
                 attn_metadata.mask_mod = attn_metadata.get_mask_mod()
                 attn_metadata.block_mask = (
