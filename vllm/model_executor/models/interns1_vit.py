@@ -19,9 +19,11 @@ from vllm.attention.layer import MultiHeadAttention
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.multimodal.utils import run_dp_sharded_vision_model
 
 NORM2FN = {
     'rms_norm': RMSNorm,
@@ -165,8 +167,11 @@ class InternSdpaAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
         *,
         num_dummy_heads: int = 0,
+        prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
@@ -185,15 +190,34 @@ class InternSdpaAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
 
-        self.q_proj = nn.Linear(self.embed_dim,
-                                self.num_heads * self.head_dim,
-                                bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.embed_dim,
-                                self.num_heads * self.head_dim,
-                                bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.embed_dim,
-                                self.num_heads * self.head_dim,
-                                bias=config.attention_bias)
+        if use_data_parallel:
+            # In data parallel mode, use ReplicatedLinear for all projections
+            self.q_proj = ReplicatedLinear(self.embed_dim,
+                                           self.num_heads * self.head_dim,
+                                           bias=config.attention_bias,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.q_proj")
+            self.k_proj = ReplicatedLinear(self.embed_dim,
+                                           self.num_heads * self.head_dim,
+                                           bias=config.attention_bias,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.k_proj")
+            self.v_proj = ReplicatedLinear(self.embed_dim,
+                                           self.num_heads * self.head_dim,
+                                           bias=config.attention_bias,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.v_proj")
+        else:
+            # In tensor parallel mode, use regular nn.Linear
+            self.q_proj = nn.Linear(self.embed_dim,
+                                    self.num_heads * self.head_dim,
+                                    bias=config.attention_bias)
+            self.k_proj = nn.Linear(self.embed_dim,
+                                    self.num_heads * self.head_dim,
+                                    bias=config.attention_bias)
+            self.v_proj = nn.Linear(self.embed_dim,
+                                    self.num_heads * self.head_dim,
+                                    bias=config.attention_bias)
 
         self.qk_normalization = config.use_qk_norm
         if self.qk_normalization:
@@ -204,7 +228,15 @@ class InternSdpaAttention(nn.Module):
                                   eps=config.layer_norm_eps,
                                   var_hidden_size=self.embed_dim)
 
-        self.projection_layer = nn.Linear(self.dummy_dim, self.embed_dim)
+        if use_data_parallel:
+            self.projection_layer = ReplicatedLinear(
+                self.dummy_dim,
+                self.embed_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.projection_layer")
+        else:
+            self.projection_layer = nn.Linear(self.dummy_dim, self.embed_dim)
 
         # Use unified MultiHeadAttention with automatic backend selection
         self.attn = MultiHeadAttention(self.num_heads, self.head_dim,
@@ -236,21 +268,35 @@ class InternS1VisionMLP(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        self.fc1 = ColumnParallelLinear(config.hidden_size,
+
+        if use_data_parallel:
+            self.fc1 = ReplicatedLinear(config.hidden_size,
                                         config.intermediate_size,
                                         bias=True,
                                         quant_config=quant_config,
                                         prefix=f"{prefix}.fc1")
-        self.fc2 = RowParallelLinear(config.intermediate_size,
-                                     config.hidden_size,
-                                     bias=True,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.fc2")
+            self.fc2 = ReplicatedLinear(config.intermediate_size,
+                                        config.hidden_size,
+                                        bias=True,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.fc2")
+        else:
+            self.fc1 = ColumnParallelLinear(config.hidden_size,
+                                            config.intermediate_size,
+                                            bias=True,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.fc1")
+            self.fc2 = RowParallelLinear(config.intermediate_size,
+                                         config.hidden_size,
+                                         bias=True,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.fc2")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -269,17 +315,20 @@ class InternS1VisionLayer(nn.Module):
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
         self.attention = self._init_attn(config,
                                          quant_config,
                                          num_dummy_heads=num_dummy_heads,
-                                         prefix=f"{prefix}.attention")
+                                         prefix=f"{prefix}.attention",
+                                         use_data_parallel=use_data_parallel)
 
         self.mlp = InternS1VisionMLP(config,
                                      quant_config=quant_config,
-                                     prefix=f"{prefix}.mlp")
+                                     prefix=f"{prefix}.mlp",
+                                     use_data_parallel=use_data_parallel)
         self.layernorm_before = NORM2FN[config.norm_type](
             config.hidden_size, eps=config.layer_norm_eps)
         self.layernorm_after = NORM2FN[config.norm_type](
@@ -300,8 +349,12 @@ class InternS1VisionLayer(nn.Module):
         *,
         num_dummy_heads: int,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ):
-        return InternSdpaAttention(config, num_dummy_heads=num_dummy_heads)
+        return InternSdpaAttention(config,
+                                   quant_config=quant_config,
+                                   prefix=prefix,
+                                   use_data_parallel=use_data_parallel)
 
     def forward(
         self,
@@ -326,6 +379,7 @@ class InternS1VisionEncoder(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ):
         super().__init__()
 
@@ -340,7 +394,8 @@ class InternS1VisionEncoder(nn.Module):
             InternS1VisionLayer(config,
                                 quant_config,
                                 num_dummy_heads=num_dummy_heads,
-                                prefix=f"{prefix}.layer.{layer_idx}")
+                                prefix=f"{prefix}.layer.{layer_idx}",
+                                use_data_parallel=use_data_parallel)
             for layer_idx in range(num_hidden_layers)
         ])
 
@@ -363,6 +418,7 @@ class InternS1VisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
@@ -374,6 +430,7 @@ class InternS1VisionModel(nn.Module):
             num_hidden_layers_override=num_hidden_layers_override,
             num_dummy_heads=num_dummy_heads,
             prefix=f"{prefix}.encoder",
+            use_data_parallel=use_data_parallel,
         )
         self.layernorm = (nn.Identity() if config.use_mean_pooling else
                           nn.LayerNorm(config.hidden_size,
@@ -399,8 +456,11 @@ class InternS1VisionModel(nn.Module):
             else:
                 raise ValueError(
                     f'wrong pixel_values size: {pixel_values.shape}')
-
-        encoder_outputs = self.encoder(inputs_embeds=hidden_states)
+        if self.use_data_parallel:
+            encoder_outputs = run_dp_sharded_vision_model(
+                hidden_states, self.encoder)
+        else:
+            encoder_outputs = self.encoder(inputs_embeds=hidden_states)
         encoder_outputs = self.layernorm(encoder_outputs)
 
         return encoder_outputs
