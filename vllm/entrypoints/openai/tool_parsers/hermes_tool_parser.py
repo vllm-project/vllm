@@ -368,16 +368,32 @@ class Hermes2ProToolParser(ToolParser):
             # case -- we now have the first info about arguments available from
             #   autocompleting the JSON
             elif cur_arguments and not prev_arguments:
+                # extract the content after {"name": ..., "arguments":
+                #   directly from tool_call_portion as cur_arguments_json,
+                #   since cur_arguments may differ from the original text
+                #   due to partial JSON parsing
+                #   for example, tool_call_portion =
+                #     {"name": "search", "arguments": {"search_request": {"
+                #   but cur_arguments =
+                #     {"search_request": {}}
+                function_name = current_tool_call.get("name")
+                match = re.search(
+                    r'\{"name":\s*"' +
+                    re.escape(function_name) + r'"\s*,\s*"arguments":\s*(.*)',
+                    tool_call_portion.strip(), re.DOTALL)
+                if match:
+                    cur_arguments_json = match.group(1)
+                else:
+                    cur_arguments_json = json.dumps(cur_arguments,
+                                                    ensure_ascii=False)
 
-                cur_arguments_json = json.dumps(cur_arguments,
-                                                ensure_ascii=False)
                 logger.debug("finding %s in %s", delta_text,
                              cur_arguments_json)
 
-                # get the location where previous args differ from current
-                if (delta_text not in cur_arguments_json[:-2]):
+                # get the location where previous args differ from current.
+                if (delta_text not in cur_arguments_json):
                     return None
-                args_delta_start_loc = cur_arguments_json[:-2]. \
+                args_delta_start_loc = cur_arguments_json. \
                                            rindex(delta_text) + \
                                            len(delta_text)
 
@@ -397,8 +413,20 @@ class Hermes2ProToolParser(ToolParser):
 
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
-                if isinstance(delta_text, str) and len(delta_text.rstrip(
-                )) >= 1 and delta_text.rstrip()[-1] == '}':
+                # judge whether the tool_call_portion is a complete JSON
+                try:
+                    json.loads(tool_call_portion)
+                    is_complete_json = True
+                except Exception:
+                    is_complete_json = False
+
+                # if the delta_text ends with a '}' and tool_call_portion is a
+                #   complete JSON, then the last '}' does not belong to the
+                #   arguments, so we should trim it off
+                if isinstance(delta_text, str) \
+                    and len(delta_text.rstrip()) >= 1 \
+                    and delta_text.rstrip()[-1] == '}' \
+                    and is_complete_json:
                     delta_text = delta_text.rstrip()[:-1]
 
                 logger.debug("got diff %s", delta_text)
