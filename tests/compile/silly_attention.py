@@ -8,12 +8,8 @@ Centralizes custom operation definitions to avoid duplicate registrations.
 import torch
 from torch.library import Library
 
-from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
-
-if is_torch_equal_or_newer("2.9.0.dev"):
-    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
-else:
-    tag_cudagraph_unsafe = ()  # type: ignore[assignment]
+from vllm.attention.layer import tag_cudagraph_unsafe
+from vllm.utils import direct_register_custom_op
 
 # Shared library for all compilation test operations
 # Using "silly" namespace to match existing test expectations
