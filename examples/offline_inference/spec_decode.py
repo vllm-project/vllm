@@ -49,6 +49,7 @@ def get_custom_mm_prompts(num_prompts):
 def parse_args():
     parser = FlexibleArgumentParser()
     add_dataset_parser(parser)
+    parser.add_argument("--test", action="store_true")
     parser.add_argument(
         "--method",
         type=str,
@@ -71,8 +72,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
+def main(args):
     args.endpoint_type = "openai-chat"
 
     model_dir = args.model_dir
@@ -198,6 +198,39 @@ def main():
         acceptance_rate = acceptance_counts[i] / num_drafts if num_drafts > 0 else 0
         print(f"acceptance at token {i}: {acceptance_rate:.2f}")
 
+    return acceptance_length
+
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    acceptance_length = main(args)
+
+    if args.test:
+        # takes ~30s to run on 1xH100
+        assert args.method in ["eagle", "eagle3"]
+        assert args.tp == 1
+        assert args.num_spec_tokens == 3
+        assert args.dataset_name == "hf"
+        assert args.dataset_path == "philschmid/mt-bench"
+        assert args.num_prompts == 80
+        assert args.temp == 0
+        assert args.top_p == 1.0
+        assert args.top_k == -1
+        assert args.enable_chunked_prefill
+
+        # check acceptance length is within 1% of expected value
+        rtol = 0.01
+        expected_acceptance_length = 2.29 if args.method == "eagle" else 2.783
+
+        assert (
+            acceptance_length <= (1 + rtol) * expected_acceptance_length
+            and acceptance_length >= (1 - rtol) * expected_acceptance_length
+        ), (
+            f"acceptance_length {acceptance_length} is not "
+            f"within {rtol * 100}% of {expected_acceptance_length}"
+        )
+
+        print(
+            f"Test passed! Expected AL: "
+            f"{expected_acceptance_length}, got {acceptance_length}"
+        )
