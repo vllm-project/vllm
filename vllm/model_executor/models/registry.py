@@ -184,7 +184,7 @@ _EMBEDDING_MODELS = {
     "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
-    "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
+    "XLMRobertaModel": ("xlm_roberta", "XLMRobertaEmbeddingModel"),
     # [Multimodal]
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
@@ -205,8 +205,8 @@ _CROSS_ENCODER_MODELS = {
                                             "ModernBertForSequenceClassification"),
     "RobertaForSequenceClassification": ("roberta",
                                          "RobertaForSequenceClassification"),
-    "XLMRobertaForSequenceClassification": ("roberta",
-                                            "RobertaForSequenceClassification"),
+    "XLMRobertaForSequenceClassification": ("xlm_roberta",
+                                            "XLMRobertaForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501,
 }
