@@ -69,7 +69,8 @@ SEEDS = [0]
 def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
     torch.manual_seed(seed)
     #TODO: Zero-centering the inputs causes errors for LLMM1!
-    #      Without that the numbers quickly saturate, and may be giving false matches.
+    #      Without that the numbers quickly saturate, and may
+    #      be giving false matches.
     A = torch.rand(n, k, dtype=dtype, device="cuda")
     B = torch.rand(m, k, dtype=dtype, device="cuda")
 
