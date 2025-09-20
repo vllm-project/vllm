@@ -645,6 +645,7 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 if not lora_config else lora_config.lora_vocab_padding_size),
             quant_config=None,
             bias=True,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)

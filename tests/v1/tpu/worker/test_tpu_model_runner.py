@@ -125,7 +125,7 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
         return False
 
     num_blocks = block_table.num_blocks_per_row[req_index]
-    block_table_values = block_table.block_table_np[req_index, :num_blocks]
+    block_table_values = block_table.block_table.np[req_index, :num_blocks]
     return (block_table_values == req_block_ids).all()
 
 

@@ -306,6 +306,7 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
             config.n_embd,
             bias=True,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (

@@ -191,7 +191,7 @@ class RocmPlatform(Platform):
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink) -> str:
         if use_mla:
-            from vllm.attention.backends.rocm_aiter_mla import (
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
                 is_aiter_mla_enabled)
 
             if selected_backend is None:

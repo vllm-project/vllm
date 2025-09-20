@@ -630,6 +630,7 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
                 # compatibility
                 if not lora_config else lora_config.lora_vocab_padding_size),
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.embedding_bias = None
         # Used to track and store by the Mamba cache between steps.

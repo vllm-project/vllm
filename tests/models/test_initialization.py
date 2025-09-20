@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from vllm import LLM
-from vllm.config import ModelImpl
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
@@ -92,10 +91,6 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
             # L4 supports FA3.
             m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
-        if model_arch == "Florence2ForConditionalGeneration":
-            # An encoder-decoder model that's V0-only. Just skip it
-            # since V0 is about to be removed.
-            pytest.skip("Skipping Florence2ForConditionalGeneration")
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         LLM(
@@ -115,8 +110,8 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             # these tests seem to produce leftover memory
             gpu_memory_utilization=0.80,
             load_format="dummy",
-            model_impl=ModelImpl.TRANSFORMERS
-            if model_arch in _TRANSFORMERS_BACKEND_MODELS else ModelImpl.VLLM,
+            model_impl="transformers"
+            if model_arch in _TRANSFORMERS_BACKEND_MODELS else "vllm",
             hf_overrides=hf_overrides_fn,
             max_num_seqs=model_info.max_num_seqs)
 

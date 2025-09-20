@@ -18,7 +18,6 @@ import torch.distributed
 import torch.nn as nn
 from tqdm.auto import tqdm
 
-import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
@@ -41,7 +40,8 @@ from vllm.model_executor.layers.sampler import (Sampler, SamplerOutput,
                                                 get_sampler)
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm.model_executor.models import (supports_lora, supports_mrope,
+                                        supports_multimodal)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
@@ -670,18 +670,33 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     inter_data.seq_ids[seq_idx]]
                 token_ids = seq_data.get_token_ids()
 
-                mrope_input_positions, mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions(
-                        token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        context_len=inter_data.context_lens[seq_idx],
-                        seq_len=inter_data.seq_lens[seq_idx],
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
-                    )
+                if supports_mrope(self.runner.model):
+                    mrope_input_positions, mrope_position_delta = \
+                        self.runner.model.get_mrope_input_positions(
+                            token_ids,
+                            hf_config=hf_config,
+                            image_grid_thw=image_grid_thw,
+                            video_grid_thw=video_grid_thw,
+                            second_per_grid_ts=second_per_grid_ts,
+                            context_len=inter_data.context_lens[seq_idx],
+                            seq_len=inter_data.seq_lens[seq_idx],
+                            audio_feature_lengths=audio_feature_lengths,
+                            use_audio_in_video=use_audio_in_video,
+                        )
+                    mrope_input_positions = mrope_input_positions.tolist()
+                else:
+                    mrope_input_positions, mrope_position_delta = \
+                        MRotaryEmbedding.get_input_positions(
+                            token_ids,
+                            hf_config=hf_config,
+                            image_grid_thw=image_grid_thw,
+                            video_grid_thw=video_grid_thw,
+                            second_per_grid_ts=second_per_grid_ts,
+                            context_len=inter_data.context_lens[seq_idx],
+                            seq_len=inter_data.seq_lens[seq_idx],
+                            audio_feature_lengths=audio_feature_lengths,
+                            use_audio_in_video=use_audio_in_video,
+                        )
 
                 seq_data.mrope_position_delta = mrope_position_delta
                 inter_data.mrope_input_positions[
@@ -1062,20 +1077,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "Regarding multimodal models, vLLM currently "
                         "only supports adding LoRA to language model.")
 
-                # Use get_text_config() in case of multimodal models
-                text_config = self.model_config.hf_config.get_text_config()
-
                 self.lora_manager = LRUCacheWorkerLoRAManager(
-                    self.scheduler_config.max_num_seqs,
-                    self.scheduler_config.max_num_batched_tokens,
-                    self.vocab_size,
-                    self.lora_config,
+                    self.vllm_config,
                     self.device,
                     self.model.embedding_modules,
                     self.model.embedding_padding_modules,
-                    max_position_embeddings=text_config.
-                    max_position_embeddings,
                 )
+
                 self.model = self.lora_manager.create_lora_manager(self.model)
             time_after_load = time.perf_counter()
 
@@ -1090,10 +1098,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             backend = self.vllm_config.compilation_config.init_backend(
                 self.vllm_config)
             compilation_counter.dynamo_as_is_count += 1
-            self.model = torch.compile(
-                self.model,
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend)
+            self.model = torch.compile(self.model,
+                                       fullgraph=True,
+                                       backend=backend)
 
     def get_model(self) -> nn.Module:
         return self.model
