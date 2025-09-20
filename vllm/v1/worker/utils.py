@@ -15,7 +15,7 @@ from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.attention.layer import Attention
@@ -132,6 +132,7 @@ class AttentionGroup:
     backend: type[AttentionBackend]
     metadata_builders: list[AttentionMetadataBuilder]
     layer_names: list[str]
+    kv_cache_spec: KVCacheSpec
 
     def get_metadata_builder(self,
                              ubatch_id: Optional[int] = None
