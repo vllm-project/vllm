@@ -109,8 +109,10 @@ class CPUWorker(Worker):
     ) -> Optional[ModelRunnerOutput]:
         intermediate_tensors = None
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        num_reqs = len(scheduler_output.num_scheduled_tokens)
+        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         num_input_tokens = self.model_runner._get_num_input_tokens(
-            num_scheduled_tokens)
+            num_scheduled_tokens, num_reqs, max_query_len)
         all_gather_tensors = {
             "residual":
             not is_residual_scattered_for_sp(self.vllm_config,
