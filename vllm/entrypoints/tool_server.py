@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 async def list_server_and_tools(server_url: str):
     from mcp import ClientSession
     from mcp.client.sse import sse_client
-
     async with sse_client(url=server_url) as streams, ClientSession(
             *streams) as session:
         initialize_response = await session.initialize()
@@ -86,8 +85,12 @@ class ToolServer(ABC):
         pass
 
     @abstractmethod
-    def new_session(self, tool_name: str,
-                    session_id: str) -> AbstractAsyncContextManager[Any]:
+    def new_session(
+        self,
+        tool_name: str,
+        session_id: str,
+        headers: Optional[dict[str, str]] = None
+    ) -> AbstractAsyncContextManager[Any]:
         """
         Create a session for the tool.
         """
@@ -144,16 +147,21 @@ class MCPToolServer(ToolServer):
         return self.harmony_tool_descriptions.get(tool_name)
 
     @asynccontextmanager
-    async def new_session(self, tool_name: str, session_id: str):
+    async def new_session(self,
+                          tool_name: str,
+                          session_id: str,
+                          headers: Optional[dict[str, str]] = None):
         from mcp import ClientSession
         from mcp.client.sse import sse_client
         url = self.urls.get(tool_name)
-        headers = {"x-session-id": session_id}
+        request_headers = {"x-session-id": session_id}
+        if headers is not None:
+            request_headers.update(headers)
         if not url:
             raise KeyError(f"Tool '{tool_name}' is not supported")
-        async with sse_client(url=url,
-                              headers=headers) as streams, ClientSession(
-                                  *streams) as session:
+        async with sse_client(
+                url=url, headers=request_headers) as streams, ClientSession(
+                    *streams) as session:
             await session.initialize()
             yield session
 
@@ -189,7 +197,10 @@ class DemoToolServer(ToolServer):
             raise ValueError(f"Unknown tool {tool_name}")
 
     @asynccontextmanager
-    async def new_session(self, tool_name: str, session_id: str):
+    async def new_session(self,
+                          tool_name: str,
+                          session_id: str,
+                          headers: Optional[dict[str, str]] = None):
         if tool_name not in self.tools:
             raise KeyError(f"Tool '{tool_name}' is not supported")
         yield self.tools[tool_name]
