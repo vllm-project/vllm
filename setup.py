@@ -82,6 +82,39 @@ def is_url_available(url: str) -> bool:
     return status == 200
 
 
+def is_git_installation() -> bool:
+    """Check if vllm is being installed from git (e.g., pip install git+https://...)"""
+    try:
+        # Check if we're in a git repository
+        if not os.path.exists('.git') and not subprocess.run(
+            ['git', 'rev-parse', '--git-dir'], 
+            capture_output=True, text=True
+        ).returncode == 0:
+            return False
+        
+        # Check if repository is clean (no uncommitted changes)
+        result = subprocess.run(
+            ['git', 'status', '--porcelain'], 
+            capture_output=True, text=True
+        )
+        if result.returncode != 0 or result.stdout.strip():
+            return False
+        
+        # Check if remote origin points to vllm repository
+        result = subprocess.run(
+            ['git', 'remote', 'get-url', 'origin'], 
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            origin_url = result.stdout.strip()
+            if 'vllm-project/vllm' in origin_url or 'github.com/vllm-project/vllm' in origin_url:
+                return True
+        
+        return False
+    except Exception:
+        return False
+
+
 class CMakeExtension(Extension):
 
     def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
@@ -297,6 +330,36 @@ class precompiled_wheel_utils:
     """Extracts libraries and other files from an existing wheel."""
 
     @staticmethod
+    def build_wheel_url(commit_hash: str):
+        """Build the wheel URL for a given commit hash by finding the first wheel for current arch."""
+        import platform
+        import re
+        from urllib.request import urlopen
+        
+        arch = platform.machine()
+        arch_suffix = f"{arch}.whl"
+        
+        # Get the index page and find the first wheel ending with our arch suffix
+        index_url = f"https://wheels.vllm.ai/{commit_hash}/vllm/index.html"
+        try:
+            with urlopen(index_url) as response:
+                content = response.read().decode('utf-8')
+                
+            # Find any wheel filename ending with our architecture suffix
+            pattern = rf'href="\.\./(.*?{re.escape(arch_suffix)})"'
+            match = re.search(pattern, content)
+            
+            if match:
+                wheel_filename = match.group(1)
+                return f"https://wheels.vllm.ai/{commit_hash}/{wheel_filename}"
+            else:
+                raise ValueError(f"No wheel found for platform {arch}")
+                
+        except Exception as e:
+            # If parsing fails, there's no wheel available
+            raise ValueError(f"No wheels available for commit {commit_hash} on {arch}")
+
+    @staticmethod
     def extract_precompiled_and_patch_package(wheel_url_or_path: str) -> dict:
         import tempfile
         import zipfile
@@ -404,6 +467,16 @@ class precompiled_wheel_utils:
                 "wheel may not be compatible with your dev branch: %s", err)
             return "nightly"
 
+    @staticmethod
+    def check_precompiled_wheels_available(commit_hash: str) -> bool:
+        """Check if precompiled wheels are available for the given commit."""
+        try:
+            # build_wheel_url() will check the index and find the correct wheel
+            wheel_url = precompiled_wheel_utils.build_wheel_url(commit_hash)
+            return is_url_available(wheel_url)
+        except Exception:
+            return False
+
 
 def _no_device() -> bool:
     return VLLM_TARGET_DEVICE == "empty"
@@ -493,7 +566,7 @@ def get_gaudi_sw_version():
     return "0.0.0"  # when hl-smi is not available
 
 
-def get_vllm_version() -> str:
+def get_vllm_version(use_precompiled_override: bool = False) -> str:
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
@@ -501,7 +574,7 @@ def get_vllm_version() -> str:
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
     elif _is_cuda():
-        if envs.VLLM_USE_PRECOMPILED:
+        if envs.VLLM_USE_PRECOMPILED or use_precompiled_override:
             version += f"{sep}precompiled"
         else:
             cuda_version = str(get_nvcc_cuda_version())
@@ -609,17 +682,9 @@ if envs.VLLM_USE_PRECOMPILED:
     if wheel_location is not None:
         wheel_url = wheel_location
     else:
-        import platform
-        arch = platform.machine()
-        if arch == "x86_64":
-            wheel_tag = "manylinux1_x86_64"
-        elif arch == "aarch64":
-            wheel_tag = "manylinux2014_aarch64"
-        else:
-            raise ValueError(f"Unsupported architecture: {arch}")
         base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
-        wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
-        nightly_wheel_url = f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+        wheel_url = precompiled_wheel_utils.build_wheel_url(base_commit)
+        nightly_wheel_url = precompiled_wheel_utils.build_wheel_url("nightly")
         from urllib.request import urlopen
         try:
             with urlopen(wheel_url) as resp:
@@ -645,9 +710,45 @@ else:
         precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
     }
 
+# Auto-enable precompiled wheels for git installations if conditions are met
+auto_use_precompiled = False
+if (not envs.VLLM_USE_PRECOMPILED and envs.VLLM_AUTO_USE_PRECOMPILED and 
+    _is_cuda() and is_git_installation()):
+    try:
+        current_commit = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], text=True
+        ).strip()
+        
+        if precompiled_wheel_utils.check_precompiled_wheels_available(current_commit):
+            auto_use_precompiled = True
+            print("✓ Detected git installation with available precompiled wheels")
+            print(f"  Using precompiled wheels for commit: {current_commit}")
+            print("  This will significantly speed up installation!")
+            print("  To disable: export VLLM_AUTO_USE_PRECOMPILED=0")
+            
+            # Update cmdclass to use precompiled build
+            if ext_modules:
+                cmdclass["build_ext"] = precompiled_build_ext
+                
+            # Extract wheels if not already done
+            wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
+            if wheel_location is not None:
+                wheel_url = wheel_location
+            else:
+                wheel_url = precompiled_wheel_utils.build_wheel_url(current_commit)
+                
+            patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(wheel_url)
+            for pkg, files in patch.items():
+                package_data.setdefault(pkg, []).extend(files)
+        else:
+            print("ⓘ Git installation detected, but no precompiled wheels available")
+            print("  Falling back to building from source")
+    except Exception as e:
+        logger.debug(f"Auto-precompiled wheel detection failed: {e}")
+
 setup(
     # static metadata should rather go in pyproject.toml
-    version=get_vllm_version(),
+    version=get_vllm_version(auto_use_precompiled),
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
