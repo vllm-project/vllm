@@ -11,7 +11,6 @@ from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
 from vllm.attention.utils.fa_utils import (flash_attn_supports_mla,
                                            get_flash_attn_version)
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
@@ -98,11 +97,6 @@ class FlashAttnMLAMetadataBuilder(
             # number of splits so that large enough intermediate buffers are
             # pre-allocated during capture.
             self.max_num_splits = _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
-
-        # TODO(lucas): Until we add support for the DCP custom masking we need
-        #   to restrict decodes to q_len == 1 when DCP is enabled.
-        self.__class__.reorder_batch_threshold = 1 \
-            if get_dcp_group().world_size > 1 else self.reorder_batch_threshold
 
     def _schedule_decode(self, num_reqs, cu_query_lens, max_query_len, seqlens,
                          max_seq_len, causal):
@@ -262,6 +256,8 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             fa_version=3,  # only version 3 is supported
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
             num_splits=attn_metadata.decode.max_num_splits,
+            cp_world_size=self.dcp_world_size,
+            cp_rank=self.dcp_rank,
         )
 
         if self.need_to_return_lse_for_decode:
