@@ -31,6 +31,7 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, VllmConfig)
+from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
@@ -472,10 +473,13 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         # Input embeddings
         if not isinstance(self.model.get_input_embeddings(), PPMissingLayer):
+            names = ("embedding_size", "hidden_size")
+            embedding_dim = getattr_iter(self.text_config, names, None)
+            assert embedding_dim is not None
             self.model.set_input_embeddings(
                 VocabParallelEmbedding(
                     self.text_config.vocab_size,
-                    self.text_config.hidden_size,
+                    embedding_dim=embedding_dim,
                     org_num_embeddings=self.text_config.vocab_size,
                     quant_config=self.quant_config,
                 ))
