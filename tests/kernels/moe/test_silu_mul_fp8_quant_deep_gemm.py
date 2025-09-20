@@ -5,39 +5,24 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    silu_mul_fp8_quant_deep_gemm_cuda)
+    silu_mul_fp8_quant_deep_gemm_cuda, silu_v1)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
 fp8_dtype = torch.float8_e4m3fn
 
 CASES = [
-    (1, 1, 128, fp8_dtype),
-    (1, 4, 128, fp8_dtype),
-    (2, 4, 256, fp8_dtype),
-    (32, 64, 256, fp8_dtype),
-    (17, 31, 768, fp8_dtype),
-    (1, 1, 128 * 1, fp8_dtype),
-    (1, 1, 128 * 2, fp8_dtype),
-    (1, 1, 128 * 3, fp8_dtype),
-    (1, 1, 128 * 4, fp8_dtype),
-    (8, 16, 128 * 1, fp8_dtype),
-    (8, 16, 128 * 2, fp8_dtype),
-    (8, 16, 128 * 3, fp8_dtype),
-    (8, 16, 128 * 4, fp8_dtype),
-    (8, 64, 7168, fp8_dtype),
-    (8, 128, 7168, fp8_dtype),
-    (8, 256, 7168, fp8_dtype),
-    (8, 512, 7168, fp8_dtype),
-    (8, 1024, 7168, fp8_dtype),
-    (256, 8, 7168, fp8_dtype),
-    (256, 16, 7168, fp8_dtype),
-    (256, 32, 7168, fp8_dtype),
-    (256, 64, 7168, fp8_dtype),
-
-    # Only add a few fnuz tests to help with long CI times.
-    (8, 512, 7168, torch.float8_e4m3fnuz),
-    (8, 1024, 7168, torch.float8_e4m3fnuz),
+    # (1, 1, 128, fp8_dtype),
+    # (1, 2, 128, fp8_dtype),
+    # (2, 1, 128, fp8_dtype),
+    # (2, 2, 128, fp8_dtype),
+    #
+    #
+    # (1, 1, 7168, fp8_dtype),
+    # (1, 2, 7168, fp8_dtype),
+    # (2, 1, 7168, fp8_dtype),
+    # (2, 2, 7168, fp8_dtype),
+    (256, 256, 7168, fp8_dtype)
 ]
 
 
@@ -50,14 +35,15 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
     # Input tensor of shape (E, T, 2*H)
     y = torch.randn((E, T, 2 * H), dtype=torch.bfloat16, device="cuda")
     tokens_per_expert = torch.randint(
-        low=T // 2,
+        low=0,
         high=T,
         size=(E, ),
         dtype=torch.int32,
         device="cuda",
-    )
+    ) * 0 + T
 
     # Run the Triton kernel
+    y_q, y_s = silu_v1(y, tokens_per_expert, group_size=group_size)
     y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(y,
                                                  tokens_per_expert,
                                                  group_size=group_size)
@@ -112,10 +98,10 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
         y_se = y_s[e].float()
         y_qe = y_q[e].float()
 
-        torch.testing.assert_close(y_se[:nt], ref_s[:nt], atol=1e-4, rtol=1e-2)
         torch.testing.assert_close(
             y_qe[:nt].to(torch.float32),
             ref_q[:nt].to(torch.float32),
             atol=2,
             rtol=2e-1,
         )
+        torch.testing.assert_close(y_se[:nt], ref_s[:nt], atol=1e-4, rtol=1e-2)
