@@ -943,6 +943,20 @@ def cutlass_fp4_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
     - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
                      MMs used in the fused MoE operation.
     """
+    # Detect SM120 architecture (RTX 5090/Blackwell GeForce)
+    device = a_tensors.device if a_tensors.is_cuda else torch.cuda.current_device()
+    major, minor = torch.cuda.get_device_capability(device)
+
+    # Use SM120 kernel for compute capability 12.0 and above
+    if major == 12 and minor == 0:
+        # Check if SM120 kernel is available
+        if hasattr(torch.ops._C, 'cutlass_fp4_group_mm_sm120'):
+            return torch.ops._C.cutlass_fp4_group_mm_sm120(
+                out_tensors, a_tensors, b_tensors,
+                a_scales, b_scales, alphas,
+                problem_sizes, expert_offsets, sf_offsets)
+
+    # Fall back to standard kernel
     return torch.ops._C.cutlass_fp4_group_mm(out_tensors, a_tensors, b_tensors,
                                              a_scales, b_scales, alphas,
                                              problem_sizes, expert_offsets,

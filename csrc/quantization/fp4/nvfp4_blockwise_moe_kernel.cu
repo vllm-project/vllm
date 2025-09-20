@@ -43,6 +43,7 @@
 #include "cutlass/util/reference/host/gett.hpp"
 #include "cutlass/util/reference/host/tensor_norm.h"
 #include "cutlass/util/reference/host/tensor_compare.h"
+#include "cutlass_extensions/common.hpp"
 #include <cassert>
 
 using namespace cute;
@@ -367,11 +368,29 @@ constexpr auto SF_DTYPE = at::ScalarType::Float8_e4m3fn;
   CHECK_CONTIGUOUS(x, m);     \
   CHECK_TYPE(x, st, m)
 
+#if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
+void cutlass_fp4_group_mm_sm120(
+    torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
+    const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
+    const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
+    const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets);
+#endif
+
 void cutlass_fp4_group_mm(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
     const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
     const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets) {
+#if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
+  {
+    int32_t version_num = get_sm_version_num();
+    if (version_num >= 120) {
+      return cutlass_fp4_group_mm_sm120(output, a, b, a_blockscale,
+                                        b_blockscales, alphas, problem_sizes,
+                                        expert_offsets, sf_offsets);
+    }
+  }
+#endif
 #if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
   // Input validation
   CHECK_INPUT(a, FLOAT4_E2M1X2, "a");
@@ -411,10 +430,18 @@ void cutlass_fp4_group_mm(
         expert_offsets, sf_offsets, M, N, K);
   }
 #else
+#if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
+  {
+    int32_t version_num = get_sm_version_num();
+    if (version_num >= 120) {
+      return cutlass_fp4_group_mm_sm120(output, a, b, a_blockscale,
+                                        b_blockscales, alphas, problem_sizes,
+                                        expert_offsets, sf_offsets);
+    }
+  }
+#endif
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
-      "No compiled cutlass_fp4_group_mm kernel, vLLM must "
-      "be compiled with ENABLE_NVFP4_SM100 for SM100+ and CUDA "
-      "12.8 or above.");
+      "No compiled cutlass_fp4_group_mm kernel for this architecture.");
 #endif
 }
