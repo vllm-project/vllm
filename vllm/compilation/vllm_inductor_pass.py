@@ -14,7 +14,6 @@ from torch._inductor.pattern_matcher import (PatternMatcherPass,
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import unique_filepath
 
 from .inductor_pass import InductorPass
 
@@ -105,6 +104,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
         debug_dump_path = Path(debug_dump_path) / f"rank_{rank}"
         debug_dump_path.mkdir(parents=True, exist_ok=True)
 
+        from vllm.utils import unique_filepath
         file_path = unique_filepath(
             lambda i: debug_dump_path / f"patterns.{self.pass_name}.{i}.py")
 
