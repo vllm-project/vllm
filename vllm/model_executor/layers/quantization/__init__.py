@@ -3,7 +3,8 @@
 
 from typing import Literal, get_args
 
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 
 QuantizationMethods = Literal[
     "awq",
