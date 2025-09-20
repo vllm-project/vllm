@@ -732,10 +732,12 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
-            pixel_values: The pixels in each input image.
+            positions: Position indices for the input tokens.
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
         Info:
-            [LlavaImageInputs][]
+            [`LlavaImageInputs`][vllm.model_executor.models.llava.LlavaImageInputs]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None

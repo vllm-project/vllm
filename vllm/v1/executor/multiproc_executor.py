@@ -11,9 +11,10 @@ import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
-from functools import partial
+from functools import cached_property, partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
+from multiprocessing.synchronize import Lock as LockType
 from threading import Thread
 from typing import Any, Callable, Optional, Union, cast
 
@@ -25,16 +26,19 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_pp_group, get_tp_group)
 from vllm.executor.multiproc_worker_utils import (
     set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.utils import (decorate_logs, get_distributed_init_method,
                         get_loopback_ip, get_mp_context, get_open_port,
                         set_process_title)
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
+from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import (AsyncModelRunnerOutput, DraftTokenIds,
                              ModelRunnerOutput)
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -81,6 +85,8 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
+        context = get_mp_context()
+        shared_worker_lock = context.Lock()
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
@@ -92,6 +98,7 @@ class MultiprocExecutor(Executor):
                         rank=rank,
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
+                        shared_worker_lock=shared_worker_lock,
                     ))
 
             # Workers must be created before wait_for_ready to avoid
@@ -127,8 +134,6 @@ class MultiprocExecutor(Executor):
 
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
-        self.kv_output_aggregator = KVOutputAggregator(
-            self.parallel_config.world_size)
 
     def start_worker_monitor(self):
         workers = self.workers
@@ -167,9 +172,9 @@ class MultiprocExecutor(Executor):
 
     def execute_model(
         self,
-        scheduler_output,
+        scheduler_output: SchedulerOutput,
+        non_block: bool = False,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        non_block = self.max_concurrent_batches > 1
 
         if not self.has_connector:
             # get output only from a single worker (output_rank)
@@ -321,7 +326,7 @@ class MultiprocExecutor(Executor):
         self.collective_rpc("check_health", timeout=10)
         return
 
-    @property
+    @cached_property
     def max_concurrent_batches(self) -> int:
         if self.scheduler_config.async_scheduling:
             return 2
@@ -380,6 +385,7 @@ class WorkerProc:
         rank: int,
         distributed_init_method: str,
         input_shm_handle: Handle,
+        shared_worker_lock: LockType,
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
@@ -416,6 +422,10 @@ class WorkerProc:
                 name="WorkerAsyncOutputCopy")
             self.async_output_copy_thread.start()
 
+        # Initialize multimodal receiver cache if needed
+        self.mm_receiver_cache = worker_receiver_cache_from_config(
+            vllm_config, MULTIMODAL_REGISTRY, shared_worker_lock)
+
         # Initialize device
         self.worker.init_device()
 
@@ -428,11 +438,12 @@ class WorkerProc:
 
     @staticmethod
     def make_worker_process(
-            vllm_config: VllmConfig,
-            local_rank: int,
-            rank: int,
-            distributed_init_method: str,
-            input_shm_handle,  # Receive SchedulerOutput
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        input_shm_handle,  # Receive SchedulerOutput
+        shared_worker_lock: LockType,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # (reader, writer)
@@ -449,6 +460,7 @@ class WorkerProc:
             "input_shm_handle": input_shm_handle,
             "ready_pipe": (reader, writer),
             "death_pipe": death_reader,
+            "shared_worker_lock": shared_worker_lock,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.worker_main,
@@ -618,7 +630,8 @@ class WorkerProc:
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))
         else:
             result = (WorkerProc.ResponseStatus.SUCCESS, output)
-        self.worker_response_mq.enqueue(result)
+        if (response_mq := self.worker_response_mq) is not None:
+            response_mq.enqueue(result)
 
     def handle_output(self, output: Any):
         """Handles output from the worker. If async scheduling is enabled,
@@ -646,6 +659,10 @@ class WorkerProc:
                     func = getattr(self.worker, method)
                 elif isinstance(method, bytes):
                     func = partial(cloudpickle.loads(method), self.worker)
+                # retrieve from shm cache if available
+                if self.mm_receiver_cache is not None \
+                    and func.__name__ == "execute_model":
+                    get_and_update_mm_cache(self.mm_receiver_cache, args)
                 output = func(*args, **kwargs)
             except Exception as e:
                 # Notes have been introduced in python 3.11

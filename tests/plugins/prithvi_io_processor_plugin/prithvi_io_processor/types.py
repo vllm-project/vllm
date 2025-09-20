@@ -22,7 +22,7 @@ class DataModuleConfig(TypedDict):
 
 class ImagePrompt(BaseModel):
 
-    data_format: Literal["b64_json", "bytes", "url"]
+    data_format: Literal["b64_json", "bytes", "url", "path"]
     """
     This is the data type for the input image
     """

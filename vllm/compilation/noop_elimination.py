@@ -62,9 +62,6 @@ class NoOpEliminationPass(VllmInductorPass):
     scaled_mm: "f16[s0, 4096]" = ...
     at = auto_functionalized(fused_add_rms_norm, input = scaled_mm, ...)
     out: "f16[s0, 4096]" = at[1]
-
-    TODO(luka): This is currently tested in test_fusion,
-     but separate tests could be good.
     """
 
     def __call__(self, graph: torch.fx.Graph):
@@ -96,17 +93,19 @@ class NoOpEliminationPass(VllmInductorPass):
                     # Invalid reshape args, skip
                     continue
 
-                if self.all_dims_equivalent(shape, input_shape):
+                if self.reshape_all_dims_equivalent(shape, input_shape):
                     node.replace_all_uses_with(input)
                     graph.erase_node(node)
                     count += 1
 
             elif is_func(node, torch.ops.aten.slice.Tensor):
+                # python slicing semantics are different from reshape
+                # Don't treat -1 as inferred dimension
                 input, dim_index, start, end = node.args[:4]
                 input_shape = input.meta["val"].shape
-                i_dim = input_shape[dim_index]
+                output_shape = node.meta["val"].shape
 
-                if start == 0 and self.dims_equivalent(end, i_dim):
+                if output_shape == input_shape:
                     node.replace_all_uses_with(input)
                     graph.erase_node(node)
                     count += 1
@@ -116,14 +115,7 @@ class NoOpEliminationPass(VllmInductorPass):
                 base_shape = base.meta["val"].shape
                 view_shape = view.meta["val"].shape
 
-                view_dim = view_shape[dim_index]
-
-                # Check that view fully covers base and the full view is used
-                # (if the view fully covered the base after slicing but was not
-                # fully used, we could replace slice_scatter with a simple slice
-                # but that's a niche case).
-                if (base_shape == view_shape and start == 0
-                        and self.dims_equivalent(end, view_dim)):
+                if base_shape == view_shape:
                     node.replace_all_uses_with(view)
                     graph.erase_node(node)
                     count += 1
@@ -132,13 +124,9 @@ class NoOpEliminationPass(VllmInductorPass):
         self.dump_graph(graph, "after_noop_elimination")
         self.end_and_log()
 
-    def all_dims_equivalent(self, dims: Iterable[Union[int, torch.fx.Node]],
-                            i_dims: Iterable[Union[int, SymInt]]):
-        return all(
-            self.dims_equivalent(s, i_s) for s, i_s in zip(dims, i_dims))
-
-    def dims_equivalent(self, dim: Union[int, torch.fx.Node],
-                        i_dim: Union[int, SymInt]) -> bool:
+    # ---------------------- Reshape helpers ----------------------
+    def reshape_dims_equivalent(self, dim: Union[int, torch.fx.Node],
+                                i_dim: Union[int, SymInt]) -> bool:
         """
         This function checks if two dimensions are equivalent.
         :param dim: The dimension arg to reshape/slice
@@ -156,10 +144,18 @@ class NoOpEliminationPass(VllmInductorPass):
         In case 3, the reshape dimension is a torch.fx.Node,
         and its value is a SymInt. That value is equal to the
         input dimension.
-
         """
         # Case 1 and 2
         if dim == i_dim or dim == -1:
             return True
         # Case 3
         return isinstance(dim, torch.fx.Node) and dim.meta["val"] == i_dim
+
+    def reshape_all_dims_equivalent(
+        self,
+        dims: Iterable[Union[int, torch.fx.Node]],
+        i_dims: Iterable[Union[int, SymInt]],
+    ) -> bool:
+        return all(
+            self.reshape_dims_equivalent(s, i_s)
+            for s, i_s in zip(dims, i_dims))

@@ -310,7 +310,7 @@ class MediaConnector:
 
 def encode_audio_base64(
     audio: np.ndarray,
-    sampling_rate: float,
+    sampling_rate: int,
 ) -> str:
     """Encode audio as base64."""
     audio_io = AudioMediaIO()
@@ -395,7 +395,9 @@ def group_mm_kwargs_by_modality(
     modality together into the same `MultiModalKwargs` instance.
 
     Args:
-        mm_inputs: List of `MultiModalKwargsItem`.
+        mm_kwargs: List of `MultiModalKwargsItem`.
+        device: The device to place the grouped tensors on.
+        pin_memory: Whether to pin memory for faster host-to-device transfer.
 
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.

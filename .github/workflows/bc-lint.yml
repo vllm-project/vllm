@@ -6,6 +6,8 @@ on:
       - opened
       - synchronize
       - reopened
+      - labeled
+      - unlabeled
 
 jobs:
   bc_lint:

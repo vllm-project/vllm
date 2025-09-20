@@ -649,7 +649,7 @@ def _sample_with_torch(
     else:
         sampled_token_ids_tensor = None
 
-    # Counterintiutively, having two loops here is actually faster.
+    # Counterintuitively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
     for sampling_type in SamplingType:
         sample_indices = categorized_sample_indices[sampling_type]

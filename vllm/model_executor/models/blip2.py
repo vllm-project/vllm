@@ -678,10 +678,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
-            pixel_values: The pixels in each input image.
         
         Info:
-            [Blip2ImageInputs][]
+            [`Blip2ImageInputs`][vllm.model_executor.models.blip2.Blip2ImageInputs]
         """
 
         if intermediate_tensors is not None:

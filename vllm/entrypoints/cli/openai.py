@@ -45,6 +45,28 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
     return model_name, openai_client
 
 
+def _print_chat_stream(stream) -> str:
+    output = ""
+    for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.content:
+            output += delta.content
+            print(delta.content, end="", flush=True)
+    print()
+    return output
+
+
+def _print_completion_stream(stream) -> str:
+    output = ""
+    for chunk in stream:
+        text = chunk.choices[0].text
+        if text is not None:
+            output += text
+            print(text, end="", flush=True)
+    print()
+    return output
+
+
 def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
     conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
@@ -58,14 +80,11 @@ def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
             break
         conversation.append({"role": "user", "content": input_message})
 
-        chat_completion = client.chat.completions.create(model=model_name,
-                                                         messages=conversation)
-
-        response_message = chat_completion.choices[0].message
-        output = response_message.content
-
-        conversation.append(response_message)  # type: ignore
-        print(output)
+        stream = client.chat.completions.create(model=model_name,
+                                                messages=conversation,
+                                                stream=True)
+        output = _print_chat_stream(stream)
+        conversation.append({"role": "assistant", "content": output})
 
 
 def _add_query_options(
@@ -108,9 +127,11 @@ class ChatCommand(CLISubcommand):
         if args.quick:
             conversation.append({"role": "user", "content": args.quick})
 
-            chat_completion = client.chat.completions.create(
-                model=model_name, messages=conversation)
-            print(chat_completion.choices[0].message.content)
+            stream = client.chat.completions.create(model=model_name,
+                                                    messages=conversation,
+                                                    stream=True)
+            output = _print_chat_stream(stream)
+            conversation.append({"role": "assistant", "content": output})
             return
 
         print("Please enter a message for the chat model:")
@@ -121,14 +142,11 @@ class ChatCommand(CLISubcommand):
                 break
             conversation.append({"role": "user", "content": input_message})
 
-            chat_completion = client.chat.completions.create(
-                model=model_name, messages=conversation)
-
-            response_message = chat_completion.choices[0].message
-            output = response_message.content
-
-            conversation.append(response_message)  # type: ignore
-            print(output)
+            stream = client.chat.completions.create(model=model_name,
+                                                    messages=conversation,
+                                                    stream=True)
+            output = _print_chat_stream(stream)
+            conversation.append({"role": "assistant", "content": output})
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -168,9 +186,10 @@ class CompleteCommand(CLISubcommand):
         model_name, client = _interactive_cli(args)
 
         if args.quick:
-            completion = client.completions.create(model=model_name,
-                                                   prompt=args.quick)
-            print(completion.choices[0].text)
+            stream = client.completions.create(model=model_name,
+                                               prompt=args.quick,
+                                               stream=True)
+            _print_completion_stream(stream)
             return
 
         print("Please enter prompt to complete:")
@@ -179,10 +198,10 @@ class CompleteCommand(CLISubcommand):
                 input_prompt = input("> ")
             except EOFError:
                 break
-            completion = client.completions.create(model=model_name,
-                                                   prompt=input_prompt)
-            output = completion.choices[0].text
-            print(output)
+            stream = client.completions.create(model=model_name,
+                                               prompt=input_prompt,
+                                               stream=True)
+            _print_completion_stream(stream)
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:

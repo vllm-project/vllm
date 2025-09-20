@@ -909,8 +909,8 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             prefix: Optional prefix for parameter names
         
         Raises:
-            AssertionError: If prefix caching is enabled
-            (not supported by Mamba)
+            AssertionError: If prefix caching is enabled 
+                (not supported by Mamba)
         """
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -941,6 +941,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         # Tie weights with input embeddings if using same dimensions
         self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)

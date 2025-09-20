@@ -158,7 +158,8 @@ class ErnieMTP(nn.Module, SupportsPP):
                                               prefix=maybe_prefix(
                                                   prefix, "model"))
         self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                      self.config.hidden_size)
+                                      self.config.hidden_size,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
         self.sampler = get_sampler()
 
         if self.config.tie_word_embeddings:

@@ -235,7 +235,6 @@ def _compare_sp(
         'level': 3,
         'custom_ops': ["+rms_norm"],
         'compile_sizes': [4, 8],
-        'splitting_ops': [],
         'pass_config': {
             'enable_sequence_parallelism': True,
             'enable_fusion': enable_fusion,
@@ -251,6 +250,8 @@ def _compare_sp(
         *common_args,
         "--tensor-parallel-size",
         str(tp_size),
+        "--pipeline-parallel-size",
+        str(pp_size),
         "--distributed-executor-backend",
         distributed_backend,
         "--compilation_config",

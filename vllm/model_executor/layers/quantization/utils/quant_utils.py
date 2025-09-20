@@ -34,6 +34,15 @@ class GroupShape(_GroupShape):
     PER_TENSOR: ClassVar['GroupShape']
     PER_TOKEN: ClassVar['GroupShape']
 
+    def is_per_tensor(self) -> bool:
+        return self.row == -1 and self.col == -1
+
+    def is_per_token(self) -> bool:
+        return self.row == 1 and self.col == -1
+
+    def is_per_group(self) -> bool:
+        return self.row == 1 and self.col >= 1
+
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
 GroupShape.PER_TOKEN = GroupShape(1, -1)

@@ -34,8 +34,8 @@ class ShortConvAttentionMetadata:
     # For causal_conv1d
     nums_dict: Optional[dict] = None
     cu_seqlen: Optional[int] = None
-    batch_ptr: Optional[torch.tensor] = None
-    token_chunk_offset_ptr: Optional[torch.tensor] = None
+    batch_ptr: Optional[torch.Tensor] = None
+    token_chunk_offset_ptr: Optional[torch.Tensor] = None
 
 
 class ShortConvAttentionMetadataBuilder(
