@@ -155,7 +155,7 @@ def detokenize_incrementally(
     if 0 <= new_token_id < len(tokenizer):
         # Put new_token_id in a list so skip_special_tokens is respected
         new_tokens = tokenizer.convert_ids_to_tokens(
-            [new_token_id], skip_special_tokens=skip_special_tokens)
+            new_token_id, skip_special_tokens=skip_special_tokens)
         if isinstance(new_tokens, str):
             new_tokens = [new_tokens]
     else:

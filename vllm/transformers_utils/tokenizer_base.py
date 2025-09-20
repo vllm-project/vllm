@@ -125,9 +125,9 @@ class TokenizerBase(ABC):
     @abstractmethod
     def convert_ids_to_tokens(
         self,
-        ids: list[int],
+        ids: Union[int, list[int]],
         skip_special_tokens: bool = True,
-    ) -> list[str]:
+    ) -> Union[str, list[str]]:
         raise NotImplementedError()
 
 

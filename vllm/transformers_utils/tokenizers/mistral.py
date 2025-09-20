@@ -476,13 +476,9 @@ class MistralTokenizer(TokenizerBase):
 
     def convert_ids_to_tokens(
         self,
-        ids: list[int],
+        ids: Union[int, list[int]],
         skip_special_tokens: bool = True,
-    ) -> list[str]:
-        from mistral_common.tokens.tokenizers.base import SpecialTokens
-        from mistral_common.tokens.tokenizers.instruct import (
-            InstructTokenizerV13)
-
+    ) -> Union[str, list[str]]:
         # TODO(Patrick) - potentially allow special tokens to not be skipped
         assert (
             skip_special_tokens
@@ -490,16 +486,29 @@ class MistralTokenizer(TokenizerBase):
 
         assert self.is_tekken or self.is_spm, type(self.tokenizer)
 
+        # handle single integer input
+        if isinstance(ids, int):
+            single_id = ids
+
+            # Check if we should skip this special token
+            if self.is_tekken:
+                non_skip_special_tokens = self._get_non_skip_special_tokens()
+                # Skip special tokens except allowed ones
+                if (single_id <= self.tokenizer.num_special_tokens 
+                    and single_id not in non_skip_special_tokens):
+                    return ""
+
+            token = self.tokenizer.id_to_piece(single_id)
+
+            if "�" in token and self.is_tekken:
+                token = self.tokenizer.id_to_byte_piece(single_id, self._special_token_policy)
+            
+            return token
+
+        # handle list of integers
         if self.is_tekken:
             # skip special tokens except tool call and think tokens
-            non_skip_special_tokens = {
-                self.tokenizer.get_control_token(SpecialTokens.tool_calls)
-            }
-            if isinstance(self.instruct, InstructTokenizerV13):
-                if self.instruct.BEGIN_THINK:
-                    non_skip_special_tokens.add(self.instruct.BEGIN_THINK)
-                if self.instruct.END_THINK:
-                    non_skip_special_tokens.add(self.instruct.END_THINK)
+            non_skip_special_tokens = self._get_non_skip_special_tokens()
             ids = [
                 i for i in ids if i > self.tokenizer.num_special_tokens
                 or i in non_skip_special_tokens
@@ -519,3 +528,19 @@ class MistralTokenizer(TokenizerBase):
             ]
 
         return tokens
+    
+    def _get_non_skip_special_tokens(self) -> set[int]:
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
+        from mistral_common.tokens.tokenizers.instruct import InstructTokenizerV13
+
+        # skip special tokens except tool call and think tokens
+        non_skip_special_tokens = {
+            self.tokenizer.get_control_token(SpecialTokens.tool_calls)
+        }
+        if isinstance(self.instruct, InstructTokenizerV13):
+            if self.instruct.BEGIN_THINK:
+                non_skip_special_tokens.add(self.instruct.BEGIN_THINK)
+            if self.instruct.END_THINK:
+                non_skip_special_tokens.add(self.instruct.END_THINK)
+
+        return non_skip_special_tokens
