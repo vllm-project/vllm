@@ -1041,9 +1041,14 @@ class OpenAIServingChat(OpenAIServing):
                             ])
 
                         # Send the finish response for each request.n only once
-                        if auto_tools_called or tools_streamed[i] or (
-                                self.use_harmony
-                                and harmony_tools_streamed[i]):
+                        # In OpenAI's API, when a tool is called, the
+                        # finish_reason is:
+                        # "tool_calls" for "auto" or "required" tool calls,
+                        # and "stop" for named tool calls.
+                        if auto_tools_called or (
+                                tools_streamed[i]
+                                and not tool_choice_function_name
+                        ) or (self.use_harmony and harmony_tools_streamed[i]):
                             finish_reason_ = "tool_calls"
                         else:
                             finish_reason_ = output.finish_reason \
@@ -1326,9 +1331,6 @@ class OpenAIServingChat(OpenAIServing):
 
                 tool_call_info = tool_parser.extract_tool_calls(
                     content if content is not None else "", request=request)
-                # In the OpenAI API the finish_reason is "tools_called"
-                # if the tool choice is auto and the model produced a tool
-                # call. The same is not true for named function calls
                 auto_tools_called = tool_call_info.tools_called
                 if tool_call_info.tools_called:
                     message = ChatMessage(role=role,
@@ -1359,12 +1361,18 @@ class OpenAIServingChat(OpenAIServing):
                 message = ChatMessage(role=role,
                                       reasoning_content=reasoning_content,
                                       content=content)
+            # In OpenAI's API, when a tool is called, the finish_reason is:
+            # "tool_calls" for "auto" or "required" tool calls,
+            # and "stop" for named tool calls.
+            is_finish_reason_tool_calls = auto_tools_called or (
+                request.tool_choice and request.tool_choice == "required"
+                and output.finish_reason == "stop")
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
                 logprobs=logprobs,
-                finish_reason="tool_calls" if auto_tools_called else
+                finish_reason="tool_calls" if is_finish_reason_tool_calls else
                 output.finish_reason if output.finish_reason else "stop",
                 stop_reason=output.stop_reason,
                 token_ids=(as_list(output.token_ids)
