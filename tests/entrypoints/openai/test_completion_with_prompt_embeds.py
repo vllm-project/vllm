@@ -14,9 +14,6 @@ from transformers import AutoConfig
 
 from ...utils import RemoteOpenAIServer
 
-pytest.skip("Skipping prompt_embeds test until V1 supports it.",
-            allow_module_level=True)
-
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
@@ -36,7 +33,6 @@ def default_server_args() -> list[str]:
         "--enforce-eager",
         # Prompt Embeds server args
         "--enable-prompt-embeds",
-        "--no-enable-chunked-prefill",
     ]
 
 

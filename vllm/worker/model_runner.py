@@ -18,7 +18,6 @@ import torch.distributed
 import torch.nn as nn
 from tqdm.auto import tqdm
 
-import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
@@ -1078,20 +1077,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "Regarding multimodal models, vLLM currently "
                         "only supports adding LoRA to language model.")
 
-                # Use get_text_config() in case of multimodal models
-                text_config = self.model_config.hf_config.get_text_config()
-
                 self.lora_manager = LRUCacheWorkerLoRAManager(
-                    self.scheduler_config.max_num_seqs,
-                    self.scheduler_config.max_num_batched_tokens,
-                    self.vocab_size,
-                    self.lora_config,
+                    self.vllm_config,
                     self.device,
                     self.model.embedding_modules,
                     self.model.embedding_padding_modules,
-                    max_position_embeddings=text_config.
-                    max_position_embeddings,
                 )
+
                 self.model = self.lora_manager.create_lora_manager(self.model)
             time_after_load = time.perf_counter()
 
@@ -1106,10 +1098,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             backend = self.vllm_config.compilation_config.init_backend(
                 self.vllm_config)
             compilation_counter.dynamo_as_is_count += 1
-            self.model = torch.compile(
-                self.model,
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend)
+            self.model = torch.compile(self.model,
+                                       fullgraph=True,
+                                       backend=backend)
 
     def get_model(self) -> nn.Module:
         return self.model
