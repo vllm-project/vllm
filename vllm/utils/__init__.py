@@ -3472,3 +3472,9 @@ def length_from_prompt_token_ids_or_embeds(
                 f" prompt_token_ids={prompt_token_len}"
                 f" prompt_embeds={prompt_embeds_len}")
         return prompt_token_len
+
+
+if is_torch_equal_or_newer("2.9.0.dev"):
+    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
+else:
+    tag_cudagraph_unsafe = ()  # type: ignore[assignment]
