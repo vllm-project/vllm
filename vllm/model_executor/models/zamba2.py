@@ -417,10 +417,14 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         # Initialize layer normalizations
         # Input normalization operates on concatenated states
         self.input_layernorm = RMSNorm(2 * config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                       eps=config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         # Pre-FF normalization operates on attention output
         self.pre_ff_layernorm = RMSNorm(config.hidden_size,
-                                        eps=config.rms_norm_eps)
+                                        eps=config.rms_norm_eps,
+                                        prefix=maybe_prefix(
+                                            prefix, "post_layernorm"))
 
     def forward(
         self,

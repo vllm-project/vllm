@@ -298,7 +298,9 @@ class MiniCPMDecoderLayer(nn.Module):
 
     def _init_attn_block(self):
         self.input_layernorm = RMSNorm(self.config.hidden_size,
-                                       eps=self.config.rms_norm_eps)
+                                       eps=self.config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           self.prefix, "input_layernorm"))
         self.self_attn = MiniCPMAttention(
             hidden_size=self.hidden_size,
             num_heads=self.config.num_attention_heads,
@@ -313,7 +315,10 @@ class MiniCPMDecoderLayer(nn.Module):
 
     def _init_ffn_block(self):
         self.post_attention_layernorm = RMSNorm(self.config.hidden_size,
-                                                eps=self.config.rms_norm_eps)
+                                                eps=self.config.rms_norm_eps,
+                                                prefix=maybe_prefix(
+                                                    self.prefix,
+                                                    "post_layernorm"))
         self.num_experts = getattr(self.config, "num_experts", 0)
         if self.num_experts == 0:
             self.mlp = MiniCPMMLP(

@@ -256,9 +256,13 @@ class Step3TextDecoderLayer(nn.Module):
                                     prefix=f"{prefix}.mlp")
             self.use_moe = False
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                       eps=config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+                                                eps=config.rms_norm_eps,
+                                                prefix=maybe_prefix(
+                                                    prefix, "post_layernorm"))
 
     def forward(
             self, positions: torch.Tensor, hidden_states: torch.Tensor,

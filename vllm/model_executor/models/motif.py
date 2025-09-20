@@ -27,7 +27,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 
 from .adapters import as_seq_cls_model
 from .interfaces import SupportsV0Only
-from .utils import extract_layer_index
+from .utils import extract_layer_index, maybe_prefix
 
 
 class MotifMLP(nn.Module):
@@ -294,9 +294,13 @@ class MotifDecoderLayer(nn.Module):
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                       eps=config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+                                                eps=config.rms_norm_eps,
+                                                prefix=maybe_prefix(
+                                                    prefix, "post_layernorm"))
 
     def forward(
         self,

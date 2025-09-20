@@ -246,9 +246,13 @@ class Grok1DecoderLayer(nn.Module):
                                   prefix=f"{prefix}.moe_block")
 
         self.pre_attn_norm = RMSNorm(config.hidden_size,
-                                     eps=config.rms_norm_eps)
+                                     eps=config.rms_norm_eps,
+                                     prefix=maybe_prefix(
+                                         prefix, "input_layernorm"))
         self.post_attn_norm = RMSNorm(config.hidden_size,
-                                      eps=config.rms_norm_eps)
+                                      eps=config.rms_norm_eps,
+                                      prefix=maybe_prefix(
+                                          prefix, "post_layernorm"))
         self.pre_moe_norm = RMSNorm(config.hidden_size,
                                     eps=config.rms_norm_eps)
         self.post_moe_norm = RMSNorm(config.hidden_size,

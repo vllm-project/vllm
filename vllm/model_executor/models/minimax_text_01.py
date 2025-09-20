@@ -351,9 +351,13 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 prefix=prefix)
 
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                       eps=config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+                                                eps=config.rms_norm_eps,
+                                                prefix=maybe_prefix(
+                                                    prefix, "post_layernorm"))
         if config.attention_type == 0:
             self.layernorm_attention_alpha = getattr(
                 config, 'layernorm_linear_attention_alpha',

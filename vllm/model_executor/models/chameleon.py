@@ -369,9 +369,13 @@ class ChameleonDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                       eps=config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+                                                eps=config.rms_norm_eps,
+                                                prefix=maybe_prefix(
+                                                    prefix, "post_layernorm"))
 
     def forward(
         self,

@@ -17,6 +17,8 @@ from vllm.model_executor.models.internlm2 import (InternLM2Attention,
                                                   InternLM2MLP, InternLM2Model)
 from vllm.sequence import IntermediateTensors
 
+from .utils import maybe_prefix
+
 
 class InternLM2VEDecoderLayer(nn.Module):
 
@@ -59,8 +61,12 @@ class InternLM2VEDecoderLayer(nn.Module):
             prefix=f"{prefix}.feed_forward_ve",
         )
         self.attention_norm = RMSNorm(config.hidden_size,
-                                      eps=config.rms_norm_eps)
-        self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+                                      eps=config.rms_norm_eps,
+                                      prefix=maybe_prefix(
+                                          prefix, "input_layernorm"))
+        self.ffn_norm = RMSNorm(config.hidden_size,
+                                eps=config.rms_norm_eps,
+                                prefix=maybe_prefix(prefix, "post_layernorm"))
 
     def forward(
         self,

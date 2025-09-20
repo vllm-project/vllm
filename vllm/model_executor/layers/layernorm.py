@@ -141,14 +141,13 @@ class RMSNorm(CustomOp):
     Refer to https://arxiv.org/abs/1910.07467
     """
 
-    def __init__(
-        self,
-        hidden_size: int,
-        eps: float = 1e-6,
-        var_hidden_size: Optional[int] = None,
-        has_weight: bool = True,
-        dtype: Optional[torch.dtype] = None,
-    ) -> None:
+    def __init__(self,
+                 hidden_size: int,
+                 eps: float = 1e-6,
+                 var_hidden_size: Optional[int] = None,
+                 has_weight: bool = True,
+                 dtype: Optional[torch.dtype] = None,
+                 prefix: Optional[str] = None) -> None:
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -169,6 +168,7 @@ class RMSNorm(CustomOp):
                 with_fused_add=False, dtype=weight_dtype)
             self.rocm_norm_func_with_add = dispatch_rocm_rmsnorm_func(
                 with_fused_add=True, dtype=weight_dtype)
+        self.prefix = prefix
 
     def forward_native(
         self,

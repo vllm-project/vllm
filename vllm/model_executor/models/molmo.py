@@ -568,9 +568,13 @@ class MolmoDecoderLayer(nn.Module):
         # LayerNorm
         assert config.layer_norm_type == "rms"
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.layer_norm_eps)
+                                       eps=config.layer_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.layer_norm_eps)
+                                                eps=config.layer_norm_eps,
+                                                prefix=maybe_prefix(
+                                                    prefix, "post_layernorm"))
 
     def forward(
         self,
