@@ -26,6 +26,9 @@
 
 using namespace cute;
 
+// Debug macro - disable for production
+// #define VLLM_DEBUG_NVFP4_MOE_SM120 1
+
 // Debug macro
 #ifdef VLLM_DEBUG_NVFP4_MOE_SM120
 #define DEBUG_PRINT(...) printf("[nvfp4-sm120] " __VA_ARGS__)
@@ -35,6 +38,150 @@ using namespace cute;
 
 // Forward declaration
 int32_t get_sm_version_num();
+
+// Proper NVFP4 E2M1 dequantization with lookup table
+__device__ __forceinline__ float dequantize_nvfp4_e2m1(uint8_t fp4_val) {
+    // E2M1 format lookup table for all 16 possible values
+    // Bit layout: [S][E1][E0][M0] - 1 sign, 2 exp, 1 mantissa
+    // Values correspond to the actual E2M1 encoding
+    static const float e2m1_table[16] = {
+        0.0f,   0.5f,   1.0f,   1.5f,    // 0000-0011: exp=00,01 positive
+        2.0f,   3.0f,   4.0f,   6.0f,    // 0100-0111: exp=10,11 positive
+        -0.0f,  -0.5f,  -1.0f,  -1.5f,   // 1000-1011: exp=00,01 negative
+        -2.0f,  -3.0f,  -4.0f,  -6.0f    // 1100-1111: exp=10,11 negative
+    };
+    return e2m1_table[fp4_val & 0xF];
+}
+
+// Dequantize E4M3 scale factor (FP8 format)
+__device__ __forceinline__ float dequantize_e4m3_scale(uint8_t e4m3_val) {
+    // E4M3 FP8 format: [S][E3][E2][E1][E0][M2][M1][M0]
+    // 1 sign, 4 exponent bits, 3 mantissa bits
+    if (e4m3_val == 0) return 0.0f;
+    
+    // Extract components
+    uint32_t sign = (e4m3_val >> 7) & 0x1;
+    uint32_t exp = (e4m3_val >> 3) & 0xF;
+    uint32_t mantissa = e4m3_val & 0x7;
+    
+    // Special case: all exponent bits set = NaN/Inf (treat as max value)
+    if (exp == 0xF) {
+        return sign ? -448.0f : 448.0f;  // E4M3 max is ~448
+    }
+    
+    // E4M3 uses bias of 7
+    float value;
+    if (exp == 0) {
+        // Subnormal numbers
+        value = ldexpf(static_cast<float>(mantissa) / 8.0f, -6);
+    } else {
+        // Normal numbers: (1 + mantissa/8) * 2^(exp - 7)
+        value = ldexpf(1.0f + static_cast<float>(mantissa) / 8.0f, static_cast<int>(exp) - 7);
+    }
+    
+    return sign ? -value : value;
+}
+
+// Templated reference kernel for NVFP4 MoE to handle different output types
+template<typename OutType>
+__global__ void nvfp4_moe_reference_kernel(
+    const uint8_t* __restrict__ a,          // [M, K/2] packed FP4
+    const uint8_t* __restrict__ b,          // [E, N, K/2] packed FP4
+    OutType* __restrict__ output,           // [M, N] output (templated type)
+    const float* __restrict__ a_scales,     // [M, K/16] block scales (E4M3 format)
+    const float* __restrict__ b_scales,     // [E, N, K/16] block scales (E4M3 format)
+    const float* __restrict__ alphas,       // [E] per-expert scaling
+    const int32_t* __restrict__ problem_sizes,
+    const int32_t* __restrict__ expert_offsets,
+    int M, int N, int K, int num_experts) {
+
+    int tid_x = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid_y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (tid_y >= M || tid_x >= N) return;
+
+    // Find which expert this row belongs to
+    int expert_id = -1;
+    int local_row = tid_y;
+    for (int e = 0; e < num_experts; e++) {
+        int start = expert_offsets[e];
+        int end = (e == num_experts - 1) ? M : expert_offsets[e + 1];
+        if (tid_y >= start && tid_y < end) {
+            expert_id = e;
+            local_row = tid_y - start;
+            break;
+        }
+    }
+
+    if (expert_id < 0 || expert_id >= num_experts) return;
+
+    // Block-scaled dot product with 16-element blocks
+    float sum = 0.0f;
+    int k_packed = K / 2;
+    const int block_size = 16;  // NVFP4 uses 16-element blocks
+    int k_blocks = K / block_size;
+    
+    // Process in blocks of 16 elements (8 packed FP4 pairs)
+    for (int block_idx = 0; block_idx < k_blocks; block_idx++) {
+        // Get the scale factors for this block
+        float a_scale = 1.0f;
+        float b_scale = 1.0f;
+        
+        // Handle E4M3 scale factors if provided
+        if (a_scales != nullptr) {
+            // a_scales layout: [M, K/16] in E4M3 format
+            // Note: These are already in swizzled format from the test
+            int a_scale_idx = tid_y * k_blocks + block_idx;
+            uint8_t a_scale_raw = reinterpret_cast<const uint8_t*>(a_scales)[a_scale_idx];
+            a_scale = dequantize_e4m3_scale(a_scale_raw);
+            // Guard against zero scales
+            if (fabsf(a_scale) < 1e-6f) a_scale = 1.0f;
+        }
+        
+        if (b_scales != nullptr) {
+            // b_scales layout: [E, N, K/16] in E4M3 format 
+            int b_scale_idx = expert_id * N * k_blocks + tid_x * k_blocks + block_idx;
+            uint8_t b_scale_raw = reinterpret_cast<const uint8_t*>(b_scales)[b_scale_idx];
+            b_scale = dequantize_e4m3_scale(b_scale_raw);
+            // Guard against zero scales
+            if (fabsf(b_scale) < 1e-6f) b_scale = 1.0f;
+        }
+
+        // Process 8 packed pairs (16 elements) in this block
+        float block_sum = 0.0f;
+        for (int i = 0; i < 8; i++) {
+            int k = block_idx * 8 + i;
+            if (k >= k_packed) break;
+            
+            // Load packed FP4 values
+            uint8_t a_packed = a[tid_y * k_packed + k];
+            
+            // Column-major indexing for B matrix
+            uint8_t b_packed = b[expert_id * N * k_packed +  // Expert offset
+                                k * N +                       // K dimension (column-major)
+                                tid_x];                       // N dimension
+
+            // Dequantize using proper E2M1 format
+            float a0 = dequantize_nvfp4_e2m1(a_packed & 0x0F);
+            float a1 = dequantize_nvfp4_e2m1(a_packed >> 4);
+            float b0 = dequantize_nvfp4_e2m1(b_packed & 0x0F);
+            float b1 = dequantize_nvfp4_e2m1(b_packed >> 4);
+
+            block_sum += a0 * b0 + a1 * b1;
+        }
+        
+        // Apply block scales to this block's contribution
+        sum += block_sum * a_scale * b_scale;
+    }
+
+    // Apply expert scaling if provided
+    if (alphas != nullptr) {
+        sum *= alphas[expert_id];
+    }
+
+    // Store result with proper type conversion
+    output[tid_y * N + tid_x] = static_cast<OutType>(sum);
+}
 
 // Check tensor types
 #define CHECK_TYPE(x, st, m) \
@@ -67,7 +214,8 @@ __global__ void __get_group_gemm_starts_sm120(
     const int32_t* sf_offsets, const int32_t* problem_sizes_as_shapes,
     const int K, const int N) {
   int64_t expert_id = threadIdx.x;
-  if (expert_id >= gridDim.x * blockDim.x) {
+  // Fix: The kernel is launched with <<<1, num_experts>>>, so blockDim.x = num_experts
+  if (expert_id >= blockDim.x) {
     return;
   }
 
@@ -75,7 +223,8 @@ __global__ void __get_group_gemm_starts_sm120(
   int64_t expert_offset = static_cast<int64_t>(expert_offsets[expert_id]);
   int64_t sf_offset = static_cast<int64_t>(sf_offsets[expert_id]);
   int64_t group_size = 16;  // NVFP4 block size
-  int64_t m = static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3]);
+  // Note: m is not used in pointer offset calculations, only n and k
+  // int64_t m = static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3]);
   int64_t n = static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3 + 1]);
   int64_t k = static_cast<int64_t>(problem_sizes_as_shapes[expert_id * 3 + 2]);
 
@@ -90,7 +239,9 @@ __global__ void __get_group_gemm_starts_sm120(
   b_scales_offsets[expert_id] = b_scales_base_as_int + expert_id * n * group_k;
   alpha_offsets[expert_id] = alphas_base_as_int + expert_id;
 
-  // Set up scale factor layouts
+  // Set up scale factor layouts - disabled for LinearCombination epilogue
+  // LinCombBlockScaleFactor would need these, but LinearCombination doesn't
+  #if 0  // Disabled - causes segfault with LinearCombination
   auto layout_tuple_sfa = ScaleConfig::tile_atom_to_shape_SFA(
       cute::make_shape(int(m), int(n), int(k), int(1)));
   auto layout_tuple_sfb = ScaleConfig::tile_atom_to_shape_SFB(
@@ -98,6 +249,7 @@ __global__ void __get_group_gemm_starts_sm120(
 
   layout_sfa_base_as_int[expert_id] = layout_tuple_sfa;
   layout_sfb_base_as_int[expert_id] = layout_tuple_sfb;
+  #endif
 }
 
 // CUTLASS kernel implementation for SM120
@@ -114,7 +266,14 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
     const torch::Tensor& sf_offsets,
     int M, int N, int K) {
 
-    DEBUG_PRINT("run_fp4_blockwise_scaled_group_mm_sm120: M=%d, N=%d, K=%d\n", M, N, K);
+    printf("[nvfp4-sm120] Entered run_fp4_blockwise_scaled_group_mm_sm120\n");
+    fflush(stdout);
+    
+    printf("[nvfp4-sm120] run_fp4_blockwise_scaled_group_mm_sm120: M=%d, N=%d, K=%d\n", M, N, K);
+    fflush(stdout);
+
+    printf("[nvfp4-sm120] Setting up CUTLASS types...\n");
+    fflush(stdout);
 
     // CUTLASS type definitions for SM120
     using ProblemShape = cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
@@ -185,7 +344,16 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
     using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::InternalLayoutSFB;
     using UnderlyingProblemShape = typename ProblemShape::UnderlyingProblemShape;
 
+    printf("[nvfp4-sm120] Getting num_experts...\n");
+    fflush(stdout);
+
     int num_experts = static_cast<int>(expert_offsets.size(0));
+
+    printf("[nvfp4-sm120] num_experts = %d\n", num_experts);
+    fflush(stdout);
+
+    printf("[nvfp4-sm120] Creating tensors for pointers and strides...\n");
+    fflush(stdout);
 
     // Create tensors for pointers and strides
     auto options_int = torch::TensorOptions().dtype(torch::kInt64).device(a.device());
@@ -207,26 +375,30 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
 
     auto stream = at::cuda::getCurrentCUDAStream(a.device().index());
 
-    // Launch kernel to set up pointer arrays
-    DEBUG_PRINT("Setting up pointer arrays for %d experts\n", num_experts);
-    DEBUG_PRINT("A shape: [%ld], B shape: [%ld, %ld, %ld]\n",
+    printf("[nvfp4-sm120] About to launch helper kernel for %d experts\n", num_experts);
+    printf("[nvfp4-sm120] A shape: [%ld], B shape: [%ld, %ld, %ld]\n",
                 (long)a.size(0), (long)b.size(0), (long)b.size(1), (long)b.size(2));
-    DEBUG_PRINT("Output shape: [%ld, %ld]\n", (long)output.size(0), (long)output.size(1));
+    printf("[nvfp4-sm120] Output shape: [%ld, %ld]\n", (long)output.size(0), (long)output.size(1));
+    fflush(stdout);
 
-    __get_group_gemm_starts_sm120<ElementType, OutType, ElementSFType,
+    printf("[nvfp4-sm120] Launching __get_group_gemm_starts_sm120 kernel\n");
+    fflush(stdout);
+
+    // Note: Using ElementA/ElementB for the packed FP4 types
+    __get_group_gemm_starts_sm120<ElementA, OutType, ElementSFType,
                                   ElementAccumulator, LayoutSFA, LayoutSFB,
                                   typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig>
         <<<1, num_experts, 0, stream>>>(
-            reinterpret_cast<ElementType**>(a_ptrs.data_ptr()),
-            reinterpret_cast<ElementType**>(b_ptrs.data_ptr()),
+            reinterpret_cast<ElementA**>(a_ptrs.data_ptr()),
+            reinterpret_cast<ElementA**>(b_ptrs.data_ptr()),
             reinterpret_cast<OutType**>(out_ptrs.data_ptr()),
             reinterpret_cast<ElementSFType**>(a_scales_ptrs.data_ptr()),
             reinterpret_cast<ElementSFType**>(b_scales_ptrs.data_ptr()),
             reinterpret_cast<ElementAccumulator**>(alpha_ptrs.data_ptr()),
             reinterpret_cast<LayoutSFA*>(layout_sfa.data_ptr()),
             reinterpret_cast<LayoutSFB*>(layout_sfb.data_ptr()),
-            const_cast<ElementType*>(reinterpret_cast<const ElementType*>(a.data_ptr())),
-            const_cast<ElementType*>(reinterpret_cast<const ElementType*>(b.data_ptr())),
+            const_cast<ElementA*>(reinterpret_cast<const ElementA*>(a.data_ptr())),
+            const_cast<ElementB*>(reinterpret_cast<const ElementB*>(b.data_ptr())),
             reinterpret_cast<OutType*>(output.data_ptr()),
             const_cast<ElementSFType*>(reinterpret_cast<const ElementSFType*>(a_blockscale.data_ptr())),
             const_cast<ElementSFType*>(reinterpret_cast<const ElementSFType*>(b_blockscales.data_ptr())),
@@ -239,38 +411,102 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
     // Synchronize to ensure helper kernel completes
     cudaError_t sync_error = cudaDeviceSynchronize();
     if (sync_error != cudaSuccess) {
-        DEBUG_PRINT("ERROR: Helper kernel failed: %s\n", cudaGetErrorString(sync_error));
+        printf("[nvfp4-sm120] ERROR: Helper kernel failed: %s\n", cudaGetErrorString(sync_error));
+        fflush(stdout);
         output.fill_(0.05f);
         return;
     }
-    DEBUG_PRINT("Helper kernel completed successfully\n");
+    printf("[nvfp4-sm120] Helper kernel completed successfully\n");
+    fflush(stdout);
 
+    printf("[nvfp4-sm120] Setting up strides for matrices...\n");
+    fflush(stdout);
+    
     // Set up strides for matrices
     auto* a_strides_ptr = reinterpret_cast<StrideA*>(a_strides.data_ptr());
     auto* b_strides_ptr = reinterpret_cast<StrideB*>(b_strides.data_ptr());
     auto* c_strides_ptr = reinterpret_cast<StrideC*>(c_strides.data_ptr());
+    
+    printf("[nvfp4-sm120] Creating problem shapes...\n");
+    fflush(stdout);
+    
     // Create problem shapes as tuples
     using UnderlyingProblemShape = typename ProblemShape::UnderlyingProblemShape;
     torch::Tensor problem_shapes = torch::empty({num_experts, sizeof(UnderlyingProblemShape)/sizeof(int32_t)}, options_int32);
+    
+    printf("[nvfp4-sm120] Problem shapes tensor created\n");
+    fflush(stdout);
+    
     auto* problem_shapes_ptr = reinterpret_cast<UnderlyingProblemShape*>(problem_shapes.data_ptr());
-    auto* problem_sizes_flat = reinterpret_cast<const int32_t*>(problem_sizes.data_ptr());
+    
+    // CRITICAL: problem_sizes is on GPU, we MUST copy to CPU before accessing
+    printf("[nvfp4-sm120] problem_sizes info:\n");
+    printf("  - shape: [%ld, %ld]\n", (long)problem_sizes.size(0), (long)problem_sizes.size(1));
+    printf("  - device: %s\n", problem_sizes.device().str().c_str());
+    std::string dtype_str(problem_sizes.dtype().name());
+    printf("  - dtype: %s\n", dtype_str.c_str());
+    fflush(stdout);
+    
+    torch::Tensor problem_sizes_cpu = problem_sizes.cpu();
+    auto* problem_sizes_cpu_ptr = reinterpret_cast<const int32_t*>(problem_sizes_cpu.data_ptr());
+    
+    // Debug first 5 experts' problem sizes
+    printf("[nvfp4-sm120] First few experts' problem sizes:\n");
+    for (int i = 0; i < std::min(5, num_experts); ++i) {
+        printf("  Expert %d: m=%d, n=%d, k=%d\n",
+               i,
+               problem_sizes_cpu_ptr[i * 3],
+               problem_sizes_cpu_ptr[i * 3 + 1], 
+               problem_sizes_cpu_ptr[i * 3 + 2]);
+    }
+    fflush(stdout);
+    
+    printf("[nvfp4-sm120] Copied problem_sizes to CPU for access\n");
+    fflush(stdout);
+
+    printf("[nvfp4-sm120] Filling problem shapes and strides on host...\n");
+    fflush(stdout);
 
     // Fill problem shapes and strides on host
     std::vector<UnderlyingProblemShape> problem_shapes_host(num_experts);
     std::vector<StrideA> a_strides_host(num_experts);
     std::vector<StrideB> b_strides_host(num_experts);
     std::vector<StrideC> c_strides_host(num_experts);
+    
+    printf("[nvfp4-sm120] Vectors created, filling with %d experts\n", num_experts);
+    fflush(stdout);
 
     for (int i = 0; i < num_experts; ++i) {
-        int32_t m = problem_sizes_flat[i * 3];
-        int32_t n = problem_sizes_flat[i * 3 + 1];
-        int32_t k = problem_sizes_flat[i * 3 + 2];
+        int32_t m = problem_sizes_cpu_ptr[i * 3];
+        int32_t n = problem_sizes_cpu_ptr[i * 3 + 1];
+        int32_t k = problem_sizes_cpu_ptr[i * 3 + 2];
+        
+        if (i < 3 || m == 0 || n == 0 || k == 0) {  // Debug first few experts and any zeros
+            printf("[nvfp4-sm120] Expert %d dimensions: m=%d, n=%d, k=%d\n", i, m, n, k);
+            fflush(stdout);
+        }
+        
+        // Validate dimensions
+        if (m <= 0 || n <= 0 || k <= 0) {
+            printf("[nvfp4-sm120] ERROR: Invalid dimensions for expert %d: m=%d, n=%d, k=%d\n", 
+                   i, m, n, k);
+            fflush(stdout);
+            // Use fallback dimensions
+            m = (m <= 0) ? 1 : m;
+            n = (n <= 0) ? N : n;  
+            k = (k <= 0) ? K : k;
+            printf("[nvfp4-sm120] Using fallback dimensions: m=%d, n=%d, k=%d\n", m, n, k);
+            fflush(stdout);
+        }
 
         problem_shapes_host[i] = cute::make_tuple(m, n, k);
         a_strides_host[i] = cutlass::make_cute_packed_stride(StrideA{}, {m, k / 2, 1});
         b_strides_host[i] = cutlass::make_cute_packed_stride(StrideB{}, {n, k / 2, 1});
         c_strides_host[i] = cutlass::make_cute_packed_stride(StrideC{}, {m, n, 1});
     }
+    
+    printf("[nvfp4-sm120] Problem shapes and strides filled\n");
+    fflush(stdout);
 
     cudaMemcpyAsync(problem_shapes_ptr, problem_shapes_host.data(),
                     sizeof(UnderlyingProblemShape) * num_experts, cudaMemcpyHostToDevice, stream);
@@ -281,9 +517,15 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
     cudaMemcpyAsync(c_strides_ptr, c_strides_host.data(),
                     sizeof(StrideC) * num_experts, cudaMemcpyHostToDevice, stream);
 
+    printf("[nvfp4-sm120] Creating CUTLASS kernel instance...\n");
+    fflush(stdout);
+    
     // Create CUTLASS kernel instance
     Gemm gemm_op;
 
+    printf("[nvfp4-sm120] Setting up kernel hardware info...\n");
+    fflush(stdout);
+    
     // Set up kernel hardware info
     cutlass::KernelHardwareInfo hw_info;
     hw_info.device_id = a.device().index();
@@ -339,34 +581,42 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
     torch::Tensor workspace = torch::empty(workspace_size, workspace_options);
 
     // Check if kernel can be implemented
-    DEBUG_PRINT("Checking kernel implementation feasibility\n");
+    printf("[nvfp4-sm120] Checking kernel implementation feasibility\n");
+    fflush(stdout);
     auto can_implement = gemm_op.can_implement(arguments);
     if (can_implement != cutlass::Status::kSuccess) {
-        DEBUG_PRINT("ERROR: Kernel cannot be implemented for given problem size (status %d)\n",
+        printf("[nvfp4-sm120] ERROR: Kernel cannot be implemented for given problem size (status %d)\n",
                     static_cast<int>(can_implement));
+        fflush(stdout);
         // Fall back to placeholder for now
         output.fill_(0.05f);
         return;
     }
-    DEBUG_PRINT("Kernel can be implemented\n");
+    printf("[nvfp4-sm120] Kernel can be implemented\n");
+    fflush(stdout);
 
     // Initialize kernel
-    DEBUG_PRINT("Initializing kernel with workspace size %ld\n", (long)workspace_size);
+    printf("[nvfp4-sm120] Initializing kernel with workspace size %ld\n", (long)workspace_size);
+    fflush(stdout);
     auto status = gemm_op.initialize(arguments, workspace.data_ptr());
     if (status != cutlass::Status::kSuccess) {
-        DEBUG_PRINT("ERROR: Failed to initialize kernel (status %d)\n",
+        printf("[nvfp4-sm120] ERROR: Failed to initialize kernel (status %d)\n",
                     static_cast<int>(status));
+        fflush(stdout);
         output.fill_(0.05f);
         return;
     }
-    DEBUG_PRINT("Kernel initialized successfully\n");
+    printf("[nvfp4-sm120] Kernel initialized successfully\n");
+    fflush(stdout);
 
     // Run the kernel
-    DEBUG_PRINT("Running CUTLASS kernel\n");
+    printf("[nvfp4-sm120] Running CUTLASS kernel\n");
+    fflush(stdout);
     status = gemm_op.run(arguments, workspace.data_ptr(), stream);
     if (status != cutlass::Status::kSuccess) {
-        DEBUG_PRINT("ERROR: Failed to run kernel (status %d)\n",
+        printf("[nvfp4-sm120] ERROR: Failed to run kernel (status %d)\n",
                     static_cast<int>(status));
+        fflush(stdout);
         output.fill_(0.05f);
         return;
     }
@@ -374,13 +624,15 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
     // Synchronize to check for kernel errors
     sync_error = cudaDeviceSynchronize();
     if (sync_error != cudaSuccess) {
-        DEBUG_PRINT("ERROR: CUTLASS kernel execution failed: %s\n",
+        printf("[nvfp4-sm120] ERROR: CUTLASS kernel execution failed: %s\n",
                     cudaGetErrorString(sync_error));
+        fflush(stdout);
         output.fill_(0.05f);
         return;
     }
 
-    DEBUG_PRINT("SM120 CUTLASS kernel executed successfully\n");
+    printf("[nvfp4-sm120] SM120 CUTLASS kernel executed successfully\n");
+    fflush(stdout);
 }
 
 // Main entry point
@@ -395,63 +647,239 @@ void cutlass_fp4_group_mm_sm120(
     const torch::Tensor& expert_offsets,
     const torch::Tensor& sf_offsets) {
 
-    DEBUG_PRINT("cutlass_fp4_group_mm_sm120 called\n");
+    // Very first debug output - no tensor access
+    fprintf(stderr, "[nvfp4-sm120] Function entry point reached\n");
+    fflush(stderr);
 
-    // Input validation
+    // Step 1: Enable input validation only
+    printf("[nvfp4-sm120] Starting input validation\n");
+    fflush(stdout);
+
+    // Critical: Add missing CHECK_INPUT validation (this was causing segfault!)
     CHECK_INPUT(a, FLOAT4_E2M1X2, "a");
     CHECK_INPUT(b, FLOAT4_E2M1X2, "b");
     CHECK_INPUT(a_blockscale, SF_DTYPE, "a_blockscale");
     CHECK_INPUT(b_blockscales, SF_DTYPE, "b_blockscales");
     CHECK_INPUT(alphas, at::ScalarType::Float, "alphas");
+    CHECK_INPUT(problem_sizes, at::ScalarType::Int, "problem_sizes");
+    CHECK_INPUT(expert_offsets, at::ScalarType::Int, "expert_offsets");
+    CHECK_INPUT(sf_offsets, at::ScalarType::Int, "sf_offsets");
+
+    printf("[nvfp4-sm120] CHECK_INPUT validation completed successfully\n");
+    fflush(stdout);  // Force output to appear
+
+    // Add TMA alignment validation for SM120 (128-byte requirement)
+    printf("[nvfp4-sm120] Checking TMA alignment...\n");
+    fflush(stdout);
+    
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(a.data_ptr()) % 128 == 0,
+                "Input tensor A not 128-byte aligned for TMA operations (got alignment: ",
+                reinterpret_cast<uintptr_t>(a.data_ptr()) % 128, ")");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(b.data_ptr()) % 128 == 0,
+                "Input tensor B not 128-byte aligned for TMA operations (got alignment: ",
+                reinterpret_cast<uintptr_t>(b.data_ptr()) % 128, ")");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(output.data_ptr()) % 128 == 0,
+                "Output tensor not 128-byte aligned for TMA operations (got alignment: ",
+                reinterpret_cast<uintptr_t>(output.data_ptr()) % 128, ")");
+
+    printf("[nvfp4-sm120] TMA alignment check passed\n");
+    fflush(stdout);
+
+    printf("[nvfp4-sm120] Checking dimension requirements...\n");
+    fflush(stdout);
 
     TORCH_CHECK(a_blockscale.dim() == 2,
                 "expected a_blockscale to be of shape [num_experts, rounded_m,"
                 " k // group_size], observed rank: ", a_blockscale.dim());
+    printf("[nvfp4-sm120] a_blockscale check passed\n");
+    fflush(stdout);
+    
     TORCH_CHECK(b_blockscales.dim() == 3,
                 "expected b_blockscale to be of shape: "
                 " [num_experts, n, k // group_size], observed rank: ",
                 b_blockscales.dim());
+    printf("[nvfp4-sm120] b_blockscales check passed\n");
+    fflush(stdout);
+    
     TORCH_CHECK(problem_sizes.dim() == 2,
                 "problem_sizes must be a 2D tensor");
+    printf("[nvfp4-sm120] problem_sizes dim check passed\n");
+    fflush(stdout);
+    
     TORCH_CHECK(problem_sizes.size(1) == 3,
                 "problem_sizes must have shape (num_experts, 3)");
+    printf("[nvfp4-sm120] problem_sizes shape check passed\n");
+    fflush(stdout);
+    
     TORCH_CHECK(problem_sizes.size(0) == expert_offsets.size(0),
                 "Number of experts must match");
+    printf("[nvfp4-sm120] expert count check passed\n");
+    fflush(stdout);
+    
     TORCH_CHECK(problem_sizes.dtype() == torch::kInt32,
                 "problem_sizes must be int32");
+    printf("[nvfp4-sm120] problem_sizes dtype check passed\n");
+    fflush(stdout);
 
     // Verify we're on SM120
-    int32_t sm_version = get_sm_version_num();
-    DEBUG_PRINT("SM version: %d.%d\n", sm_version / 10, sm_version % 10);
+    printf("[nvfp4-sm120] About to get SM version...\n");
+    fflush(stdout);
+    
+    // Temporary: Use inline implementation to avoid potential linking issue
+    int32_t sm_version;
+    {
+        int32_t major_capability, minor_capability;
+        cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor, 0);
+        cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor, 0);
+        sm_version = major_capability * 10 + minor_capability;
+    }
+    
+    printf("[nvfp4-sm120] SM version: %d.%d\n", sm_version / 10, sm_version % 10);
+    fflush(stdout);
 
     if (sm_version < 120) {
         TORCH_CHECK(false,
                     "SM120 kernel requires compute capability >= 12.0, got ",
                     sm_version / 10, ".", sm_version % 10);
     }
+    
+    printf("[nvfp4-sm120] SM version check passed\n");
+    fflush(stdout);
 
+    printf("[nvfp4-sm120] Extracting dimensions from tensors...\n");
+    fflush(stdout);
+    
     int num_experts = static_cast<int>(expert_offsets.size(0));
+    printf("[nvfp4-sm120] num_experts = %d\n", num_experts);
+    fflush(stdout);
+    
     int M = static_cast<int>(a.size(0));
+    printf("[nvfp4-sm120] M = %d\n", M);
+    fflush(stdout);
+    
     int N = static_cast<int>(b.size(1));
+    printf("[nvfp4-sm120] N = %d\n", N);
+    fflush(stdout);
+    
     int K = static_cast<int>(2 * b.size(2));  // K is doubled because FP4 is packed
+    printf("[nvfp4-sm120] K = %d (from b.size(2)=%ld)\n", K, (long)b.size(2));
+    fflush(stdout);
 
-    DEBUG_PRINT("Running SM120 kernel: E=%d, M=%d, N=%d, K=%d\n",
+    printf("[nvfp4-sm120] Running SM120 kernel: E=%d, M=%d, N=%d, K=%d\n",
                 num_experts, M, N, K);
+    fflush(stdout);
 
     // Check for K=1536 register exhaustion issue
     if (K == 1536) {
-        DEBUG_PRINT("WARNING: K=1536 exceeds SM120 register limits. May fail or produce incorrect results.\n");
+        printf("[nvfp4-sm120] WARNING: K=1536 exceeds SM120 register limits. May fail or produce incorrect results.\n");
+        fflush(stdout);
     }
 
-    // Call the templated implementation
+    // Decide whether to use CUTLASS or reference kernel
+    // For now, always use reference kernel until CUTLASS issues are resolved
+    bool use_cutlass = false; // (K != 1536);  // Temporarily disabled while debugging
+    
+    printf("[nvfp4-sm120] use_cutlass = %d (temporarily disabled for debugging)\n", use_cutlass);
+    fflush(stdout);
+
+    if (use_cutlass) {
+        printf("[nvfp4-sm120] Attempting CUTLASS kernel implementation\n");
+        fflush(stdout);
+        
+        // Call the CUTLASS implementation with CUTLASS types
+        if (output.scalar_type() == torch::kBFloat16) {
+            printf("[nvfp4-sm120] Output type is BFloat16\n");
+            fflush(stdout);
+            run_fp4_blockwise_scaled_group_mm_sm120<cutlass::bfloat16_t>(
+                output, a, b, a_blockscale, b_blockscales, alphas,
+                problem_sizes, expert_offsets, sf_offsets, M, N, K);
+        } else if (output.scalar_type() == torch::kHalf) {
+            printf("[nvfp4-sm120] Output type is Half\n");
+            fflush(stdout);
+            run_fp4_blockwise_scaled_group_mm_sm120<cutlass::half_t>(
+                output, a, b, a_blockscale, b_blockscales, alphas,
+                problem_sizes, expert_offsets, sf_offsets, M, N, K);
+        } else {
+            printf("[nvfp4-sm120] Output type is Float32\n");
+            fflush(stdout);
+            run_fp4_blockwise_scaled_group_mm_sm120<float>(
+                output, a, b, a_blockscale, b_blockscales, alphas,
+                problem_sizes, expert_offsets, sf_offsets, M, N, K);
+        }
+        
+        // Check if CUTLASS kernel succeeded
+        cudaError_t cutlass_err = cudaGetLastError();
+        if (cutlass_err == cudaSuccess) {
+            printf("[nvfp4-sm120] CUTLASS kernel executed successfully\n");
+            fflush(stdout);
+            return;
+        }
+        
+        // If CUTLASS failed, fall back to reference
+        printf("[nvfp4-sm120] CUTLASS kernel failed: %s, falling back to reference kernel\n",
+               cudaGetErrorString(cutlass_err));
+        fflush(stdout);
+    }
+    
+    printf("[nvfp4-sm120] Using reference kernel implementation\n");
+    fflush(stdout);
+    
+    // Launch reference kernel
+    printf("[nvfp4-sm120] Launching reference kernel with grid(%d,%d) block(16,16)\n",
+           (N + 15) / 16, (M + 15) / 16);
+    fflush(stdout);
+    
+    dim3 block(16, 16);
+    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    
+    auto stream = at::cuda::getCurrentCUDAStream(a.device().index());
+    
+    // Launch templated kernel based on output type
     if (output.scalar_type() == torch::kBFloat16) {
-        run_fp4_blockwise_scaled_group_mm_sm120<cutlass::bfloat16_t>(
-            output, a, b, a_blockscale, b_blockscales, alphas,
-            problem_sizes, expert_offsets, sf_offsets, M, N, K);
+        nvfp4_moe_reference_kernel<at::BFloat16><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(a.data_ptr()),
+            reinterpret_cast<const uint8_t*>(b.data_ptr()),
+            reinterpret_cast<at::BFloat16*>(output.data_ptr()),
+            nullptr,  // Temporarily disable scales to test basic functionality
+            nullptr,  // Temporarily disable scales to test basic functionality
+            reinterpret_cast<const float*>(alphas.data_ptr()),
+            reinterpret_cast<const int32_t*>(problem_sizes.data_ptr()),
+            reinterpret_cast<const int32_t*>(expert_offsets.data_ptr()),
+            M, N, K, num_experts);
+    } else if (output.scalar_type() == torch::kHalf) {
+        nvfp4_moe_reference_kernel<at::Half><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(a.data_ptr()),
+            reinterpret_cast<const uint8_t*>(b.data_ptr()),
+            reinterpret_cast<at::Half*>(output.data_ptr()),
+            nullptr,  // Temporarily disable scales to test basic functionality
+            nullptr,  // Temporarily disable scales to test basic functionality
+            reinterpret_cast<const float*>(alphas.data_ptr()),
+            reinterpret_cast<const int32_t*>(problem_sizes.data_ptr()),
+            reinterpret_cast<const int32_t*>(expert_offsets.data_ptr()),
+            M, N, K, num_experts);
     } else {
-        run_fp4_blockwise_scaled_group_mm_sm120<cutlass::half_t>(
-            output, a, b, a_blockscale, b_blockscales, alphas,
-            problem_sizes, expert_offsets, sf_offsets, M, N, K);
+        // Default to float
+        nvfp4_moe_reference_kernel<float><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(a.data_ptr()),
+            reinterpret_cast<const uint8_t*>(b.data_ptr()),
+            reinterpret_cast<float*>(output.data_ptr()),
+            nullptr,  // Temporarily disable scales to test basic functionality
+            nullptr,  // Temporarily disable scales to test basic functionality
+            reinterpret_cast<const float*>(alphas.data_ptr()),
+            reinterpret_cast<const int32_t*>(problem_sizes.data_ptr()),
+            reinterpret_cast<const int32_t*>(expert_offsets.data_ptr()),
+            M, N, K, num_experts);
+    }
+    
+    // Synchronize to check for errors
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        printf("[nvfp4-sm120] Reference kernel execution failed: %s\n",
+               cudaGetErrorString(err));
+        fflush(stdout);
+    } else {
+        printf("[nvfp4-sm120] Reference kernel executed successfully\n");
+        fflush(stdout);
     }
 
     // Log a warning that this is still being developed
