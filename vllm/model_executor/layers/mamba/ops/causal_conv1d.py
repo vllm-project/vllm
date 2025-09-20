@@ -420,14 +420,12 @@ def causal_conv1d_fn(
     x = x.to(conv_states.dtype)
     out = torch.empty_like(x)
     if metadata is not None:
-        cu_seqlen = metadata.cu_seqlen
         nums_dict = metadata.nums_dict
-        #x = metadata.x
         args = nums_dict
         batch_ptr = metadata.batch_ptr
         token_chunk_offset_ptr = metadata.token_chunk_offset_ptr
     else:
-        seqlens = np.diff(query_start_loc.to('cpu'))
+        seqlens = query_start_loc.diff().to('cpu')
         args = seqlens
         MAX_NUM_PROGRAMS = 1024
 
@@ -926,7 +924,6 @@ def causal_conv1d_update(
     query_start_loc: Optional[torch.Tensor] = None,
     max_query_len: int = -1,
     pad_slot_id: int = PAD_SLOT_ID,
-    metadata=None,
     validate_data=False,
 ):
     """

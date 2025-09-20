@@ -30,7 +30,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
-    Mamba2Metadata, prepare_mamba2_metadata, update_metadata)
+    Mamba2Metadata, prepare_mamba2_metadata)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
@@ -38,7 +38,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
-    mamba_chunk_scan_combined)
+    mamba_chunk_scan_combined_varlen)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -292,6 +292,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
             seq_idx_p = mamba2_metadata.seq_idx_p
             chunk_indices_p = mamba2_metadata.chunk_indices_p
             chunk_offsets_p = mamba2_metadata.chunk_offsets_p
+            query_start_loc_p = mamba2_metadata.query_start_loc_p
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)
@@ -333,9 +334,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
                 [num_decodes, num_prefills],
                 dim=0,
             )
-            query_start_loc_p = (
-                attn_metadata.query_start_loc[-num_prefills - 1:] -
-                num_decodes if has_prefill else None)
         else:
             hidden_states_p, hidden_states_d = torch.split(
                 hidden_states,
@@ -351,9 +349,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
                 [num_prefills, num_decodes],
                 dim=0,
             )
-            query_start_loc_p = (attn_metadata.query_start_loc[:num_prefills +
-                                                               1]
-                                 if has_prefill else None)
 
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
@@ -385,9 +380,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
             #   pointed to by "state_indices_tensor"
             x = hidden_states_p.transpose(
                 0, 1)  # this is the form that causal-conv see
-            if mamba2_metadata.cu_seqlen is None:
-                mamba2_metadata = update_metadata(x, query_start_loc_p,
-                                                  mamba2_metadata)
             hidden_states_p = causal_conv1d_fn(
                 x,
                 conv_weights,
@@ -415,17 +407,17 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
                     has_initial_states_p[:, None, None, None],
                     ssm_state[state_indices_tensor_p], 0)
 
-            varlen_state = mamba_chunk_scan_combined(
-                hidden_states_p.view(1, num_prefill_tokens,
+            varlen_state = mamba_chunk_scan_combined_varlen(
+                hidden_states_p.view(num_prefill_tokens,
                                      self.num_heads // self.tp_size,
                                      self.head_dim),
-                dt.unsqueeze(0),
+                dt,
                 self.A,
-                B.view(1, num_prefill_tokens, 1, -1),
-                C.view(1, num_prefill_tokens, 1, -1),
+                B.view(num_prefill_tokens, 1, -1),
+                C.view(num_prefill_tokens, 1, -1),
                 chunk_size=chunk_size,
                 D=self.D,
-                z=gate_p.view(1, num_prefill_tokens,
+                z=gate_p.view(num_prefill_tokens,
                               self.num_heads // self.tp_size, self.head_dim),
                 dt_bias=self.dt_bias,
                 seq_idx=seq_idx_p,
@@ -433,11 +425,9 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
                 chunk_offsets=chunk_offsets_p,
                 cu_seqlens=query_start_loc_p,
                 initial_states=initial_states,
-                return_varlen_states=True,
-                return_final_states=False,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
-                out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
+                out=preallocated_ssm_out_p.view(num_prefill_tokens, -1,
                                                 self.head_dim),
                 state_dtype=ssm_state.dtype,
             )

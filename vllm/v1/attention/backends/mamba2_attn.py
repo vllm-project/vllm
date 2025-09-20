@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
@@ -114,7 +115,7 @@ class Mamba2AttentionMetadata:
     num_prefill_tokens: int
     num_decodes: int
     num_decode_tokens: int
-    query_start_loc: torch.Tensor
+    query_start_loc_p: torch.Tensor
     seq_lens: torch.Tensor
 
     prep_initial_states: bool
@@ -131,7 +132,6 @@ class Mamba2AttentionMetadata:
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: Optional[dict] = None
-    cu_seqlen: Optional[int] = None
     batch_ptr: Optional[torch.Tensor] = None
     token_chunk_offset_ptr: Optional[torch.Tensor] = None
 
@@ -151,7 +151,7 @@ class Mamba2AttentionMetadataBuilder(
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> Mamba2AttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_p = None
         seq_lens = common_attn_metadata.seq_lens
 
         seq_idx_p = None
@@ -176,7 +176,7 @@ class Mamba2AttentionMetadataBuilder(
                 num_computed_tokens_cpu[num_reqs - num_prefills:num_reqs] > 0)
             prep_initial_states = torch.any(has_initial_states_cpu).item()
             has_initial_states_p = has_initial_states_cpu.to(
-                query_start_loc.device)
+                common_attn_metadata.query_start_loc.device)
 
             query_start_loc_p = common_attn_metadata.query_start_loc[
                 -num_prefills - 1:] - num_decode_tokens
@@ -187,7 +187,6 @@ class Mamba2AttentionMetadataBuilder(
                 device=query_start_loc_p.device),
                                                 query_start_loc_p.diff(),
                                                 output_size=num_prefill_tokens)
-            seq_idx_p.unsqueeze_(0)
 
             # We compute metadata for chunked prefill once at the top level
             # model forward and reuse them in mamba layers. If not needed,
@@ -211,7 +210,7 @@ class Mamba2AttentionMetadataBuilder(
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            query_start_loc=query_start_loc,
+            query_start_loc_p=query_start_loc_p,
             seq_lens=seq_lens,
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
@@ -221,4 +220,59 @@ class Mamba2AttentionMetadataBuilder(
             chunk_offsets_p=chunk_offsets_p,
             state_indices_tensor=state_indices_tensor,
         )
-        return attn_metadata
+        return update_metadata(
+            attn_metadata) if num_prefills > 0 else attn_metadata
+
+
+# update_metadata computes metadata required by triton conv1d kernel
+# NOTE: argument type is removed for now to prevent circular dependency
+#       V0 metadata will eventually be obsolete and we can add back
+#       the correct type by then
+def update_metadata(mamba2_metadata):
+    # TODO: add has_attr assertions
+
+    seqlens = mamba2_metadata.query_start_loc_p.diff().to('cpu')
+    nums_dict = {}  # type: ignore
+    for BLOCK_M in [8]:  # cover all BLOCK_M values
+        nums = -(-seqlens // BLOCK_M)
+        nums_dict[BLOCK_M] = {}
+        nums_dict[BLOCK_M]['nums'] = nums
+        nums_dict[BLOCK_M]['tot'] = nums.sum().item()
+        mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums))
+        nums_dict[BLOCK_M]['mlist'] = mlist
+        mlist_len = len(nums_dict[BLOCK_M]['mlist'])
+        nums_dict[BLOCK_M]['mlist_len'] = mlist_len
+        MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
+        offsetlist = []  # type: ignore
+        for idx, num in enumerate(nums):
+            offsetlist.extend(range(num))
+        offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+        nums_dict[BLOCK_M]['offsetlist'] = offsetlist
+
+        if mamba2_metadata.batch_ptr is None:
+            # Update default value after class definition
+            #mamba2_metadata.MAX_NUM_PROGRAMS *= 2
+            mamba2_metadata.batch_ptr = torch.full((MAX_NUM_PROGRAMS, ),
+                                                   PAD_SLOT_ID,
+                                                   dtype=torch.int32,
+                                                   device='cuda')
+            mamba2_metadata.token_chunk_offset_ptr = torch.full(
+                (MAX_NUM_PROGRAMS, ),
+                PAD_SLOT_ID,
+                dtype=torch.int32,
+                device='cuda')
+        else:
+            if mamba2_metadata.batch_ptr.nelement() < MAX_NUM_PROGRAMS:
+                mamba2_metadata.batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(
+                    PAD_SLOT_ID)
+                mamba2_metadata.token_chunk_offset_ptr.resize_(  # type: ignore
+                    MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+
+        mamba2_metadata.batch_ptr[0:mlist_len].copy_(mlist)
+        mamba2_metadata.token_chunk_offset_ptr[  # type: ignore
+            0:mlist_len].copy_(offsetlist)
+        nums_dict[BLOCK_M]['batch_ptr'] = mamba2_metadata.batch_ptr
+        nums_dict[BLOCK_M]['token_chunk_offset_ptr'] = (
+            mamba2_metadata.token_chunk_offset_ptr)  # type: ignore
+    mamba2_metadata.nums_dict = nums_dict
+    return mamba2_metadata
