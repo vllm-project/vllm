@@ -879,7 +879,9 @@ class VllmConfig:
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
-            f"compilation_config={self.compilation_config!r}")
+            f"compilation_config={self.compilation_config!r}, "
+            f"global_cache_hit_threshold={self.scheduler_config.global_cache_hit_threshold}"
+        )
 
 
 _current_vllm_config: Optional[VllmConfig] = None

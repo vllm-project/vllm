@@ -64,6 +64,8 @@ class Request:
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: Optional[dict[str, Any]] = None
 
+        self.cache_hit_threshold: Optional[float] = None
+
         if pooling_params is not None:
             # Pooling models.
             self.max_tokens = 1
@@ -78,6 +80,8 @@ class Request:
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = \
                     sampling_params.extra_args.get("kv_transfer_params")
+                self.cache_hit_threshold = \
+                    sampling_params.extra_args.get("cache_hit_threshold")
         else:
             raise ValueError(
                 "sampling_params and pooling_params can't both be unset")
@@ -215,6 +219,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
+    FINISHED_CACHE_HIT_BELOW_THRESHOLD = enum.auto()
 
     def __str__(self):
         return self.name
@@ -238,4 +243,6 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_CACHE_HIT_BELOW_THRESHOLD:
+    FinishReason.CACHE_THRESHOLD,
 }
