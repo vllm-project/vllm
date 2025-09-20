@@ -40,6 +40,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
                                                    supports_eagle3,
                                                    supports_mrope,
@@ -4028,6 +4029,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         self.speculative_config.num_speculative_tokens
                         if self.speculative_config else 0),
                 )
+        ds_indexer_layers = get_layers_from_vllm_config(
+            self.vllm_config, DeepseekV32IndexerCache)
+        for layer_name, ds_indexer_module in ds_indexer_layers.items():
+            kv_cache_spec[layer_name] = ds_indexer_module.get_kv_cache_spec()
 
         return kv_cache_spec
 

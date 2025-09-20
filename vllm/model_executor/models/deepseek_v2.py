@@ -32,15 +32,19 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+from vllm.attention.backends.abstract import AttentionBackend
+from vllm.logger import init_logger
+from vllm.config.compilation import CompilationConfig
 import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -60,13 +64,18 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv, direct_register_custom_op
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+
+logger = init_logger(__name__)
 
 WITH_V32 = True
+
 
 class DeepseekV2MLP(nn.Module):
 
@@ -475,6 +484,40 @@ class DeepseekV2Attention(nn.Module):
         return output
 
 
+class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
+
+    def __init__(self, head_dim: int, dtype: torch.dtype, prefix: str,
+                 cache_config: CacheConfig):
+        super().__init__()
+        self.kv_cache = [torch.tensor([])]
+        self.head_dim = head_dim
+        self.prefix = prefix
+        self.cache_config = cache_config
+        self.dtype = dtype
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+        logger.info(f"register indexer cache {prefix}")
+
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        return FullAttentionSpec(
+            block_size=self.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_dim,
+            dtype=self.dtype,
+            use_mla=True  # Only has one vector instead of K + V
+        )
+
+    def forward(self):
+        logger.info(
+            f"self.kv_cache {self.prefix} {self.kv_cache[0].shape} {self.kv_cache[0].dtype}"
+        )
+
+    def get_attn_backend(self) -> AttentionBackend:
+        return DeepseekV32IndexerBackend
+
+
 class Indexer(nn.Module):
 
     def __init__(self,
@@ -482,6 +525,7 @@ class Indexer(nn.Module):
                  hidden_size: int,
                  q_lora_rank: int,
                  quant_config: Optional[QuantizationConfig],
+                 cache_config: Optional[CacheConfig],
                  prefix: str = ""):
         super().__init__()
         self.config = config
@@ -506,6 +550,17 @@ class Indexer(nn.Module):
                                              quant_config=quant_config,
                                              prefix=f"{prefix}.weights_proj")
         self.softmax_scale = self.head_dim**-0.5
+
+        self.quant_block_size = 128  # TODO: get from config
+        self.k_cache = DeepseekV32IndexerCache(head_dim=self.head_dim,
+                                               dtype=torch.float8_e4m3fn,
+                                               prefix=f"{prefix}.k_cache",
+                                               cache_config=cache_config)
+        self.k_scale_cache = DeepseekV32IndexerCache(
+            head_dim=self.head_dim // self.quant_block_size,
+            dtype=torch.float32,
+            prefix=f"{prefix}.k_scale_cache",
+            cache_config=cache_config)
 
     def forward(self, hidden_states: torch.Tensor,
                 q: torch.Tensor) -> torch.Tensor:
@@ -621,7 +676,8 @@ class DeepseekV2MLAAttention(nn.Module):
                    ) and "attn_index" in config.attn_module_list_cfg[0]:
             # DSv3.2
             self.indexer = Indexer(config, hidden_size, q_lora_rank,
-                                   quant_config, f"{prefix}.indexer")
+                                   quant_config, cache_config,
+                                   f"{prefix}.indexer")
         else:
             self.indexer = None
 
