@@ -423,8 +423,8 @@ class FlashAttentionImpl(AttentionImpl):
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: Optional[torch.Tensor],
+        value: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
@@ -472,6 +472,8 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Handle encoder attention differently - no KV cache needed
         if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # key/value are only None with ENCODER_DECODER attention
+            assert key is not None and value is not None
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return self._forward_encoder_attention(query[:num_actual_tokens],
