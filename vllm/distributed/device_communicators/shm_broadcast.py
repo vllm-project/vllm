@@ -28,43 +28,6 @@ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 logger = init_logger(__name__)
 
 
-class SpinTimer:
-
-    def record_activity(self):
-        pass
-
-    def spin(self):
-        sched_yield()
-
-
-class SpinSleepTimer(SpinTimer):
-    """
-    In setups which have long inactivity periods it is desirable to reduce
-    system power consumption when vllm does nothing. This would lead to more
-    CPU thermal headroom when a request eventually comes, especially when
-    multiple GPUs are connected as each GPU would otherwise pin one thread at
-    100% CPU usage.
-
-    The simplest solution is to reduce polling frequency when there is no
-    activity for a certain period of time.
-    """
-
-    def __init__(self, busy_loop_s: float = 3.0, wait_sleep_s: float = 0.1):
-        self.last_activity = time.monotonic()
-        self.busy_loop_s = busy_loop_s
-        self.wait_sleep_s = wait_sleep_s
-
-    def record_activity(self):
-        self.last_activity = time.monotonic()
-
-    def spin(self):
-        curr_time = time.monotonic()
-        if curr_time >= self.last_activity + self.busy_loop_s:
-            time.sleep(self.wait_sleep_s)
-        else:
-            sched_yield()
-
-
 class ShmRingBuffer:
 
     def __init__(self,
@@ -275,7 +238,6 @@ class MessageQueue:
         self.local_reader_rank = -1
         # rank does not matter for remote readers
         self._is_remote_reader = False
-        self._read_spin_timer = SpinTimer()
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
@@ -315,8 +277,6 @@ class MessageQueue:
 
             self.remote_socket = None
 
-            self._read_spin_timer = SpinSleepTimer(
-            ) if envs.VLLM_SLEEP_WHEN_IDLE else SpinTimer()
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -447,8 +407,16 @@ class MessageQueue:
                     # if this block is not ready,
                     # we need to wait until it is written
 
-                    # Release the processor to other threads
-                    self._read_spin_timer.spin()
+                    if envs.VLLM_SLEEP_WHEN_IDLE:
+                        poll_timeout_ms = 50
+                        if timeout is not None:
+                            remaining = start_time + timeout - time.monotonic()
+                            poll_timeout_ms = min(int(remaining * 1000),
+                                                  poll_timeout_ms)
+                        if poll_timeout_ms > 0:
+                            self.local_socket.poll(timeout=poll_timeout_ms)
+                    else:
+                        sched_yield()
 
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
@@ -472,6 +440,9 @@ class MessageQueue:
                 # found a block that is not read by this reader
                 # let caller read from the buffer
                 with self.buffer.get_data(self.current_idx) as buf:
+                    if envs.VLLM_SLEEP_WHEN_IDLE and buf[0] == 0:
+                        # in not overflow case, we consume the tick byte
+                        self.local_socket.recv(copy=False)
                     yield buf
 
                 # caller has read from the buffer
@@ -479,8 +450,6 @@ class MessageQueue:
                 metadata_buffer[self.local_reader_rank + 1] = 1
                 self.current_idx = (self.current_idx +
                                     1) % self.buffer.max_chunks
-
-                self._read_spin_timer.record_activity()
                 break
 
     def enqueue(self, obj, timeout: Optional[float] = None):
@@ -496,6 +465,8 @@ class MessageQueue:
                 with self.acquire_write(timeout) as buf:
                     buf[0] = 0  # not overflow
                     buf[1:len(serialized_obj) + 1] = serialized_obj
+                if envs.VLLM_SLEEP_WHEN_IDLE:
+                    self.local_socket.send(b"\x00")
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
