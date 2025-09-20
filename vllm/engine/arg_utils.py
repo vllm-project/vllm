@@ -1537,7 +1537,7 @@ class EngineArgs:
             raise NotImplementedError(
                 "Speculative decoding with draft model is not supported yet. "
                 "Please consider using other speculative decoding methods "
-                "such as ngram, medusa, eagle, or deepseek_mtp.")
+                "such as ngram, medusa, eagle, or mtp.")
 
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1",
