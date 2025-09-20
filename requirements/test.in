@@ -7,7 +7,6 @@ pytest-rerunfailures
 pytest-shard
 pytest-timeout
 pytest-cov
-scipy
 
 # testing utils
 backoff # required for phi4mm test
