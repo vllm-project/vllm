@@ -184,8 +184,23 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             q = torch.cat(q, dim=-1)
 
         assert isinstance(q, torch.Tensor)
+
+        batch_size = attn_metadata.decode.seq_lens.shape[0]
+        total_tokens = q.shape[0]
+        num_heads = q.shape[1]
+        head_dim = q.shape[2]
+
+        # support uniform batch
+        if total_tokens % batch_size == 0:
+            seq_len = total_tokens // batch_size
+            q = q.view(batch_size, seq_len, num_heads, head_dim)
+        else:
+            raise ValueError(
+                f"total_tokens={total_tokens}, batch_size={batch_size}. "
+                f"Expected uniform batches with seq_len=1 or seq_len=2.")
+
         o, lse = flash_mla_with_kvcache(
-            q=q.unsqueeze(1),  # Add seqlen dim of 1 (decode)
+            q=q,
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             block_table=attn_metadata.decode.block_table,
             cache_seqlens=attn_metadata.decode.seq_lens,
@@ -198,5 +213,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             descale_q=layer._q_scale.reshape(1),
             descale_k=layer._k_scale.reshape(1),
         )
+
+        o = o.view(total_tokens, num_heads, self.kv_lora_rank)
 
         return o, lse
