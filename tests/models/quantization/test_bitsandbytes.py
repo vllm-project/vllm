@@ -174,7 +174,8 @@ def test_4bit_bnb_embedding_model(
                      runner="pooling",
                      dtype=dtype,
                      gpu_memory_utilization=0.5,
-                     quantization="bitsandbytes") as vllm_model:
+                     quantization="bitsandbytes",
+                     default_torch_num_threads=1) as vllm_model:
         vllm_outputs = vllm_model.embed(example_prompts)
 
     hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(
@@ -184,6 +185,7 @@ def test_4bit_bnb_embedding_model(
             dtype=dtype,
             model_kwargs=hf_model_kwargs,
             is_sentence_transformer=True,
+            default_torch_num_threads=1,
     ) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
@@ -222,7 +224,8 @@ def validate_generated_texts(hf_runner,
     with vllm_runner(model_name,
                      quantization=None if pre_quant else 'bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
-                     enforce_eager=False) as llm:
+                     enforce_eager=False,
+                     default_torch_num_threads=1) as llm:
 
         vllm_outputs = llm.generate_greedy(prompts, max_tokens)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
@@ -231,7 +234,9 @@ def validate_generated_texts(hf_runner,
         hf_model_kwargs = {}
 
     # Run with HF runner
-    with hf_runner(model_name, model_kwargs=hf_model_kwargs) as llm:
+    with hf_runner(model_name,
+                   model_kwargs=hf_model_kwargs,
+                   default_torch_num_threads=1) as llm:
         hf_outputs = llm.generate_greedy(prompts, max_tokens)
         hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
 
