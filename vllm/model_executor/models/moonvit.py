@@ -54,9 +54,13 @@ from transformers.activations import ACT2FN, PytorchGELUTanh
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import is_flash_attn_2_available
 
+from vllm.attention.layer import check_xformers_availability
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
+
+logger = init_logger(__name__)
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func
@@ -117,6 +121,42 @@ def multihead_attention(
     return attn_out
 
 
+def xformers_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_cu_seqlens: Optional[torch.Tensor] = None,
+    k_cu_seqlens: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """xformer attention.
+
+    Args:
+        q: Query tensor of shape (batch_size, seqlen, num_heads, head_dim),
+            or (tot_seqlens, num_heads, head_dim) if packing.
+        k: Key tensor of shape (batch_size, seqlen, num_heads, head_dim),
+            or (tot_seqlens, num_heads, head_dim) if packing.
+        v: Value tensor of shape (batch_size, seqlen, num_heads, head_dim),
+            or (tot_seqlens, num_heads, head_dim) if packing.
+        q_cu_seqlens: Optional cumulative sequence lengths of q.
+        k_cu_seqlens: Optional cumulative sequence lengths of k.
+    """
+    from xformers import ops as xops
+
+    q = torch.unsqueeze(q, 0)
+    k = torch.unsqueeze(k, 0)
+    v = torch.unsqueeze(v, 0)
+    seqlens = torch.diff(q_cu_seqlens)
+    attention_bias = xops.fmha.BlockDiagonalMask.from_seqlens(seqlens.tolist(),
+                                                              kv_seqlen=None,
+                                                              device=q.device)
+
+    attn_out = xops.memory_efficient_attention_forward(
+        q, k, v, attn_bias=attention_bias)
+    attn_out = torch.squeeze(attn_out, 0)
+    attn_out = attn_out.flatten(start_dim=-2)
+    return attn_out
+
+
 def sdpa_attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -136,31 +176,33 @@ def sdpa_attention(
         q_cu_seqlens: Optional cumulative sequence lengths of q.
         k_cu_seqlens: Optional cumulative sequence lengths of k.
     """
-    seq_length = q.shape[0]
-    attention_mask = torch.zeros([1, seq_length, seq_length],
-                                 device=q.device,
-                                 dtype=torch.bool)
-    for i in range(1, len(q_cu_seqlens)):
-        attention_mask[
-            ...,
-            q_cu_seqlens[i - 1]:q_cu_seqlens[i],
-            q_cu_seqlens[i - 1]:q_cu_seqlens[i],
-        ] = True
-    q = q.transpose(0, 1)
-    k = k.transpose(0, 1)
-    v = v.transpose(0, 1)
-    attn_output = F.scaled_dot_product_attention(q,
-                                                 k,
-                                                 v,
-                                                 attention_mask,
-                                                 dropout_p=0.0)
-    attn_output = attn_output.transpose(0, 1)
-    attn_output = attn_output.reshape(seq_length, -1)
-    return attn_output
+    batch_size = q_cu_seqlens.numel() - 1
+    outputs = []
+
+    for i in range(batch_size):
+        # unpack
+        start_idx = q_cu_seqlens[i]
+        end_idx = q_cu_seqlens[i + 1]
+        q_i = q[start_idx:end_idx]
+        k_i = k[start_idx:end_idx]
+        v_i = v[start_idx:end_idx]
+
+        q_i = q_i.transpose(0, 1)
+        k_i = k_i.transpose(0, 1)
+        v_i = v_i.transpose(0, 1)
+
+        out_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
+        outputs.append(out_i.transpose(0, 1))
+
+    outputs = torch.cat(outputs, dim=0)
+    outputs = outputs.flatten(start_dim=-2)
+
+    return outputs
 
 
 VL_VISION_ATTENTION_FUNCTIONS = {
     "flash_attention_2": multihead_attention,
+    "xformers": xformers_attention,
     "sdpa": sdpa_attention,
 }
 
@@ -442,6 +484,12 @@ class MoonVitEncoderLayer(nn.Module):
         # use fa2 in vllm by default
         if is_flash_attn_2_available():
             self.attn_implementation = "flash_attention_2"
+        elif check_xformers_availability():
+            self.attn_implementation = "xformers"
+        else:
+            self.attn_implementation = "sdpa"
+
+        logger.info_once(f"Moonvit attn_backend: {self.attn_implementation}")
 
         self.norm0 = nn.LayerNorm(hidden_dim)
         self.norm1 = nn.LayerNorm(hidden_dim)
