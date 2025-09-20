@@ -8,8 +8,9 @@ import os
 import sys
 import time
 import traceback
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import Optional, Union
+from typing import Optional, Protocol, Union
 
 import aiohttp
 from tqdm.asyncio import tqdm
@@ -90,6 +91,16 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
     start_time: float = 0.0
+
+
+class RequestFunc(Protocol):
+    def __call__(
+        self,
+        request_func_input: RequestFuncInput,
+        session: aiohttp.ClientSession,
+        pbar: Optional[tqdm] = None,
+    ) -> Awaitable[RequestFuncOutput]:
+        ...
 
 
 async def async_request_openai_completions(
@@ -507,7 +518,7 @@ async def async_request_openai_embeddings(
 
 
 # TODO: Add more request functions for different API protocols.
-ASYNC_REQUEST_FUNCS = {
+ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "vllm": async_request_openai_completions,
     "openai": async_request_openai_completions,
     "openai-chat": async_request_openai_chat_completions,
