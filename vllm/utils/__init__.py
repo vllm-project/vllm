@@ -3475,6 +3475,8 @@ def length_from_prompt_token_ids_or_embeds(
 
 
 if is_torch_equal_or_newer("2.9.0.dev"):
-    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
+    from vllm.platforms import current_platform
+    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe,
+                            ) if current_platform.is_cuda_alike() else ()
 else:
     tag_cudagraph_unsafe = ()  # type: ignore[assignment]
