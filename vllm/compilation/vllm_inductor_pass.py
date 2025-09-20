@@ -14,8 +14,8 @@ from torch._inductor.pattern_matcher import (PatternMatcherPass,
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.utils import unique_filepath
 
-from ..utils import unique_filepath
 from .inductor_pass import InductorPass
 
 logger = init_logger(__name__)
