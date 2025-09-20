@@ -23,11 +23,11 @@ class TensorShape:
         self.dynamic_dims = dynamic_dims if dynamic_dims else set()
 
     def resolve(self, **bindings: int) -> tuple[Union[int, str], ...]:
-        resolved = []
+        resolved = list[Union[int, str]]()
         for dim in self.dims:
             if isinstance(dim, str) and dim in bindings:
                 resolved.append(bindings[dim])
-            elif isinstance(dim, int):
+            else:
                 resolved.append(dim)
         return tuple(resolved)
 
