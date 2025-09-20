@@ -580,10 +580,7 @@ class WhisperDecoder(nn.Module):
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
 
@@ -917,7 +914,10 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        do_language_embed_multimodal: bool = True,
     ) -> torch.Tensor:
         # This method just returns the decoder sequence embeddings since
         # Whisper does not have encoder text tokens.
