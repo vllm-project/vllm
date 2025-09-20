@@ -289,7 +289,7 @@ message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
 # Define extension targets
 #
 
-define_gpu_extension_target(
+define_extension_target(
     _C
     DESTINATION vllm
     LANGUAGE CXX
