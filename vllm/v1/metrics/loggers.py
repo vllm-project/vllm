@@ -12,6 +12,7 @@ from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging)
 from vllm.logger import init_logger
+from vllm.plugins import load_plugins_by_group
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
@@ -643,6 +644,23 @@ def build_1_2_5_buckets(max_value: int) -> list[int]:
     return build_buckets([1, 2, 5], max_value)
 
 
+def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
+    factories: list[StatLoggerFactory] = []
+
+    for name, plugin_class in load_plugins_by_group(
+            "vllm.stat_logger_plugins").items():
+        if not isinstance(plugin_class, type) or not issubclass(
+                plugin_class, StatLoggerBase):
+            logger.warning(
+                "Stat logger plugin %s is not a valid subclass "
+                "of StatLoggerBase. Skipping.", name)
+            continue
+
+        factories.append(plugin_class)
+
+    return factories
+
+
 class StatLoggerManager:
     """
     StatLoggerManager:
@@ -669,6 +687,9 @@ class StatLoggerManager:
         factories: list[StatLoggerFactory] = []
         if custom_stat_loggers is not None:
             factories.extend(custom_stat_loggers)
+
+        # Load plugin-based stat loggers
+        factories.extend(load_stat_logger_plugin_factories())
 
         if enable_default_loggers and logger.isEnabledFor(logging.INFO):
             if client_count > 1:
