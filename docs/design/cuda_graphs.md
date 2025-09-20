@@ -165,7 +165,7 @@ The following table lists backends that support full CUDA Graphs at the time of 
 | FlashAttention v2 | `UNIFORM_BATCH` | Actually `ALWAYS` but workaround to fallback to `FULL_AND_PIECEWISE` for performance reason |
 | FlashAttention v3 | `ALWAYS` | has unified routine for both batches, so `FULL` mode is good |
 | Triton Attention | `ALWAYS` | prefer `FULL_AND_PIECEWISE` since it has different kernels for prefill/mixed and pure decode batches |
-| AITER FlashAttention | `ALWAYS`| |
+| AITER FlashAttention | `UNIFORM_BATCH`| |
 | FlashInfer | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | FlashMLA | `UNIFORM_BATCH` | |
 | AITER MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
