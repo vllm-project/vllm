@@ -13,6 +13,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.attention.ops.triton_reshape_and_cache_flash import (
+    triton_reshape_and_cache_flash)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -346,7 +348,13 @@ class TritonAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
             else:
-                ops.reshape_and_cache_flash(
+                if self.kv_cache_dtype.startswith("fp8"):
+                    key_cache = key_cache.view(self.fp8_dtype)
+                    value_cache = value_cache.view(self.fp8_dtype)
+                    # triton kernel does not support uint8 kv_cache
+                    #  (because some explicit casts (e.g. float8_e4m3fnuz)
+                    #   are not supported)
+                triton_reshape_and_cache_flash(
                     key,
                     value,
                     key_cache,
@@ -358,8 +366,9 @@ class TritonAttentionImpl(AttentionImpl):
                 )
 
         if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(self.fp8_dtype)
-            value_cache = value_cache.view(self.fp8_dtype)
+            if key_cache.dtype != self.fp8_dtype:
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
             num_tokens, num_heads, head_size = query.shape
             assert layer._q_scale_float == 1.0, \
                 "A non 1.0 q_scale is not currently supported."
