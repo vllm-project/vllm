@@ -672,10 +672,15 @@ class Scheduler(SchedulerInterface):
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
         new_block_ids: list[Optional[tuple[list[int], ...]]] = []
+        resumed_req_token_ids: list[Optional[list[int]]] = []
         num_computed_tokens: list[int] = []
 
         use_connector = self.connector is not None
-        for req in itertools.chain(running_reqs, resumed_reqs):
+        # Because resumed_reqs is usually empty, it is more efficient to do
+        # in-place appending so that we don't need to allocate a new list.
+        resumed_from_preemption = [False] * len(running_reqs)
+        resumed_from_preemption += [True] * len(resumed_reqs)
+        for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
             num_tokens = (num_scheduled_tokens[req_id] -
@@ -689,23 +694,28 @@ class Scheduler(SchedulerInterface):
                 token_ids = req.all_token_ids[req.num_computed_tokens:req.
                                               num_computed_tokens + num_tokens]
                 new_token_ids.append(token_ids)
+                resumed_req_token_ids.append(None)
             elif use_connector:
                 # When using a KVConnector, we add a placeholder to avoid index
                 # out of bounds errors. TODO: Remove this once the KVConnector
                 # is updated to handle token IDs properly.
                 new_token_ids.append([])
+                if resumed_from_preemption[idx]:
+                    resumed_token_ids = req.all_token_ids[:req.
+                                                          num_computed_tokens +
+                                                          num_tokens]
+                    resumed_req_token_ids.append(resumed_token_ids)
+                else:
+                    resumed_req_token_ids.append(None)
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True))
             num_computed_tokens.append(req.num_computed_tokens)
-        # Because resumed_reqs is usually empty, it is more efficient to do
-        # in-place appending so that we don't need to allocate a new list.
-        resumed_from_preemption = [False] * len(running_reqs)
-        resumed_from_preemption += [True] * len(resumed_reqs)
 
         return CachedRequestData(
             req_ids=req_ids,
             resumed_from_preemption=resumed_from_preemption,
             new_token_ids=new_token_ids,
+            resumed_req_token_ids=resumed_req_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
         )
