@@ -701,8 +701,12 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 @support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersModel(TransformersBase):
     hf_to_vllm_mapper = WeightsMapper(
+        # These are applied in order, so the order matters!
         orig_to_new_prefix={
             # Handle BERT-like models
+            "albert": "model",
+            "roberta": "model",
+            "electra": "model",
             "bert": "model",
             # Add `model.` prefix for base model checkpoints
             "": "model.",
