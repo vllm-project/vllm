@@ -987,8 +987,10 @@ def find_process_using_port(port: int) -> Optional[psutil.Process]:
     if sys.platform.startswith("darwin"):
         return None
 
+    our_pid = os.getpid()
     for conn in psutil.net_connections():
-        if conn.laddr.port == port:
+        if conn.laddr.port == port and (conn.pid is not None
+                                        and conn.pid != our_pid):
             try:
                 return psutil.Process(conn.pid)
             except psutil.NoSuchProcess:
