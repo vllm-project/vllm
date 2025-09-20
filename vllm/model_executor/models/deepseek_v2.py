@@ -487,13 +487,13 @@ class Indexer(nn.Module):
         self.config = config
         self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         self.topk_tokens = config.attn_module_list_cfg[0]["topk_tokens"]
-        self.n_heads = self.indexer_cfg["n_heads"]  # 64
+        self.n_head = self.indexer_cfg["n_head"]  # 64
         self.head_dim = self.indexer_cfg["head_dim"]  # 128
         self.rope_dim = self.indexer_cfg["rope_dim"]  # 64
         self.q_lora_rank = q_lora_rank  # 1536
         # no tensor parallel, just replicated
         self.wq_b = ReplicatedLinear(self.q_lora_rank,
-                                     self.head_dim * self.n_heads,
+                                     self.head_dim * self.n_head,
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.wq_b")
         self.wk = ReplicatedLinear(hidden_size,
@@ -502,7 +502,7 @@ class Indexer(nn.Module):
                                    prefix=f"{prefix}.wk")
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.weights_proj = ReplicatedLinear(hidden_size,
-                                             self.n_heads,
+                                             self.n_head,
                                              quant_config=quant_config,
                                              prefix=f"{prefix}.weights_proj")
         self.softmax_scale = self.head_dim**-0.5
