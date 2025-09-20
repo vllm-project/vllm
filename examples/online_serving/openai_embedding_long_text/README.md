@@ -42,7 +42,7 @@ python client.py
 
 ### Server Configuration
 
-The key parameters for chunked processing are in the `--override-pooler-config`:
+The key parameters for chunked processing are in the `--pooler-config`:
 
 ```json
 {
