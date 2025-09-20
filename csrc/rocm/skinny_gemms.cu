@@ -1492,7 +1492,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int y = 0; y < YTILE; y++) {
           // TODO: Determine data type conversion of bias for fp8
           scalar_t out = __float2s<scalar_t>(sum[n][y][0] * sA * sB);
-          C[m + y + n * M] = BIAS ? (out + BIAS[(m + y) % Bx + (n % By) * M]) : out;
+          C[m + y + n * M] =
+              BIAS ? (out + BIAS[(m + y) % Bx + (n % By) * M]) : out;
         }
       }
     }
@@ -1506,8 +1507,8 @@ template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
 __global__ void wvSplitKQ_hf_sml_(const int K, const int Kp, const int M,
                                   const int Bx, const int By, const fp8_t* B,
                                   const fp8_t* __restrict__ A,
-                                  const scalar_t* __restrict__ BIAS, scalar_t* C,
-                                  const float* __restrict__ s_A,
+                                  const scalar_t* __restrict__ BIAS,
+                                  scalar_t* C, const float* __restrict__ s_A,
                                   const float* __restrict__ s_B,
                                   const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
@@ -1669,7 +1670,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
           scalar_t out = __float2s<scalar_t>(sum[n][y][0] * sA * sB);
-          C[m + y + n * M] = BIAS ? (out + BIAS[(m + y) % Bx + (n % By) * M]) : out;
+          C[m + y + n * M] =
+              BIAS ? (out + BIAS[(m + y) % Bx + (n % By) * M]) : out;
         }
       }
     }
