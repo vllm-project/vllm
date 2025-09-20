@@ -100,10 +100,10 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
-    # Max output tokens per second and concurrent requests at that peak
     max_output_tokens_per_s: float
     max_concurrent_requests: int
-
+    total_accepted_tokens: int
+    total_rejected_tokens: int
 
 @dataclass
 class EmbedBenchmarkMetrics:
@@ -298,6 +298,8 @@ def calculate_metrics(
     all_tpots: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
+    total_accepted_tokens: list[int] = []
+    total_rejected_tokens: list[int] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
@@ -324,6 +326,8 @@ def calculate_metrics(
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
             completed += 1
+            total_accepted_tokens.append(outputs[i].accepted_prediction_tokens)
+            total_rejected_tokens.append(outputs[i].rejected_prediction_tokens)
         else:
             actual_output_lens.append(0)
 
@@ -446,6 +450,8 @@ def calculate_metrics(
                              for p in selected_percentiles],
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
+        total_accepted_tokens=sum(total_accepted_tokens),
+        total_rejected_tokens=sum(total_rejected_tokens),
     )
 
     return metrics, actual_output_lens
@@ -624,12 +630,13 @@ async def benchmark(
                         "timestamp": timestamp
                     })
                 last_int_rps = current_int_rps
-        prompt, prompt_len, output_len, mm_content, request_id = (
+        prompt, prompt_len, output_len, mm_content, request_id, prediction = (
             request.prompt,
             request.prompt_len,
             request.expected_output_len,
             request.multi_modal_data,
             request.request_id,
+            request.prediction,
         )
         req_model_id, req_model_name = model_id, model_name
         if lora_modules:
@@ -649,6 +656,7 @@ async def benchmark(
             extra_headers=extra_headers,
             extra_body=extra_body,
             request_id=request_id,
+            prediction=prediction,
         )
         tasks.append(
             asyncio.create_task(
@@ -708,6 +716,10 @@ async def benchmark(
                                         metrics.max_concurrent_requests))
     print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
                                     metrics.total_token_throughput))
+    print("{:<40} {:<10.2f}".format("Total Accepted tokens:",
+                                    metrics.total_accepted_tokens))
+    print("{:<40} {:<10.2f}".format("Total Rejected tokens:",
+                                    metrics.total_rejected_tokens))
 
     if isinstance(metrics, BenchmarkMetrics):
         result = {

@@ -196,6 +196,9 @@ class SamplingParams(
     last token of a corresponding token sequence is not allowed when the next
     generated token can complete the sequence."""
     _bad_words_token_ids: Optional[list[list[int]]] = None
+    prediction: Optional[Union[str, list[int]]] = None
+    """If provided, the engine will use the predicted output tokens to propose,
+    currently only support ngram method."""
 
     @staticmethod
     def from_optional(
@@ -229,6 +232,7 @@ class SamplingParams(
         structured_outputs: Optional[StructuredOutputsParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
+        prediction: Optional[Union[str, list[int]]] = None,
         extra_args: Optional[dict[str, Any]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
@@ -271,6 +275,7 @@ class SamplingParams(
             structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
+            prediction=prediction,
             extra_args=extra_args,
         )
 
@@ -447,7 +452,12 @@ class SamplingParams(
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
-    def update_from_tokenizer(self, tokenizer: AnyTokenizer) -> None:
+    def update_from_tokenizer(self,
+                              tokenizer: AnyTokenizer,
+                              predicted_outputs: bool = False) -> None:
+        if predicted_outputs and isinstance(self.prediction, str):
+            self.prediction = tokenizer.encode(self.prediction,
+                                               add_special_tokens=False)
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
@@ -540,6 +550,7 @@ class SamplingParams(
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
+            f"prediction={self.prediction}, "
             f"extra_args={self.extra_args})")
 
 

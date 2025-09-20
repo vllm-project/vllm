@@ -914,6 +914,10 @@ class Scheduler(SchedulerInterface):
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted)
+                request.accepted_prediction_tokens = (
+                    request.accepted_prediction_tokens or 0) + num_accepted
+                request.rejected_prediction_tokens = (
+                    request.rejected_prediction_tokens or 0) + num_rejected
 
             stopped = False
             new_logprobs = None
@@ -977,6 +981,10 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        accepted_prediction_tokens=request.
+                        accepted_prediction_tokens,
+                        rejected_prediction_tokens=request.
+                        rejected_prediction_tokens,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
