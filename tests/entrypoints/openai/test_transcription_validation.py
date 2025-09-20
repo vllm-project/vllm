@@ -194,6 +194,46 @@ async def test_stream_options(winning_call, client):
     assert final and continuous
 
 
+@pytest.fixture(scope="function")
+def server_with_force_include_usage(request, monkeypatch_module):  #noqa: F811
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        "--enable-force-include-usage",
+    ]
+
+    with RemoteOpenAIServer("TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                            args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_transcription_with_enable_force_include_usage(
+        client_with_force_include_usage, winning_call):
+    res = await client_with_force_include_usage.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=winning_call,
+        language="en",
+        temperature=0.0,
+        stream=True,
+        timeout=30)
+
+    async for chunk in res:
+        if not len(chunk.choices):
+            # final usage sent
+            usage = chunk.usage
+            assert isinstance(usage, dict)
+            assert usage['prompt_tokens'] > 0
+            assert usage['completion_tokens'] > 0
+            assert usage['total_tokens'] > 0
+        else:
+            assert not hasattr(chunk, 'usage')
+
+
 @pytest.mark.asyncio
 async def test_sampling_params(mary_had_lamb, client):
     """
