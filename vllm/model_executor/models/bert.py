@@ -348,6 +348,9 @@ class BertModel(nn.Module, SupportsQuant):
         self.encoder = BertEncoder(vllm_config=vllm_config,
                                    prefix=f"{prefix}.encoder")
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -456,6 +459,9 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         self.model = self._build_model(vllm_config=vllm_config,
                                        prefix=maybe_prefix(prefix, "model"))
         self.pooler = self._build_pooler(pooler_config)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
