@@ -2602,9 +2602,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             backend = self.vllm_config.compilation_config.init_backend(
                 self.vllm_config)
             compilation_counter.dynamo_as_is_count += 1
-            self.model.compile(
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend)
+            self.model.compile(fullgraph=True, backend=backend)
             return
         # for other compilation levels, cudagraph behavior is controlled by
         # CudagraphWraper and CudagraphDispatcher of vllm.
