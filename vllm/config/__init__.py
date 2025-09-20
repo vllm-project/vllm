@@ -232,6 +232,24 @@ class ObservabilityConfig:
             list[DetailedTraceModules],
             self.collect_detailed_traces[0].split(","))
 
+    mfu_analysis_mode: str = "fast"
+    """Setting `mfu_analysis_mode` to
+       - "detailed" will capture the torch FX graph and attempt to properly
+         count every flop and byte moved.  This is a very slow operation and
+         should be run infrequently for advanced optimization usecases.
+       - "fast" (default) will attempt to use the 2AND approximation by
+         automatically deriving active parameter count.
+       - "manual" will require user specified `mfu_analysis_active_parameters`
+         and also uses 2AND to approximate MFU.
+         N = number of parameters, D = number of new tokens."""
+    mfu_analysis_interval: int = -1
+    """Enable periodic MFU calculations every 'mfu_analysis_interval' model 
+    executions.  Defaults to -1, which is disabling the calculation.
+    Setting to 0 does the analysis for every step. """
+    mfu_analysis_active_parameters: float = 0
+    """Used when `mfu_analysis_mode == "manual"` to specify how to calculate
+    the total flops."""
+
 
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))

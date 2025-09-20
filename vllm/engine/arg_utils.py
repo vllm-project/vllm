@@ -437,6 +437,11 @@ class EngineArgs:
         ObservabilityConfig.show_hidden_metrics_for_version
     otlp_traces_endpoint: Optional[str] = \
         ObservabilityConfig.otlp_traces_endpoint
+    mfu_analysis_interval: int = ObservabilityConfig.mfu_analysis_interval
+    mfu_analysis_mode: str = ObservabilityConfig.mfu_analysis_mode
+    mfu_analysis_active_parameters: float = \
+        ObservabilityConfig.mfu_analysis_active_parameters
+
     collect_detailed_traces: Optional[list[DetailedTraceModules]] = \
         ObservabilityConfig.collect_detailed_traces
     disable_async_output_proc: bool = not ModelConfig.use_async_output_proc
@@ -861,6 +866,15 @@ class EngineArgs:
         observability_group.add_argument(
             "--otlp-traces-endpoint",
             **observability_kwargs["otlp_traces_endpoint"])
+        observability_group.add_argument(
+            "--mfu-analysis-interval",
+            **observability_kwargs["mfu_analysis_interval"])
+        observability_group.add_argument(
+            "--mfu-analysis-mode", **observability_kwargs["mfu_analysis_mode"])
+        observability_group.add_argument(
+            "--mfu-analysis-active-parameters",
+            **observability_kwargs["mfu_analysis_active_parameters"])
+
         # TODO: generalise this special case
         choices = observability_kwargs["collect_detailed_traces"]["choices"]
         metavar = f"{{{','.join(choices)}}}"
@@ -1459,6 +1473,9 @@ class EngineArgs:
                 self.show_hidden_metrics_for_version),
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
+            mfu_analysis_interval=self.mfu_analysis_interval,
+            mfu_analysis_mode=self.mfu_analysis_mode,
+            mfu_analysis_active_parameters=self.mfu_analysis_active_parameters,
         )
 
         config = VllmConfig(
