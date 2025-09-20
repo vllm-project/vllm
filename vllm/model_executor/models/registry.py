@@ -14,7 +14,7 @@ import sys
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Set
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional, TypeVar, Union
@@ -467,12 +467,9 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         """save dictionary json file to cache"""
         from vllm.model_executor.model_loader.weight_utils import atomic_writer
         try:
-            mi_dict = {}
-            for f in fields(mi):
-                mi_dict[f.name] = getattr(mi, f.name)
             modelinfo_dict = {
                 "hash": module_hash,
-                "modelinfo": mi_dict,
+                "modelinfo": asdict(mi),
             }
             cache_dir = self._get_cache_dir()
             cache_dir.mkdir(parents=True, exist_ok=True)
