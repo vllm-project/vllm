@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import Optional
 
 import torch
 
@@ -62,7 +62,7 @@ class GDNAttentionMetadataBuilder(
 
     cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
-    reorder_batch_threshold: ClassVar[int] = 1
+    reorder_batch_threshold: int = 1
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -76,7 +76,7 @@ class GDNAttentionMetadataBuilder(
         else:
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
-        self.reorder_batch_threshold = self.num_spec + 1  # type: ignore[misc]
+        self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
         self.use_full_cuda_graph = \
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
