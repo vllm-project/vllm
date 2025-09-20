@@ -12,6 +12,7 @@ from tests.v1.engine.utils import (NUM_PROMPT_LOGPROBS_UNDER_TEST,
                                    STOP_STRINGS,
                                    DummyOutputProcessorTestVectors,
                                    MockEngineCore)
+from vllm.config import DecodingConfig, VllmConfig
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import PromptLogprobs, SampleLogprobs
@@ -43,7 +44,9 @@ def _ref_convert_id_to_token(
     [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
 def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                                     dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer,
+    vllm_config = VllmConfig(decoding_config=DecodingConfig())
+    output_processor = OutputProcessor(vllm_config=vllm_config,
+                                       tokenizer=dummy_test_vectors.tokenizer,
                                        log_stats=False)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens)
@@ -382,7 +385,9 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                             num_sample_logprobs: Optional[int],
                             num_prompt_logprobs: Optional[int],
                             dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer,
+    vllm_config = VllmConfig(decoding_config=DecodingConfig())
+    output_processor = OutputProcessor(vllm_config=vllm_config,
+                                       tokenizer=dummy_test_vectors.tokenizer,
                                        log_stats=False)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
@@ -534,8 +539,9 @@ def test_stop_token(include_stop_str_in_output: bool,
         dummy_test_vectors.tokenizer.eos_token_id if is_eos_test else None
     )  # '<|end_of_text|>'
     stop_token_ids = [128009] if not is_eos_test else None  # '<|eot_id|>'
-
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer,
+    vllm_config = VllmConfig(decoding_config=DecodingConfig())
+    output_processor = OutputProcessor(vllm_config=vllm_config,
+                                       tokenizer=dummy_test_vectors.tokenizer,
                                        log_stats=False)
     # Dummy engine core outputs, with control tokens suffixed to test stops
     suffix_token = ([eos_token_id] if is_eos_test else stop_token_ids)
@@ -642,7 +648,9 @@ def test_stop_token(include_stop_str_in_output: bool,
                          [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
 def test_stop_string(include_stop_str_in_output: bool,
                      num_sample_logprobs: Optional[int], dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer,
+    vllm_config = VllmConfig(decoding_config=DecodingConfig())
+    output_processor = OutputProcessor(vllm_config=vllm_config,
+                                       tokenizer=dummy_test_vectors.tokenizer,
                                        log_stats=False)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
@@ -763,7 +771,9 @@ def test_stop_string(include_stop_str_in_output: bool,
 
 
 def test_iteration_stats(dummy_test_vectors):
-    output_processor = OutputProcessor(dummy_test_vectors.tokenizer,
+    vllm_config = VllmConfig(decoding_config=DecodingConfig())
+    output_processor = OutputProcessor(vllm_config=vllm_config,
+                                       tokenizer=dummy_test_vectors.tokenizer,
                                        log_stats=True)
     engine_core = MockEngineCore(dummy_test_vectors.generation_tokens)
     engine_core_timestamp = time.monotonic()
