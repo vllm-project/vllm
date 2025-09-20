@@ -522,9 +522,14 @@ class LLM:
         """
         Run a function directly on the model inside each worker,
         returning the result for each of them.
+
+        !!! warning
+            To reduce the overhead of data transfer, avoid returning large
+            arrays or tensors from this method. If you must return them,
+            make sure you move them to CPU first to avoid taking up additional
+            VRAM!
         """
-        executor = self.llm_engine.model_executor
-        return executor.apply_model(func)
+        return self.llm_engine.apply_model(func)
 
     def _get_beam_search_lora_requests(
         self,
