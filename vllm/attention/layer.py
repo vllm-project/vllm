@@ -91,7 +91,6 @@ class Attention(nn.Module, AttentionLayerBase):
         quant_config: Optional[QuantizationConfig] = None,
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
-        use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -153,7 +152,6 @@ class Attention(nn.Module, AttentionLayerBase):
         # the quant op after this attention layer.
         self._o_scale_float: Optional[float] = None
 
-        self.use_mla = use_mla
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -186,7 +184,7 @@ class Attention(nn.Module, AttentionLayerBase):
                                                  kv_cache_dtype,
                                                  block_size,
                                                  is_attention_free,
-                                                 use_mla=use_mla,
+                                                 use_mla=False,
                                                  has_sink=self.has_sink)
         else:
             self.attn_backend = attn_backend
@@ -280,19 +278,15 @@ class Attention(nn.Module, AttentionLayerBase):
                                  dtype=query.dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
-            # We skip reshaping query, key and value tensors for the MLA
-            # backend since these tensors have different semantics and are
-            # processed differently.
-            if not self.use_mla:
-                # Reshape the query, key, and value tensors.
-                # NOTE(woosuk): We do this outside the custom op to minimize the
-                # CPU overheads from the non-CUDA-graph regions.
-                query = query.view(-1, self.num_heads, self.head_size)
-                output = output.view(-1, self.num_heads, self.head_size)
-                if key is not None:
-                    key = key.view(-1, self.num_kv_heads, self.head_size)
-                if value is not None:
-                    value = value.view(-1, self.num_kv_heads, self.head_size)
+            # Reshape the query, key, and value tensors.
+            # NOTE(woosuk): We do this outside the custom op to minimize the
+            # CPU overheads from the non-CUDA-graph regions.
+            query = query.view(-1, self.num_heads, self.head_size)
+            output = output.view(-1, self.num_heads, self.head_size)
+            if key is not None:
+                key = key.view(-1, self.num_kv_heads, self.head_size)
+            if value is not None:
+                value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
@@ -633,4 +627,93 @@ direct_register_custom_op(
     fake_impl=unified_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
     tags=tag_cudagraph_unsafe,
+)
+
+
+def unified_mla_attention(
+    q: torch.Tensor,
+    k_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    wait_for_kv_layer_from_connector(layer_name)
+
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    self = forward_context.no_compile_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    output = self.impl.forward(self, q, k_c_normed, k_pe, kv_cache,
+                               attn_metadata)
+
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    return output
+
+
+def unified_mla_attention_fake(
+    q: torch.Tensor,
+    k_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    return torch.empty_like(q).contiguous()
+
+
+direct_register_custom_op(
+    op_name="unified_mla_attention",
+    op_func=unified_mla_attention,
+    mutates_args=[],
+    fake_impl=unified_mla_attention_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+def unified_mla_attention_with_output(
+    q: torch.Tensor,
+    k_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
+) -> None:
+    wait_for_kv_layer_from_connector(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    self = forward_context.no_compile_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    self.impl.forward(self,
+                      q,
+                      k_c_normed,
+                      k_pe,
+                      kv_cache,
+                      attn_metadata,
+                      output=output,
+                      output_scale=output_scale,
+                      output_block_scale=output_block_scale)
+
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+
+
+def unified_mla_attention_with_output_fake(
+    q: torch.Tensor,
+    k_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="unified_mla_attention_with_output",
+    op_func=unified_mla_attention_with_output,
+    mutates_args=["output", "output_block_scale"],
+    fake_impl=unified_mla_attention_with_output_fake,
+    dispatch_key=current_platform.dispatch_key,
 )
