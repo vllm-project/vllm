@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform
+from vllm.utils import is_torch_equal_or_newer
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -339,6 +340,10 @@ else:
 @pytest.mark.parametrize(
     "split_attention",
     [False, True] if current_platform.is_rocm() else [False])
+# TODO(boyuan): test inductor graph partition on rocm
+@pytest.mark.parametrize(
+    "use_inductor_graph_partition",
+    [False] if current_platform.is_rocm() else [False, True])
 @pytest.mark.skipif(not current_platform.is_cuda_alike(),
                     reason="Only test ROCm or CUDA")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
@@ -352,8 +357,14 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                                  dtype: torch.dtype, model_name: str,
                                  model_class: type[AttentionQuantPatternModel],
                                  backend: _Backend, split_attention: bool,
-                                 monkeypatch, dist_init):
+                                 use_inductor_graph_partition: bool,
+                                 monkeypatch, dist_init, caplog_vllm):
     """Test AttentionStaticQuantPattern fusion pass"""
+
+    if use_inductor_graph_partition and not is_torch_equal_or_newer(
+            "2.9.0.dev"):
+        pytest.skip("inductor graph partition is only available "
+                    "in PyTorch 2.9+")
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
     if split_attention:
@@ -372,6 +383,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             custom_ops=["+quant_fp8"],
+            use_inductor_graph_partition=use_inductor_graph_partition,
         ),
         cache_config=CacheConfig(cache_dtype="fp8"))
 
@@ -444,6 +456,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                                        backend=test_backend,
                                        fullgraph=True)
         assert model_compiled.attn._o_scale_float is None
+
         result_fused_1 = model_compiled(q, k, v)
 
         if backend == _Backend.FLASHINFER:
@@ -453,6 +466,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
             # _o_scale_float
             assert model_compiled.attn._o_scale_float is not None
             result_fused_2 = model_compiled(q, k, v)
+
             assert model_compiled.attn._o_scale_float is not None
 
             torch.testing.assert_close(result_unfused,
