@@ -79,6 +79,7 @@ def mock_parser():
         parser = MagicMock()
         parser.messages = []
         parser.current_channel = None
+        parser.current_recipient = None
         parser.state = StreamState.EXPECT_START
         mock_parser_factory.return_value = parser
         yield parser
@@ -222,6 +223,45 @@ def test_reasoning_tokens_counting(mock_parser):
     # All output tokens should be counted as reasoning
     assert context.num_reasoning_tokens == 4
     assert context.num_output_tokens == 4
+
+
+def test_reasoning_tokens_comprehensive_recipients(mock_parser):
+    """Test that reasoning tokens are counted for all recipient types."""
+    from vllm.entrypoints.harmony_utils import is_reasoning_token
+
+    # Test analysis channel
+    mock_parser.current_channel = "analysis"
+    mock_parser.current_recipient = None
+    assert is_reasoning_token(mock_parser)
+
+    # Test commentary channel
+    mock_parser.current_channel = "commentary"
+    mock_parser.current_recipient = None
+    assert is_reasoning_token(mock_parser)
+
+    # Test various tool recipients
+    mock_parser.current_channel = "content"
+
+    # Python tool
+    mock_parser.current_recipient = "python"
+    assert is_reasoning_token(mock_parser)
+
+    # Browser tools
+    mock_parser.current_recipient = "browser.search"
+    assert is_reasoning_token(mock_parser)
+
+    # Container tools
+    mock_parser.current_recipient = "container.exec"
+    assert is_reasoning_token(mock_parser)
+
+    # MCP or custom tools
+    mock_parser.current_recipient = "some_custom_tool"
+    assert is_reasoning_token(mock_parser)
+
+    # No reasoning - regular content channel with no recipient
+    mock_parser.current_channel = "content"
+    mock_parser.current_recipient = None
+    assert not is_reasoning_token(mock_parser)
 
 
 def test_zero_tokens_edge_case():
@@ -459,11 +499,20 @@ async def test_streaming_message_synchronization(mock_parser):
         ),
     ]
 
-    # This should trigger the message synchronization logic
+    # This should not trigger synchronization yet (not finished)
     context.append_output(
         create_mock_request_output(prompt_token_ids=[1, 2, 3],
                                    output_token_ids=[101],
                                    finished=False))
+
+    # Messages should not be synchronized yet
+    assert len(context._messages) == 1
+
+    # Complete the message to trigger synchronization
+    context.append_output(
+        create_mock_request_output(prompt_token_ids=[1, 2, 3],
+                                   output_token_ids=[101],
+                                   finished=True))
 
     # Verify that messages were synchronized
     assert len(context._messages) == 2
@@ -483,7 +532,7 @@ async def test_streaming_message_synchronization(mock_parser):
     mock_parser.messages.append(
         Message(
             author=Author(role=Role.ASSISTANT, name="assistant"),
-            content=[TextContent(text="Response 4")],
+            content=[TextContent(text="Response 2")],
             recipient=Role.USER,
         ))
 
@@ -494,7 +543,7 @@ async def test_streaming_message_synchronization(mock_parser):
 
     context.append_output(mock_output2)
 
-    # Verify the fourth message was added, num_init_messages is still 1
+    # Verify the second message was added, num_init_messages is still 1
     assert len(context._messages) == 3
     assert context.num_init_messages == 1
-    assert context._messages[2].content[0].text == "Response 4"
+    assert context._messages[2].content[0].text == "Response 2"
