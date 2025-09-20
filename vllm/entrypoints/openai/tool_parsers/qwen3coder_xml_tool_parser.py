@@ -4,7 +4,6 @@ import ast
 import json
 import uuid
 from collections.abc import Sequence
-from contextlib import suppress
 from typing import Any, Optional, Union
 from xml.parsers.expat import ParserCreate
 
@@ -231,6 +230,30 @@ class StreamingXMLToolCallParser:
                     # Clear buffer for potential subsequent text content
                     self.text_content_buffer = ''
 
+                # If a new tool_call starts and
+                # there are already completed tool_calls
+                if (preprocessed_element.strip().startswith('<tool_call>')
+                        and self.tool_call_index > 0 and self.current_call_id):
+                    # Reset parser state but preserve generated deltas
+                    if self.current_param_name:
+                        self._end_element('parameter')
+                    if self.current_function_open or self.current_function_name:
+                        self._end_element('function')
+                    # Output final tool_call tail delta
+                    final_delta = DeltaMessage(
+                        role=None,
+                        content=None,
+                        reasoning_content=None,
+                        tool_calls=[
+                            DeltaToolCall(index=self.tool_call_index - 1,
+                                          id=self.current_call_id,
+                                          type='function',
+                                          function=DeltaFunctionCall(
+                                              name=None, arguments=''))
+                        ])
+                    self._emit_delta(final_delta)
+                    # Reset XML parser and current call state
+                    self._reset_xml_parser_after_tool_call()
                 # Parse preprocessed element
                 self.parser.Parse(preprocessed_element, False)
                 found_any = True
@@ -1004,9 +1027,6 @@ class StreamingXMLToolCallParser:
         so we need to reset the parser after each tool_call.
         """
 
-        with suppress(Exception):
-            self.parser.Parse('', True)
-
         # recreate XML parser
         self.parser = ParserCreate()
         self.setup_parser()
@@ -1024,6 +1044,7 @@ class StreamingXMLToolCallParser:
         self.current_param_is_first = False
         self.should_emit_end_newline = False
         self.start_quote_emitted = False
+        self.text_content_buffer = ''
 
         # Reset preprocessing and deferred parsing state
         self._pre_inside_parameter = False
@@ -1061,7 +1082,7 @@ class Qwen3CoderXMLToolParser(ToolParser):
         else:
             tool_calls = []
             for tool_call in result.tool_calls:
-                if tool_call.function:
+                if tool_call.function and tool_call.function.name:
                     tool_calls.append(
                         ToolCall(
                             id=tool_call.id,
