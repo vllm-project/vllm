@@ -925,12 +925,6 @@ class EngineArgs:
             title="VllmConfig",
             description=VllmConfig.__doc__,
         )
-        # We construct SpeculativeConfig using fields from other configs in
-        # create_engine_config. So we set the type to a JSON string here to
-        # delay the Pydantic validation that comes with SpeculativeConfig.
-        vllm_kwargs["speculative_config"]["type"] = optional_type(json.loads)
-        vllm_group.add_argument("--speculative-config",
-                                **vllm_kwargs["speculative_config"])
         vllm_group.add_argument("--kv-transfer-config",
                                 **vllm_kwargs["kv_transfer_config"])
         vllm_group.add_argument('--kv-events-config',
@@ -946,6 +940,13 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
+
+        # Speculative config argument
+        parser.add_argument(
+            '--speculative-config',
+            type=json.loads,
+            default=None,
+            help='Speculative decoding configuration as JSON string')
 
         return parser
 
@@ -1532,12 +1533,17 @@ class EngineArgs:
             return False
 
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        if (self.speculative_config is not None
-                and self.speculative_config.get("method") == "draft_model"):
-            raise NotImplementedError(
-                "Speculative decoding with draft model is not supported yet. "
-                "Please consider using other speculative decoding methods "
-                "such as ngram, medusa, eagle, or deepseek_mtp.")
+        if self.speculative_config is not None:
+            if isinstance(self.speculative_config, dict):
+                method = self.speculative_config.get("method")
+            else:
+                method = getattr(self.speculative_config, "method", None)
+
+            if method == "draft_model":
+                raise NotImplementedError(
+                    "Draft model speculative decoding is not supported yet. "
+                    "Please consider using other speculative decoding methods "
+                    "such as ngram, medusa, eagle, or deepseek_mtp.")
 
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1",
