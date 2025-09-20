@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 import json
 import warnings
 from dataclasses import InitVar, field
@@ -20,7 +19,7 @@ import vllm.envs as envs
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.pooler import PoolerConfig
-from vllm.config.utils import assert_hashable, config
+from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
@@ -300,33 +299,32 @@ class ModelConfig:
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
-
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.model)
-        factors.append(self.dtype)
-        factors.append(self.quantization)
-        factors.append(self.revision)
-        factors.append(self.code_revision)
-        factors.append(self.max_model_len)
-        factors.append(self.max_logprobs)
-        factors.append(self.disable_sliding_window)
-        factors.append(self.trust_remote_code)
-        factors.append(self.generation_config)
-        factors.append(self.model_impl)
-        factors.append(self.override_generation_config)
-        factors.append(self.rope_scaling)
-        factors.append(self.rope_theta)
-        # hf_config can control how the model looks!
-        factors.append(self.hf_config.to_json_string())
-        str_factors = str(factors)
-        assert_hashable(str_factors)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
+        ignored_factors = {
+            "tokenizer",
+            "hf_text_config",
+            "encoder_config",
+            "hf_image_processor_config",
+            "pooler_config",
+            "multimodal_config",
+            "hf_overrides",
+            # Internals / metadata
+            "_model_info",
+            "_architecture",
+            "seed",
+            "served_model_name",
+            "hf_token",
+            "hf_config_path",
+        }
+
+        from vllm.config.utils import get_hash_factors, hash_factors
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def __post_init__(
             self,
