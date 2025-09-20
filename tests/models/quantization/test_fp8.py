@@ -36,9 +36,6 @@ from ..utils import check_logprobs_close
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-# Due to low-precision numerical divergence, this test is too sensitive for
-# the async postprocessor
-@pytest.mark.parametrize("disable_async_output_proc", [True])
 def test_models(
     vllm_runner,
     example_prompts,
@@ -49,7 +46,6 @@ def test_models(
     enforce_eager: bool,
     backend: str,
     tensor_parallel_size: int,
-    disable_async_output_proc: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
