@@ -130,6 +130,7 @@ class Mamba2Model(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+        self.use_vllm_v1 = envs.VLLM_USE_V1
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings(input_ids)
@@ -155,7 +156,7 @@ class Mamba2Model(nn.Module):
 
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
-        if not envs.VLLM_USE_V1:
+        if not self.use_vllm_v1:
             mamba2_metadata = prepare_mamba2_metadata(
                 chunk_size=self.config.chunk_size,
                 attn_metadata=attn_metadata,
@@ -292,6 +293,8 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         self.make_empty_intermediate_tensors = (
             self.backbone.make_empty_intermediate_tensors)
 
+        self.use_vllm_v1 = self.backbone.use_vllm_v1
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.backbone.get_input_embeddings(input_ids)
 
@@ -301,7 +304,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
-        if not envs.VLLM_USE_V1:
+        if not self.use_vllm_v1:
             if self.mamba_cache is None:
                 num_mamba_layers = (
                     self.model_config.get_num_layers_by_block_type(

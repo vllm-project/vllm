@@ -520,6 +520,7 @@ class SambaYModel(nn.Module):
             prefix=f"{prefix}.layers")
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
+        self.use_vllm_v1 = envs.VLLM_USE_V1
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -559,7 +560,7 @@ class SambaYModel(nn.Module):
                 # the kv cache since we reuse the kv cache from last layer.
                 # If in prefill phase, we can <s>prune></s> truncate
                 # the hidden state to save computation cost.
-                if attn_metadata.prefill_metadata and not envs.VLLM_USE_V1:
+                if attn_metadata.prefill_metadata and not self.use_vllm_v1:
                     selected_token_indices = torch.cumsum(
                         attn_metadata.seq_lens_tensor, dim=0) - 1
                     hidden_states = hidden_states.index_select(

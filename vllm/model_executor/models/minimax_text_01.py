@@ -564,7 +564,8 @@ class MiniMaxText01Model(nn.Module):
         self._dtype = _dummy.dtype
         del _dummy
 
-        if not envs.VLLM_USE_V1:
+        self.use_vllm_v1 = envs.VLLM_USE_V1
+        if not self.use_vllm_v1:
             self.minimax_cache = MinimaxCacheManager(
                 dtype=torch.float32, cache_shape=self.cache_shape)
 
@@ -615,9 +616,9 @@ class MiniMaxText01Model(nn.Module):
                 **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-        if not envs.VLLM_USE_V1 and attn_metadata is None:
+        if not self.use_vllm_v1 and attn_metadata is None:
             return None
-        if not envs.VLLM_USE_V1:
+        if not self.use_vllm_v1:
             if "request_ids_to_seq_ids" not in kwargs:
                 kwargs["request_ids_to_seq_ids"] = {}
             if "finished_requests_ids" not in kwargs:
@@ -650,7 +651,7 @@ class MiniMaxText01Model(nn.Module):
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             _caches = None
-            if not envs.VLLM_USE_V1 and isinstance(
+            if not self.use_vllm_v1 and isinstance(
                     layer.self_attn, MiniMaxText01LinearAttention):
                 current_state_layer = minimax_cache_index
                 _caches = minimax_cache_params.at_layer_idx(
