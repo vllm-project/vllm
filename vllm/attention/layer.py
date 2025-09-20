@@ -32,7 +32,7 @@ USE_XFORMERS_OPS = None
 try:
     tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
 except AttributeError:
-    tag_cudagraph_unsafe = ()
+    tag_cudagraph_unsafe = ()  # type: ignore[assignment]
 
 
 def check_xformers_availability():
