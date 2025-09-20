@@ -594,6 +594,9 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
             ),
         })
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.bert.get_input_embeddings(input_ids)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights)
@@ -642,6 +645,9 @@ class BertForTokenClassification(nn.Module):
             "encode":
             Pooler.for_encode(pooler_config),
         })
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.bert.get_input_embeddings(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
