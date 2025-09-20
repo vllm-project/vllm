@@ -29,8 +29,10 @@ from vllm.utils import GiB_bytes, direct_register_custom_op
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
-tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe,
-                        ) if current_platform.is_cuda_alike() else ()
+try:
+    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
+except AttributeError:
+    tag_cudagraph_unsafe = ()
 
 
 def check_xformers_availability():
