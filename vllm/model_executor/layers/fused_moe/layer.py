@@ -789,6 +789,49 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
         for local_index, global_index in zip(local_indices, global_indices))
 
 
+def maybe_roundup_hidden_size(
+        hidden_size: int, act_dtype: torch.dtype,
+        quant_config: Optional[QuantizationConfig],
+        moe_parallel_config: FusedMoEParallelConfig) -> int:
+    """
+    Given layer hidden size and MoE configurations, round up hidden_size
+    if necessary.
+    
+    Args:
+        hidden_size(int): Layer hidden-size
+        act_dtype: Data type of the layer activations.
+        quant_config(FusedMoEQuantConfig): Fused MoE quantization configuration.
+        moe_parallel_config(FusedMoEParallelConfig): Fused MoE parallelization
+            strategy configuration.
+    
+    Return:
+        Rounded up hidden_size if rounding up is required based on the configs.
+        Original hidden size otherwise.
+    """
+
+    if (moe_parallel_config.use_deepep_ht_kernels):
+        hidden_size = (
+            DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+                hidden_size, act_dtype))
+
+    # we are padding globally so EP buffer allocation works
+    if quant_config and quant_config.get_name() == "mxfp4":
+
+        from vllm.model_executor.layers.quantization.mxfp4 import (
+            Mxfp4Backend, get_mxfp4_backend)
+        current_mxfp4_backend = get_mxfp4_backend()
+        if (current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+                or current_mxfp4_backend
+                == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS):
+            hidden_size = round_up(hidden_size, 128)
+        elif (current_platform.is_rocm() or current_mxfp4_backend
+              == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+              or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
+            hidden_size = round_up(hidden_size, 256)
+
+    return hidden_size
+
+
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -863,19 +906,10 @@ class FusedMoE(CustomOp):
 
         self.global_num_experts = num_experts + num_redundant_experts
 
-        # we are padding globally so EP buffer allocation works
-        if quant_config and quant_config.get_name() == "mxfp4":
-            from vllm.model_executor.layers.quantization.mxfp4 import (
-                Mxfp4Backend, get_mxfp4_backend)
-            current_mxfp4_backend = get_mxfp4_backend()
-            if (current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-                    or current_mxfp4_backend
-                    == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS):
-                hidden_size = round_up(hidden_size, 128)
-            elif (current_platform.is_rocm() or current_mxfp4_backend
-                  == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM or
-                  current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
-                hidden_size = round_up(hidden_size, 256)
+        # Round up hidden size if needed.
+        hidden_size = maybe_roundup_hidden_size(hidden_size, params_dtype,
+                                                quant_config,
+                                                self.moe_parallel_config)
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
