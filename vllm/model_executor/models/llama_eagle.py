@@ -134,6 +134,11 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         nn.Module.__init__(self)
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
+        # Ensure draft_vocab_size is set
+        # default to the base vocab size when absent
+        if getattr(self.config, "draft_vocab_size", None) is None:
+            base_vocab_size = getattr(self.config, "vocab_size", None)
+            self.config.draft_vocab_size = base_vocab_size
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
         self.model = LlamaModel(vllm_config=vllm_config,
