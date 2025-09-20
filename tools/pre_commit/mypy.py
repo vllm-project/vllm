@@ -66,7 +66,7 @@ EXCLUDE = [
 ]
 
 
-def group_files(changed_files: list[str]) -> tuple[list[str], list[list[str]]]:
+def group_files(changed_files: list[str]) -> dict[str, list[str]]:
     """
     Group changed files into different mypy calls.
 
@@ -97,7 +97,7 @@ def group_files(changed_files: list[str]) -> tuple[list[str], list[list[str]]]:
 
 
 def mypy(targets: list[str], python_version: Optional[str],
-         follow_imports: Optional[str], file_group: str) -> bool:
+         follow_imports: Optional[str], file_group: str) -> int:
     """
     Run mypy on the given targets.
     
