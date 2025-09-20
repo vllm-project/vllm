@@ -647,7 +647,8 @@ class VllmConfig:
             "the VLLM_ALL2ALL_BACKEND environment variable to "\
             "deepep_low_latency and install the DeepEP kerenls."
 
-        mm_config = self.model_config.multimodal_config
+        mm_config = (self.model_config.multimodal_config
+                     if self.model_config else None)
         if mm_config and mm_config.mm_processing_device != "cpu":
             api_process_count = self.parallel_config._api_process_count
             api_process_rank = self.parallel_config._api_process_rank
