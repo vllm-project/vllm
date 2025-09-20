@@ -4,9 +4,9 @@
 
 import os
 from collections import defaultdict, deque
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from typing import Any, Callable, NewType, Optional, Union
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Callable, NewType, Optional, Union, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -816,11 +816,11 @@ def get_num_blocks(vllm_config: VllmConfig, num_layers: int,
     return num_blocks
 
 
-def get_uniform_page_size(kv_cache_spec: dict[str, KVCacheSpec]) -> int:
+def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
     """
     Get the page size of the KV cache.
     """
-    page_sizes = set(layer.page_size_bytes for layer in kv_cache_spec.values())
+    page_sizes = set(layer.page_size_bytes for layer in kv_cache_specs)
     assert len(page_sizes) == 1
     return page_sizes.pop()
 
@@ -842,19 +842,42 @@ def _get_kv_cache_groups_uniform_type(
                                        [list(kv_cache_specs.keys())])
 
 
-def is_kv_cache_page_size_uniform(
-        kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+def unify_kv_cache_spec_page_size(
+        kv_cache_spec: dict[str, KVCacheSpec]) -> dict[str, KVCacheSpec]:
     """
-    Whether all layers in the given KVCacheSpec have the same page size.
+    Unify the page size of the given KVCacheSpec. If the page size of all layers
+    are the same, return the original KVCacheSpec. If not same, unify the page
+    size by increasing the block size of layers with smaller page size. Raise 
+    NotImplementedError if failed to unify the page size.
+
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
 
     Returns:
-        True if all layers have the same page size, False otherwise.
+        The updated KVCacheSpec with the same page_size_bytes.
     """
-
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
-    return len(page_sizes) == 1
+    if len(page_sizes) <= 1:
+        # All layers have the same page size, no need to unify.
+        return kv_cache_spec
+
+    max_page_size = max(page_sizes)
+    new_kv_cache_spec = {}
+    for layer_name, layer_spec in kv_cache_spec.items():
+        if layer_spec.page_size_bytes == max_page_size:
+            new_kv_cache_spec[layer_name] = layer_spec
+        else:
+            layer_page_size = layer_spec.page_size_bytes
+            if max_page_size % layer_page_size != 0:
+                raise NotImplementedError(
+                    "The page size of the layer is not divisible by the "
+                    "maximum page size. Cannot unify by adjusting block_size.")
+            ratio = max_page_size // layer_page_size
+            new_block_size = layer_spec.block_size * ratio
+            new_spec = replace(layer_spec, block_size=new_block_size)
+            assert new_spec.page_size_bytes == max_page_size
+            new_kv_cache_spec[layer_name] = new_spec
+    return new_kv_cache_spec
 
 
 def is_kv_cache_type_attention_free(
@@ -976,7 +999,6 @@ def _get_kv_cache_groups_uniform_page_size(
 
 def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
                                     kv_cache_groups: list[KVCacheGroupSpec],
-                                    kv_cache_specs: dict[str, KVCacheSpec],
                                     available_memory: int) -> KVCacheConfig:
     """
     Generate the KV cache configuration from the KV cache groups and spec
@@ -985,7 +1007,6 @@ def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
     Args:
         vllm_config: The global VllmConfig
         kv_cache_groups: The KV cache groups
-        kv_cache_specs: The KV cache spec of each attention layer in the model
         available_memory: Memory available for KV cache in bytes
     Returns:
         The generated KVCacheConfig
@@ -1009,7 +1030,8 @@ def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
     # full.1, sw.2: share another Tensor with size=available_memory//2
     group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
-    page_size = get_uniform_page_size(kv_cache_specs)
+    page_size = get_uniform_page_size(
+        [group.kv_cache_spec for group in kv_cache_groups])
     assert group_size > 0, "group_size must be greater than 0"
     num_blocks = get_num_blocks(vllm_config, group_size, available_memory,
                                 page_size)
@@ -1122,19 +1144,21 @@ def get_kv_cache_groups(
         # This returns an empty list to allow for the KVCacheManager to handle
         # attention free models.
         return []
-    elif is_kv_cache_type_uniform(kv_cache_spec):
+
+    if is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
         # each layer.
         return _get_kv_cache_groups_uniform_type(kv_cache_spec)
-    elif is_kv_cache_page_size_uniform(kv_cache_spec):
-        # Model contains multiple attention types, but KV cache of all layers
-        # have the same physical memory per block per layer. Split the layers
-        # into groups with the same number of layers, and thus same total page
-        # size.
-        return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
 
-    raise NotImplementedError
+    # As KVCacheManager can only allocate memory of one size, we need to unify
+    # thepage size of the layers.
+    kv_cache_spec = unify_kv_cache_spec_page_size(kv_cache_spec)
+    # Model contains multiple attention types, but KV cache of all layers
+    # have the same physical memory per block per layer. Split the layers
+    # into groups with the same number of layers, and thus same total page
+    # size.
+    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
 
 
 def get_kv_cache_configs(vllm_config: VllmConfig,
@@ -1206,7 +1230,6 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(vllm_config,
                                             kv_cache_groups_one_worker,
-                                            kv_cache_spec_one_worker,
                                             available_memory_one_worker))
 
     # Change the num_blocks of each rank to the smallest among all ranks. We
@@ -1216,5 +1239,58 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
                          for kv_cache_config in kv_cache_configs)
     for kv_cache_config in kv_cache_configs:
         kv_cache_config.num_blocks = min_num_blocks
+    # TODO: remove this print
+    print("kv_cache_configs", kv_cache_configs[0])
 
     return kv_cache_configs
+
+
+class BlockHashListWithBlockSize:
+    """
+    Convert the block hashes under hash_block_size to another target_block_size.
+    Only support scaling up the block size by an integer factor now. Implemented
+    by concatenating the block hashes under hash_block_size to form that of 
+    target_block_size.
+    """
+
+    def __init__(self, block_hashes: list[BlockHash], hash_block_size: int,
+                 target_block_size: int):
+        self.block_hashes = block_hashes
+        assert target_block_size % hash_block_size == 0
+        self.scale_factor = target_block_size // hash_block_size
+
+    def __len__(self) -> int:
+        return len(self.block_hashes) // self.scale_factor
+
+    @overload
+    def __getitem__(self, idx: int) -> BlockHash:
+        ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> list[BlockHash]:
+        ...
+
+    def __getitem__(self, idx):
+        if isinstance(idx, int):
+            return self._get_value_at(idx)
+
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(len(self))
+            return [self._get_value_at(i) for i in range(start, stop, step)]
+
+        raise TypeError(f"Invalid index type: {type(idx)!r}")
+
+    def __iter__(self) -> Iterator[BlockHash]:
+        for i in range(len(self)):
+            yield self._get_value_at(i)
+
+    def _get_value_at(self, idx: int) -> BlockHash:
+        base = idx * self.scale_factor
+        end = base + self.scale_factor
+        merged_hash: bytes = self.block_hashes[base]
+        for i in range(base + 1, end):
+            merged_hash += self.block_hashes[i]
+        return BlockHash(merged_hash)
+
+
+BlockHashList = Union[list[BlockHash], BlockHashListWithBlockSize]

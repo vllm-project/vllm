@@ -6,7 +6,7 @@ from collections import defaultdict
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         CrossAttentionSpec, FullAttentionSpec,
                                         KVCacheSpec, MambaSpec,
@@ -193,13 +193,14 @@ class SingleTypeKVCacheManager(ABC):
     @abstractmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        alignment: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than 
@@ -217,7 +218,9 @@ class SingleTypeKVCacheManager(ABC):
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
             use_eagle: Whether to use eagle.
-
+            alignment: The returned cache hit length should be a multiple of 
+            this length.
+            
         Returns:
             A list of cached blocks with skipped blocks replaced by null block
             for each kv cache group in `kv_cache_group_ids`.
@@ -251,13 +254,14 @@ class FullAttentionManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        alignment: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
             kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
@@ -280,6 +284,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         if use_eagle and computed_blocks[0]:
+            for computed in computed_blocks:
+                computed.pop()
+        while len(computed_blocks[0]) * block_size % alignment != 0:
             for computed in computed_blocks:
                 computed.pop()
         return computed_blocks
@@ -312,13 +319,14 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        alignment: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups")
@@ -343,6 +351,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks = tuple([block_pool.null_block] * max_num_blocks
                                 for _ in range(len(kv_cache_group_ids)))
+        block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
         match_found = False
         # Search from right to left and early stop when a match is found.
@@ -351,6 +360,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                     block_hashes[i], kv_cache_group_ids):
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed[i] = cached
+                if (num_contiguous_blocks == 0
+                        and (i + 1) * block_size % alignment != 0):
+                    continue
                 num_contiguous_blocks += 1
                 if num_contiguous_blocks >= sliding_window_contiguous_blocks:
                     # Trim the trailing blocks.
@@ -367,7 +379,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
             for computed in computed_blocks:
                 del computed[num_contiguous_blocks:]
+            while len(computed_blocks[0]) * block_size % alignment != 0:
+                for computed in computed_blocks:
+                    computed.pop()
         if use_eagle and computed_blocks[0]:
+            assert kv_cache_spec.block_size % alignment == 0, \
+                "aligned_length is not compatible with eagle now"
             for computed in computed_blocks:
                 computed.pop()
         return computed_blocks
@@ -412,13 +429,14 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        alignment: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         For chunked local attention, we need to find the longest cache hit
@@ -457,6 +475,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         assert use_eagle is False, ("Hybrid KV cache is not supported for " +
                                     "eagle + chunked local attention.")
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
+        assert kv_cache_spec.block_size % alignment == 0, \
+            "alignment is not compatible with chunked local attention now"
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
             local_attention_start_idx = (max_length //
@@ -531,13 +551,14 @@ class MambaManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        alignment: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
             kv_cache_spec,
@@ -627,13 +648,14 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHash],
+        block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
         dcp_world_size: int = 1,
+        alignment: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
