@@ -88,11 +88,12 @@ __global__ void nvfp4_moe_reference_kernel(
     const uint8_t* __restrict__ a,          // [M, K/2] packed FP4
     const uint8_t* __restrict__ b,          // [E, N, K/2] packed FP4
     OutType* __restrict__ output,           // [M, N] output (templated type)
-    const float* __restrict__ a_scales,     // [M, K/16] block scales (E4M3 format)
-    const float* __restrict__ b_scales,     // [E, N, K/16] block scales (E4M3 format)
-    const float* __restrict__ alphas,       // [E] per-expert scaling
+    const uint8_t* __restrict__ a_scales,   // [sum_e padded_M_e, k_tiles*4] swizzled FP8-E4M3
+    const uint8_t* __restrict__ b_scales,   // [E, ...] swizzled FP8-E4M3 per expert
+    const float* __restrict__ alphas,       // [E] per-expert scaling (1 / global_scale)
     const int32_t* __restrict__ problem_sizes,
     const int32_t* __restrict__ expert_offsets,
+    const int32_t* __restrict__ sf_offsets, // [E+1] prefix sum of padded_M/128*128 rows
     int M, int N, int K, int num_experts) {
 
     int tid_x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -123,27 +124,42 @@ __global__ void nvfp4_moe_reference_kernel(
     
     // Process in blocks of 16 elements (8 packed FP4 pairs)
     for (int block_idx = 0; block_idx < k_blocks; block_idx++) {
-        // Get the scale factors for this block
         float a_scale = 1.0f;
         float b_scale = 1.0f;
-        
-        // Handle E4M3 scale factors if provided
+
         if (a_scales != nullptr) {
-            // a_scales layout: [M, K/16] in E4M3 format
-            // Note: These are already in swizzled format from the test
-            int a_scale_idx = tid_y * k_blocks + block_idx;
-            uint8_t a_scale_raw = reinterpret_cast<const uint8_t*>(a_scales)[a_scale_idx];
+            // Compute global row in scale buffer with expert padding (128 rows)
+            int local_row = tid_y - expert_offsets[expert_id];
+            int global_row = sf_offsets[expert_id] + local_row;
+            // Swizzled index mapping per tcgen05 B-layout 4x
+            int k_tiles = (K + 64 - 1) / 64;
+            int m_tile = global_row / 128;
+            int row128 = global_row % 128;
+            int d4a = row128 / 32;           // 0..3
+            int d32 = row128 % 32;           // 0..31
+            int k_tile = block_idx / 4;      // tile along K (64)
+            int d4b = block_idx % 4;         // block within tile (16)
+            long long a_scale_idx = (((((long long)m_tile * k_tiles + k_tile) * 32 + d32) * 4 + d4a) * 4 + d4b);
+            uint8_t a_scale_raw = a_scales[a_scale_idx];
             a_scale = dequantize_e4m3_scale(a_scale_raw);
-            // Guard against zero scales
             if (fabsf(a_scale) < 1e-6f) a_scale = 1.0f;
         }
-        
+
         if (b_scales != nullptr) {
-            // b_scales layout: [E, N, K/16] in E4M3 format 
-            int b_scale_idx = expert_id * N * k_blocks + tid_x * k_blocks + block_idx;
-            uint8_t b_scale_raw = reinterpret_cast<const uint8_t*>(b_scales)[b_scale_idx];
+            // Per-expert swizzled buffer: compute base offset per expert, then row/k mapping
+            int k_tiles = (K + 64 - 1) / 64;
+            int n_tiles = (N + 128 - 1) / 128;
+            long long per_expert = (long long)k_tiles * n_tiles * 512;  // 32*4*4 per tile * 128 rows
+            long long base = (long long)expert_id * per_expert;
+            int m_tile = tid_x / 128;
+            int row128 = tid_x % 128;
+            int d4a = row128 / 32;
+            int d32 = row128 % 32;
+            int k_tile = block_idx / 4;
+            int d4b = block_idx % 4;
+            long long b_scale_idx = base + (((((long long)m_tile * k_tiles + k_tile) * 32 + d32) * 4 + d4a) * 4 + d4b);
+            uint8_t b_scale_raw = b_scales[b_scale_idx];
             b_scale = dequantize_e4m3_scale(b_scale_raw);
-            // Guard against zero scales
             if (fabsf(b_scale) < 1e-6f) b_scale = 1.0f;
         }
 
@@ -156,10 +172,8 @@ __global__ void nvfp4_moe_reference_kernel(
             // Load packed FP4 values
             uint8_t a_packed = a[tid_y * k_packed + k];
             
-            // Column-major indexing for B matrix
-            uint8_t b_packed = b[expert_id * N * k_packed +  // Expert offset
-                                k * N +                       // K dimension (column-major)
-                                tid_x];                       // N dimension
+            // Contiguous memory indexing for B: [E, N, K/2]
+            uint8_t b_packed = b[((long long)expert_id * N + tid_x) * k_packed + k];
 
             // Dequantize using proper E2M1 format
             float a0 = dequantize_nvfp4_e2m1(a_packed & 0x0F);
@@ -179,7 +193,6 @@ __global__ void nvfp4_moe_reference_kernel(
         sum *= alphas[expert_id];
     }
 
-    // Store result with proper type conversion
     output[tid_y * N + tid_x] = static_cast<OutType>(sum);
 }
 
@@ -684,6 +697,9 @@ void cutlass_fp4_group_mm_sm120(
 
     printf("[nvfp4-sm120] TMA alignment check passed\n");
     fflush(stdout);
+    printf("[nvfp4-sm120] a_blockscale shape: [%ld, %ld]\n", (long)a_blockscale.size(0), (long)a_blockscale.size(1));
+    if (b_blockscales.dim()==3) printf("[nvfp4-sm120] b_blockscales shape: [%ld, %ld, %ld]\n", (long)b_blockscales.size(0), (long)b_blockscales.size(1), (long)b_blockscales.size(2));
+    fflush(stdout);
 
     printf("[nvfp4-sm120] Checking dimension requirements...\n");
     fflush(stdout);
@@ -835,27 +851,31 @@ void cutlass_fp4_group_mm_sm120(
     auto stream = at::cuda::getCurrentCUDAStream(a.device().index());
     
     // Launch templated kernel based on output type
+    const uint8_t* a_scales_ptr = reinterpret_cast<const uint8_t*>(a_blockscale.data_ptr());
+    const uint8_t* b_scales_ptr = reinterpret_cast<const uint8_t*>(b_blockscales.data_ptr());
     if (output.scalar_type() == torch::kBFloat16) {
         nvfp4_moe_reference_kernel<at::BFloat16><<<grid, block, 0, stream>>>(
             reinterpret_cast<const uint8_t*>(a.data_ptr()),
             reinterpret_cast<const uint8_t*>(b.data_ptr()),
             reinterpret_cast<at::BFloat16*>(output.data_ptr()),
-            nullptr,  // Temporarily disable scales to test basic functionality
-            nullptr,  // Temporarily disable scales to test basic functionality
+            a_scales_ptr,
+            b_scales_ptr,
             reinterpret_cast<const float*>(alphas.data_ptr()),
             reinterpret_cast<const int32_t*>(problem_sizes.data_ptr()),
             reinterpret_cast<const int32_t*>(expert_offsets.data_ptr()),
+            reinterpret_cast<const int32_t*>(sf_offsets.data_ptr()),
             M, N, K, num_experts);
     } else if (output.scalar_type() == torch::kHalf) {
         nvfp4_moe_reference_kernel<at::Half><<<grid, block, 0, stream>>>(
             reinterpret_cast<const uint8_t*>(a.data_ptr()),
             reinterpret_cast<const uint8_t*>(b.data_ptr()),
             reinterpret_cast<at::Half*>(output.data_ptr()),
-            nullptr,  // Temporarily disable scales to test basic functionality
-            nullptr,  // Temporarily disable scales to test basic functionality
+            a_scales_ptr,
+            b_scales_ptr,
             reinterpret_cast<const float*>(alphas.data_ptr()),
             reinterpret_cast<const int32_t*>(problem_sizes.data_ptr()),
             reinterpret_cast<const int32_t*>(expert_offsets.data_ptr()),
+            reinterpret_cast<const int32_t*>(sf_offsets.data_ptr()),
             M, N, K, num_experts);
     } else {
         // Default to float
@@ -863,11 +883,12 @@ void cutlass_fp4_group_mm_sm120(
             reinterpret_cast<const uint8_t*>(a.data_ptr()),
             reinterpret_cast<const uint8_t*>(b.data_ptr()),
             reinterpret_cast<float*>(output.data_ptr()),
-            nullptr,  // Temporarily disable scales to test basic functionality
-            nullptr,  // Temporarily disable scales to test basic functionality
+            a_scales_ptr,
+            b_scales_ptr,
             reinterpret_cast<const float*>(alphas.data_ptr()),
             reinterpret_cast<const int32_t*>(problem_sizes.data_ptr()),
             reinterpret_cast<const int32_t*>(expert_offsets.data_ptr()),
+            reinterpret_cast<const int32_t*>(sf_offsets.data_ptr()),
             M, N, K, num_experts);
     }
     
