@@ -1182,7 +1182,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def __del__(self):
-        if self.disabled:
+        if getattr(self, "disabled", True):
             return
         if flashinfer_comm is not None:
             flashinfer_comm.trtllm_destroy_ipc_workspace_for_all_reduce(
