@@ -329,6 +329,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
             global compilation_start_time
+
             compiled_graph_for_dynamic_shape = self.vllm_backend.\
                 compiler_manager.compile(
                 submod,
@@ -339,7 +340,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None)
             # Lazy import here to avoid circular import
-            from .cuda_graph import CUDAGraphOptions
             from .cuda_piecewise_backend import PiecewiseBackend
 
             piecewise_backend = PiecewiseBackend(
@@ -347,7 +347,13 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_dynamic_shape, self.vllm_backend)
 
-            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                    and
+                    not self.compilation_config.use_inductor_graph_partition):
+                # We're using Dynamo-based piecewise splitting, so we wrap
+                # the whole subgraph with a static graph wrapper.
+                from .cuda_graph import CUDAGraphOptions
+
                 # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
                 # class) as platform dependent.
                 static_graph_wrapper_class = resolve_obj_by_qualname(
