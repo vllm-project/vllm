@@ -39,6 +39,30 @@ class CutlassMLABackend(MLACommonBackend):
     def get_builder_cls() -> type["CutlassMLAMetadataBuilder"]:
         return CutlassMLAMetadataBuilder
 
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16", "e4m3fn"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return [128]
+
+    @classmethod
+    def is_v1(cls) -> bool:
+        return True
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 100
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 109
+
 
 class SM100Workspace:
 

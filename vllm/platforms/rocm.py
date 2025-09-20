@@ -11,10 +11,11 @@ from torch.distributed import PrefixStore, ProcessGroup
 from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -204,11 +205,9 @@ class RocmPlatform(Platform):
                     if use_v1:
                         logger.info_once(
                             "Using Triton MLA backend on V1 engine.")
-                        return ("vllm.v1.attention.backends.mla."
-                                "triton_mla.TritonMLABackend")
                     else:
                         logger.info("Using Triton MLA backend.")
-                        return "vllm.attention.backends.triton_mla.TritonMLABackend"  # noqa: E501
+                    return backend_to_class_str(_Backend.TRITON_MLA, use_v1)
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
@@ -218,10 +217,10 @@ class RocmPlatform(Platform):
                 if block_size == 1:
                     if use_v1:
                         logger.info("Using AITER MLA backend on V1 engine.")
-                        return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
                     else:
                         logger.info("Using AITER MLA backend")
-                        return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                    return backend_to_class_str(_Backend.ROCM_AITER_MLA,
+                                                use_v1)
                 else:
                     raise ValueError(
                         f" The selected backend, {selected_backend.name},"
@@ -239,12 +238,12 @@ class RocmPlatform(Platform):
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
                 and on_gfx9():
                 logger.info("Using Flash Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "rocm_aiter_fa.AiterFlashAttentionBackend")
+                return backend_to_class_str(_Backend.ROCM_AITER_FA,
+                                            envs.VLLM_USE_V1)
             else:
                 logger.info("Using Triton Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "triton_attn.TritonAttentionBackend")
+                return backend_to_class_str(_Backend.TRITON_ATTN_VLLM_V1,
+                                            envs.VLLM_USE_V1)
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.
@@ -252,7 +251,7 @@ class RocmPlatform(Platform):
         else:
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
         logger.info("Using ROCmFlashAttention backend.")
-        return "vllm.attention.backends.rocm_flash_attn.ROCmFlashAttentionBackend"  # noqa: E501
+        return backend_to_class_str(_Backend.ROCM_FLASH, envs.VLLM_USE_V1)
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:

@@ -285,6 +285,10 @@ class MLACommonBackend(AttentionBackend):
     def get_supported_head_sizes() -> List[int]:
         return [576]
 
+    @classmethod
+    def is_mla(cls) -> bool:
+        return True
+
 
 T = TypeVar("T", bound="MLACommonMetadata")
 

@@ -3,33 +3,19 @@
 
 import os
 from contextlib import contextmanager
-from dataclasses import dataclass
 from functools import cache
-from typing import Generator, Optional, Union
+from typing import Generator, Optional
 
 import torch
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.registry import _Backend, backend_name_to_enum
 from vllm.logger import init_logger
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import current_platform
 from vllm.utils import STR_BACKEND_ENV_VAR, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
-
-
-def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
-    """
-    Convert a string backend name to a _Backend enum value.
-
-    Returns:
-    * _Backend: enum value if backend_name is a valid in-tree type
-    * None: otherwise it's an invalid in-tree type or an out-of-tree platform is
-            loaded.
-    """
-    assert backend_name is not None
-    return _Backend[backend_name] if backend_name in _Backend.__members__ else \
-          None
 
 
 def get_env_variable_attn_backend() -> Optional[_Backend]:
@@ -78,63 +64,6 @@ def get_global_forced_attn_backend() -> Optional[_Backend]:
     or None if auto-selection is currently enabled.
     '''
     return forced_attn_backend
-
-
-@dataclass(frozen=True)
-class _IsSupported:
-    can_import: bool
-    head_size: bool
-    dtype: bool
-
-    def __bool__(self) -> bool:
-        return self.can_import and self.head_size and self.dtype
-
-
-def is_attn_backend_supported(
-    attn_backend: Union[str, type[AttentionBackend]],
-    head_size: int,
-    dtype: torch.dtype,
-    *,
-    allow_import_error: bool = True,
-) -> _IsSupported:
-    if isinstance(attn_backend, str):
-        try:
-            attn_backend = resolve_obj_by_qualname(attn_backend)
-        except ImportError:
-            if not allow_import_error:
-                raise
-
-            return _IsSupported(can_import=False, head_size=False, dtype=False)
-
-    assert isinstance(attn_backend, type)
-
-    # TODO: Update the interface once V0 is removed
-    if get_supported_head_sizes := getattr(attn_backend,
-                                           "get_supported_head_sizes", None):
-        is_head_size_supported = head_size in get_supported_head_sizes()
-    elif validate_head_size := getattr(attn_backend, "validate_head_size",
-                                       None):
-        try:
-            validate_head_size(head_size)
-            is_head_size_supported = True
-        except Exception:
-            is_head_size_supported = False
-    else:
-        raise NotImplementedError(f"{attn_backend.__name__} does not support "
-                                  "head size validation")
-
-    if get_supported_dtypes := getattr(attn_backend, "get_supported_dtypes",
-                                       None):
-        is_dtype_supported = dtype in get_supported_dtypes()
-    else:
-        raise NotImplementedError(f"{attn_backend.__name__} does not support "
-                                  "dtype validation")
-
-    return _IsSupported(
-        can_import=True,
-        head_size=is_head_size_supported,
-        dtype=is_dtype_supported,
-    )
 
 
 def get_attn_backend(

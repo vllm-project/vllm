@@ -134,26 +134,6 @@ def trtllm_prefill_attn_kvfp8_dequant(
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
-        return [64, 128, 256]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes.")
-
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_VLLM_V1"
@@ -200,6 +180,39 @@ class FlashInferBackend(AttentionBackend):
             return torch.float8_e5m2
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
+        return [64, 128, 256]
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3", "fp8_e5m2"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def is_v1(cls) -> bool:
+        return True
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return False
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 100
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 109
 
 
 @dataclass
@@ -270,7 +283,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.vllm_config.parallel_config)
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
-        FlashInferBackend.validate_head_size(self.head_dim)
         self.page_size = self.kv_cache_spec.block_size
 
         self.cache_dtype = self.cache_config.cache_dtype

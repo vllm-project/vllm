@@ -41,6 +41,22 @@ class FlashMLABackend(MLACommonBackend):
     def get_state_cls() -> Type["FlashMLAState"]:
         return FlashMLAState
 
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return [64]
+
+    @classmethod
+    def is_v1(cls) -> bool:
+        return False
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 90
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 99
+
 
 @dataclass
 class FlashMLAMetadata(MLACommonMetadata):

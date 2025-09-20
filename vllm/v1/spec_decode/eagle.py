@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
@@ -121,8 +122,8 @@ class EagleProposer:
         self.allowed_attn_types: tuple[type[EagleAttentionMetadata], ...]
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
-            # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
-            if find_spec("vllm.v1.attention.backends.rocm_aiter_fa"):
+            # ROCM_AITER_FA is an optional backend
+            if find_spec(backend_to_class_str(_Backend.ROCM_AITER_FA, True)):
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
                     AiterFlashAttentionMetadata)
                 rocm_types.append(AiterFlashAttentionMetadata)
