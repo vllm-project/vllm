@@ -6,7 +6,7 @@ import inspect
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from torch import nn
@@ -93,8 +93,53 @@ def initialize_model(
         return model_class(**kwargs)
 
 
+weight_attr_keys = [
+    'weight_loader',
+    'load_qkv_weight',
+    'load_row_parallel_weight',
+    'load_merged_column_weight',
+    'output_dim',
+    'input_dim',
+    '_assert_and_load',
+]
+
+
 def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                   target_device: torch.device) -> None:
+    if getattr(model, "process_weights_after_loading_already_called", False):
+        logger.debug(
+            'process_weights_after_loading already called for model %s', model)
+        return
+
+    # save the dytpe, shape and device for model parameter, used for
+    # restoring the model high precision parameters before
+    # reloading the weights
+    if not hasattr(model, "original_weights_rebuild_keys"):
+        model.original_weights_rebuild_keys = {}
+        for name, p in model.named_parameters():
+            model.original_weights_rebuild_keys[name] = {
+                "shape": p.shape,
+                "dtype": p.dtype,
+                "device": p.device,
+            }
+
+    # record the weight attributes (loader functions etc.)
+    # so these can be recovered later when we reload the weights
+    # structure: {"weight_name": {"weight_attr_key": attr}}
+    recorded_weight_attr: dict[str, dict[str, Any]] = {}
+    for name, param in model.named_parameters():
+        recorded_weight_attr[name] = {}
+        for key in weight_attr_keys:
+            if hasattr(param, key):
+                attr = getattr(param, key)
+                if not callable(attr):
+                    recorded_weight_attr[name][key] = attr
+                elif param is attr.__self__:
+                    recorded_weight_attr[name][key] = attr.__func__
+                else:
+                    recorded_weight_attr[name][key] = attr
+    model.recorded_weight_attr = recorded_weight_attr
+
     for _, module in model.named_modules():
         if isinstance(module, QKVCrossParallelLinear):
             # NOTE(Isotr0py): special case for cross QKV layer because
@@ -236,7 +281,7 @@ def get_architecture_class_name(model_config: ModelConfig) -> str:
 class ParamMapping:
     """
     A class to handle parameter mapping for model weight loading.
-    It creates a bidirectional mapping between packed parameters and their 
+    It creates a bidirectional mapping between packed parameters and their
     constituent parts.
     """
     packed_mapping: dict[str, list[str]]

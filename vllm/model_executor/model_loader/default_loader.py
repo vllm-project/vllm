@@ -4,6 +4,7 @@ import dataclasses
 import glob
 import os
 import time
+import types
 from collections.abc import Generator, Iterable
 from typing import Optional, cast
 
@@ -15,6 +16,8 @@ from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.utils import (
+    process_weights_after_loading)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     fastsafetensors_weights_iterator, filter_duplicate_safetensors_files,
@@ -25,6 +28,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def bond_method_to_cls(func, obj):
+    if hasattr(func, '__self__') or not callable(func):
+        # If the function is already bound to an instance, return it as is
+        return func
+    else:
+        return types.MethodType(func, obj)
 
 
 class DefaultModelLoader(BaseModelLoader):
@@ -262,8 +273,81 @@ class DefaultModelLoader(BaseModelLoader):
     def load_weights(self, model: nn.Module,
                      model_config: ModelConfig) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
-        loaded_weights = model.load_weights(
-            self.get_all_weights(model_config, model))
+        if model_config.quantization is None or not hasattr(
+                model, "original_weights_rebuild_keys"):
+            model.process_weights_after_loading_already_called = False
+            loaded_weights = model.load_weights(
+                self.get_all_weights(model_config, model))
+        else:
+            # TODO: use create_weights to restore the weights to original state
+
+            # the process for on the fly quantization is the following:
+            # initial:
+            #  C1. load bfloat16 weights (load_weights)
+            #  C2. quantize to fp8 (process_weights_after_loading)
+            # reload:
+            #  (model weight is in fp8)
+            #  R1. restore bfloat16 model weight
+            #  R2. restore the model weight to bfloat16
+            #  Run C1. and C2. again to reload and quantize weights
+
+            # first restore the weights to original state
+            existing_param_names = dict(
+                model.named_parameters(remove_duplicate=False)).keys()
+            named_modules = dict(model.named_modules(remove_duplicate=False))
+            model_device = None
+
+            # recover the parameter to the state before first loading
+            for name, d in model.original_weights_rebuild_keys.items():
+                _shape = d["shape"]
+                _dtype = d["dtype"]
+                _device = d["device"]
+                if model_device is not None:
+                    assert model_device == _device, "Expecting all weights " \
+                        "to be in the same device for now, got both: " \
+                        f"{model_device} and {_device}"
+                else:
+                    model_device = _device
+
+                if name in existing_param_names:
+                    module_name, weight_name = name.rsplit(".", 1)
+                    module = named_modules[module_name]
+                    setattr(
+                        module, weight_name,
+                        torch.nn.Parameter(
+                            torch.empty(_shape, dtype=_dtype, device=_device)))
+
+            # recorded_weight_attr is
+            # {"weight_name": {"weight_attr_key": attr}}
+            # e.g.
+            # {
+            #   {
+            #     "layer.0.weight": {
+            #       "weight_loader": weight_loader_function_object,
+            #       "input_dim": 0, ...
+            #     },
+            #     "layer.1.weight": ...,
+            #    }
+            # }
+            for full_weight_name, weight_attr_dict in \
+                    model.recorded_weight_attr.items():
+                for attr_name, attr in weight_attr_dict.items():
+                    module_name, weight_name = full_weight_name.rsplit(".", 1)
+                    module = named_modules[module_name]
+                    weight = getattr(module, weight_name)
+                    if not hasattr(weight, attr_name):
+                        setattr(weight, attr_name,
+                                bond_method_to_cls(attr, weight))
+
+            loaded_weights = model.load_weights(
+                self.get_all_weights(model_config, model))
+
+            # manually process weights after loading, including
+            # on the fly quantization
+            process_weights_after_loading(model, model_config, model_device)
+            model.process_weights_after_loading_already_called = True
+            # TODO: Add fp8 support
+
         self.counter_after_loading_weights = time.perf_counter()
         logger.info(
             "Loading weights took %.2f seconds",
