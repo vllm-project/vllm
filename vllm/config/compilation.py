@@ -603,7 +603,7 @@ class CompilationConfig:
                         "support cudagraph or set cudagraph_mode to NONE "
                         "explicitly if encountering any problems.")
                     self.cudagraph_mode = CUDAGraphMode.FULL
-             else:
+            else:
                 # NOTE: When using full cudagraph, instead of setting an empty
                 # list and capture the full cudagraph inside the flattened fx
                 # graph, we keep the piecewise fx graph structure but capture
