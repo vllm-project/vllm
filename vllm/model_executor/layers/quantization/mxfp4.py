@@ -87,6 +87,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.moe = moe
         self.use_marlin = self._should_use_marlin()
 
+        # NOTE: with `use_marlin`, we repack weights and create a
+        # new nn.Parameter object in `process_weights_after_loading`.
+        # To preserve any additional attributes passed during `create_weights`,
+        # we store them as a class attribute here.
+        self._extra_weight_attrs = {}
+
     def _should_use_marlin(self):
         if envs.VLLM_MXFP4_USE_MARLIN is not None:
             return envs.VLLM_MXFP4_USE_MARLIN
@@ -105,6 +111,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
         self.num_experts = num_experts
+        self._extra_weight_attrs = extra_weight_attrs
         weight_dtype = torch.uint8
         scale_dtype = torch.uint8
 
@@ -229,7 +236,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if self.use_marlin:
-            prepare_moe_fp4_layer_for_marlin(layer)
+            prepare_moe_fp4_layer_for_marlin(layer, self._extra_weight_attrs)
         elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
               or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
             layer.gemm1_alpha = Parameter(torch.tensor(

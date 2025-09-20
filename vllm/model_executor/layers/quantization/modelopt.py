@@ -969,6 +969,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.fused_experts: Optional[
             mk.FusedMoEModularKernel] = None  # type: ignore[assignment]
 
+        self._extra_weight_attrs = {}
+
     def maybe_make_prepare_finalize(
         self,
         moe: FusedMoEConfig,
@@ -1013,6 +1015,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                              " dynamic quantization is not supported.")
 
         layer.num_experts = num_experts
+        self._extra_weight_attrs = extra_weight_attrs
         layer.params_dtype = params_dtype
         layer.quant_config = self.quant_config
         weight_dtype = torch.uint8
@@ -1287,7 +1290,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                         requires_grad=False)
 
         if self.use_marlin:
-            prepare_moe_fp4_layer_for_marlin(layer)
+            prepare_moe_fp4_layer_for_marlin(layer, self._extra_weight_attrs)
             del layer.g1_alphas
             del layer.g2_alphas
             del layer.w13_input_scale_quant

@@ -192,7 +192,9 @@ def prepare_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
     return
 
 
-def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
+def prepare_moe_fp4_layer_for_marlin(
+        layer: torch.nn.Module,
+        extra_weight_attrs: Optional[dict] = None) -> None:
     logger.warning_once(
         "Your GPU does not have native support for FP4 computation but "
         "FP4 quantization is being used. Weight-only FP4 compression will "
@@ -237,6 +239,10 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
         weight = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
         weight = torch.nn.Parameter(weight, requires_grad=False)
 
+        if extra_weight_attrs:
+            for key, value in extra_weight_attrs.items():
+                setattr(weight, key, value)
+
         setattr(layer, name, weight)
 
     # WEIGHT SCALES
@@ -271,12 +277,19 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
 
         scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
         scales = torch.nn.Parameter(scales, requires_grad=False)
+
+        if extra_weight_attrs:
+            for key, value in extra_weight_attrs.items():
+                setattr(scales, key, value)
         setattr(layer, name + "_weight_scale", scales)
 
         if is_nvfp4:
             global_scale = nvfp4_marlin_process_global_scale(global_scale)
             global_scale = torch.nn.Parameter(global_scale,
                                               requires_grad=False)
+            if extra_weight_attrs:
+                for key, value in extra_weight_attrs.items():
+                    setattr(scales, key, value)
             setattr(layer, name + "_weight_scale_2", global_scale)
 
     # BIAS
@@ -294,6 +307,9 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
 
         bias = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
         bias = torch.nn.Parameter(bias, requires_grad=False)
+        if extra_weight_attrs:
+            for key, value in extra_weight_attrs.items():
+                setattr(bias, key, value)
         setattr(layer, name, bias)
 
 
