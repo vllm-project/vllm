@@ -466,7 +466,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: Optional[float] = None
     repetition_penalty: Optional[float] = None
     length_penalty: float = 1.0
-    stop_token_ids: Optional[list[int]] = []
+    stop_token_ids: Optional[list[Union[int, list[int]]]] = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
@@ -985,7 +985,7 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: Optional[float] = None
     repetition_penalty: Optional[float] = None
     length_penalty: float = 1.0
-    stop_token_ids: Optional[list[int]] = []
+    stop_token_ids: Optional[list[Union[int, list[int]]]] = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0

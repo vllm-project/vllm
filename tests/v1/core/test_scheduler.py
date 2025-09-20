@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, Union
 from unittest.mock import Mock
 
 import pytest
@@ -1293,7 +1293,7 @@ def create_requests_with_priority(
         num_tokens: int = 10,
         mm_positions: Optional[list[list[PlaceholderRange]]] = None,
         max_tokens: int = 16,
-        stop_token_ids: Optional[list[int]] = None,
+        stop_token_ids: Optional[list[Union[int, list[int]]]] = None,
         prompt_logprobs: Optional[int] = None,
         starting_idx: int = 0):
     """Create requests with specified priorities and arrival times."""
