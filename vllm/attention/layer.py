@@ -25,13 +25,15 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import GiB_bytes, direct_register_custom_op
+from vllm.utils import (GiB_bytes, direct_register_custom_op,
+                        is_torch_equal_or_newer)
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
-try:
+
+if is_torch_equal_or_newer("2.9.0.dev"):
     tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
-except AttributeError:
+else:
     tag_cudagraph_unsafe = ()  # type: ignore[assignment]
 
 
