@@ -11,6 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm.utils import random_uuid
 from vllm.v1.utils import CpuGpuBuffer
 
 
@@ -80,7 +81,7 @@ class InputBatch:
         device: torch.device,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
-        req_ids = [f"req_{i}" for i in range(num_reqs)]
+        req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         idx_mapping = torch.tensor(idx_mapping_np, device=device)
         num_scheduled_tokens = np.full(num_reqs,
