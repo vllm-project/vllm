@@ -5,8 +5,10 @@
 import os
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass
 from typing import Any, Callable, NewType, Optional, Union
+
+import torch
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -750,6 +752,24 @@ def create_kv_cache_group_specs(
     return kv_cache_groups
 
 
+def is_kv_cache_dtype_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+    """
+    Check if all layers use the same dtype for KV cache.
+    
+    Args:
+        kv_cache_spec: The kv cache spec of each attention layer in the model
+        
+    Returns:
+        True if all layers use the same dtype, False otherwise
+    """
+    dtypes = set()
+    for spec in kv_cache_spec.values():
+        dtype = getattr(spec, 'dtype', None)
+        dtypes.add(dtype)
+
+    return len(dtypes) <= 1
+
+
 def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     """
     Whether all layers in the given KVCacheSpec have the same KV cache spec.
@@ -1165,6 +1185,8 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
     Returns:
         The generated KVCacheConfigs for each worker.
     """
+    if len(kv_cache_specs) == 0:
+        return []
 
     # Check if the available memory is enough for each worker.
     for kv_cache_spec_one_worker, available_memory_one_worker in zip(
@@ -1184,29 +1206,45 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
                 assert merged_kv_cache_specs[layer_name] == layer_spec, (
                     "The KV cache specs for the same layer are different "
                     "across workers. This is not supported yet.")
-    global_kv_cache_groups = get_kv_cache_groups(vllm_config,
-                                                 merged_kv_cache_specs)
+
+    # Check for mixed-dtype scenario and adjust specs if needed
+    if not is_kv_cache_dtype_uniform(merged_kv_cache_specs):
+        # Mixed-dtype scenario - adjust block sizes for uniform page sizes
+        adjusted_merged_specs = _adjust_mixed_dtype_specs(
+            merged_kv_cache_specs)
+        global_kv_cache_groups = get_kv_cache_groups(vllm_config,
+                                                     adjusted_merged_specs)
+    else:
+        global_kv_cache_groups = get_kv_cache_groups(vllm_config,
+                                                     merged_kv_cache_specs)
 
     kv_cache_configs: list[KVCacheConfig] = []
     for kv_cache_spec_one_worker, available_memory_one_worker in zip(
             kv_cache_specs, available_memory):
+        # Apply same adjustments to individual worker specs if needed
+        if not is_kv_cache_dtype_uniform(merged_kv_cache_specs):
+            adjusted_worker_specs = _adjust_mixed_dtype_specs(
+                kv_cache_spec_one_worker)
+        else:
+            adjusted_worker_specs = kv_cache_spec_one_worker
+
         kv_cache_groups_one_worker: list[KVCacheGroupSpec] = []
         for group in global_kv_cache_groups:
             group_layer_names_one_worker = [
                 layer_name for layer_name in group.layer_names
-                if layer_name in kv_cache_spec_one_worker
+                if layer_name in adjusted_worker_specs
             ]
             kv_cache_groups_one_worker.append(
                 KVCacheGroupSpec(group_layer_names_one_worker,
                                  group.kv_cache_spec))
         assert sum(
             len(group.layer_names) for group in
-            kv_cache_groups_one_worker) == len(kv_cache_spec_one_worker), (
+            kv_cache_groups_one_worker) == len(adjusted_worker_specs), (
                 "Some layers are not assigned to any group.")
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(vllm_config,
                                             kv_cache_groups_one_worker,
-                                            kv_cache_spec_one_worker,
+                                            adjusted_worker_specs,
                                             available_memory_one_worker))
 
     # Change the num_blocks of each rank to the smallest among all ranks. We
@@ -1218,3 +1256,110 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
         kv_cache_config.num_blocks = min_num_blocks
 
     return kv_cache_configs
+
+
+def _adjust_mixed_dtype_specs(
+        kv_cache_spec: dict[str, KVCacheSpec]) -> dict[str, KVCacheSpec]:
+    """
+    Adjust block_size for mixed-dtype specs to achieve uniform page sizes.
+    """
+    # Calculate max kv_hidden_size (BF16 will be larger than FP8)
+    max_kv_hidden_size = 0
+    for spec in kv_cache_spec.values():
+        if isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+            dtype_size = 2 if spec.dtype == torch.bfloat16 else 1
+            kv_hidden_size = 2 * spec.num_kv_heads * spec.head_size * dtype_size
+            max_kv_hidden_size = max(max_kv_hidden_size, kv_hidden_size)
+
+    # Adjust block_size for FP8 layers to match BF16 page size
+    adjusted_kv_cache_spec: dict[str, KVCacheSpec] = {}
+    for layer_name, spec in kv_cache_spec.items():
+        if isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+            dtype_size = 2 if spec.dtype == torch.bfloat16 else 1
+            current_kv_hidden_size = (2 * spec.num_kv_heads * spec.head_size *
+                                      dtype_size)
+
+            # Calculate multiplier (will be 1 for BF16, >1 for FP8)
+            block_size_multiplier = max_kv_hidden_size // current_kv_hidden_size
+            adjusted_block_size = spec.block_size * block_size_multiplier
+
+            # Create adjusted spec with new block_size
+            adjusted_spec: KVCacheSpec
+            if isinstance(spec, FullAttentionSpec):
+                adjusted_spec = FullAttentionSpec(
+                    block_size=adjusted_block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    dtype=spec.dtype,
+                    use_mla=spec.use_mla,
+                    sliding_window=spec.sliding_window,
+                )
+            else:  # SlidingWindowSpec
+                adjusted_spec = SlidingWindowSpec(
+                    block_size=adjusted_block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    dtype=spec.dtype,
+                    use_mla=spec.use_mla,
+                    sliding_window=spec.sliding_window,
+                )
+
+            adjusted_kv_cache_spec[layer_name] = adjusted_spec
+        else:
+            raise NotImplementedError(
+                f"Mixed-dtype KV cache does not support spec type: {type(spec)}"
+            )
+
+    return adjusted_kv_cache_spec
+
+
+def _get_sortable_spec_key(kv_cache_spec):
+    """
+    Create a sortable key from a KVCacheSpec, handling torch dtypes properly.
+    """
+    spec_tuple = astuple(kv_cache_spec)
+    sortable_tuple = []
+
+    for item in spec_tuple:
+        if isinstance(item, torch.dtype):
+            # Convert torch dtype to string for sorting
+            sortable_tuple.append(str(item))
+        else:
+            sortable_tuple.append(item)
+
+    return tuple(sortable_tuple)
+
+
+def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
+    """
+    Make the KV cache configurations for each worker consistent, so that all
+    workers have the same KV cache configuration. This is necessary for the
+    centralized controller to work correctly.
+
+    Args:
+        kv_cache_configs: The KV cache configurations for each worker. Will be
+            in-place modified to make them consistent.
+    """
+    if len(kv_cache_configs) == 0:
+        return
+
+    # Sort the kv cache groups by their KV cache spec.
+    # This can avoid the inconsistency caused by the order of groups.
+    for kv_cache_config in kv_cache_configs:
+        kv_cache_config.kv_cache_groups.sort(
+            key=lambda x: (type(x.kv_cache_spec).__name__,
+                           _get_sortable_spec_key(x.kv_cache_spec)))
+
+    # Verify that the groups of each rank are the same.
+    for kv_cache_config in kv_cache_configs[1:]:
+        assert len(kv_cache_config.kv_cache_groups) == len(
+            kv_cache_configs[0].kv_cache_groups), (
+                "The number of KV cache groups is different across workers.")
+        for i, group in enumerate(kv_cache_config.kv_cache_groups):
+            assert group.kv_cache_spec == kv_cache_configs[0].kv_cache_groups[
+                i].kv_cache_spec, (
+                    "The KV cache specs are different across workers.")
+            assert len(group.layer_names) == len(
+                kv_cache_configs[0].kv_cache_groups[i].layer_names), (
+                    "The number of layers in each group is different "
+                    "across workers.")
