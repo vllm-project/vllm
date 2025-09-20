@@ -1183,7 +1183,7 @@ class AllReduceFusionPass(VllmInductorPass):
         self.end_and_log()
 
     def __del__(self):
-        if self.disabled:
+        if getattr(self, "disabled", True):
             return
         if flashinfer_comm is not None:
             flashinfer_comm.trtllm_destroy_ipc_workspace_for_all_reduce(

@@ -1450,9 +1450,11 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
             and isinstance(message["tool_calls"], list)
         ):
             for item in message["tool_calls"]:
-                item["function"]["arguments"] = json.loads(
-                    item["function"]["arguments"]
-                )
+                # if arguments is None or empty string, set to {}
+                if content := item["function"].get("arguments"):
+                    item["function"]["arguments"] = json.loads(content)
+                else:
+                    item["function"]["arguments"] = {}
 
 
 def parse_chat_messages(
