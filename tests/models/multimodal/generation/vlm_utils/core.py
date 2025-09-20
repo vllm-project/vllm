@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Core test implementation to be shared across modalities."""
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
@@ -31,7 +31,8 @@ def run_test(
     auto_cls: type[_BaseAutoModelClass],
     use_tokenizer_eos: bool,
     comparator: Callable[..., None],
-    get_stop_token_ids: Optional[Callable[[AnyTokenizer], list[int]]],
+    get_stop_token_ids: Optional[Callable[[AnyTokenizer],
+                                          list[Union[int, list[int]]]]],
     stop_str: Optional[list[str]],
     limit_mm_per_prompt: dict[str, int],
     vllm_runner_kwargs: Optional[dict[str, Any]],

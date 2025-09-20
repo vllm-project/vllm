@@ -29,8 +29,14 @@ INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 
 class IncrementalDetokenizer:
 
-    def __init__(self):
+    def __init__(
+        self,
+        multi_stop_token_ids: list[list[int]],
+        include_stop_str_in_output: bool,
+    ):
         self.token_ids: list[int] = []
+        self.multi_stop_token_ids = multi_stop_token_ids
+        self.include_stop_str_in_output = include_stop_str_in_output
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -39,10 +45,53 @@ class IncrementalDetokenizer:
     def update(self, new_token_ids: list[int],
                stop_terminated: bool) -> Optional[str]:
         self.token_ids.extend(new_token_ids)
-        return None
+
+        stop_string = None
+        if self.multi_stop_token_ids:
+            stop = self.check_stop_token_ids(new_token_ids)
+            if stop is not None:
+                # No need to truncate token_ids
+                stop_string = stop[0]
+
+        return stop_string
 
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         return ""
+
+    def check_stop_token_ids(
+            self, new_token_ids: list[int]) -> Optional[tuple[str, int]]:
+        stop_index = -1
+        for stop_token_group in self.multi_stop_token_ids:
+            st_len = len(stop_token_group)
+            ot_len = len(self.output_token_ids)
+            if st_len > ot_len:
+                continue
+
+            # Avoid searching beyond what's necessary
+            search_start_index = len(
+                self.output_token_ids) - len(new_token_ids) - st_len + 1
+
+            for i in range(search_start_index, ot_len):
+                # TODO(sarck): optimize sublist search further
+                if (self.output_token_ids[i] == stop_token_group[0]
+                        and self.output_token_ids[i:i + st_len]
+                        == stop_token_group):
+                    stop_index = i
+                    break
+
+            if stop_index == -1:
+                continue
+
+            if self.include_stop_str_in_output:
+                # Truncate to end of stop string.
+                stop_index += st_len
+                if stop_index >= ot_len:
+                    # No truncation required.
+                    return str(stop_token_group), -1
+
+            return str(stop_token_group), stop_index
+
+        return None
 
     @classmethod
     def from_new_request(
@@ -55,7 +104,10 @@ class IncrementalDetokenizer:
 
         if tokenizer is None:
             # No tokenizer => skipping detokenization.
-            return IncrementalDetokenizer()
+            return IncrementalDetokenizer(
+                request.sampling_params.multi_stop_token_ids,
+                request.sampling_params.include_stop_str_in_output,
+            )
 
         if USE_FAST_DETOKENIZER and isinstance(tokenizer,
                                                PreTrainedTokenizerFast):
@@ -69,11 +121,13 @@ class IncrementalDetokenizer:
 class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
     def __init__(self, request: EngineCoreRequest):
-        super().__init__()
-
         # Stop strings
         params = request.sampling_params
         assert params is not None
+        super().__init__(
+            params.multi_stop_token_ids,
+            params.include_stop_str_in_output,
+        )
         self.stop = stop = params.stop
         self.min_tokens = params.min_tokens
         self.include_stop_str_in_output = params.include_stop_str_in_output
@@ -88,6 +142,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # Generation data
         self.output_text = ""
+        self.output_text_lengths: list[int] = []
 
     def update(self, new_token_ids: list[int],
                stop_terminated: bool) -> Optional[str]:
@@ -117,6 +172,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
             self.output_text += self.decode_next(new_token_id)
+            self.output_text_lengths.append(len(self.output_text))
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
             if self.min_tokens and len(
                     self.output_token_ids) <= self.min_tokens:
@@ -125,9 +181,21 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         if skipped_stop_token_id is not None:
             # Cleanup after skipping detokenization.
             self.token_ids.append(skipped_stop_token_id)
+            self.output_text_lengths.append(len(self.output_text))
 
-        # 2) Evaluate stop strings.
         stop_string = None
+        # 2) Evaluate stop token ids
+        if self.multi_stop_token_ids:
+            stop = self.check_stop_token_ids(new_token_ids)
+            if stop is not None:
+                stop_string, truncate_to = stop
+                if not self.include_stop_str_in_output and truncate_to != -1:
+                    # only truncate output text
+                    new_output_len = (self.output_text_lengths[truncate_to - 1]
+                                      if truncate_to > 0 else 0)
+                    self.output_text = self.output_text[:new_output_len]
+
+        # 3) Evaluate stop strings.
         if self.stop and len(self.output_token_ids) > self.min_tokens:
             stop = StopChecker.check_stop_strings(
                 output_text=self.output_text,

@@ -125,7 +125,7 @@ class SamplingParams(
     stop: Optional[Union[str, list[str]]] = None
     """String(s) that stop the generation when they are generated. The returned
     output will not contain the stop strings."""
-    stop_token_ids: Optional[list[int]] = None
+    stop_token_ids: Optional[list[Union[int, list[int]]]] = None
     """Token IDs that stop the generation when they are generated. The returned
     output will contain the stop tokens unless the stop tokens are special
     tokens."""
@@ -210,7 +210,7 @@ class SamplingParams(
         min_p: float = 0.0,
         seed: Optional[int] = None,
         stop: Optional[Union[str, list[str]]] = None,
-        stop_token_ids: Optional[list[int]] = None,
+        stop_token_ids: Optional[list[Union[int, list[int]]]] = None,
         bad_words: Optional[list[str]] = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
@@ -331,8 +331,22 @@ class SamplingParams(
             self.min_p = 0.0
             self._verify_greedy_sampling()
 
+        self.single_stop_token_ids: list[int] = []
+        self.multi_stop_token_ids: list[list[int]] = []
+        for st_id in self.stop_token_ids:
+            if isinstance(st_id, int):
+                self.single_stop_token_ids.append(st_id)
+            else:
+                assert isinstance(st_id, list)
+                self.multi_stop_token_ids.append(st_id)
+
+        # flatten to update self._all_stop_token_ids
+        all_stop_token_ids = self.single_stop_token_ids + [
+            token for tokens in self.multi_stop_token_ids for token in tokens
+        ]
+
         # eos_token_id is added to this by the engine
-        self._all_stop_token_ids.update(self.stop_token_ids)
+        self._all_stop_token_ids.update(all_stop_token_ids)
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
@@ -402,9 +416,12 @@ class SamplingParams(
                 f"truncate_prompt_tokens must be an integer >= 1 or -1, "
                 f"got {self.truncate_prompt_tokens}")
         assert isinstance(self.stop_token_ids, list)
-        if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
-            raise ValueError(f"stop_token_ids must contain only integers, "
-                             f"got {self.stop_token_ids}.")
+        if (not all(
+                isinstance(st_id, int) or (isinstance(st_id, list) and all(
+                    isinstance(id, int) for id in st_id))
+                for st_id in self.stop_token_ids)):
+            raise ValueError(f"stop_token_ids must contain only int or "
+                             f"list[int], got {self.stop_token_ids}.")
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
@@ -444,8 +461,9 @@ class SamplingParams(
             if eos_ids:
                 self._all_stop_token_ids.update(eos_ids)
                 if not self.ignore_eos:
-                    eos_ids.update(self.stop_token_ids)
-                    self.stop_token_ids = list(eos_ids)
+                    # stop_token_ids is set to empty list in post_init
+                    assert self.stop_token_ids is not None
+                    self.stop_token_ids.extend(eos_ids)
 
     def update_from_tokenizer(self, tokenizer: AnyTokenizer) -> None:
         if not self.bad_words:

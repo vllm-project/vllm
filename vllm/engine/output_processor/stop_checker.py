@@ -68,7 +68,7 @@ class StopChecker:
         # Check if a stop token was encountered.
         # This assumes a single token produced per step.
         last_token_id = seq.get_last_token_id()
-        if last_token_id in (sampling_params.stop_token_ids or ()):
+        if last_token_id in (sampling_params.single_stop_token_ids or ()):
             if new_char_count and (
                     not sampling_params.include_stop_str_in_output):
                 # Remove last token

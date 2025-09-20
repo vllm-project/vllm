@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import pytest
 
@@ -15,8 +15,10 @@ def _test_stopping(llm: LLM,
                    expected_output: str,
                    expected_reason: Any,
                    stop: Optional[list[str]] = None,
-                   stop_token_ids: Optional[list[int]] = None,
-                   include_in_output: bool = False) -> None:
+                   stop_token_ids: Optional[list[Union[int,
+                                                       list[int]]]] = None,
+                   include_in_output: bool = False,
+                   detokenize: bool = True) -> None:
     output = llm.generate(
         "A story about vLLM:\n",
         SamplingParams(
@@ -25,10 +27,16 @@ def _test_stopping(llm: LLM,
             stop=stop,
             stop_token_ids=stop_token_ids,
             include_stop_str_in_output=include_in_output,
+            detokenize=detokenize,
         ))[0].outputs[0]
 
     assert output is not None
-    assert output.text == expected_output
+    if not detokenize:
+        # Detokenize manually
+        output_text = llm.get_tokenizer().decode(list(output.token_ids))
+    else:
+        output_text = output.text
+    assert output_text == expected_output
     assert output.stop_reason == expected_reason
 
 
@@ -97,6 +105,94 @@ def _stop_token_id(llm):
                    expected_reason=13013)
 
 
+def _stop_token_id_multi(llm):
+    # token id 13013 => " organization"
+    # token id 3273 => "short"
+    # token id 2318 => "group"
+    # token ids [2318, 310, 2305] => "group of people"
+
+    # single grouped stop token id
+    _test_stopping(llm,
+                   stop_token_ids=[[13013]],
+                   include_in_output=False,
+                   expected_output="VLLM is a 100% volunteer",
+                   expected_reason="[13013]")
+
+    _test_stopping(llm,
+                   stop_token_ids=[[13013]],
+                   include_in_output=True,
+                   expected_output="VLLM is a 100% volunteer organization",
+                   expected_reason="[13013]")
+
+    # mixed stop token ids
+    _test_stopping(
+        llm,
+        stop_token_ids=[[2318, 310, 2305], 3273],
+        include_in_output=False,
+        expected_output="VLLM is a 100% volunteer organization. We are a",
+        expected_reason="[2318, 310, 2305]")
+
+    _test_stopping(
+        llm,
+        stop_token_ids=[[2318, 310, 2305], 3273],
+        include_in_output=True,
+        expected_output=
+        "VLLM is a 100% volunteer organization. We are a group of people",
+        expected_reason="[2318, 310, 2305]")
+
+    # case where no detokenizer is used
+    _test_stopping(
+        llm,
+        stop_token_ids=[[2318, 310, 2305], 3273],
+        include_in_output=False,
+        detokenize=False,  # required to pass list[list[int]] to stop 
+        # include_in_output=False does not work as token ids are not truncated
+        expected_output=
+        "VLLM is a 100% volunteer organization. We are a group of people",
+        expected_reason="[2318, 310, 2305]")
+
+    _test_stopping(
+        llm,
+        stop_token_ids=[[2318, 310, 2305], 3273],
+        include_in_output=True,
+        detokenize=False,
+        expected_output=
+        "VLLM is a 100% volunteer organization. We are a group of people",
+        expected_reason="[2318, 310, 2305]")
+
+    # Case where single stop token id and grouped token ids overlap (2318)
+    _test_stopping(
+        llm,
+        stop_token_ids=[2318, [2318, 310, 2305]],
+        include_in_output=False,
+        expected_output="VLLM is a 100% volunteer organization. We are a",
+        expected_reason=2318)
+
+    _test_stopping(
+        llm,
+        stop_token_ids=[2318, [2318, 310, 2305]],
+        include_in_output=True,
+        expected_output="VLLM is a 100% volunteer organization. We are a group",
+        expected_reason=2318)
+
+    _test_stopping(
+        llm,
+        stop_token_ids=[2305, [2318, 310, 2305]],
+        include_in_output=True,
+        expected_output=
+        "VLLM is a 100% volunteer organization. We are a group of people",
+        expected_reason='[2318, 310, 2305]')
+
+    _test_stopping(
+        llm,
+        stop_token_ids=[2305, [2318, 310, 2305]],
+        detokenize=False,
+        include_in_output=True,
+        expected_output=
+        "VLLM is a 100% volunteer organization. We are a group of people",
+        expected_reason='[2318, 310, 2305]')
+
+
 @pytest.mark.skip_global_cleanup
 def test_stop_strings():
     # If V0, must set enforce_eager=False since we use
@@ -131,9 +227,8 @@ def test_stop_strings():
         _stop_partial_token(llm)
 
     if envs.VLLM_USE_V1:
-        # FIXME: this does not respect include_in_output=False
-        # _stop_token_id(llm)
-        pass
+        _stop_token_id(llm)
+        _stop_token_id_multi(llm)
     else:
         _set_async_mode(llm, True)
         _stop_token_id(llm)
