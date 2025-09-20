@@ -17,7 +17,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
-from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
+from vllm.utils.flashinfer import (flashinfer_scaled_fp4_mm, has_flashinfer,
+                                   register_flashinfer_kernel_autotune)
 
 logger = init_logger(__name__)
 
@@ -30,8 +31,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         if envs.VLLM_USE_TRTLLM_FP4_GEMM:
             assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
             self.backend = "flashinfer-trtllm"
+            register_flashinfer_kernel_autotune(
+                reason="CompressedTensors NVFP4 dense GEMM (TRT-LLM)")
         elif has_flashinfer():
             self.backend = "flashinfer-cutlass"
+            register_flashinfer_kernel_autotune(
+                reason="CompressedTensors NVFP4 dense GEMM (CUTLASS)")
         else:
             self.backend = "cutlass"
         self.group_size = 16
