@@ -235,9 +235,6 @@ class ExecutorBase(ABC):
         """Shutdown the executor."""
         self.collective_rpc("shutdown")
 
-    def __del__(self):
-        self.shutdown()
-
     async def execute_model_async(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
