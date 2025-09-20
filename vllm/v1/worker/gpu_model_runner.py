@@ -1479,7 +1479,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         Args:
             scheduler_output: The scheduler output containing scheduled encoder
-              inputs.
+                inputs.
 
         Returns:
             A tuple of (mm_kwargs, req_ids_pos) where:
