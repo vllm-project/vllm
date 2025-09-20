@@ -160,6 +160,7 @@ class ModelOptFp8Config(QuantizationConfig):
     def is_layer_excluded(self, prefix: str) -> bool:
         """
         Check if a layer should be excluded from quantization.
+        Handles both exact matching (for fused layers) and substring matching.
 
         This method handles both regular models and multimodal models that use
         the language_model prefix. For multimodal models, it checks if the
@@ -168,11 +169,18 @@ class ModelOptFp8Config(QuantizationConfig):
         if self.exclude_modules is None:
             return False
 
-        # Check if any excluded module matches the prefix
+        # First check exact matching with fused layer support
+        if is_layer_skipped(prefix, self.exclude_modules,
+                            self.packed_modules_mapping):
+            return True
+
+        # Then check substring matching for patterns not caught by exact match
         for module in self.exclude_modules:
-            if (module in prefix
-                    or (prefix.startswith("language_model.")
-                        and module in prefix.removeprefix("language_model."))):
+            # Skip exact matches already handled above
+            if (module != prefix and
+                (module in prefix or
+                 (prefix.startswith("language_model.")
+                  and module in prefix.removeprefix("language_model.")))):
                 return True
         return False
 
@@ -180,9 +188,10 @@ class ModelOptFp8Config(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
-            if (is_layer_skipped(prefix, self.exclude_modules,
-                                 self.packed_modules_mapping)
-                    or self.is_layer_excluded(prefix)):
+            if self.is_layer_excluded(prefix):
+                return UnquantizedLinearMethod()
+            # Check if this is a vision model layer that should not be quantized
+            if ("vision_tower" in prefix or "vision_model" in prefix):
                 return UnquantizedLinearMethod()
             return ModelOptFp8LinearMethod(self)
         elif isinstance(layer, Attention):
@@ -778,22 +787,34 @@ class ModelOptNvFp4Config(QuantizationConfig):
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
                    exclude_modules, group_size)
 
-    def is_layer_excluded(self, prefix: str,
-                          exclude_modules: list[str]) -> bool:
+    def is_layer_excluded(self, prefix: str) -> bool:
+        """
+        Check if a layer should be excluded from quantization.
+        Handles both exact matching (for fused layers) and pattern matching.
+        """
+        # First check exact matching with fused layer support
+        if is_layer_skipped(prefix, self.exclude_modules,
+                            self.packed_modules_mapping):
+            return True
+
+        # Check regex pattern matching for patterns not caught by exact match
         import regex as re
-        for pattern in exclude_modules:
-            regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
-            if re.fullmatch(regex_str, prefix):
-                return True
+        for pattern in self.exclude_modules:
+            # Skip patterns that would be caught by exact matching
+            if '*' in pattern or '.' in pattern:
+                regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
+                if re.fullmatch(regex_str, prefix):
+                    return True
         return False
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
-            if (is_layer_skipped(prefix, self.exclude_modules,
-                                 self.packed_modules_mapping)
-                    or self.is_layer_excluded(prefix, self.exclude_modules)):
+            if self.is_layer_excluded(prefix):
+                return UnquantizedLinearMethod()
+            # Check if this is a vision model layer that should not be quantized
+            if ("vision_tower" in prefix or "vision_model" in prefix):
                 return UnquantizedLinearMethod()
             return ModelOptNvFp4LinearMethod(self)
         elif isinstance(layer, Attention):

@@ -27,11 +27,11 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          EPLBConfig, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ModelImpl, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
-                         RunnerOption, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, StructuredOutputsConfig,
-                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs)
+                         ModelDType, ObservabilityConfig, ParallelConfig,
+                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
+                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                         StructuredOutputsConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.config.utils import get_field
@@ -335,6 +335,8 @@ class EngineArgs:
     enable_eplb: bool = ParallelConfig.enable_eplb
     expert_placement_strategy: ExpertPlacementStrategy = \
         ParallelConfig.expert_placement_strategy
+    _api_process_count: int = ParallelConfig._api_process_count
+    _api_process_rank: int = ParallelConfig._api_process_rank
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
@@ -550,7 +552,6 @@ class EngineArgs:
         model_group.add_argument("--max-logprobs",
                                  **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode",
-                                 choices=[f.value for f in LogprobsMode],
                                  **model_kwargs["logprobs_mode"])
         model_group.add_argument("--disable-sliding-window",
                                  **model_kwargs["disable_sliding_window"])
@@ -595,9 +596,7 @@ class EngineArgs:
                                  **model_kwargs["override_generation_config"])
         model_group.add_argument("--enable-sleep-mode",
                                  **model_kwargs["enable_sleep_mode"])
-        model_group.add_argument("--model-impl",
-                                 choices=[f.value for f in ModelImpl],
-                                 **model_kwargs["model_impl"])
+        model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument("--override-attention-dtype",
                                  **model_kwargs["override_attention_dtype"])
         model_group.add_argument("--logits-processors",
@@ -960,7 +959,10 @@ class EngineArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+        engine_args = cls(**{
+            attr: getattr(args, attr)
+            for attr in attrs if hasattr(args, attr)
+        })
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
@@ -1375,6 +1377,8 @@ class EngineArgs:
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
+            _api_process_count=self._api_process_count,
+            _api_process_rank=self._api_process_rank,
         )
 
         speculative_config = self.create_speculative_config(
@@ -1487,12 +1491,6 @@ class EngineArgs:
 
         #############################################################
         # Unsupported Feature Flags on V1.
-
-        if self.load_format == "sharded_state":
-            _raise_or_fallback(
-                feature_name=f"--load_format {self.load_format}",
-                recommend_to_remove=False)
-            return False
 
         if (self.logits_processor_pattern
                 != EngineArgs.logits_processor_pattern):

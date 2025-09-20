@@ -135,6 +135,7 @@ class AttentionGroup:
     # won't have to worry about conflicting with the other ubatches.
     metadata_builders: list[AttentionMetadataBuilder]
     layer_names: list[str]
+    kv_cache_spec: KVCacheSpec
 
     @staticmethod
     def create_with_metadata_builders(
@@ -150,7 +151,8 @@ class AttentionGroup:
                                       device)
             for _ in range(num_metadata_builders)
         ]
-        return AttentionGroup(backend, metadata_builders, layer_names)
+        return AttentionGroup(backend, metadata_builders, layer_names,
+                              kv_cache_spec)
 
     def get_metadata_builder(self,
                              ubatch_id: int = 0) -> AttentionMetadataBuilder:
@@ -220,7 +222,8 @@ def gather_mm_placeholders(
     """
     Reconstructs the embeddings from the placeholder tokens.
 
-    This is the operation of [scatter_mm_placeholders][].
+    This is the operation of [`scatter_mm_placeholders`]
+    [vllm.v1.worker.utils.scatter_mm_placeholders].
     """
     if is_embed is None:
         return placeholders
