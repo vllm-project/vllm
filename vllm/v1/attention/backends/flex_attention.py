@@ -754,6 +754,12 @@ class FlexAttentionImpl(AttentionImpl):
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
+                # TODO: Support skipping the computation of sliding window
+                # in direct block mask building code path.
+                logger.warning_once(
+                    "Using direct block mask building with sliding window, "
+                    "which is suboptimal now. Performance may be degraded."
+                )
                 # update mask mod in attention metadata
                 attn_metadata.mask_mod = attn_metadata.get_mask_mod()
                 attn_metadata.block_mask = (
