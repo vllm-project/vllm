@@ -78,3 +78,23 @@ Try it yourself with the following arguments:
 ```bash
 --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
 ```
+
+### CPU weight loading
+
+The `cpu_weight_loading.py` example demonstrates how to control where model weights are loaded from using the `pt_load_map_location` parameter. This is particularly useful for memory management and when working with PyTorch checkpoint files.
+
+Try it yourself:
+
+```bash
+python examples/offline_inference/basic/cpu_weight_loading.py
+```
+
+You can also use this parameter with other scripts that support argument parsing:
+
+```bash
+# Load weights from CPU (default behavior)
+python examples/offline_inference/basic/chat.py --pt-load-map-location cpu
+
+# Use custom device mapping (example syntax)
+python examples/offline_inference/basic/generate.py --pt-load-map-location '{"": "cpu"}'
+```
