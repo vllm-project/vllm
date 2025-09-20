@@ -1,6 +1,9 @@
 # Common dependencies
 -r common.txt
 tblib==3.1.0
+mteb>=1.38.11, <2
+bm25s==0.2.13
+pystemmer==3.0.0
 
 # entrypoints test
 # librosa==0.10.2.post1 # required by audio tests in entrypoints/openai
