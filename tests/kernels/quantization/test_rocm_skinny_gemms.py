@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
+
 import pytest
 import torch
-import math
 
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    rocm_per_tensor_w8a8_scaled_mm_impl)
 from vllm.platforms import current_platform
 
 DTYPES = [torch.bfloat16, torch.float16]
@@ -89,8 +88,8 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
     torch.manual_seed(seed)
     cu_count = current_platform.get_cu_count()
 
-    A = torch.rand(n, k, dtype=dtype, device="cuda")-.5
-    B = torch.rand(m, k, dtype=dtype, device="cuda")-.5
+    A = torch.rand(n, k, dtype=dtype, device="cuda") - .5
+    B = torch.rand(m, k, dtype=dtype, device="cuda") - .5
 
     ref_out = torch.matmul(A, B.t())
     out = ops.wvSplitK(B, A, cu_count)
@@ -107,10 +106,10 @@ def test_rocm_wvsplitk_bias1D_kernel(n, k, m, dtype, seed):
     torch.manual_seed(seed)
     cu_count = current_platform.get_cu_count()
 
-    xavier = math.sqrt(2/k) # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, dtype=dtype, device="cuda")-.5)*xavier
-    B = (torch.rand(m, k, dtype=dtype, device="cuda")-.5)*xavier
-    BIAS = torch.rand(m, dtype=dtype, device="cuda")-.5
+    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") - .5) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") - .5) * xavier
+    BIAS = torch.rand(m, dtype=dtype, device="cuda") - .5
 
     ref_out = torch.matmul(A, B.t()) + BIAS
     out = ops.wvSplitK(B, A, cu_count, BIAS)
@@ -127,15 +126,16 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
     torch.manual_seed(seed)
     cu_count = current_platform.get_cu_count()
 
-    xavier = math.sqrt(2/k) # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, dtype=dtype, device="cuda")-.5)*xavier
-    B = (torch.rand(m, k, dtype=dtype, device="cuda")-.5)*xavier
-    BIAS = torch.rand(n, m, dtype=dtype, device="cuda")-.5
+    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") - .5) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") - .5) * xavier
+    BIAS = torch.rand(n, m, dtype=dtype, device="cuda") - .5
 
     ref_out = torch.matmul(A, B.t()) + BIAS
     out = ops.wvSplitK(B, A, cu_count, BIAS)
 
     assert torch.allclose(out, ref_out, rtol=0.01)
+
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -146,8 +146,8 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
 def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed):
     torch.manual_seed(seed)
 
-    A = torch.rand(n, k, device="cuda")-0.5
-    B = torch.rand(m, k, device="cuda")-0.5
+    A = torch.rand(n, k, device="cuda") - 0.5
+    B = torch.rand(m, k, device="cuda") - 0.5
 
     A, scale_a = ref_dynamic_per_tensor_fp8_quant(A)
     B, scale_b = ref_dynamic_per_tensor_fp8_quant(B)
@@ -162,6 +162,7 @@ def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed):
 
     assert torch.allclose(out, ref_out, rtol=0.01)
 
+
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
@@ -171,23 +172,21 @@ def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed):
 def test_rocm_wvsplitk_fp8_bias1D_kernel(n, k, m, dtype, seed):
     torch.manual_seed(seed)
 
-    xavier = math.sqrt(2/k) # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, device="cuda")-.5)*xavier
-    B = (torch.rand(m, k, device="cuda")-.5)*xavier
-    BIAS = (torch.rand(m, dtype=dtype, device="cuda")-.5)
+    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
+    A = (torch.rand(n, k, device="cuda") - .5) * xavier
+    B = (torch.rand(m, k, device="cuda") - .5) * xavier
+    BIAS = (torch.rand(m, dtype=dtype, device="cuda") - .5)
 
     A, scale_a = ref_dynamic_per_tensor_fp8_quant(A)
     B, scale_b = ref_dynamic_per_tensor_fp8_quant(B)
 
-    ref_out = torch._scaled_mm(A,
-                               B.t(),
-                               out_dtype=dtype,
-                               scale_a=scale_a,
-                               scale_b=scale_b) + BIAS
+    ref_out = torch._scaled_mm(
+        A, B.t(), out_dtype=dtype, scale_a=scale_a, scale_b=scale_b) + BIAS
     out = ops.wvSplitKQ(B, A, dtype, scale_a, scale_b,
                         current_platform.get_cu_count(), BIAS)
 
     assert torch.allclose(out, ref_out, rtol=0.01)
+
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -198,25 +197,17 @@ def test_rocm_wvsplitk_fp8_bias1D_kernel(n, k, m, dtype, seed):
 def test_rocm_wvsplitk_fp8_bias2D_kernel(n, k, m, dtype, seed):
     torch.manual_seed(seed)
 
-    xavier = math.sqrt(2/k) # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, device="cuda")-.5)*xavier
-    B = (torch.rand(m, k, device="cuda")-.5)*xavier
-    BIAS = torch.rand(n, m, dtype=dtype, device="cuda")-.5
+    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
+    A = (torch.rand(n, k, device="cuda") - .5) * xavier
+    B = (torch.rand(m, k, device="cuda") - .5) * xavier
+    BIAS = torch.rand(n, m, dtype=dtype, device="cuda") - .5
 
     A, scale_a = ref_dynamic_per_tensor_fp8_quant(A)
     B, scale_b = ref_dynamic_per_tensor_fp8_quant(B)
 
-    bias = torch.rand(1, m, dtype=dtype, device="cuda") if use_bias else None
-
-    output = rocm_per_tensor_w8a8_scaled_mm_impl(A, B.t(), dtype, scale_a,
-                                                 scale_b, bias)
-    ref_out = torch._scaled_mm(A,
-                               B.t(),
-                               out_dtype=dtype,
-                               scale_a=scale_a,
-                               scale_b=scale_b) + BIAS
+    ref_out = torch._scaled_mm(
+        A, B.t(), out_dtype=dtype, scale_a=scale_a, scale_b=scale_b) + BIAS
     out = ops.wvSplitKQ(B, A, dtype, scale_a, scale_b,
                         current_platform.get_cu_count(), BIAS)
 
     assert torch.allclose(out, ref_out, rtol=0.01)
-
