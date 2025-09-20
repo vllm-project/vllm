@@ -8,6 +8,9 @@ import sys
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
 
+# Default port for NIXL side channel communication
+_DEFAULT_NIXL_SIDE_CHANNEL_PORT = 5600
+
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: Optional[int] = None
@@ -149,7 +152,7 @@ if TYPE_CHECKING:
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
-    VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
+    VLLM_NIXL_SIDE_CHANNEL_PORT: int = _DEFAULT_NIXL_SIDE_CHANNEL_PORT
     VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx",
                                   "deepep_high_throughput",
                                   "deepep_low_latency",
@@ -1121,7 +1124,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT":
-    lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
+    lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT",
+                          str(_DEFAULT_NIXL_SIDE_CHANNEL_PORT))),
 
     # all2all backend for vllm's expert parallel communication
     # Available options:
