@@ -77,6 +77,15 @@ class EngineCore:
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
+        security_config = vllm_config.model_config.security_config
+        if security_config and \
+           security_config.model_signature_verification_needed(
+                vllm_config.model_config.model):
+            raise Exception("Signature verification was requested for "
+                            f"{vllm_config.model_config.model} but was not "
+                            "done since a code path was taken that is not yet "
+                            "instrumented for signature verification.")
+
         self.log_stats = log_stats
 
         # Setup Model.
@@ -778,8 +787,11 @@ class EngineCoreProc(EngineCore):
                 output.result = UtilityResult(result)
             except BaseException as e:
                 logger.exception("Invocation of %s method failed", method_name)
+                message = str(e)
+                if e.__cause__:
+                    message += f" caused by {e.__cause__}"
                 output.failure_message = (f"Call to {method_name} method"
-                                          f" failed: {str(e)}")
+                                          f" failed: {message}")
             self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=output)))
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
