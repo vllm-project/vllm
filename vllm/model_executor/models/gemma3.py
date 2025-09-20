@@ -446,6 +446,22 @@ class Gemma3Model(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
+
+            # Check if this is a scale parameter that needs remapping first
+            if name.endswith(
+                (".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
+                # Try to remap the scale name first
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is not None and remapped_name in params_dict:
+                    # Successfully remapped, use the remapped name
+                    param = params_dict[remapped_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(remapped_name)
+                    continue
+                # If remapping failed, continue with normal processing
+
             for (param_name, shard_name, shard_id) in stacked_params_mapping:
                 if shard_name not in name:
                     continue
