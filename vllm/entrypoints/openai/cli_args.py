@@ -165,6 +165,10 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If set to True, enable prompt_tokens_details in usage."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
+    max_server_load: Optional[int] = None
+    """Maximum number of concurrent requests allowed. When exceeded, new
+    requests will be rejected with HTTP 503. Only effective when
+    --enable-server-load-tracking is enabled."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
     enable_tokenizer_info_endpoint: bool = False
@@ -276,6 +280,16 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires "
                         "--enable-log-requests")
+
+    # Validate max_server_load
+    if args.max_server_load is not None:
+        if not args.enable_server_load_tracking:
+            raise TypeError("Error: --max-server-load requires "
+                            "--enable-server-load-tracking to be enabled")
+        if not isinstance(args.max_server_load,
+                          int) or args.max_server_load <= 0:
+            raise TypeError(
+                "Error: --max-server-load must be a positive integer")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

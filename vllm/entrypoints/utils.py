@@ -8,6 +8,8 @@ import functools
 import os
 import subprocess
 import sys
+import time
+from http import HTTPStatus
 from typing import Any, Optional, Union
 
 from fastapi import Request
@@ -23,6 +25,16 @@ from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
+
+SERVER_OVERLOADED_RESPONSE = JSONResponse(
+    content={
+        "error": {
+            "type": "server_overloaded",
+            "message":
+            "Server is currently overloaded. Please try again later."
+        }
+    },
+    status_code=HTTPStatus.SERVICE_UNAVAILABLE)
 
 VLLM_SUBCMD_PARSER_EPILOG = (
     "Tip: Use `vllm [serve|run-batch|bench <bench_type>] "
@@ -98,6 +110,39 @@ def decrement_server_load(request: Request):
     request.app.state.server_load_metrics -= 1
 
 
+def _flush_pending_overload_warnings(app_state):
+    """Flush pending aggregated overload warnings if interval elapsed."""
+    now = time.monotonic()
+    pending = getattr(app_state, "server_overload_rejections_since_last_log",
+                      0)
+    if pending > 0:
+        last_log_time = getattr(app_state, "server_overload_last_log_time",
+                                now)
+        log_interval = getattr(app_state, "server_overload_log_interval", 60.0)
+        if (now - last_log_time) >= log_interval:
+            max_load_snapshot = getattr(app_state, "max_server_load", None)
+            try:
+                logger.warning(
+                    "Server overloaded: current load %s >= max load %s. "
+                    "Rejected %d requests since last log.",
+                    app_state.server_load_metrics, max_load_snapshot, pending)
+            except Exception:
+                logger.exception("Failed to log server overload warning")
+            else:
+                app_state.server_overload_rejections_since_last_log = 0
+                app_state.server_overload_last_log_time = now
+
+
+def _aggregate_rejection_stats(app_state):
+    """Aggregate rejections since last log."""
+    now = time.monotonic()
+    if not hasattr(app_state, "server_overload_last_log_time"):
+        app_state.server_overload_last_log_time = now
+    if not hasattr(app_state, "server_overload_rejections_since_last_log"):
+        app_state.server_overload_rejections_since_last_log = 0
+    app_state.server_overload_rejections_since_last_log += 1
+
+
 def load_aware_call(func):
 
     @functools.wraps(func)
@@ -109,19 +154,28 @@ def load_aware_call(func):
             raise ValueError(
                 "raw_request required when server load tracking is enabled")
 
-        if not getattr(raw_request.app.state, "enable_server_load_tracking",
-                       False):
+        app_state = raw_request.app.state
+        if not getattr(app_state, "enable_server_load_tracking", False):
             return await func(*args, **kwargs)
 
         # ensure the counter exists
-        if not hasattr(raw_request.app.state, "server_load_metrics"):
-            raw_request.app.state.server_load_metrics = 0
+        if not hasattr(app_state, "server_load_metrics"):
+            app_state.server_load_metrics = 0
 
-        raw_request.app.state.server_load_metrics += 1
+        # Flush pending aggregated overload warnings if interval elapsed.
+        _flush_pending_overload_warnings(app_state)
+
+        max_load = getattr(app_state, "max_server_load", None)
+        if max_load is not None and app_state.server_load_metrics >= max_load:
+            # Aggregate rejections since last log
+            _aggregate_rejection_stats(app_state)
+            return SERVER_OVERLOADED_RESPONSE
+
+        app_state.server_load_metrics += 1
         try:
             response = await func(*args, **kwargs)
         except Exception:
-            raw_request.app.state.server_load_metrics -= 1
+            app_state.server_load_metrics -= 1
             raise
 
         if isinstance(response, (JSONResponse, StreamingResponse)):
@@ -141,7 +195,7 @@ def load_aware_call(func):
                 tasks.add_task(decrement_server_load, raw_request)
                 response.background = tasks
         else:
-            raw_request.app.state.server_load_metrics -= 1
+            app_state.server_load_metrics -= 1
 
         return response
 
