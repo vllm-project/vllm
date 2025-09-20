@@ -220,6 +220,11 @@ class EngineCore:
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
+        # GPU DEVICE DEBUG: Log which actual GPU device/rank receives this request
+        import torch
+        gpu_device = torch.cuda.current_device() if torch.cuda.is_available() else -1
+        logger.info(f"GPU_DEVICE_DEBUG: Request {request.request_id} received on GPU device {gpu_device}, parallel_config.rank={getattr(self.vllm_config.parallel_config, 'rank', 'unknown')}")
+
         # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
