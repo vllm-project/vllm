@@ -29,6 +29,10 @@ from vllm.utils import GiB_bytes, direct_register_custom_op
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
+try:
+    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
+except AttributeError:
+    tag_cudagraph_unsafe = ()  # type: ignore[assignment]
 
 
 def check_xformers_availability():
@@ -577,7 +581,7 @@ direct_register_custom_op(
     mutates_args=[],
     fake_impl=unified_attention_fake,
     dispatch_key=current_platform.dispatch_key,
-    tags=(torch._C.Tag.cudagraph_unsafe, ),
+    tags=tag_cudagraph_unsafe,
 )
 
 
@@ -628,5 +632,5 @@ direct_register_custom_op(
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
-    tags=(torch._C.Tag.cudagraph_unsafe, ),
+    tags=tag_cudagraph_unsafe,
 )
