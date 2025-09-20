@@ -1070,7 +1070,7 @@ timm==1.0.17
     #   segmentation-models-pytorch
     #   terratorch
     #   torchgeo
-tokenizers==0.21.1
+tokenizers==0.22.0
     # via
     #   -r requirements/test.in
     #   transformers
@@ -1151,7 +1151,7 @@ tqdm==4.66.6
     #   transformers
 tqdm-multiprocess==0.0.11
     # via lm-eval
-transformers==4.55.2
+transformers==4.56.1
     # via
     #   -r requirements/test.in
     #   genai-perf
