@@ -675,3 +675,92 @@ direct_register_custom_op(
     fake_impl=unified_attention_with_output_fake,
     tags=tag_cudagraph_unsafe,
 )
+
+
+def unified_mla_attention(
+    q: torch.Tensor,
+    k_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    wait_for_kv_layer_from_connector(layer_name)
+
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    self = forward_context.no_compile_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    output = self.impl.forward(self, q, k_c_normed, k_pe, kv_cache,
+                               attn_metadata)
+
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    return output
+
+
+def unified_mla_attention_fake(
+    q: torch.Tensor,
+    k_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    return torch.empty_like(q).contiguous()
+
+
+direct_register_custom_op(
+    op_name="unified_mla_attention",
+    op_func=unified_mla_attention,
+    mutates_args=[],
+    fake_impl=unified_mla_attention_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+def unified_mla_attention_with_output(
+    q: torch.Tensor,
+    k_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
+) -> None:
+    wait_for_kv_layer_from_connector(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    self = forward_context.no_compile_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    self.impl.forward(self,
+                      q,
+                      k_c_normed,
+                      k_pe,
+                      kv_cache,
+                      attn_metadata,
+                      output=output,
+                      output_scale=output_scale,
+                      output_block_scale=output_block_scale)
+
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+
+
+def unified_mla_attention_with_output_fake(
+    q: torch.Tensor,
+    k_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="unified_mla_attention_with_output",
+    op_func=unified_mla_attention_with_output,
+    mutates_args=["output", "output_block_scale"],
+    fake_impl=unified_mla_attention_with_output_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
