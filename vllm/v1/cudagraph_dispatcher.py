@@ -5,7 +5,7 @@ from typing import Any, Optional, Union
 import torch
 
 import vllm.envs as envs
-from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.logger import init_logger
 from vllm.utils import round_up
@@ -54,11 +54,15 @@ class CudagraphDispatcher:
         self.uniform_cudagraph_capture_sizes: dict[int, list[int]] = {}
         self.uniform_query_lens: list[int] = []
 
-        assert not self.cudagraph_mode.requires_piecewise_compilation() or \
-            (self.compilation_config.level == CompilationLevel.PIECEWISE and
-             self.compilation_config.splitting_ops_contain_attention()), \
+        not_use_piecewise_compilation = (
+            not self.cudagraph_mode.requires_piecewise_compilation())
+
+        assert not_use_piecewise_compilation or \
+            self.compilation_config.is_attention_compiled_piecewise(), \
             "Compilation level should be CompilationLevel.PIECEWISE when "\
             "cudagraph_mode piecewise cudagraphs is used, "\
+            "and attention should be in splitting_ops or "\
+            "inductor splitting should be used. " \
             f"cudagraph_mode={self.cudagraph_mode}, "\
             f"compilation_level={self.compilation_config.level}, "\
             f"splitting_ops={self.compilation_config.splitting_ops}"

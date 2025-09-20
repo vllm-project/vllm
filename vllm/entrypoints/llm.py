@@ -15,8 +15,8 @@ import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
-from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
-                         is_init_field)
+from vllm.config import (CompilationConfig, ModelDType,
+                         StructuredOutputsConfig, TokenizerMode, is_init_field)
 from vllm.engine.arg_utils import (ConvertOption, EngineArgs, HfOverrides,
                                    PoolerConfig, RunnerOption)
 from vllm.engine.llm_engine import LLMEngine
@@ -151,9 +151,11 @@ class LLM:
             multi-modal processor obtained from `AutoProcessor.from_pretrained`.
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
-        override_pooler_config: Initialize non-default pooling config or
-            override default pooling config for the pooling model.
-            e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+        pooler_config: Initialize non-default pooling config for the pooling
+            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+        override_pooler_config: [DEPRECATED] Use `pooler_config` instead. This
+            argument is deprecated and will be removed in v0.12.0 or v1.0.0,
+            whichever is sooner.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -191,7 +193,10 @@ class LLM:
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        pooler_config: Optional[PoolerConfig] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
+        structured_outputs_config: Optional[Union[dict[
+            str, Any], StructuredOutputsConfig]] = None,
         kv_cache_memory_bytes: Optional[int] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
@@ -236,13 +241,29 @@ class LLM:
                 compilation_config_instance = CompilationConfig(
                     level=compilation_config)
             elif isinstance(compilation_config, dict):
-                predicate = lambda x: is_init_field(CompilationConfig, x[0])
                 compilation_config_instance = CompilationConfig(
-                    **dict(filter(predicate, compilation_config.items())))
+                    **{
+                        k: v
+                        for k, v in compilation_config.items()
+                        if is_init_field(CompilationConfig, k)
+                    })
             else:
                 compilation_config_instance = compilation_config
         else:
             compilation_config_instance = CompilationConfig()
+
+        if structured_outputs_config is not None:
+            if isinstance(structured_outputs_config, dict):
+                structured_outputs_instance = StructuredOutputsConfig(
+                    **{
+                        k: v
+                        for k, v in structured_outputs_config.items()
+                        if is_init_field(StructuredOutputsConfig, k)
+                    })
+            else:
+                structured_outputs_instance = structured_outputs_config
+        else:
+            structured_outputs_instance = StructuredOutputsConfig()
 
         engine_args = EngineArgs(
             model=model,
@@ -270,7 +291,9 @@ class LLM:
             hf_token=hf_token,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
+            pooler_config=pooler_config,
             override_pooler_config=override_pooler_config,
+            structured_outputs_config=structured_outputs_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
@@ -301,23 +324,17 @@ class LLM:
         self.io_processor = get_io_processor(self.llm_engine.vllm_config,
                                              io_processor_plugin)
 
-    def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return self.llm_engine.get_tokenizer_group().get_lora_tokenizer(
-            lora_request)
+    def get_tokenizer(self) -> AnyTokenizer:
+        return self.llm_engine.get_tokenizer()
 
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
-        tokenizer_group = self.llm_engine.get_tokenizer_group()
-
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
         # user-defined tokenizer started with 'Cached'
         if tokenizer.__class__.__name__.startswith("Cached"):
-            tokenizer_group.tokenizer = tokenizer
+            self.llm_engine.tokenizer = tokenizer
         else:
-            tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
+            self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:
@@ -505,9 +522,14 @@ class LLM:
         """
         Run a function directly on the model inside each worker,
         returning the result for each of them.
+
+        !!! warning
+            To reduce the overhead of data transfer, avoid returning large
+            arrays or tensors from this method. If you must return them,
+            make sure you move them to CPU first to avoid taking up additional
+            VRAM!
         """
-        executor = self.llm_engine.model_executor
-        return executor.apply_model(func)
+        return self.llm_engine.apply_model(func)
 
     def _get_beam_search_lora_requests(
         self,
@@ -707,7 +729,6 @@ class LLM:
         self,
         messages: Union[list[ChatCompletionMessageParam],
                         list[list[ChatCompletionMessageParam]]],
-        lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
@@ -739,7 +760,7 @@ class LLM:
                 cast(list[ChatCompletionMessageParam], messages)
             ]
 
-        tokenizer = self.get_tokenizer(lora_request)
+        tokenizer = self.get_tokenizer()
         model_config = self.llm_engine.get_model_config()
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
@@ -872,7 +893,6 @@ class LLM:
 
         prompts = self.preprocess_chat(
             messages=messages,
-            lora_request=lora_request,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
             add_generation_prompt=add_generation_prompt,
@@ -932,6 +952,10 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the `inputs` parameter.
         """
+
+        if self.supported_tasks == ["encode"] and pooling_task is None:
+            pooling_task = "encode"
+
         if pooling_task is None:
             if "embed" in self.supported_tasks:
                 pooling_task = "embed"
@@ -1519,7 +1543,7 @@ class LLM:
     ):
         """
         Validate that if any multi-modal data is skipped (i.e. None),
-        then its corresponding UUID must be set. 
+        then its corresponding UUID must be set.
         """
         if multi_modal_data is None:
             return
