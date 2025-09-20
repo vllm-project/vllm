@@ -50,8 +50,8 @@ ALLOWED_FILES = set([
     # cloudpickle
     'vllm/worker/worker_base.py',
     'vllm/executor/mp_distributed_executor.py',
-    'vllm/executor/ray_distributed_executor.py',
     'vllm/entrypoints/llm.py',
+    'vllm/v1/executor/ray_distributed_executor.py',
     'tests/utils.py',
     # pickle and cloudpickle
     'vllm/utils/__init__.py',
