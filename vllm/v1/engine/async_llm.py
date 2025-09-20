@@ -33,7 +33,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv,
-                        deprecate_kwargs)
+                        deprecate_kwargs, random_uuid)
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -727,6 +727,22 @@ class AsyncLLM(EngineClient):
                 engine_idxs=list(range(new_data_parallel_size)),
                 custom_stat_loggers=None,
             )
+
+    async def minimal_generation(self) -> str:
+        prompt = "Ping"
+        sampling_params = SamplingParams(temperature=0, max_tokens=2)
+        request_id = random_uuid()
+        result_text = ""
+        count = await self.engine_core.get_request_count()
+        num_running_reqs, num_waiting_reqs = count[0], count[1]
+        if num_running_reqs > 0 or num_waiting_reqs > 0:
+            return result_text
+        async for output in self.generate(prompt, sampling_params, request_id):
+            for completion in output.outputs:
+                result_text = completion.text
+            if output.finished:
+                break
+        return result_text
 
     @property
     def is_running(self) -> bool:

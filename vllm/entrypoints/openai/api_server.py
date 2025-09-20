@@ -345,6 +345,9 @@ async def health(raw_request: Request) -> Response:
     """Health check."""
     try:
         await engine_client(raw_request).check_health()
+        generate_str = raw_request.query_params.get("generate")
+        if generate_str == "true":
+            await engine_client(raw_request).minimal_generation()
         return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)
