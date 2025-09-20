@@ -3,6 +3,7 @@
 
 import ast
 import dataclasses
+import hashlib
 import os
 import pprint
 import time
@@ -20,6 +21,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
+from .caching import VllmSerializableFunction
 from .compiler_interface import (CompilerInterface, EagerAdaptor,
                                  InductorAdaptor, InductorStandaloneAdaptor)
 from .counter import compilation_counter
@@ -473,7 +475,11 @@ class VllmBackend:
                 self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
-    def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
+    def __call__(self, graph: fx.GraphModule,
+                 example_inputs) -> VllmSerializableFunction:
+
+        from .caching import (_compute_code_hash,
+                              compilation_config_hash_factors)
 
         vllm_config = self.vllm_config
         if not self.compilation_config.cache_dir:
@@ -482,37 +488,13 @@ class VllmBackend:
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
 
-            factors = []
-            # 0. factors come from the env, for example, The values of
-            # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-            env_hash = envs.compute_hash()
-            factors.append(env_hash)
-
-            # 1. factors come from the vllm_config (it mainly summarizes how the
-            #    model is created)
-            config_hash = vllm_config.compute_hash()
-            factors.append(config_hash)
-
+            factors = compilation_config_hash_factors(vllm_config)
             # 2. factors come from the code files that are traced by Dynamo (
             #    it mainly summarizes how the model is used in forward pass)
-            forward_code_files = list(
-                sorted(self.compilation_config.traced_files))
+            code_hash = _compute_code_hash(
+                self.compilation_config.traced_files)
             self.compilation_config.traced_files.clear()
-            logger.debug(
-                "Traced files (to be considered for compilation cache):\n%s",
-                "\n".join(forward_code_files))
-            hash_content = []
-            for filepath in forward_code_files:
-                hash_content.append(filepath)
-                if filepath == "<string>":
-                    # This means the function was dynamically generated, with
-                    # e.g. exec(). We can't actually check these.
-                    continue
-                with open(filepath) as f:
-                    hash_content.append(f.read())
-            import hashlib
-            code_hash = hashlib.md5("\n".join(hash_content).encode(),
-                                    usedforsecurity=False).hexdigest()
+
             factors.append(code_hash)
 
             # 3. compiler hash
@@ -605,7 +587,8 @@ class VllmBackend:
 
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE or \
             not self.compilation_config.cudagraph_copy_inputs:
-            return self.split_gm
+            return VllmSerializableFunction(graph, example_inputs, self.prefix,
+                                            self.split_gm)
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode
@@ -647,4 +630,5 @@ class VllmBackend:
                 list_args[index] = static_tensor
             return self.split_gm(*list_args)
 
-        return copy_and_call
+        return VllmSerializableFunction(graph, example_inputs, self.prefix,
+                                        copy_and_call)
