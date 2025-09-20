@@ -139,9 +139,9 @@ def _apply_gumbel_kernel(
         # Greedy sampling. Don't apply gumbel noise.
         return
 
-    seed = tl.load(seeds_ptr + req_idx)
-    pos = tl.load(pos_ptr + req_idx)
-    gumbel_seed = seed ^ (pos * 0x9E3779B9)
+    seed = tl.load(seeds_ptr + req_idx).to(tl.uint64)
+    pos = tl.load(pos_ptr + req_idx).to(tl.uint64)
+    gumbel_seed = seed ^ (pos * 0x9E3779B97F4A7C15)
 
     block_id = tl.program_id(1)
     r_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
