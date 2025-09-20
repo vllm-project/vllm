@@ -44,7 +44,7 @@ class InputBatch:
         # This buffer is not directly transferred to the GPU, so it does not
         # need to be pinned.
         self.token_ids_cpu_tensor = torch.zeros(
-            (max_num_reqs, max_model_len),
+            (max_num_reqs, max_model_len + 1),
             device="cpu",
             dtype=torch.int32,
             pin_memory=False,
