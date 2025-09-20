@@ -500,6 +500,8 @@ class SpeculativeConfig:
             disable_custom_all_reduce,
             ray_workers_use_nsight=target_parallel_config.
             ray_workers_use_nsight,
+            ray_workers_use_unitrace=target_parallel_config.
+            ray_workers_use_unitrace,
             placement_group=target_parallel_config.placement_group,
         )
 

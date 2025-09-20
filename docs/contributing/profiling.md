@@ -160,6 +160,78 @@ GUI example:
 
 <img width="1799" alt="Screenshot 2025-03-05 at 11 48 42 AM" src="https://github.com/user-attachments/assets/c7cff1ae-6d6f-477d-a342-bd13c4fc424c" />
 
+## Profile with Unitrace
+
+If you run your workload on Intel(R) GPUs, you need the unitrace tool for GPU profiling. The tool is open sourced. Please follow the [instructions](https://github.com/intel/pti-gpu/blob/master/tools/unitrace/README.md) to build and install the tool.
+
+#### Offline Inference
+
+For basic usage, you can just append `unitrace <options>`, for example, `unitrace --chrome-kernel-logging`, before any existing script you would run for offline inference.
+
+The following is an example using the `vllm bench latency` script:
+
+```bash
+unitrace --chrome-kernel-logging \
+vllm bench latency \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --num-iters-warmup 5 \
+    --num-iters 1 \
+    --batch-size 16 \
+    --input-len 512 \
+    --output-len 8
+```
+
+#### OpenAI Server
+
+To profile the server, you need to prepend your `vllm serve` command with `unitrace <options>` just like for offline inference. It is recommended that you use `--teardown-on-signal <signum> --session <session> --start-paused` options and run `unitrace --resume/pause/stop` command after the server is started to control when to pause/resume/stop profiling. After your execution of interest is profiled, you can use `kill <signum> <worker-process-pid>` to notify the tool to write profile data to files.
+
+```bash
+# server
+unitrace --chrome-kernel-logging \
+    --teardown-on-signal <signum> \
+    --session <session> \
+    --start-paused \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct
+```
+
+Right before the client is started, you can run
+
+```bash
+unitrace --resume <session>
+```
+to start profiling.
+
+```bash
+# client
+vllm bench serve \
+    --backend vllm \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --num-prompts 1 \
+    --dataset-name random \
+    --random-input 1024 \
+    --random-output 512
+```
+
+Before or after the client is completed, you may run
+
+```bash
+unitrace --pause <session>
+```
+
+to pause profiling
+
+and/or
+
+```bash
+unitrace --stop <session>
+```
+
+to stop profiling.
+
+After the profiling is stopped, you run the `kill <signum> <worker-process-pid>` command to notify unitrace to save profile data to files.
+
+More information including details on how to view the profile data is [here](https://github.com/intel/pti-gpu/blob/master/tools/unitrace/README.md)
+
 ## Profiling vLLM Python Code
 
 The Python standard library includes
