@@ -1813,11 +1813,16 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    input_tokens_per_turn: list[int] = []
+    cached_tokens_per_turn: list[int] = []
 
 
 class OutputTokensDetails(OpenAIBaseModel):
     reasoning_tokens: int = 0
     tool_output_tokens: int = 0
+    output_tokens_per_turn: list[int] = []
+    tool_output_tokens_per_turn: list[int] = []
+    tool_call_latency_ms_per_turn: list[int] = []
 
 
 class ResponseUsage(OpenAIBaseModel):
