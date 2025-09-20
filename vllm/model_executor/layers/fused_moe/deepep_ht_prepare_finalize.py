@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+    moe_kernel_quantize_input, restrict_dispatch_to_tp_leader)
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -190,6 +190,10 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> tuple[Callable, mk.ReceiverType]:
+
+        # Restrict dispatch to TP leader to avoid duplicate work.
+        a1, topk_ids, topk_weights = restrict_dispatch_to_tp_leader(
+            a1, topk_ids, topk_weights)
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 from math import log2
 from typing import Optional
 
@@ -261,17 +262,40 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_metadata: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        # FIXME (varun): We should be able to dispatch only from the leader
-        # DP ranks in the case of TP > 1. At the moment, all the Ranks
-        # end up sending their tokens. This needs to be fixed.
-        num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
-        max_num_tokens = a.size(
-            0) if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = (num_experts, max_num_tokens * num_dispatchers,
-                       max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
-        output = (num_experts, max_num_tokens * num_dispatchers, K)
+
+        # Tokens-per-expert capacity actually used by the backend for this
+        # call. For batched formats (DeepEP-LL / PPLX), aq has shape
+        #   (E, T_backend, K)
+        # Prefer using aq.size(1) to avoid under-allocation during dummy/profile
+        # runs or when multiple dispatchers/ranks contribute tokens.
+        T_backend = aq.size(1) if aq.dim() == 3 else 0
+
+        # Fallback capacity from configuration/observation.
+        num_dispatchers = self.num_dispatchers
+        observed_M = a.size(0)
+        if self.max_num_tokens is None:
+            T_cfg = observed_M * num_dispatchers
+        else:
+            # Guard with observed_M to avoid under-estimation when TP>1 or
+            # during profiling runs.
+            max_num_tokens = max(self.max_num_tokens, observed_M)
+            if observed_M > self.max_num_tokens:
+                with contextlib.suppress(Exception):
+                    logger.debug_once(
+                        "[MoE Debug] Increasing workspace max_num_tokens "
+                        "from configured=%d to observed=%d to avoid OOM. "
+                        "(num_dispatchers=%d, E=%d, N=%d, K=%d)",
+                        self.max_num_tokens, observed_M, num_dispatchers,
+                        num_experts, N, K)
+            T_cfg = max_num_tokens * num_dispatchers
+
+        # Final capacity: honor backend's requested T if larger.
+        T_eff = max(T_backend, T_cfg)
+
+        workspace13 = (num_experts, T_eff, max(K, N))
+        workspace2 = (num_experts, T_eff, (N // 2))
+        output = (num_experts, T_eff, K)
         return (workspace13, workspace2, output, a.dtype)
 
     def apply(
@@ -305,6 +329,27 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
+
+        # Debug (one-time): total dispatched tokens received on this EP rank.
+        # Avoid triggering CUDA Graph sync by skipping during graph capture or
+        # torch.compile. This reads a small scalar once for observability.
+        if (not torch.cuda.is_current_stream_capturing()
+                and not torch.compiler.is_compiling()):
+            try:
+                total_tokens = int(expert_num_tokens.sum().item())
+                logger.debug_once(
+                    "[MoE Debug] EP rank received tokens: total=%d, E=%d, "
+                    "max_tokens_per_dispatcher=%d, num_dispatchers=%d",
+                    total_tokens, E, max_num_tokens, self.num_dispatchers)
+            except Exception as e:
+                # Log the failure without triggering CUDA graph sync.
+                # Only prints once to avoid log spam.
+                with contextlib.suppress(Exception):
+                    logger.debug_once(
+                        "[MoE Debug] Skipped token-count log due to %r "
+                        "(E=%d, shape=%s, device=%s)", e, E,
+                        tuple(expert_num_tokens.size()),
+                        expert_num_tokens.device)
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 

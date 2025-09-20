@@ -10,7 +10,8 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input, normalize_batched_scales_shape)
+    moe_kernel_quantize_input, normalize_batched_scales_shape,
+    restrict_dispatch_to_tp_leader)
 from vllm.v1.worker.ubatching import (dbo_current_ubatch_id, dbo_enabled,
                                       dbo_maybe_run_recv_hook)
 
@@ -147,6 +148,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * topk_weights.to(a1.dtype)
+
+        # Restrict dispatch to TP leader to avoid duplicate work.
+        a1, topk_ids, topk_weights = restrict_dispatch_to_tp_leader(
+            a1, topk_ids, topk_weights)
 
         # Dispatch
         expert_x, expert_num_tokens, handle, _, hook= \
