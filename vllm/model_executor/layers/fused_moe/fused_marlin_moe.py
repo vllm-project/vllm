@@ -161,6 +161,9 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     if activation == "silu":
         torch.ops._C.silu_and_mul(intermediate_cache2,
                                   intermediate_cache1.view(-1, 2 * N))
+    elif activation == "gelu":
+        torch.ops._C.gelu_and_mul(intermediate_cache2,
+                                  intermediate_cache1.view(-1, 2 * N))
     elif activation == "swigluoai":
         # alpha = 1.702, limit = 7.0
         torch.ops._C.swigluoai_and_mul(intermediate_cache2,
@@ -209,6 +212,8 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
 def fused_marlin_moe_fake(hidden_states: torch.Tensor,
                           w1: torch.Tensor,
                           w2: torch.Tensor,
+                          bias1: Optional[torch.Tensor],
+                          bias2: Optional[torch.Tensor],
                           w1_scale: torch.Tensor,
                           w2_scale: torch.Tensor,
                           gating_output: torch.Tensor,
@@ -217,9 +222,10 @@ def fused_marlin_moe_fake(hidden_states: torch.Tensor,
                           quant_type_id: int,
                           apply_router_weight_on_input: bool = False,
                           global_num_experts: int = -1,
+                          activation: Optional[str] = "silu",
+                          expert_map: Optional[torch.Tensor] = None,
                           global_scale1: Optional[torch.Tensor] = None,
                           global_scale2: Optional[torch.Tensor] = None,
-                          expert_map: Optional[torch.Tensor] = None,
                           g_idx1: Optional[torch.Tensor] = None,
                           g_idx2: Optional[torch.Tensor] = None,
                           sort_indices1: Optional[torch.Tensor] = None,

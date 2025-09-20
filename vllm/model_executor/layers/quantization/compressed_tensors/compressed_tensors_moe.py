@@ -373,7 +373,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         if enable_eplb:
             raise NotImplementedError("EPLB not supported for "
                                       "`CompressedTensorsW4A4MoeMethod` yet.")
-        assert activation == "silu", "Only SiLU activation is supported."
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -412,10 +411,14 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 quant_type_id=scalar_types.float4_e2m1f.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
+                activation=activation,
                 expert_map=expert_map,
                 workspace=layer.workspace)
 
-        elif self.fused_experts is not None:
+        assert activation == "silu", "Only SiLU activation is supported."
+
+        # FlashInfer fused experts path
+        if self.fused_experts is not None:
             assert is_valid_flashinfer_cutlass_fused_moe(
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
@@ -871,8 +874,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # cutlass fp8 or fused_experts but not marlin or rocm.
         #
         if self.use_marlin:
-            assert activation == "silu", (
-                f"{activation} not supported for Marlin MoE.")
             assert self.fused_experts is None
             return torch.ops.vllm.fused_marlin_moe(
                 x,
@@ -888,6 +889,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
+                activation=activation,
                 expert_map=expert_map,
                 workspace=layer.workspace)
 
@@ -1411,9 +1413,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 "EPLB not supported for "
                 "`CompressedTensorsWNA16MarlinMoEMethod` yet.")
 
-        assert activation == "silu", (
-            f"{activation} not supported for Marlin MoE.")
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -1442,6 +1441,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             quant_type_id=self.quant_type.id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
+            activation=activation,
             expert_map=expert_map,
             g_idx1=layer.w13_weight_g_idx,
             g_idx2=layer.w2_weight_g_idx,
