@@ -15,7 +15,12 @@ from ....conftest import (IMAGE_ASSETS, VIDEO_ASSETS, PromptImageInput,
                           PromptVideoInput, VllmRunner)
 from ...utils import check_logprobs_close
 
-pytest.skip("Skipping the test until V1 supports it", allow_module_level=True)
+
+@pytest.fixture(scope="function", autouse=True)
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
 
 models = ["Qwen/Qwen2-VL-2B-Instruct"]
 target_dtype = "half"
@@ -119,9 +124,8 @@ def batch_make_image_embeddings(
             image_grid_thw_on_device = image_grid_thw.to(visual.device,
                                                          dtype=torch.int64)
             return visual(pixel_values_on_device,
-                          grid_thw=image_grid_thw_on_device)
+                          grid_thw=image_grid_thw_on_device).cpu()
 
-    # V1 Test: this calls a V0 internal.
     image_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
@@ -203,7 +207,7 @@ def batch_make_video_embeddings(
             video_grid_thw_on_device = video_grid_thw.to(visual.device,
                                                          dtype=torch.int64)
             return visual(pixel_values_on_device,
-                          grid_thw=video_grid_thw_on_device)
+                          grid_thw=video_grid_thw_on_device).cpu()
 
     # V1 Test: this calls a V0 internal.
     video_embeds = torch.concat(llm.apply_model(get_image_embeds))
@@ -259,19 +263,20 @@ def run_embedding_input_test(
     processor = AutoProcessor.from_pretrained(model)
 
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     runner="generate",
-                     max_model_len=4000,
-                     max_num_seqs=3,
-                     dtype=dtype,
-                     limit_mm_per_prompt={
-                         "image": mm_limit,
-                         "video": mm_limit
-                     },
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend
-                     ) as vllm_model:
-
+    with vllm_runner(
+            model,
+            runner="generate",
+            max_model_len=4000,
+            max_num_seqs=3,
+            dtype=dtype,
+            limit_mm_per_prompt={
+                "image": mm_limit,
+                "video": mm_limit
+            },
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+            default_torch_num_threads=1,
+    ) as vllm_model:
         outputs_per_case_for_original_input = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
@@ -322,9 +327,8 @@ def run_embedding_input_test(
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
 def test_qwen2_vl_image_embeddings_input(vllm_runner, image_assets, model,
-                                         size_factors, dtype: str,
-                                         max_tokens: int,
-                                         num_logprobs: int) -> None:
+                                         size_factors, dtype, max_tokens,
+                                         num_logprobs, monkeypatch) -> None:
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_case: list[tuple[

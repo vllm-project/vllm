@@ -18,7 +18,6 @@ import torch.distributed
 import torch.nn as nn
 from tqdm.auto import tqdm
 
-import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
@@ -1099,10 +1098,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             backend = self.vllm_config.compilation_config.init_backend(
                 self.vllm_config)
             compilation_counter.dynamo_as_is_count += 1
-            self.model = torch.compile(
-                self.model,
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend)
+            self.model = torch.compile(self.model,
+                                       fullgraph=True,
+                                       backend=backend)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -1812,7 +1810,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         return [output]
 
-    def need_recv_kv(self, model_input, kv_caches) -> bool:
+    def need_recv_kv(self, model_input: ModelInputForGPUWithSamplingMetadata,
+                     kv_caches: List[torch.Tensor]) -> bool:
         """Check if we need to receive kv-cache from the other worker.
         We need to receive KV when
             1. current vLLM instance is KV cache consumer/decode vLLM instance
@@ -1827,6 +1826,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if self.vllm_config.kv_transfer_config is None:
             return False
 
+        if model_input.attn_metadata is None:
+            raise ValueError("model_input.attn_metadata cannot be None")
+
         prefill_meta = model_input.attn_metadata.prefill_metadata
 
         # check if the current run is profiling
@@ -1837,7 +1839,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         return self.vllm_config.kv_transfer_config.is_kv_consumer and (
             not is_profile_run) and is_prefill_run
 
-    def need_send_kv(self, model_input, kv_caches) -> bool:
+    def need_send_kv(self, model_input: ModelInputForGPUWithSamplingMetadata,
+                     kv_caches: List[torch.Tensor]) -> bool:
         """Check if we need to send kv-cache to the other worker.
         We need to send KV when
             1. current vLLM instance is KV cache producer/prefill vLLM instance
@@ -1851,6 +1854,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         if self.vllm_config.kv_transfer_config is None:
             return False
+
+        if model_input.attn_metadata is None:
+            raise ValueError("model_input.attn_metadata cannot be None")
 
         prefill_meta = model_input.attn_metadata.prefill_metadata
 

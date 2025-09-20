@@ -13,6 +13,12 @@ import torch
 from tests.quantization.utils import is_quant_method_supported
 
 
+@pytest.fixture(scope="function", autouse=True)
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
 @pytest.mark.skipif(not is_quant_method_supported("modelopt"),
                     reason="ModelOpt FP8 is not supported on this GPU type.")
 def test_modelopt_fp8_checkpoint_setup(vllm_runner):

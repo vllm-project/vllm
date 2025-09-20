@@ -57,10 +57,19 @@ def llama_3p2_1b_files():
 
 def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
     llm_sharded_writer = LLM(model=input_dir, **kwargs)
-
+    # Check which engine version is being used
+    is_v1_engine = hasattr(llm_sharded_writer.llm_engine, "engine_core")
     # Dump worker states to output directory
-    llm_sharded_writer.llm_engine.model_executor.save_sharded_state(
-        path=output_dir)
+    if is_v1_engine:
+        # For V1 engine, we need to use engine_core.save_sharded_state
+        print("Using V1 engine save path")
+        llm_sharded_writer.llm_engine.engine_core.save_sharded_state(
+            path=output_dir)
+    else:
+        # For V0 engine
+        print("Using V0 engine save path")
+        model_executor = llm_sharded_writer.llm_engine.model_executor
+        model_executor.save_sharded_state(path=output_dir)
 
     # Copy metadata files to output directory
     for file in os.listdir(input_dir):
@@ -98,7 +107,6 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
                         args=(input_dir, output_dir, weights_patterns),
                         kwargs=dict(
                             tensor_parallel_size=tp_size,
-                            distributed_executor_backend="mp",
                             gpu_memory_utilization=gpu_memory_utilization,
                             enforce_eager=True,
                         ))
@@ -110,7 +118,6 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
         p = ctx.Process(target=_run_generate,
                         args=(input_dir, queue),
                         kwargs=dict(
-                            distributed_executor_backend="mp",
                             enable_lora=enable_lora,
                             gpu_memory_utilization=gpu_memory_utilization,
                             tensor_parallel_size=tp_size,
@@ -131,7 +138,6 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
         p = ctx.Process(target=_run_generate,
                         args=(output_dir, queue),
                         kwargs=dict(
-                            distributed_executor_backend="mp",
                             enable_lora=enable_lora,
                             gpu_memory_utilization=gpu_memory_utilization,
                             tensor_parallel_size=tp_size,

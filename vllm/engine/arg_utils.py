@@ -1486,12 +1486,6 @@ class EngineArgs:
         #############################################################
         # Unsupported Feature Flags on V1.
 
-        if self.load_format == "sharded_state":
-            _raise_or_fallback(
-                feature_name=f"--load_format {self.load_format}",
-                recommend_to_remove=False)
-            return False
-
         if (self.logits_processor_pattern
                 != EngineArgs.logits_processor_pattern):
             _raise_or_fallback(feature_name="--logits-processor-pattern",
