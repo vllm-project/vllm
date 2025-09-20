@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from vllm import LLM
-from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
 from vllm.v1.engine.core import EngineCore as V1EngineCore
@@ -61,10 +60,6 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
                                   False))
 
     # Avoid calling model.forward()
-    def _initialize_kv_caches_v0(self) -> None:
-        self.cache_config.num_gpu_blocks = 0
-        self.cache_config.num_cpu_blocks = 0
-
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
         scheduler_kv_cache_config = get_kv_cache_configs(
@@ -76,12 +71,12 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
 
-    with (patch.object(V0LLMEngine, "_initialize_kv_caches",
-                       _initialize_kv_caches_v0),
-          patch.object(V1EngineCore, "_initialize_kv_caches",
+    with (patch.object(V1EngineCore, "_initialize_kv_caches",
                        _initialize_kv_caches_v1), monkeypatch.context() as m):
         if model_info.v0_only:
-            m.setenv("VLLM_USE_V1", "0")
+            # NOTE(woosuk): skip the test for V0-only models
+            return
+
         if model_arch in ("Phi4FlashForCausalLM", "MotifForCausalLM"):
             # Phi4FlashForCausalLM and MotifForCausalLM
             # only supports DIFFERENTIAL_FLASH_ATTN backend

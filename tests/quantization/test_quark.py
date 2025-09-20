@@ -42,14 +42,6 @@ except huggingface_hub.errors.RepositoryNotFoundError:
     HF_HUB_AMD_ORG_ACCESS = False
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
-
-
 @pytest.mark.parametrize('kv_cache_dtype', ['auto', 'fp8'])
 @pytest.mark.parametrize('tp', [1])
 def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
