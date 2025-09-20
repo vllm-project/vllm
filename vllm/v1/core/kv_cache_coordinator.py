@@ -138,27 +138,29 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.free(request_id)
 
-    def get_num_common_prefix_blocks(self, request_id: str,
-                                     num_running_requests: int) -> list[int]:
+    def get_num_common_prefix_blocks(
+            self, running_request_id: str, num_running_requests: int,
+            transfering_request_ids: list[str]) -> list[int]:
         """
         Get the number of common prefix blocks for all requests in the RUNNING
-        state for each kv cache group.
+        and TRANSFERING state for each kv cache group.
 
         Args:
-            request_id: The request ID.
+            running_request_id: The request ID of the running request.
             num_running_requests: The total number of requests in the RUNNING
                 state.
+            transfering_request_ids: List of request IDs in transfer state.
 
         Returns:
             list[int]: The number of common prefix blocks for all requests in
                 the RUNNING state for each kv cache group.
         """
-        num_blocks_per_group = [
-            manager.get_num_common_prefix_blocks(request_id,
-                                                 num_running_requests)
+        return [
+            manager.get_num_common_prefix_blocks(running_request_id,
+                                                 num_running_requests,
+                                                 transfering_request_ids)
             for manager in self.single_type_managers
         ]
-        return num_blocks_per_group
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
@@ -209,8 +211,9 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
                          dcp_world_size=dcp_world_size)
         self.num_single_type_manager = len(self.single_type_managers)
 
-    def get_num_common_prefix_blocks(self, request_id: str,
-                                     num_running_requests: int) -> list[int]:
+    def get_num_common_prefix_blocks(
+            self, running_request_id: str, num_running_requests: int,
+            transfering_request_ids: list[str]) -> list[int]:
         return [0] * self.num_single_type_manager
 
     def find_longest_cache_hit(
