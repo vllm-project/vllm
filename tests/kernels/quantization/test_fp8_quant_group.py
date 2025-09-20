@@ -68,8 +68,9 @@ def test_quantfp8_group_functionality(batch_size: int, hidden_dim: int,
 
 
 @pytest.mark.parametrize("seed", [42])
+@pytest.mark.parametrize("use_ue8m0", [True, False])
 @torch.inference_mode()
-def test_quantfp8_group_multidimensional(seed: int) -> None:
+def test_quantfp8_group_multidimensional(seed: int, use_ue8m0: bool) -> None:
     current_platform.seed_everything(seed)
 
     group_size = 64
@@ -82,7 +83,8 @@ def test_quantfp8_group_multidimensional(seed: int) -> None:
     group_shape = GroupShape(1, group_size)
     quant_op = QuantFP8(static=False,
                         group_shape=group_shape,
-                        column_major_scales=False)
+                        column_major_scales=False,
+                        use_ue8m0=use_ue8m0)
 
     x_quant, scales = quant_op.forward_native(x_3d.clone())
     assert x_quant.shape == x_3d.shape
@@ -91,7 +93,8 @@ def test_quantfp8_group_multidimensional(seed: int) -> None:
     # Test column_major_scales with multi-dim
     quant_op_col = QuantFP8(static=False,
                             group_shape=group_shape,
-                            column_major_scales=True)
+                            column_major_scales=True,
+                            use_ue8m0=use_ue8m0)
     _, scales_col = quant_op_col.forward_native(x_3d.clone())
     assert scales_col.shape == (batch1, hidden_dim // group_size, batch2)
 
