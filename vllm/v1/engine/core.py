@@ -29,6 +29,7 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
                         resolve_obj_by_qualname, set_process_title)
+from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
 from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_configs,
                                          get_request_block_hasher,
                                          init_none_hash)
@@ -535,6 +536,9 @@ class EngineCoreProc(EngineCore):
         # Reduces pause times of oldest generation collections.
         gc.collect()
         gc.freeze()
+
+        # If enable, attach GC debugger after static variable freeze.
+        maybe_attach_gc_debug_callback()
 
     @contextmanager
     def _perform_handshakes(

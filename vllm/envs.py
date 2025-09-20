@@ -188,6 +188,7 @@ if TYPE_CHECKING:
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+    VLLM_GC_DEBUG: str = ""
 
 
 def get_default_cache_root():
@@ -1330,6 +1331,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME":
     lambda: os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
                       "VLLM_OBJECT_STORAGE_SHM_BUFFER"),
+
+    # GC debug config
+    # - VLLM_GC_DEBUG=0: disable GC debugger
+    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+    # - VLLM_GC_DEBUG={\"top_objects\":5}: enable GC debugger with
+    #                                      top 5 collected objects
+    "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
 }
 
 # --8<-- [end:env-vars-definition]
