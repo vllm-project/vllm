@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 _config_home = envs.VLLM_CONFIG_ROOT
 _USAGE_STATS_JSON_PATH = os.path.join(_config_home, "usage_stats.json")
 _USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home, "do_not_track")
-_USAGE_STATS_ENABLED = None
+_USAGE_STATS_ENABLED = False
 _USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
 
 _GLOBAL_RUNTIME_DATA = dict[str, Union[str, int, bool]]()
@@ -51,7 +51,7 @@ def set_runtime_usage_data(key: str, value: Union[str, int, bool]) -> None:
     _GLOBAL_RUNTIME_DATA[key] = value
 
 
-def is_usage_stats_enabled():
+def is_usage_stats_enabled() -> bool:
     """Determine whether or not we can send usage stats to the server.
     The logic is as follows:
     - By default, it should be enabled.
@@ -63,7 +63,7 @@ def is_usage_stats_enabled():
         - $HOME/.config/vllm/do_not_track
     """
     global _USAGE_STATS_ENABLED
-    if _USAGE_STATS_ENABLED is None:
+    if not _USAGE_STATS_ENABLED:
         do_not_track = envs.VLLM_DO_NOT_TRACK
         no_usage_stats = envs.VLLM_NO_USAGE_STATS
         do_not_track_file = os.path.exists(_USAGE_STATS_DO_NOT_TRACK_PATH)
