@@ -322,8 +322,28 @@ class ModelConfig:
         factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
+
         # hf_config can control how the model looks!
-        factors.append(self.hf_config.to_json_string())
+        try:
+            hf_config_json = self.hf_config.to_json_string(use_diff=False)
+        except TypeError:
+            from transformers import PretrainedConfig
+
+            from vllm.utils.jsontree import json_map_leaves
+
+            # Handle nested HF configs with unserializable values gracefully
+            hf_config_json = json.dumps(
+                json_map_leaves(
+                    lambda v: v.to_dict()
+                    if isinstance(v, PretrainedConfig) else str(v),
+                    self.hf_config.to_dict(),
+                ),
+                indent=2,
+                sort_keys=True,
+            ) + "\n"
+
+        factors.append(hf_config_json)
+
         str_factors = str(factors)
         assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
