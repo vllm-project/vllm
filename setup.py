@@ -662,7 +662,7 @@ setup(
                   "mistral_common[audio]"],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         # FlashInfer should be updated together with the Dockerfile
-        "flashinfer": ["flashinfer-python==0.3.1"],
+        "flashinfer": ["flashinfer-python==0.4.0rc1"],
         # Optional deps for AMD FP4 quantization support
         "petit-kernel": ["petit-kernel"],
     },
