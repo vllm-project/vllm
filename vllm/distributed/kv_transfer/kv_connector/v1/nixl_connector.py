@@ -569,9 +569,10 @@ class NixlConnectorWorker:
 
     def __del__(self):
         """Cleanup background threads on destruction."""
-        self._handshake_initiation_executor.shutdown(wait=False)
-        if self._nixl_handshake_listener_t:
-            self._nixl_handshake_listener_t.join(timeout=0)
+        if executor := getattr(self, "_handshake_initiation_executor", None):
+            executor.shutdown(wait=False)
+        if listener_t := getattr(self, "_nixl_handshake_listener_t", None):
+            listener_t.join(timeout=0)
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
