@@ -1479,7 +1479,7 @@ class LLM:
 
     def _validate_and_add_requests(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
+        prompts: Union[PromptType, Sequence[PromptType], DataPrompt],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
         *,
@@ -1489,7 +1489,7 @@ class LLM:
     ) -> None:
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
-            prompts = [prompts]
+            prompts = [prompts]  # type: ignore[list-item]
 
         num_requests = len(prompts)
         if isinstance(params, Sequence) and len(params) != num_requests:
