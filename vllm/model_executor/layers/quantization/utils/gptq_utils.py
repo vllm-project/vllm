@@ -7,9 +7,9 @@ from typing import Optional, Union
 import regex as re
 import torch
 
-from vllm.config import QuantizationConfig
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod)
 

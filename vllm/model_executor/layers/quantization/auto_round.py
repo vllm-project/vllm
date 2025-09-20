@@ -9,9 +9,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import (QuantizationConfig,
+                                                     QuantizationMethods)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
