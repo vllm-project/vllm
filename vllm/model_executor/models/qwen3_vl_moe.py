@@ -122,9 +122,10 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
 
     def load_fused_expert_weights(self, name: str, params_dict: dict,
                                   loaded_weight: torch.Tensor, shard_id: str,
-                                  num_experts: int):
+                                  num_experts: int) -> bool:
         param = params_dict[name]
         weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+        loaded_local_expert = False
         for expert_id in range(num_experts):
             curr_expert_weight = loaded_weight[expert_id]
             success = weight_loader(param,
@@ -133,9 +134,10 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                                     shard_id,
                                     expert_id,
                                     return_success=True)
-            if not success:
-                return False
-        return True
+            if success:
+                loaded_local_expert = True
+
+        return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
