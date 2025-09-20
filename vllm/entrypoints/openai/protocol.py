@@ -26,11 +26,13 @@ from openai.types.responses import (
 from openai.types.responses import (
     ResponseCompletedEvent as OpenAIResponseCompletedEvent)
 from openai.types.responses import (ResponseContentPartAddedEvent,
-                                    ResponseContentPartDoneEvent,
-                                    ResponseCreatedEvent,
-                                    ResponseFunctionToolCall,
-                                    ResponseInProgressEvent,
-                                    ResponseInputItemParam, ResponseOutputItem,
+                                    ResponseContentPartDoneEvent)
+from openai.types.responses import (
+    ResponseCreatedEvent as OpenAIResponseCreatedEvent)
+from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import (
+    ResponseInProgressEvent as OpenAIResponseInProgressEvent)
+from openai.types.responses import (ResponseInputItemParam, ResponseOutputItem,
                                     ResponseOutputItemAddedEvent,
                                     ResponseOutputItemDoneEvent,
                                     ResponsePrompt, ResponseReasoningItem,
@@ -1970,6 +1972,14 @@ class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
 # TODO: move this to a separate file
 # Streaming Events
 class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseInProgressEvent(OpenAIResponseInProgressEvent):
     response: ResponsesResponse  # type: ignore[override]
 
 
