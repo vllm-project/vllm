@@ -13,12 +13,12 @@ from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast
 
 import torch
+import torch.nn as nn
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, ModelConfig, ObservabilityConfig,
+from vllm.config import (LoRAConfig, ModelConfig, ObservabilityConfig,
                          ParallelConfig, SchedulerConfig, VllmConfig)
-from vllm.config.lora import LoRAConfig
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
@@ -40,6 +40,7 @@ from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            Sequence, SequenceGroup, SequenceGroupBase,
@@ -48,14 +49,14 @@ from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizer_group import (
-    TokenizerGroup, init_tokenizer_from_configs)
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter, Device, resolve_obj_by_qualname, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.model_runner_base import InputProcessingError
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -185,7 +186,7 @@ class LLMEngine:
 
         return outputs_
 
-    tokenizer: Optional[TokenizerGroup]
+    tokenizer: Optional[AnyTokenizer]
 
     def __init__(
         self,
@@ -213,8 +214,7 @@ class LLMEngine:
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config  # noqa
         self.load_config = vllm_config.load_config
-        self.decoding_config = vllm_config.decoding_config or DecodingConfig(  # noqa
-        )
+        self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
 
@@ -232,18 +232,9 @@ class LLMEngine:
         if self.model_config.skip_tokenizer_init:
             self.tokenizer = None
             self.detokenizer = None
-            tokenizer_group = None
         else:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
-            tokenizer_group = self.get_tokenizer_group()
-
-        # Ensure that the function doesn't contain a reference to self,
-        # to avoid engine GC issues
-        def get_tokenizer_for_seq(sequence: Sequence) -> AnyTokenizer:
-            assert tokenizer_group, ("tokenizer_group cannot be None, "
-                                     "make sure skip_tokenizer_init is False")
-            return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
         self.seq_counter = Counter()
         self.generation_config_fields = (
@@ -372,6 +363,13 @@ class LLMEngine:
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
 
+        # Initialize reasoning parser if reasoning backend is set.
+        if self.structured_outputs_config.reasoning_parser and self.tokenizer:
+            reasoner_class = ReasoningParserManager.get_reasoning_parser(
+                self.structured_outputs_config.reasoning_parser)
+            self.reasoner: ReasoningParser = reasoner_class(
+                self.tokenizer.get_lora_tokenizer())
+
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
@@ -380,9 +378,12 @@ class LLMEngine:
                 self.detokenizer,
                 self.scheduler,
                 self.seq_counter,
-                get_tokenizer_for_seq,
-                stop_checker=StopChecker(self.scheduler_config.max_model_len,
-                                         get_tokenizer_for_seq),
+                stop_checker=StopChecker(
+                    self.scheduler_config.max_model_len,
+                    self.reasoner
+                    if self.structured_outputs_config.reasoning_parser
+                    and self.tokenizer else None,
+                ),
             ))
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
@@ -508,24 +509,15 @@ class LLMEngine:
         if model_executor := getattr(self, "model_executor", None):
             model_executor.shutdown()
 
-    def get_tokenizer_group(self) -> TokenizerGroup:
+    def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
 
         return self.tokenizer
 
-    def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
-
-    def _init_tokenizer(self) -> TokenizerGroup:
-        return init_tokenizer_from_configs(
-            model_config=self.model_config,
-            scheduler_config=self.scheduler_config,
-            lora_config=self.lora_config)
+    def _init_tokenizer(self) -> AnyTokenizer:
+        return init_tokenizer_from_configs(model_config=self.model_config)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -561,11 +553,11 @@ class LLMEngine:
             )
             return None
 
-        self._validate_model_inputs(processed_inputs, lora_request)
+        self._validate_model_inputs(processed_inputs)
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
-        eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
+        eos_token_id = self.input_preprocessor.get_eos_token_id()
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
@@ -679,15 +671,17 @@ class LLMEngine:
             arrival_time = time.time()
 
         if (isinstance(prompt, dict)
-                and prompt.get("prompt_embeds", None) is not None
-                and not prompt.get("prompt_token_ids", None)):
-            seq_len = prompt["prompt_embeds"].shape[0]
-            prompt["prompt_token_ids"] = [0] * seq_len
+                and prompt.get("prompt_embeds", None) is not None):
+            if not prompt.get("prompt_token_ids", None):
+                seq_len = prompt["prompt_embeds"].shape[0]
+                prompt["prompt_token_ids"] = [0] * seq_len
+            if params.prompt_logprobs is not None:
+                raise ValueError(
+                    "prompt_logprobs is not compatible with prompt embeds.")
 
         processed_inputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
-            lora_request=lora_request,
         )
 
         self._add_processed_request(
@@ -777,10 +771,6 @@ class LLMEngine:
     def get_parallel_config(self) -> ParallelConfig:
         """Gets the parallel configuration."""
         return self.parallel_config
-
-    def get_decoding_config(self) -> DecodingConfig:
-        """Gets the decoding configuration."""
-        return self.decoding_config
 
     def get_scheduler_config(self) -> SchedulerConfig:
         """Gets the scheduler configuration."""
@@ -1726,29 +1716,22 @@ class LLMEngine:
                     SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE,
                     metrics.model_execute_time)
 
-    def _validate_model_inputs(self, inputs: ProcessorInputs,
-                               lora_request: Optional[LoRARequest]):
+    def _validate_model_inputs(self, inputs: ProcessorInputs):
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
         if encoder_inputs is not None:
-            self._validate_model_input(encoder_inputs,
-                                       lora_request,
-                                       prompt_type="encoder")
+            self._validate_model_input(encoder_inputs, prompt_type="encoder")
 
-        self._validate_model_input(decoder_inputs,
-                                   lora_request,
-                                   prompt_type="decoder")
+        self._validate_model_input(decoder_inputs, prompt_type="decoder")
 
     def _validate_model_input(
         self,
         prompt_inputs: SingletonInputs,
-        lora_request: Optional[LoRARequest],
         *,
         prompt_type: Literal["encoder", "decoder"],
     ):
         model_config = self.model_config
-        tokenizer = (None if self.tokenizer is None else
-                     self.tokenizer.get_lora_tokenizer(lora_request))
+        tokenizer = self.tokenizer
 
         prompt_ids = prompt_inputs.get("prompt_token_ids", [])
         if not prompt_ids:
@@ -1776,7 +1759,7 @@ class LLMEngine:
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
                 if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper and Donut
+                    return  # Skip encoder length check for Whisper
 
             if model_config.is_multimodal_model:
                 suggestion = (
@@ -1809,7 +1792,7 @@ class LLMEngine:
         logits_processors = []
 
         if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
-            tokenizer = self.get_tokenizer(lora_request=lora_request)
+            tokenizer = self.get_tokenizer()
 
             processors = get_openai_logits_processors(
                 logit_bias=sampling_params.logit_bias,
@@ -1822,7 +1805,7 @@ class LLMEngine:
             sampling_params.allowed_token_ids = None
 
         if len(sampling_params.bad_words) > 0:
-            tokenizer = self.get_tokenizer(lora_request)
+            tokenizer = self.get_tokenizer()
             processors = get_bad_words_logits_processors(
                 bad_words=sampling_params.bad_words, tokenizer=tokenizer)
             logits_processors.extend(processors)
@@ -1836,12 +1819,15 @@ class LLMEngine:
         return sampling_params
 
     def collective_rpc(self,
-                       method: Union[str, Callable[..., _R]],
+                       method: Union[str, Callable[[WorkerBase], _R]],
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
+
+    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+        return self.collective_rpc("apply_model", args=(func, ))
 
 
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
