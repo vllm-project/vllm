@@ -1338,7 +1338,7 @@ template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitKQ_hf_sml_(const int K, const int Kp, const int M, const int Bx,
                       const int By, const fp8_t* B, const fp8_t* __restrict__ A,
-                      const fp8_t* __restrict__ BIAS, scalar_t* C,
+                      const scalar_t* __restrict__ BIAS, scalar_t* C,
                       const float* __restrict__ s_A,
                       const float* __restrict__ s_B, const int _WvPrGrp,
                       const int CuCount) {
@@ -1491,8 +1491,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           // TODO: Determine data type conversion of bias for fp8
-          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0] * sA *
-                                                 sB);  // + BIAS[(m+y)%Bx]);
+          scalar_t out = __float2s<scalar_t>(sum[n][y][0] * sA * sB);
+          C[m + y + n * M] = BIAS ? (out + BIAS[(m + y) % Bx + (n % By) * M]) : out;
         }
       }
     }
@@ -1506,7 +1506,7 @@ template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
 __global__ void wvSplitKQ_hf_sml_(const int K, const int Kp, const int M,
                                   const int Bx, const int By, const fp8_t* B,
                                   const fp8_t* __restrict__ A,
-                                  const fp8_t* __restrict__ BIAS, scalar_t* C,
+                                  const scalar_t* __restrict__ BIAS, scalar_t* C,
                                   const float* __restrict__ s_A,
                                   const float* __restrict__ s_B,
                                   const int _WvPrGrp, const int CuCount) {
@@ -1520,7 +1520,7 @@ template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     wvSplitKQ_hf_(const int K, const int Kp, const int M, const int Bx,
                   const int By, const fp8_t* B, const fp8_t* __restrict__ A,
-                  const fp8_t* __restrict__ BIAS, scalar_t* C,
+                  const scalar_t* __restrict__ BIAS, scalar_t* C,
                   const float* __restrict__ s_A, const float* __restrict__ s_B,
                   const int _WvPrGrp, const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE;
@@ -1668,9 +1668,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
-          // TODO: Determine data type conversion of bias for fp8
-          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0] * sA *
-                                                 sB);  // + BIAS[(m+y)%Bx]);
+          scalar_t out = __float2s<scalar_t>(sum[n][y][0] * sA * sB);
+          C[m + y + n * M] = BIAS ? (out + BIAS[(m + y) % Bx + (n % By) * M]) : out;
         }
       }
     }
@@ -1684,7 +1683,7 @@ template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
 __global__ void wvSplitKQ_hf_(const int K, const int Kp, const int M,
                               const int Bx, const int By, const fp8_t* B,
                               const fp8_t* __restrict__ A,
-                              const fp8_t* __restrict__ BIAS, scalar_t* C,
+                              const scalar_t* __restrict__ BIAS, scalar_t* C,
                               const float* __restrict__ s_A,
                               const float* __restrict__ s_B, const int _WvPrGrp,
                               const int CuCount) {
@@ -1750,7 +1749,7 @@ void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
       auto a_ptr = in_a.data_ptr<fp8_t>();
       auto b_ptr = in_b.data_ptr<fp8_t>();
       auto bias_ptr = (in_bias.has_value() && in_bias->numel() > 0)
-                          ? in_bias->data_ptr<fp8_t>()
+                          ? reinterpret_cast<fptype*>(in_bias->data_ptr())
                           : nullptr;
       switch (N_in) {
         case 1:
