@@ -64,7 +64,7 @@ repos:
     stages: [pre-commit] # Don't run in CI
     <<: &mypy_common
       language: python
-      types: [python, pyi]
+      types_or: [python, pyi]
       require_serial: true
       additional_dependencies: [mypy==1.11.1, regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
   - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
