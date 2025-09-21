@@ -4,7 +4,7 @@
 """
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.distributed
@@ -21,9 +21,6 @@ from vllm.logger import init_logger
 from vllm.utils import async_tensor_h2d
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache, sparse_attn_func)
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 logger = init_logger(__name__)
 
@@ -224,9 +221,8 @@ class DualChunkFlashAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
         super().prepare()
         self.orig_seq_lens: List[int] = []
 
-    def _add_seq_group(
-            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool, prefix_cache_hit: bool):
+    def _add_seq_group(self, inter_data, chunked_prefill_enabled: bool,
+                       prefix_cache_hit: bool):
         super()._add_seq_group(inter_data, chunked_prefill_enabled,
                                prefix_cache_hit)
         for prompt_len, seq_len in zip(inter_data.prompt_lens,
