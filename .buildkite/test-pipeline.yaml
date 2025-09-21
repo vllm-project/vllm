@@ -166,7 +166,6 @@ steps:
   - tests/v1/engine/test_engine_core_client.py
   commands:
   # test with torchrun tp=2 and external_dp=2
-  - VLLM_USE_V1=0 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   # test with torchrun tp=2 and pp=2
   - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
