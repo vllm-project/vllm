@@ -791,11 +791,13 @@ def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
     remainder = seq_len % tp_size
     if remainder != 0:
         pad_len = tp_size - remainder
-        x = nn.functional.pad(x, (0, 0, 0, pad_len))
+        y = nn.functional.pad(x, (0, 0, 0, pad_len))
+    else:
+        y = x
 
-    chunk = x.shape[0] // tp_size
+    chunk = y.shape[0] // tp_size
     start = tp_rank * chunk
-    return torch.narrow(x, 0, start, chunk)
+    return torch.narrow(y, 0, start, chunk)
 
 
 def sequence_parallel_chunk_impl_fake(x: torch.Tensor) -> torch.Tensor:

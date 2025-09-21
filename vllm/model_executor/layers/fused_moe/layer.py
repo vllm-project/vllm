@@ -1897,60 +1897,66 @@ class FusedMoE(CustomOp):
         else:
             shared_output = None
 
-        if do_naive_dispatch_combine:
-            hidden_states, router_logits = get_ep_group().dispatch(
-                hidden_states, router_logits)
+        ctx = get_forward_context()
+        with ctx.dp_metadata.sp_local_sizes(self.sp_size):
 
-        # Matrix multiply.
-        final_hidden_states = self.quant_method.apply(
-            layer=self,
-            x=hidden_states,
-            router_logits=router_logits,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
-            use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
-            expert_map=self.expert_map,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
-            e_score_correction_bias=self.e_score_correction_bias,
-            activation=self.activation,
-            apply_router_weight_on_input=self.apply_router_weight_on_input,
-            enable_eplb=self.enable_eplb,
-            expert_load_view=self.expert_load_view,
-            logical_to_physical_map=self.logical_to_physical_map,
-            logical_replica_count=self.logical_replica_count,
-        )
+            if do_naive_dispatch_combine:
+                hidden_states, router_logits = get_ep_group().dispatch(
+                    hidden_states, router_logits)
 
-        if shared_output is not None:
-            assert not isinstance(final_hidden_states, tuple)
-            assert self.shared_experts is not None
-            final_hidden_states = (
-                shared_output,
-                final_hidden_states,
+            # Matrix multiply.
+            final_hidden_states = self.quant_method.apply(
+                layer=self,
+                x=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                global_num_experts=self.global_num_experts,
+                expert_map=self.expert_map,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                e_score_correction_bias=self.e_score_correction_bias,
+                activation=self.activation,
+                apply_router_weight_on_input=self.apply_router_weight_on_input,
+                enable_eplb=self.enable_eplb,
+                expert_load_view=self.expert_load_view,
+                logical_to_physical_map=self.logical_to_physical_map,
+                logical_replica_count=self.logical_replica_count,
             )
 
-        def reduce_output(states: torch.Tensor,
-                          do_combine: bool = True) -> torch.Tensor:
-            if do_naive_dispatch_combine and do_combine:
-                states = get_ep_group().combine(states)
+            if shared_output is not None:
+                assert not isinstance(final_hidden_states, tuple)
+                assert self.shared_experts is not None
+                final_hidden_states = (
+                    shared_output,
+                    final_hidden_states,
+                )
 
-            if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
-                states = self.maybe_all_reduce_tensor_model_parallel(states)
+            def reduce_output(states: torch.Tensor,
+                              do_combine: bool = True) -> torch.Tensor:
+                if do_naive_dispatch_combine and do_combine:
+                    states = get_ep_group().combine(states)
 
-            return states
+                if (not self.is_sequence_parallel and self.reduce_results
+                        and self.tp_size > 1):
+                    raise AssertionError()
+                    states = self.maybe_all_reduce_tensor_model_parallel(
+                        states)
 
-        if self.shared_experts is None:
-            assert not isinstance(final_hidden_states, tuple)
-            return reduce_output(final_hidden_states)
-        else:
-            return (
-                reduce_output(final_hidden_states[0], do_combine=False),
-                reduce_output(final_hidden_states[1]),
-            )
+                return states
+
+            if self.shared_experts is None:
+                assert not isinstance(final_hidden_states, tuple)
+                return reduce_output(final_hidden_states)
+            else:
+                return (
+                    reduce_output(final_hidden_states[0], do_combine=False),
+                    reduce_output(final_hidden_states[1]),
+                )
 
     @classmethod
     def make_expert_params_mapping(

@@ -32,7 +32,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
 
         # ep does not use pynccl
-        use_pynccl = "ep" not in unique_name
+        # NOTE: ep *does* use pynncl only for the allgather_v/reducescatter_v
+        # implementation.
+        # TODO: Should we still initialize the PyNcclCommunicator selectively?
+        # use_pynccl = "ep" not in unique_name
+        use_pynccl = True
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce

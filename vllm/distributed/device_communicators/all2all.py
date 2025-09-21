@@ -45,8 +45,9 @@ class NaiveAll2AllManager(All2AllManagerBase):
 
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
-        cu_dispatched_tokens_cpu = get_forward_context(
-        ).dp_metadata.cu_tokens_across_dp_cpu // self.sp_world_size
+        dp_metadata = get_forward_context().dp_metadata
+        cu_dispatched_tokens_cpu = dp_metadata.cu_tokens_across_dp(
+            self.sp_world_size)
 
         hidden_states = self.naive_multicast(hidden_states,
                                              cu_dispatched_tokens_cpu)
@@ -55,11 +56,15 @@ class NaiveAll2AllManager(All2AllManagerBase):
         return hidden_states, router_logits
 
     def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        cu_combined_tokens_cpu = get_forward_context(
-        ).dp_metadata.cu_tokens_across_dp_cpu // self.sp_world_size
+        dp_metadata = get_forward_context().dp_metadata
+        cu_combined_tokens_cpu = dp_metadata.cu_tokens_across_dp(
+            self.sp_world_size)
 
         start = 0 if self.rank == 0 else cu_combined_tokens_cpu[self.rank - 1]
-        end = cu_combined_tokens_cpu[self.dp_rank]
+        end = cu_combined_tokens_cpu[get_ep_group().rank_in_group]
+
+        print(f"COMBINE - cu tokens {cu_combined_tokens_cpu}")
+        print(f"start {start} -- end {end}")
 
         all_hidden_states = get_ep_group().all_reduce(hidden_states)
         hidden_states = all_hidden_states[start:end, :]
@@ -85,6 +90,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         sizes = get_forward_context(
         ).dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes[get_ep_group().rank_in_group] == hidden_states.shape[0]
         hidden_states, router_logits = get_ep_group().all_gatherv(
             [hidden_states, router_logits],
             dim=0,
