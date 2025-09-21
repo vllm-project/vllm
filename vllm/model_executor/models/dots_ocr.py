@@ -110,7 +110,7 @@ class DotsOCRProcessingInfo(Qwen2VLProcessingInfo):
         return config
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "video": 0}
+        return {"image": None}
 
     def get_mm_max_tokens_per_item(
         self,
@@ -118,7 +118,7 @@ class DotsOCRProcessingInfo(Qwen2VLProcessingInfo):
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
         max_image_tokens = self.get_max_image_tokens()
-        return {"image": max_image_tokens, "video": 0}
+        return {"image": max_image_tokens}
 
     def get_hf_processor(
         self,
