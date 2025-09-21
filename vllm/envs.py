@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
+    VLLM_DISABLE_FLASHINFER_PREFILL: bool = False
     VLLM_DO_NOT_TRACK: bool = False
     VLLM_USAGE_SOURCE: str = ""
     VLLM_CONFIGURE_LOGGING: int = 1
@@ -432,11 +433,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASH_ATTN_VERSION":
     lambda: maybe_convert_int(os.environ.get("VLLM_FLASH_ATTN_VERSION", None)),
 
-    # Internal flag to enable Dynamo fullgraph capture
-    "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
-    lambda: bool(
-        os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
-
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
     # enabled by default.
@@ -478,6 +474,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_USAGE_STATS_SERVER", "https://stats.vllm.ai"),
     "VLLM_NO_USAGE_STATS":
     lambda: os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1",
+    "VLLM_DISABLE_FLASHINFER_PREFILL":
+    lambda: os.environ.get("VLLM_DISABLE_FLASHINFER_PREFILL", "0") == "1",
     "VLLM_DO_NOT_TRACK":
     lambda: (os.environ.get("VLLM_DO_NOT_TRACK", None) or os.environ.get(
         "DO_NOT_TRACK", None) or "0") == "1",
