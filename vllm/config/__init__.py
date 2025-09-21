@@ -454,9 +454,6 @@ class VllmConfig:
         self.try_verify_and_update_config()
 
         if self.model_config is not None:
-            self.model_config.verify_async_output_proc(self.parallel_config,
-                                                       self.speculative_config,
-                                                       self.device_config)
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(
                 self.load_config)
@@ -877,7 +874,6 @@ class VllmConfig:
             f"served_model_name={self.model_config.served_model_name}, "
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
-            f"use_async_output_proc={self.model_config.use_async_output_proc}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")
 

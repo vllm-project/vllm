@@ -223,8 +223,6 @@ class ModelConfig:
     that this name(s) will also be used in `model_name` tag content of
     prometheus metrics, if multiple names provided, metrics tag will take the
     first one."""
-    use_async_output_proc: bool = True
-    """Whether to use async output processor."""
     config_format: Union[str, ConfigFormat] = "auto"
     """The format of the model config to load:\n
     - "auto" will try to load the config in hf format if available else it
@@ -1119,37 +1117,6 @@ class ModelConfig:
                 raise ValueError("please set VLLM_ATTENTION_BACKEND to "
                                  f"{STR_DUAL_CHUNK_FLASH_ATTN_VAL}")
 
-    def verify_async_output_proc(self, parallel_config, speculative_config,
-                                 device_config) -> None:
-        if not self.use_async_output_proc:
-            # Nothing to check
-            return
-
-        if parallel_config.pipeline_parallel_size > 1:
-            self.use_async_output_proc = False
-            return
-
-        # Reminder: Please update docs/features/compatibility_matrix.md
-        # If the feature combo become valid
-        from vllm.platforms import current_platform
-        if not current_platform.is_async_output_supported(self.enforce_eager):
-            self.use_async_output_proc = False
-            return
-
-        if envs.VLLM_USE_RAY_SPMD_WORKER:
-            self.use_async_output_proc = False
-            return
-
-        # Async postprocessor is not necessary for pooling models
-        # since there is no token generation
-        if self.runner_type == "pooling":
-            self.use_async_output_proc = False
-
-        # Reminder: Please update docs/features/compatibility_matrix.md
-        # If the feature combo become valid
-        if speculative_config:
-            self.use_async_output_proc = False
-
     def verify_with_parallel_config(
         self,
         parallel_config: ParallelConfig,
@@ -1173,15 +1140,12 @@ class ModelConfig:
             self._verify_with_expert_parallelism()
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
-        if pipeline_parallel_size > 1:
-            if not self.registry.is_pp_supported_model(self.architectures,
-                                                       self):
-                raise NotImplementedError(
-                    "Pipeline parallelism is not supported for this model. "
-                    "Supported models implement the `SupportsPP` interface.")
-
-            if self.use_async_output_proc:
-                self.use_async_output_proc = False
+        if (pipeline_parallel_size > 1
+                and not self.registry.is_pp_supported_model(
+                    self.architectures, self)):
+            raise NotImplementedError(
+                "Pipeline parallelism is not supported for this model. "
+                "Supported models implement the `SupportsPP` interface.")
 
     def get_sliding_window(self) -> Optional[int]:
         """Get the sliding window size from the HF text config if present."""

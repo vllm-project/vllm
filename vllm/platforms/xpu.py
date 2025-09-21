@@ -99,10 +99,6 @@ class XPUPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return True
-
-    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
