@@ -666,15 +666,15 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
 
 @triton.jit
 def compute_identity_kernel(
-    top_k,
-    hidden_states_ptr,
-    expert_scales_ptr,
-    num_tokens,
-    output_ptr,
-    hidden_dim,
-    scales_stride,
+    top_k: int,
+    hidden_states_ptr: tl.tensor,
+    expert_scales_ptr: tl.tensor,
+    num_tokens: int,
+    output_ptr: tl.tensor,
+    hidden_dim: int,
+    scales_stride: int,
     BLOCK_SIZE: tl.constexpr,
-):
+) -> None:
     pid = tl.program_id(0)
 
     batch_id = pid // (hidden_dim // BLOCK_SIZE)
@@ -698,8 +698,10 @@ def compute_identity_kernel(
              mask=(dim_offset + tl.arange(0, BLOCK_SIZE)) < hidden_dim)
 
 
-def zero_experts_compute_triton(expert_indices, expert_scales, num_experts,
-                                zero_expert_type, hidden_states):
+def zero_experts_compute_triton(expert_indices: torch.Tensor,
+                                expert_scales: torch.Tensor, num_experts: int,
+                                zero_expert_type: str,
+                                hidden_states: torch.Tensor) -> torch.Tensor:
     N = expert_indices.numel()
     top_k = expert_indices.size(-1)
     grid = lambda meta: (triton.cdiv(N, meta['BLOCK_SIZE']), )

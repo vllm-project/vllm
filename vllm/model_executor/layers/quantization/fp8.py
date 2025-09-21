@@ -996,11 +996,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             zero_expert_type=zero_expert_type,
         )
 
-        if len(select_result) == 3:
-            topk_weights, topk_ids, zero_expert_result = select_result
-        else:
-            topk_weights, topk_ids = select_result
-            zero_expert_result = None
+        #
+        # Note: the order of checks is important since self.fused_experts
+        # can override fused_experts or cutlass but not rocm or marlin.
+        #
+        topk_weights, topk_ids, zero_expert_result = select_result
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
