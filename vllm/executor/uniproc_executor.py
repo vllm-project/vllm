@@ -137,10 +137,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
         """
-        assert self.vllm_config.scheduler_config.delay_factor == 0.0, \
-            ("ExecutorWithExternalLauncher needs deterministic "
-            "execution, so it"
-            "does not support delay_factor in scheduling")
         if envs.VLLM_USE_V1:
             assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, \
             ("To get deterministic execution in V1, "
