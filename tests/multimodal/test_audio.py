@@ -38,7 +38,8 @@ def test_resample_audio_scipy(dummy_audio):
     assert len(out_down) == 3
     assert len(out_up) == 10
     assert np.all(out_same == dummy_audio)
-    
+
+
 def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     out = resample_audio_scipy(dummy_audio, orig_sr=5, target_sr=3)
 
@@ -46,7 +47,7 @@ def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     assert len(out) == expected_len
 
     assert isinstance(out, np.ndarray)
-    assert np.isfinite(out).all()    
+    assert np.isfinite(out).all()
 
 
 def test_audio_resampler_librosa_calls_resample(dummy_audio):
