@@ -127,13 +127,10 @@ PerLayerAttnMetadata: TypeAlias = Union[list[AttnMetadataDict],
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
-    def __init__(
-        self,
-        model_runner_output: ModelRunnerOutput,
-        sampled_token_ids: torch.Tensor,
-        invalid_req_indices: list[int],
-        async_output_copy_stream: torch.cuda.Stream,
-    ):
+    def __init__(self, model_runner_output: ModelRunnerOutput,
+                 sampled_token_ids: torch.Tensor,
+                 invalid_req_indices: list[int],
+                 async_output_copy_stream: torch.cuda.Stream, vocab_size: int):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
 
@@ -143,6 +140,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Keep a reference to the device tensor to avoid it being
         # deallocated until we finish copying it to the host.
         self._sampled_token_ids = sampled_token_ids
+        self.vocab_size = vocab_size
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
@@ -161,8 +159,14 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         # Release the device tensor once the copy has completed
         del self._sampled_token_ids
-
-        valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
+        max_gen_len = self._sampled_token_ids_cpu.shape[-1]
+        if max_gen_len == 1:
+            valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
+        else:
+            valid_sampled_token_ids = RejectionSampler.parse_output(
+                self._sampled_token_ids_cpu,
+                self.vocab_size,
+            )
         for i in self._invalid_req_indices:
             valid_sampled_token_ids[i].clear()
 
@@ -743,6 +747,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # num_computed_tokens, or won't.
         if not self.use_async_scheduling or not prev_draft_tokens_len:
             return num_computed_tokens
+        assert self.input_batch.prev_req_id_to_index is not None
         req_idx = self.input_batch.prev_req_id_to_index.get(req_id, None)
         # invalid sampled tokens in last step, we don't update
         # num_computed_tokens.
@@ -917,7 +922,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # on the GPU from prev_sampled_token_ids.
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         assert prev_req_id_to_index is not None
-        sample_flattened_indices = []
+        sample_flattened_indices: list[int] = []
         spec_flattened_indices: list[int] = []
         prev_common_req_indices: list[int] = []
         prev_draft_token_indices: list[int] = []
@@ -2307,7 +2312,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
             invalid_req_indices_set = set(invalid_req_indices)
-            assert sampled_token_ids.shape[-1] == 1
+            if self.num_spec_tokens <= 0:
+                assert sampled_token_ids.shape[-1] == 1
 
             # Cache the sampled tokens on the GPU and avoid CPU sync.
             # These will be copied into input_ids in the next step
