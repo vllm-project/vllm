@@ -67,7 +67,6 @@ from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    SupportsPP)
 from vllm.model_executor.models.moonvit import MoonVitPretrainedModel
 from vllm.model_executor.models.utils import merge_multimodal_embeddings
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -484,10 +483,8 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata,
                        **kwargs) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata, **kwargs)
+        logits = self.logits_processor(self.lm_head, hidden_states, **kwargs)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
