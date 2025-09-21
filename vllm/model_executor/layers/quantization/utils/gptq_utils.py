@@ -83,7 +83,9 @@ def get_linear_quant_method(
         # False = skip module, None = no override, else = Positive match
         if get_dynamic_override(  # noqa: E712
                 cloned_config,  # noqa: E712
-                layer_name=prefix) == False:  # noqa: E712
+                layer_name=prefix) == False or (
+                    prefix not in cloned_config.modules_in_block_to_quantize
+                ):  # noqa: E712
             if parallel_lm_head_quantized:
                 return UnquantizedEmbeddingMethod()
             return UnquantizedLinearMethod()
