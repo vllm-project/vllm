@@ -17,7 +17,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
@@ -97,7 +96,6 @@ def dummy_model() -> nn.Module:
             # Special handling for lm_head & sampler
             ("lm_head", ParallelLMHead(512, 10)),
             ("logits_processor", LogitsProcessor(512)),
-            ("sampler", Sampler())
         ]))
     model.config = MagicMock()
     model.embedding_modules = {"lm_head": "lm_head"}
@@ -125,7 +123,6 @@ def dummy_model_gate_up() -> nn.Module:
             # Special handling for lm_head & sampler
             ("lm_head", ParallelLMHead(512, 10)),
             ("logits_processor", LogitsProcessor(512)),
-            ("sampler", Sampler())
         ]))
     model.config = MagicMock()
     model.packed_modules_mapping = {
