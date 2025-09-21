@@ -11,7 +11,7 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 from vllm.inputs import token_inputs
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import (FastIncrementalDetokenizer,
@@ -221,17 +221,14 @@ def test_oov_decode(tokenizer, fast):
 
 @pytest.fixture
 def detokenizer(tokenizer_name: str) -> Detokenizer:
-    tokenizer_group = TokenizerGroup(
-        tokenizer_id=tokenizer_name,
-        enable_lora=False,
-        max_num_seqs=100,
-        max_input_length=None,
+    tokenizer = get_tokenizer(
+        tokenizer_name,
         tokenizer_mode="mistral" if "mistral" in tokenizer_name else "auto",
         trust_remote_code=False,
         revision=None,
     )
 
-    return Detokenizer(tokenizer_group)
+    return Detokenizer(tokenizer)
 
 
 @pytest.fixture(name="complete_sequence_token_ids")
@@ -312,8 +309,7 @@ def test_decode_prompt_logprobs(complete_sequence: str,
     # don't support that.
     if complete_sequence not in SPECIAL_TOKS_TRUTH:
         skip_special_tokens = True
-    elif not isinstance(detokenizer.tokenizer_group.get_lora_tokenizer(None),
-                        MistralTokenizer):
+    elif not isinstance(detokenizer.tokenizer, MistralTokenizer):
         skip_special_tokens = False
     else:
         pytest.skip("MistralTokenizers don't support "
@@ -339,7 +335,7 @@ def test_decode_prompt_logprobs(complete_sequence: str,
 
     # decoded_prompt_logprobs doesn't contain the first token.
     token_ids = complete_sequence_token_ids
-    tokenizer = detokenizer.get_tokenizer_for_seq(seq)
+    tokenizer = detokenizer.tokenizer
     text_full = tokenizer.decode(token_ids,
                                  skip_special_tokens=skip_special_tokens)
     text_first = tokenizer.decode(token_ids[0],
@@ -356,58 +352,3 @@ def test_decode_prompt_logprobs(complete_sequence: str,
         logprobs[token_id + 1].decoded_token
         for token_id, logprobs in zip(token_ids[1:], decoded_prompt_logprobs)
     ])
-
-
-@pytest.mark.parametrize("model", ["facebook/opt-125m"])
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 7, 16, -1])
-def test_decode_prompt_logprobs_chunked_prefill(
-    vllm_runner,
-    model,
-    chunked_prefill_token_size: int,
-    example_prompts,
-    monkeypatch,
-):
-    # VLLM V1 does not use incremental detokenization for
-    # prompt logprobs, so this test strategy is irrelevant.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
-
-    max_num_seqs = 256
-    enable_chunked_prefill = False
-    max_num_batched_tokens = None
-    if chunked_prefill_token_size != -1:
-        enable_chunked_prefill = True
-        max_num_seqs = min(chunked_prefill_token_size, max_num_seqs)
-        max_num_batched_tokens = chunked_prefill_token_size
-
-    with vllm_runner(model,
-                     dtype="half",
-                     max_logprobs=5,
-                     gpu_memory_utilization=0.5,
-                     enable_chunked_prefill=enable_chunked_prefill,
-                     max_num_batched_tokens=max_num_batched_tokens,
-                     max_num_seqs=max_num_seqs) as vllm_model:
-
-        vllm_sampling_params = SamplingParams(max_tokens=10,
-                                              logprobs=5,
-                                              prompt_logprobs=5,
-                                              temperature=0.0)
-        vllm_results = vllm_model.llm.generate(
-            example_prompts, sampling_params=vllm_sampling_params)
-
-        for idx, result in enumerate(vllm_results):
-            assert result.prompt_logprobs is not None
-            assert result.prompt_logprobs[0] is None
-
-            # Compared detokenized prompts ids to original prompt.
-            generated_string = ""
-            for (prompt_token,
-                 prompt_logprobs) in zip(result.prompt_token_ids[1:],
-                                         result.prompt_logprobs[1:]):
-                # prompt_logprobs is a dict of the token_id: logprob
-                # We select the token_id corresponding to the actual prompt
-                # Decoded token in the detokenized string corresponding to this
-                # prompt token.
-                generated_string += prompt_logprobs[prompt_token].decoded_token
-
-            assert generated_string == example_prompts[idx], (
-                "Detokenized prompt logprobs do not match original prompt")
