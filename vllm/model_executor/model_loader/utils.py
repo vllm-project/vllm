@@ -93,8 +93,56 @@ def initialize_model(
         return model_class(**kwargs)
 
 
+recorded_loader_keys = [
+    'weight_loader',
+    'load_qkv_weight',
+    'load_row_parallel_weight',
+    'load_merged_column_weight',
+    'output_dim',
+    'input_dim',
+    '_assert_and_load',
+]
+
 def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                   target_device: torch.device) -> None:
+
+    if model_config is None and target_device is None:
+        model_config = getattr(model, 'last_model_config', None)
+        target_device = getattr(model, 'last_target_device', None)
+    else:
+        setattr(model, 'last_model_config', model_config)
+        setattr(model, 'last_target_device', target_device)
+        
+    # in the case for model reloading, etc. the function of `process_weights_after_loading`
+    # could be called before, in which case we will skip the function call this time
+    if getattr(model, 'process_weights_after_loading_already_called', False):
+        logger.debug('process_weights_after_loading already called for model %s', model)
+        return
+    
+    # save the dytpe & shape for model parameter shapes, used for 
+    if not hasattr(model, 'original_weights_rebuild_keys'):
+        model.original_weights_rebuild_keys = {}
+        for name, p in model.named_parameters():
+            model.original_weights_rebuild_keys[name] = {
+                'shape': p.shape, 
+                'stride': p.stride(), 
+                'dtype': p.dtype, 
+                'nbytes': p.untyped_storage().nbytes()
+            }
+
+    recorded_loader = {k: dict() for k in recorded_loader_keys}
+    for name, p in model.named_parameters():
+        for key in recorded_loader_keys:
+            if hasattr(p, key):
+                attr = getattr(p, key)
+                if not callable(attr):
+                    recorded_loader[key][name] = attr 
+                elif p is attr.__self__:
+                    recorded_loader[key][name] = attr.__func__ 
+                else:
+                    recorded_loader[key][name] = attr 
+    model.recorded_loader = recorded_loader
+    
     for _, module in model.named_modules():
         if isinstance(module, QKVCrossParallelLinear):
             # NOTE(Isotr0py): special case for cross QKV layer because
