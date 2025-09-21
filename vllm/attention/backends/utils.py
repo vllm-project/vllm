@@ -35,9 +35,6 @@ PAD_SLOT_ID = -1
 # if we have at least this many elements. Could be tuned further.
 _COMPUTE_SLOT_MAPPING_NUMPY_NUMEL = 256
 
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
-
 
 def is_block_tables_empty(block_tables: Union[None, Dict]):
     """
@@ -129,7 +126,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
     _metadata_cls: Type[TAttentionMetadata]
 
-    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+    def __init__(self, input_builder):
         self.input_builder = input_builder
         self.runner = input_builder.runner
 
@@ -149,9 +146,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
 
-    def _add_seq_group(
-            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool):
+    def _add_seq_group(self, inter_data, chunked_prefill_enabled: bool):
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
 
