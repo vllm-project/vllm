@@ -110,7 +110,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
-  - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
+  - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 - label: Entrypoints Integration Test (API Server) # 100min
   timeout_in_minutes: 130
@@ -163,7 +163,6 @@ steps:
   - tests/v1/engine/test_engine_core_client.py
   commands:
   # test with tp=2 and external_dp=2
-  - VLLM_USE_V1=0 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   # test with tp=2 and pp=2
   - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
@@ -314,12 +313,11 @@ steps:
     - python3 offline_inference/vision_language.py --seed 0
     - python3 offline_inference/vision_language_pooling.py --seed 0
     - python3 offline_inference/vision_language_multi_image.py --seed 0
-    - VLLM_USE_V1=0 python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
     - python3 offline_inference/basic/classify.py
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
-    - VLLM_USE_V1=0 python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Platform Tests (CUDA) # 4min
   timeout_in_minutes: 15
@@ -894,7 +892,7 @@ steps:
   - pytest -v -s distributed/test_sequence_parallel.py
   # this test fails consistently.
   # TODO: investigate and fix
-  - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s models/multimodal/generation/test_maverick.py
 

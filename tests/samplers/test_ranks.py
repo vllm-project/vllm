@@ -8,12 +8,6 @@ from vllm import SamplingParams
 MODELS = ["distilbert/distilgpt2"]
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
-
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_ranks(
