@@ -378,7 +378,7 @@ def resolve_gguf_filename(
     quant_basename_with_ext = (quant_basename
                                if quant_basename.endswith(".gguf") else
                                f"{quant_basename}.gguf")
-    quant_base = (quant_basename_with_ext[:len(".gguf")]
+    quant_base = (quant_basename_with_ext[:-len(".gguf")]
                   if quant_basename_with_ext.endswith(".gguf") else
                   quant_basename_with_ext)
 
@@ -417,7 +417,7 @@ def resolve_gguf_filename(
         name = normalized.split("/")[-1]
         if not name.endswith(".gguf"):
             continue
-        stem = name[:len(".gguf")]
+        stem = Path(name).stem
         if stem == quant_base:
             suffix_matches.append(original)
             continue
