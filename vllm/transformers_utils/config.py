@@ -525,9 +525,9 @@ def get_config(
                 raise ValueError(
                     "Could not detect config format for no config file found. "
                     "With config_format 'auto', ensure your model has either "
-                    "config.json (HF format) or params.json (Mistral format)."
-                    "Otherwise please specify your_custom_config_format"
-                    "in engine args for customized config parser")
+                    "config.json (HF format) or params.json (Mistral format). "
+                    "Otherwise please specify your_custom_config_format "
+                    "in engine args for customized config parser.")
 
         except Exception as e:
             error_message = (
