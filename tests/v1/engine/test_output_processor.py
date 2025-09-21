@@ -12,9 +12,9 @@ from tests.v1.engine.utils import (NUM_PROMPT_LOGPROBS_UNDER_TEST,
                                    STOP_STRINGS,
                                    DummyOutputProcessorTestVectors,
                                    MockEngineCore)
+from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import (OutputProcessor,
