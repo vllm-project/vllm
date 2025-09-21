@@ -43,12 +43,9 @@ ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
 
 
 @pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    if not current_platform.is_cpu():
-        monkeypatch.setenv('VLLM_USE_V1', '0')
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 @pytest.mark.parametrize(
@@ -176,10 +173,11 @@ def test_compressed_tensors_w8a8_logprobs(
 
     dtype = "bfloat16"
 
-    # skip language translation prompt for the static per tensor asym model
-    if (model_path ==
-            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym"
-        ):  # noqa: E501
+    # skip language translation prompt for the static per tensor models
+    if model_path in (
+            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Sym",
+            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym",
+    ):
         example_prompts = example_prompts[0:-1]
 
     with hf_runner(model_path, dtype=dtype) as hf_model:
@@ -359,6 +357,9 @@ def test_compressed_tensors_fp8(vllm_runner):
         assert output
 
 
+@pytest.mark.skipif(
+    not current_platform.is_kv_cache_dtype_supported("fp8", None),
+    reason="FP8 KV cache is not supported on this device.")
 @pytest.mark.skipif(not current_platform.is_cuda(),
                     reason="This test is skipped on non-CUDA platform.")
 def test_compressed_tensors_kv_cache(vllm_runner):

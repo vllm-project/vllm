@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar
 
-import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
@@ -19,7 +18,6 @@ from vllm.config import (CompilationConfig, ModelDType,
                          StructuredOutputsConfig, TokenizerMode, is_init_field)
 from vllm.engine.arg_utils import (ConvertOption, EngineArgs, HfOverrides,
                                    PoolerConfig, RunnerOption)
-from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
                                          apply_hf_chat_template,
@@ -54,6 +52,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, as_iter, is_list_of
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -151,9 +150,11 @@ class LLM:
             multi-modal processor obtained from `AutoProcessor.from_pretrained`.
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
-        override_pooler_config: Initialize non-default pooling config or
-            override default pooling config for the pooling model.
-            e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+        pooler_config: Initialize non-default pooling config for the pooling
+            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+        override_pooler_config: [DEPRECATED] Use `pooler_config` instead. This
+            argument is deprecated and will be removed in v0.12.0 or v1.0.0,
+            whichever is sooner.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -191,6 +192,7 @@ class LLM:
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        pooler_config: Optional[PoolerConfig] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
         structured_outputs_config: Optional[Union[dict[
             str, Any], StructuredOutputsConfig]] = None,
@@ -288,6 +290,7 @@ class LLM:
             hf_token=hf_token,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
+            pooler_config=pooler_config,
             override_pooler_config=override_pooler_config,
             structured_outputs_config=structured_outputs_instance,
             compilation_config=compilation_config_instance,
@@ -305,11 +308,7 @@ class LLM:
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
-        if envs.VLLM_USE_V1:
-            supported_tasks = self.llm_engine \
-                .get_supported_tasks()  # type: ignore
-        else:
-            supported_tasks = self.llm_engine.model_config.supported_tasks
+        supported_tasks = self.llm_engine.get_supported_tasks()  # type: ignore
 
         logger.info("Supported_tasks: %s", supported_tasks)
 
@@ -518,9 +517,14 @@ class LLM:
         """
         Run a function directly on the model inside each worker,
         returning the result for each of them.
+
+        !!! warning
+            To reduce the overhead of data transfer, avoid returning large
+            arrays or tensors from this method. If you must return them,
+            make sure you move them to CPU first to avoid taking up additional
+            VRAM!
         """
-        executor = self.llm_engine.model_executor
-        return executor.apply_model(func)
+        return self.llm_engine.apply_model(func)
 
     def _get_beam_search_lora_requests(
         self,
@@ -1464,8 +1468,6 @@ class LLM:
         Note:
             This method is only available with the V1 LLM engine.
         """
-        from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-        assert isinstance(self.llm_engine, V1LLMEngine)
         return self.llm_engine.get_metrics()
 
     def _validate_and_add_requests(
