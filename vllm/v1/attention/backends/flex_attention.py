@@ -524,7 +524,7 @@ class FlexAttentionMetadata:
             kv_len = self.num_actual_tokens
 
         if (self.num_reqs == 0 or self.num_actual_tokens == 0 or kv_len == 0
-                or self.doc_ids.numel() == 0):
+                or self.doc_ids is None or self.doc_ids.numel() == 0):
             # Build a dense fallback block mask. The actual sequence lengths
             # will be adjusted later when we have real tokens available
             # (e.g. during CUDA graph capture we rebuild the mask with the
@@ -596,7 +596,8 @@ class FlexAttentionMetadata:
             return current
 
         rebuilt: Optional[BlockMask] = None
-        if (self.doc_ids.numel() > 0 and self.num_actual_tokens > 0
+        if (self.doc_ids is not None and self.doc_ids.numel() > 0
+                and self.num_actual_tokens > 0
                 and self.total_cache_tokens > 0):
             try:
                 if self.direct_build and self.causal:
