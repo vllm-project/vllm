@@ -148,9 +148,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
         # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid gate quantization.
-        # See: https://huggingface.co/Qwen/Qwen3-30B-A3B-GPTQ-Int4
-        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
+        # seems to avoid gate quantization while AutoRound does.
+        if isinstance(
+                quant_config,
+            (GPTQConfig,
+             GPTQMarlinConfig)) and not quant_config.autoround_version:
             return None
         return quant_config
 
@@ -306,7 +308,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             eps=self.layer_norm_epsilon,
             group_size=None,
             norm_before_gate=True,
-            device=torch.cuda.current_device(),
+            device=current_platform.current_device(),
             dtype=config.torch_dtype,
         )
 
