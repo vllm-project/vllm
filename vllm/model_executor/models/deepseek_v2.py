@@ -478,7 +478,8 @@ class DeepseekV2MLAAttention(nn.Module):
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
     (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
     
-    For more info see MLACommonImpl in: vllm/attention/backends/mla/utils.py
+        For more info see MLACommonImpl in:
+        vllm/v1/attention/backends/mla/utils.py
     """
 
     def __init__(
