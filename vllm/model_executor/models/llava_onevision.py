@@ -14,6 +14,7 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -933,8 +934,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states)
+        return self.language_model.compute_logits(hidden_states,
+                                                  sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

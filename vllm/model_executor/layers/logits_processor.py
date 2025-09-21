@@ -10,6 +10,7 @@ from vllm.distributed import (tensor_model_parallel_all_gather,
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 
 
@@ -49,6 +50,7 @@ class LogitsProcessor(CustomOp):
         self,
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
+        sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if self.logits_as_input:

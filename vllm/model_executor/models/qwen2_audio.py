@@ -34,6 +34,7 @@ from transformers.models.qwen2_audio import (Qwen2AudioConfig,
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (AudioItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
@@ -480,8 +481,10 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states)
+        return self.language_model.compute_logits(hidden_states,
+                                                  sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

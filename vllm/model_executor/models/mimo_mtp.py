@@ -34,6 +34,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2DecoderLayer
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .utils import maybe_prefix
@@ -139,10 +140,12 @@ class MiMoMultiTokenPredictor(nn.Module):
         self,
         hidden_states: torch.Tensor,
         lm_head: ParallelLMHead,
+        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         self.mtp_layers[str(self.mtp_start_layer_idx + spec_step_idx)]
-        logits = self.logits_processor(lm_head, hidden_states)
+        logits = self.logits_processor(lm_head, hidden_states,
+                                       sampling_metadata)
         return logits
 
 
@@ -175,10 +178,11 @@ class MiMoMTP(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> Optional[torch.Tensor]:
         return self.model.compute_logits(hidden_states, self.lm_head,
-                                         spec_step_idx)
+                                         sampling_metadata, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

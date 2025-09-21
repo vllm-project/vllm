@@ -399,10 +399,11 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                   inputs_embeds=inputs_embeds)
         return model_output
 
-    def compute_logits(self,
-                       hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata) -> Optional[torch.Tensor]:
         # Compute final logits from hidden states (last pipeline rank only)
-        logits = self.logits_processor(self.lm_head, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:

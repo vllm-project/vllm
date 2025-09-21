@@ -29,6 +29,7 @@ from transformers import (BatchFeature, FuyuConfig, FuyuImageProcessor,
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -388,9 +389,10 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         logits = self.language_model.logits_processor(
-            self.language_model.lm_head, hidden_states)
+            self.language_model.lm_head, hidden_states, sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
