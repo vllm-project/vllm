@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from collections.abc import Generator
+from pathlib import Path
 
 import gguf
 import torch
@@ -32,7 +33,35 @@ class GGUFModelLoader(BaseModelLoader):
             raise ValueError(f"Model loader extra config is not supported for "
                              f"load format {load_config.load_format}")
 
-    def _prepare_weights(self, model_name_or_path: str):
+    def _prepare_weights(self, model_config: ModelConfig) -> str:
+        model_name_or_path = model_config.model
+
+        def _hf_hub_download_with_config_kwargs(repo_id: str,
+                                                filename: str) -> str:
+            download_kwargs = {}
+            if model_config.revision is not None:
+                download_kwargs["revision"] = model_config.revision
+            if model_config.hf_token not in (None, ""):
+                download_kwargs["token"] = model_config.hf_token
+            if self.load_config.download_dir is not None:
+                download_kwargs["cache_dir"] = self.load_config.download_dir
+            return hf_hub_download(repo_id=repo_id,
+                                   filename=filename,
+                                   **download_kwargs)
+
+        gguf_file = model_config.gguf_file
+        if gguf_file is not None:
+            base_path = Path(model_name_or_path)
+            if base_path.is_dir():
+                candidate = base_path / gguf_file
+                if candidate.is_file():
+                    return str(candidate)
+            candidate_path = Path(gguf_file)
+            if candidate_path.is_file():
+                return str(candidate_path)
+            return _hf_hub_download_with_config_kwargs(
+                repo_id=model_name_or_path, filename=gguf_file)
+
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
         # for raw HTTPS link
@@ -42,7 +71,8 @@ class GGUFModelLoader(BaseModelLoader):
         # repo id/filename.gguf
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
-            return hf_hub_download(repo_id=repo_id, filename=filename)
+            return _hf_hub_download_with_config_kwargs(repo_id=repo_id,
+                                                       filename=filename)
         else:
             raise ValueError(
                 f"Unrecognised GGUF reference: {model_name_or_path} "
@@ -115,11 +145,11 @@ class GGUFModelLoader(BaseModelLoader):
                                            gguf_to_hf_name_map)
 
     def download_model(self, model_config: ModelConfig) -> None:
-        self._prepare_weights(model_config.model)
+        self._prepare_weights(model_config)
 
     def load_weights(self, model: nn.Module,
                      model_config: ModelConfig) -> None:
-        local_model_path = self._prepare_weights(model_config.model)
+        local_model_path = self._prepare_weights(model_config)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         model.load_weights(
             self._get_weights_iterator(local_model_path, gguf_weights_map))
@@ -127,14 +157,14 @@ class GGUFModelLoader(BaseModelLoader):
     def load_model(self, vllm_config: VllmConfig,
                    model_config: ModelConfig) -> nn.Module:
         device_config = vllm_config.device_config
-        local_model_path = self._prepare_weights(model_config.model)
+        local_model_path = self._prepare_weights(model_config)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         # we can only know if tie word embeddings after mapping weights
         if "lm_head.weight" in get_gguf_extra_tensor_names(
                 local_model_path, gguf_weights_map):
             model_config.hf_config.update({"tie_word_embeddings": True})
 
-        weight_type_map = get_gguf_weight_type_map(model_config.model,
+        weight_type_map = get_gguf_weight_type_map(local_model_path,
                                                    gguf_weights_map)
 
         # filter out unquantized modules to skip

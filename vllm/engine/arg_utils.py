@@ -41,8 +41,9 @@ from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
-from vllm.transformers_utils.config import get_model_path, is_interleaved
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.config import (get_model_path, is_interleaved,
+                                            resolve_gguf_filename)
+from vllm.transformers_utils.utils import is_model_local_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -288,6 +289,7 @@ class EngineArgs:
         str, List[str]]] = ModelConfig.served_model_name
     tokenizer: Optional[str] = ModelConfig.tokenizer
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
+    gguf_file: Optional[str] = ModelConfig.gguf_file
     runner: RunnerOption = ModelConfig.runner
     convert: ConvertOption = ModelConfig.convert
     task: Optional[TaskOption] = ModelConfig.task
@@ -515,6 +517,7 @@ class EngineArgs:
         )
         if not ('serve' in sys.argv[1:] and '--help' in sys.argv[1:]):
             model_group.add_argument("--model", **model_kwargs["model"])
+        model_group.add_argument("--gguf_file", **model_kwargs["gguf_file"])
         model_group.add_argument("--runner", **model_kwargs["runner"])
         model_group.add_argument("--convert", **model_kwargs["convert"])
         model_group.add_argument("--task",
@@ -961,8 +964,44 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
+        # Check if model uses "repo_id:gguf-quant-spec" format
+        gguf_model_spec = _split_gguf_model_spec(self.model)
+        if self.gguf_file is None and gguf_model_spec is not None:
+            repo_id, quant_spec = gguf_model_spec
+            token = self.hf_token
+            if isinstance(token, str) and not token.strip():
+                token = None
+            try:
+                self.gguf_file = resolve_gguf_filename(repo_id,
+                                                       quant_spec,
+                                                       revision=self.revision,
+                                                       token=token)
+            except ValueError as e:
+                raise ValueError(
+                    "Failed to resolve GGUF quantization '"
+                    f"{quant_spec}' for model '{self.model}'. "
+                    "Please validate that the provided model spec "
+                    "follows the 'repo_id:quant_spec' syntax.") from e
+
+            if self.load_format not in ("auto", "gguf"):
+                raise ValueError(
+                    "GGUF quantization selection requires load-format 'gguf'.")
+            self.load_format = "gguf"
+
+            if self.quantization is not None and self.quantization != "gguf":
+                raise ValueError(
+                    "GGUF quantization selection conflicts with the "
+                    f"explicit quantization {self.quantization!r}.")
+            self.quantization = "gguf"
+
+            if self.served_model_name is None:
+                self.served_model_name = self.model
+
+            self.model = repo_id
+            logger.info("Using GGUF file %s from %s", self.gguf_file, repo_id)
+
         # gguf file needs a specific model loader and doesn't use hf_repo
-        if check_gguf_file(self.model):
+        if is_model_local_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
 
         # NOTE: This is to allow model loading from S3 in CI
@@ -997,6 +1036,7 @@ class EngineArgs:
 
         return ModelConfig(
             model=self.model,
+            gguf_file=self.gguf_file,
             hf_config_path=self.hf_config_path,
             runner=self.runner,
             convert=self.convert,
@@ -1104,10 +1144,13 @@ class EngineArgs:
             SpeculatorsConfig)
 
         if self.speculative_config is None:
-            hf_config = get_config(
-                self.hf_config_path or target_model_config.model,
-                self.trust_remote_code, self.revision, self.code_revision,
-                self.config_format)
+            hf_config = get_config(model=self.hf_config_path
+                                   or target_model_config.model,
+                                   trust_remote_code=self.trust_remote_code,
+                                   revision=self.revision,
+                                   code_revision=self.code_revision,
+                                   config_format=self.config_format,
+                                   gguf_file=self.gguf_file)
 
             # if loading a SpeculatorsConfig, load the speculative_config
             # details from the config directly
@@ -1905,3 +1948,29 @@ def human_readable_int(value):
 
     # Regular plain number.
     return int(value)
+
+
+def _split_gguf_model_spec(model: str) -> Optional[tuple[str, str]]:
+    """Split a GGUF model spec of the form ``repo_id:quant``.
+
+    If the model spec is not in this form, None is returned.
+    """
+    if "://" in model:
+        return None
+
+    colon_index = model.rfind(":")
+    if colon_index <= 0:
+        return None
+
+    # Handle Windows drive letters (e.g., C:\\path).
+    if (colon_index == 1 and len(model) > 2 and model[0].isalpha()
+            and model[1] == ":" and model[2] in ("/", "\\")):
+        return None
+
+    repo_id = model[:colon_index]
+    quant_spec = model[colon_index + 1:]
+
+    if not repo_id or not quant_spec:
+        return None
+
+    return repo_id, quant_spec

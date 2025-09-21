@@ -27,7 +27,7 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import is_model_local_gguf_file
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -319,6 +319,124 @@ def list_repo_files(
     return with_retry(lookup_files, "Error retrieving file list")
 
 
+def _normalize_repo_file_path(path: str) -> str:
+    """Return a normalized representation of a repo-relative path.
+
+    Args:
+        path: Path to normalize.
+
+    Returns:
+        Normalized path.
+    """
+    return path.replace("\\", "/")
+
+
+def resolve_gguf_filename(
+    repo_id: str,
+    quantization: str,
+    *,
+    revision: Optional[str] = None,
+    token: Union[str, bool, None] = None,
+) -> str:
+    """Resolve a GGUF quantization specifier to a concrete file name.
+
+    Args:
+        repo_id: Hugging Face repo ID or local directory containing GGUF files.
+        quantization: Quantization specifier, e.g. ``"Q4_K_M"`` or a file name.
+        revision: Optional revision to query from the hub.
+        token: Optional Hugging Face token (string or ``True`` to use cached).
+
+    Returns:
+        The repo-relative path to the resolved GGUF file.
+    """
+    quant_spec = quantization.strip()
+    if not quant_spec:
+        raise ValueError("GGUF quantization specifier cannot be empty.")
+
+    files = list_repo_files(
+        repo_id,
+        revision=revision,
+        token=token if token is not None else _get_hf_token())
+    gguf_files = [
+        file for file in files
+        if _normalize_repo_file_path(file).lower().endswith(".gguf")
+    ]
+
+    if not gguf_files:
+        raise ValueError(
+            "No GGUF files were found in the repository or directory "
+            f"'{repo_id}'.")
+
+    original_and_normalized_files = [
+        (file, _normalize_repo_file_path(file).lower()) for file in gguf_files
+    ]
+
+    quant_norm = _normalize_repo_file_path(quant_spec).lower()
+    quant_with_ext = (quant_norm if quant_norm.endswith(".gguf") else
+                      f"{quant_norm}.gguf")
+    quant_basename = quant_norm.split("/")[-1]
+    quant_basename_with_ext = (quant_basename
+                               if quant_basename.endswith(".gguf") else
+                               f"{quant_basename}.gguf")
+    quant_base = (quant_basename_with_ext[:len(".gguf")]
+                  if quant_basename_with_ext.endswith(".gguf") else
+                  quant_basename_with_ext)
+
+    def _pick_single(candidates: list[str]) -> Optional[str]:
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        raise ValueError(
+            "Multiple GGUF files match the requested quantization "
+            f"'{quantization}': {', '.join(sorted(candidates))}. "
+            "Please provide a more specific identifier.")
+
+    # Highest priority: full path match (with or without explicit extension).
+    full_path_matches = [
+        original for original, normalized in original_and_normalized_files
+        if normalized in (quant_norm, quant_with_ext)
+    ]
+    match = _pick_single(full_path_matches)
+    if match:
+        return match
+
+    # Next priority: match by final path component (file name).
+    name_matches = [
+        original for original, normalized in original_and_normalized_files
+        if normalized.split("/")[-1] in (quant_basename,
+                                         quant_basename_with_ext)
+    ]
+    match = _pick_single(name_matches)
+    if match:
+        return match
+
+    # Lowest priority: suffix match on the file stem (e.g. "*-Q4_K_M.gguf").
+    suffix_matches: list[str] = []
+    for original, normalized in original_and_normalized_files:
+        name = normalized.split("/")[-1]
+        if not name.endswith(".gguf"):
+            continue
+        stem = name[:len(".gguf")]
+        if stem == quant_base:
+            suffix_matches.append(original)
+            continue
+        if quant_base and stem.endswith(quant_base):
+            prefix_index = len(stem) - len(quant_base) - 1
+            if prefix_index < 0 or not stem[prefix_index].isalnum():
+                suffix_matches.append(original)
+
+    match = _pick_single(suffix_matches)
+    if match:
+        return match
+
+    formatted = sorted({Path(f).name for f in gguf_files})
+    available = ", ".join(formatted) if formatted else "<none>"
+    raise ValueError(
+        "Unable to find a GGUF file matching quantization "
+        f"'{quantization}' in '{repo_id}'. Available GGUF files: {available}.")
+
+
 def file_exists(
     repo_id: str,
     file_name: str,
@@ -468,15 +586,19 @@ def maybe_override_with_speculators_target_model(
     tokenizer: str,
     trust_remote_code: bool,
     revision: Optional[str] = None,
+    gguf_file: Optional[str] = None,
     **kwargs,
 ) -> tuple[str, str]:
     """
     If running a speculators config, override running model with target model
     """
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
+    is_local_gguf = is_model_local_gguf_file(model)
+    if is_local_gguf:
         kwargs["gguf_file"] = Path(model).name
         gguf_model_repo = Path(model).parent
+    elif gguf_file is not None:
+        kwargs["gguf_file"] = gguf_file
+        gguf_model_repo = model
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -506,11 +628,16 @@ def get_config(
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
+    gguf_file_arg = kwargs.pop("gguf_file", None)
 
-    is_gguf = check_gguf_file(model)
-    if is_gguf:
+    is_local_gguf = is_model_local_gguf_file(model)
+    if is_local_gguf:
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
+    elif gguf_file_arg is not None:
+        kwargs["gguf_file"] = gguf_file_arg
+
+    is_gguf = is_local_gguf or gguf_file_arg is not None
 
     if config_format == "auto":
         try:
@@ -890,7 +1017,7 @@ def get_hf_image_processor_config(
     if envs.VLLM_USE_MODELSCOPE:
         return dict()
     # Separate model folder from file path for GGUF models
-    if check_gguf_file(model):
+    if is_model_local_gguf_file(model):
         model = Path(model).parent
     return get_image_processor_config(model,
                                       token=hf_token,
@@ -917,6 +1044,7 @@ def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
     revision: Optional[str] = None,
+    gguf_file: Optional[str] = None,
 ) -> Optional[GenerationConfig]:
     try:
         return GenerationConfig.from_pretrained(
@@ -925,11 +1053,10 @@ def try_get_generation_config(
         )
     except OSError:  # Not found
         try:
-            config = get_config(
-                model,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-            )
+            config = get_config(model,
+                                trust_remote_code=trust_remote_code,
+                                revision=revision,
+                                gguf_file=gguf_file)
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
             return None
