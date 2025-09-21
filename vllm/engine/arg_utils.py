@@ -1486,12 +1486,6 @@ class EngineArgs:
         #############################################################
         # Unsupported Feature Flags on V1.
 
-        if self.load_format == "sharded_state":
-            _raise_or_fallback(
-                feature_name=f"--load_format {self.load_format}",
-                recommend_to_remove=False)
-            return False
-
         if (self.logits_processor_pattern
                 != EngineArgs.logits_processor_pattern):
             _raise_or_fallback(feature_name="--logits-processor-pattern",
@@ -1513,14 +1507,6 @@ class EngineArgs:
             _raise_or_fallback(feature_name="--scheduler-delay-factor",
                                recommend_to_remove=True)
             return False
-
-        if self.kv_cache_dtype != "auto":
-            supported = current_platform.is_kv_cache_dtype_supported(
-                self.kv_cache_dtype, model_config)
-            if not supported:
-                _raise_or_fallback(feature_name="--kv-cache-dtype",
-                                   recommend_to_remove=False)
-                return False
 
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
