@@ -27,8 +27,7 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    is_interleaved, maybe_override_with_speculators_target_model,
-    try_get_generation_config, try_get_safetensors_metadata,
+    is_interleaved, try_get_generation_config, try_get_safetensors_metadata,
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.runai_utils import (ObjectStorageModel,
                                                  is_runai_obj_uri)
@@ -415,15 +414,6 @@ class ModelConfig:
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
-
-        if self.runner != "draft":
-            # If we're not running the draft model, check for speculators config
-            # If speculators config, set model / tokenizer to be target model
-            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
-                model=self.model,
-                tokenizer=self.tokenizer,
-                revision=self.revision,
-                trust_remote_code=self.trust_remote_code)
 
         if (backend := envs.VLLM_ATTENTION_BACKEND
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
