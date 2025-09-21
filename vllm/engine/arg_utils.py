@@ -41,7 +41,8 @@ from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
-from vllm.transformers_utils.config import get_model_path, is_interleaved
+from vllm.transformers_utils.config import (get_model_path, is_interleaved,
+                                            maybe_override_with_speculators)
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
@@ -1082,29 +1083,8 @@ class EngineArgs:
         provided as a JSON string input via CLI arguments or directly as a
         dictionary from the engine.
         """
-
-        from vllm.transformers_utils.config import get_config
-        from vllm.transformers_utils.configs.speculators.base import (
-            SpeculatorsConfig)
-
         if self.speculative_config is None:
-            hf_config = get_config(
-                self.hf_config_path or target_model_config.model,
-                self.trust_remote_code, self.revision, self.code_revision,
-                self.config_format)
-
-            # if loading a SpeculatorsConfig, load the speculative_config
-            # details from the config directly
-            # no user input required / expected
-            if isinstance(hf_config, SpeculatorsConfig):
-                # We create one since we don't create one
-                self.speculative_config = {}
-                self.speculative_config[
-                    "num_speculative_tokens"] = hf_config.num_lookahead_tokens
-                self.speculative_config["model"] = target_model_config.model
-                self.speculative_config["method"] = hf_config.method
-            else:
-                return None
+            return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
@@ -1139,6 +1119,15 @@ class EngineArgs:
 
         device_config = DeviceConfig(
             device=cast(Device, current_platform.device_type))
+
+        (self.model, self.tokenizer,
+         self.speculative_config) = maybe_override_with_speculators(
+             model=self.model,
+             tokenizer=self.tokenizer,
+             revision=self.revision,
+             trust_remote_code=self.trust_remote_code,
+             vllm_speculative_config=self.speculative_config,
+         )
         model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
