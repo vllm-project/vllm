@@ -148,7 +148,8 @@ class SupportsMultiModal(Protocol):
         In case the multi-modal token IDs exceed the vocabulary size of
         the language model, you can set `handle_oov_mm_token=False`
         to avoid calling the language model's `get_input_embeddings` method
-        on those tokens.
+        on those tokens. Note however that doing so increases memory usage
+        as an additional buffer is needed to hold the input embeddings.
         """
         from .utils import _merge_multimodal_embeddings
 
