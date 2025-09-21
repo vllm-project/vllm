@@ -378,20 +378,15 @@ class Qwen3_VisionTransformer(nn.Module):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
-    def fast_pos_embed_interpolate(self, grid_thw):
-        if isinstance(grid_thw, torch.Tensor):
-            grid_list = [
-                tuple(int(v) for v in grid) for grid in grid_thw.tolist()
-            ]
-        else:
-            grid_list = [tuple(int(v) for v in grid) for grid in grid_thw]
+    def fast_pos_embed_interpolate(self,
+                                   grid_thw: list[list[int]]) -> torch.Tensor:
 
         num_grid_per_side = self.num_grid_per_side
         m_size = self.spatial_merge_size
         hidden_dim = self.pos_embed.embedding_dim
 
         outputs = []
-        for t, h, w in grid_list:
+        for t, h, w in grid_thw:
             h_idxs = torch.linspace(0,
                                     num_grid_per_side - 1,
                                     h,
@@ -469,12 +464,9 @@ class Qwen3_VisionTransformer(nn.Module):
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        if isinstance(grid_thw, list):
-            grid_thw_tensor = torch.tensor(grid_thw,
-                                           device=hidden_states.device,
-                                           dtype=torch.int32)
-        else:
-            grid_thw_tensor = grid_thw
+        grid_thw_tensor = torch.tensor(grid_thw,
+                                       device=self.device,
+                                       dtype=torch.int32)
 
         cu_seqlens = torch.repeat_interleave(
             grid_thw_tensor[:, 1] * grid_thw_tensor[:, 2],
@@ -1216,7 +1208,8 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                          grid_thw_list,
                                                          rope_type="rope_3d")
             else:
-                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+                image_embeds = self.visual(pixel_values,
+                                           grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
