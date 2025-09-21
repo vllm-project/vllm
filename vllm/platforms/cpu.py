@@ -127,10 +127,6 @@ class CpuPlatform(Platform):
         torch.cpu.set_device(device)
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
-
-    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 

@@ -29,24 +29,6 @@ def test_unsupported_configs(monkeypatch):
                 },
             ).create_engine_config()
 
-        with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(
-                model=MODEL,
-                preemption_mode="swap",
-            ).create_engine_config()
-
-        with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(
-                model=MODEL,
-                disable_async_output_proc=True,
-            ).create_engine_config()
-
-        with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(
-                model=MODEL,
-                scheduler_delay_factor=1.2,
-            ).create_engine_config()
-
 
 def test_enable_by_default_fallback(monkeypatch):
     with monkeypatch.context() as m:
