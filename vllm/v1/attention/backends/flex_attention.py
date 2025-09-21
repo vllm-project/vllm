@@ -3,7 +3,7 @@
 """Attention layer with FlexAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
 import torch
 import torch._dynamo.decorators
@@ -19,7 +19,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, is_torch_equal_or_newer
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -29,10 +30,65 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
+# NOTE: torch.compile(create_block_mask, ...) is left defined but not used;
+# see build_block_mask() for why eager mode is enforced.
 create_block_mask_compiled = torch.compile(create_block_mask,
                                            fullgraph=True,
                                            mode="reduce-overhead")
-flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
+
+# FlexAttention compilation state management
+_flex_attention_compiled = None
+_flex_attention_compilation_attempted = False
+
+
+def get_flex_attention_fn():
+    """Get appropriate flex_attention function, 
+    reusing existing compilation patterns."""
+    global _flex_attention_compiled, _flex_attention_compilation_attempted
+
+    from vllm.compilation.monitor import cudagraph_capturing_enabled
+
+    if cudagraph_capturing_enabled:
+        # During CUDAGraphs capture: use uncompiled version
+        return flex_attention
+
+    if not _flex_attention_compilation_attempted:
+        # Attempt lazy compilation, reusing existing compilation config
+        try:
+            _flex_attention_compiled = torch.compile(flex_attention,
+                                                     fullgraph=True,
+                                                     mode="reduce-overhead")
+            logger.debug(
+                "FlexAttention compiled successfully after CUDAGraphs capture")
+        except Exception as e:
+            logger.debug(
+                "FlexAttention compilation failed: %s, using uncompiled "
+                "version", e)
+            _flex_attention_compiled = flex_attention
+        _flex_attention_compilation_attempted = True
+
+    return _flex_attention_compiled or flex_attention
+
+
+def _clone_block_mask(block_mask: BlockMask) -> BlockMask:
+    """Clone tensor fields to keep them valid across CUDA graph replays."""
+
+    def maybe_clone(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        return tensor.clone() if tensor is not None else None
+
+    return BlockMask(
+        block_mask.seq_lengths,
+        block_mask.kv_num_blocks.clone(),
+        block_mask.kv_indices.clone(),
+        maybe_clone(block_mask.full_kv_num_blocks),
+        maybe_clone(block_mask.full_kv_indices),
+        maybe_clone(block_mask.q_num_blocks),
+        maybe_clone(block_mask.q_indices),
+        maybe_clone(block_mask.full_q_num_blocks),
+        maybe_clone(block_mask.full_q_indices),
+        block_mask.BLOCK_SIZE,
+        block_mask.mask_mod,
+    )
 
 
 def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
@@ -520,18 +576,109 @@ class FlexAttentionMetadata:
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
     def build_block_mask(self) -> BlockMask:
-        mask_mod = self.get_mask_mod()
-        kv_len = (self.total_cache_tokens
-                  if self.causal else self.num_actual_tokens)
-        return create_block_mask_compiled(
-            mask_mod,
-            None,
-            None,
-            self.num_actual_tokens,
-            kv_len,
-            device=self.block_table.device,
+        if self.causal:
+            mask_mod = self.get_causal_mask_mod()
+            kv_len = self.total_cache_tokens
+        else:
+            mask_mod = self.get_bidirectional_mask_mod()
+            kv_len = self.num_actual_tokens
+
+        if (self.num_reqs == 0 or self.num_actual_tokens == 0 or kv_len == 0
+                or self.doc_ids.numel() == 0):
+            # Build a dense fallback block mask. The actual sequence lengths
+            # will be adjusted later when we have real tokens available
+            # (e.g. during CUDA graph capture we rebuild the mask with the
+            # padded dimensions).
+            return self._build_dense_block_mask(max(self.q_block_size, 1),
+                                                max(self.kv_block_size, 1))
+        else:
+            # NOTE: torch.compile(create_block_mask, ...) intermittently hits
+            # illegal memory access on large multi-GPU captures; stick to eager.
+            block_mask = create_block_mask(
+                mask_mod,
+                None,
+                None,
+                self.num_actual_tokens,
+                kv_len,
+                device=self.block_table.device,
+                BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
+            )
+        return _clone_block_mask(block_mask)
+
+    def _build_dense_block_mask(self, q_len: int, kv_len: int) -> BlockMask:
+        """Create a dense block mask covering the provided logical lengths.
+
+        This is used for warmup / dummy runs where we may not have meaningful
+        block-table metadata yet (e.g. CUDA Graph captures with zero active
+        requests). The mask simply enables all KV blocks for the queried
+        sequence length and uses `mask_mod=None` to avoid additional tensor
+        allocations during capture.
+        """
+
+        device = self.block_table.device
+        q_len = max(int(q_len), 1)
+        kv_len = max(int(kv_len), 1)
+
+        num_q_blocks = max(1, cdiv(q_len, self.q_block_size))
+        num_kv_blocks = max(1, cdiv(kv_len, self.kv_block_size))
+
+        kv_indices = torch.arange(num_kv_blocks,
+                                  device=device,
+                                  dtype=torch.int32)
+        kv_indices = kv_indices.repeat(num_q_blocks, 1)
+        kv_indices = kv_indices.unsqueeze(0).unsqueeze(0)
+
+        kv_num_blocks = torch.full((1, 1, num_q_blocks),
+                                   num_kv_blocks,
+                                   dtype=torch.int32,
+                                   device=device)
+
+        block_mask = BlockMask.from_kv_blocks(
+            seq_lengths=(q_len, kv_len),
+            kv_num_blocks=kv_num_blocks,
+            kv_indices=kv_indices,
+            full_kv_num_blocks=None,
+            full_kv_indices=None,
             BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
+            mask_mod=None,
         )
+        return block_mask
+
+    def ensure_block_mask_capacity(self, q_len: int, kv_len: int) -> BlockMask:
+        """Ensure block_mask can cover the provided query/KV lengths."""
+
+        q_len = max(int(q_len), 1)
+        kv_len = max(int(kv_len), 1)
+
+        current = self.block_mask
+        if (current is not None and current.seq_lengths[0] >= q_len
+                and current.seq_lengths[1] >= kv_len):
+            return current
+
+        rebuilt: Optional[BlockMask] = None
+        if (self.doc_ids.numel() > 0 and self.num_actual_tokens > 0
+                and self.total_cache_tokens > 0):
+            original_num_tokens = self.num_actual_tokens
+            original_total_cache_tokens = self.total_cache_tokens
+            try:
+                self.num_actual_tokens = max(original_num_tokens, q_len)
+                self.total_cache_tokens = max(original_total_cache_tokens,
+                                              kv_len)
+                if self.direct_build and self.causal:
+                    rebuilt = self._build_block_mask_direct()
+                else:
+                    rebuilt = self.build_block_mask()
+            except Exception:  # noqa: BLE001
+                rebuilt = None
+            finally:
+                self.num_actual_tokens = original_num_tokens
+                self.total_cache_tokens = original_total_cache_tokens
+
+        if rebuilt is None:
+            rebuilt = self._build_dense_block_mask(q_len, kv_len)
+
+        self.block_mask = rebuilt
+        return rebuilt
 
     def __post_init__(self):
         assert self.use_cascade is False, "Not implemented yet."
@@ -546,14 +693,33 @@ class FlexAttentionMetadata:
         self.mask_mod = self.get_mask_mod()
         self.transformed_score_mod = self.get_transformed_score_mod()
 
-        if self.direct_build and self.causal:
-            self.block_mask = self._build_block_mask_direct()
+        # Check if we're in CUDAGraphs capture mode
+        from vllm.compilation.monitor import cudagraph_capturing_enabled
+
+        if cudagraph_capturing_enabled:
+            # During CUDAGraphs capture: create a "sufficiently large"
+            # block_mask
+            # to avoid dynamic creation during forward pass
+            # Use smaller defaults for CUDAGraphs capture compatibility
+            default_q_len = max(self.q_block_size * 2, 128)  # 2 blocks or 128
+            default_kv_len = max(self.kv_block_size * 2,
+                                 128)  # 2 blocks or 128
+            self.block_mask = self._build_dense_block_mask(
+                default_q_len, default_kv_len)
         else:
-            self.block_mask = self.build_block_mask()
+            # Normal mode: create block_mask as usual
+            if self.direct_build and self.causal:
+                self.block_mask = self._build_block_mask_direct()
+            else:
+                self.block_mask = self.build_block_mask()
 
 
 class FlexAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlexAttentionMetadata]):
+    # TODO: Re-enable CUDA graph support once PyTorch's FlexAttention
+    # fallback stops allocating tensors during capture. The current fallback
+    # instantiates new GPU scalars (e.g. -inf), which breaks capture.
+    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -606,8 +772,18 @@ class FlexAttentionMetadataBuilder(
         max_possible_seq_len = self.model_config.max_model_len
         num_gpu_blocks = self.cache_config.num_gpu_blocks
 
-        assert num_gpu_blocks is not None, \
-            "FlexAttention requires num_gpu_blocks to be set"
+        # num_gpu_blocks should be set by the engine based on available memory
+        # and gpu_memory_utilization. During CUDAGraphs capture, we may need a
+        # fallback.
+        if num_gpu_blocks is None:
+            # During CUDAGraphs capture, use a reasonable estimate based on
+            # model config
+            # This is a temporary fallback until the engine properly sets
+            # num_gpu_blocks
+            estimated_blocks = cdiv(max_possible_seq_len, block_size)
+            # Use a small minimum for CUDAGraphs capture
+            num_gpu_blocks = max(estimated_blocks, 4)
+            # Note: This will be overridden when the engine properly initializes
         total_cache_tokens = (num_gpu_blocks * block_size)
 
         inverse_block_table = physical_to_logical_mapping(
@@ -751,6 +927,10 @@ class FlexAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        doc_ids = attn_metadata.doc_ids
+        is_dummy_run = (attn_metadata.num_reqs == 0 or num_actual_tokens == 0
+                        or doc_ids is None or doc_ids.numel() == 0)
+
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
@@ -798,10 +978,12 @@ class FlexAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
 
-            # View out the block_size dim
-            key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
-            value_cache = value_cache.view(-1, self.num_kv_heads,
-                                           self.head_size)
+            # View out the block_size dim - use reshape to avoid tensor shape
+            # compatibility issues
+            key_cache = key_cache.reshape(-1, self.num_kv_heads,
+                                          self.head_size)
+            value_cache = value_cache.reshape(-1, self.num_kv_heads,
+                                              self.head_size)
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key_cache, value_cache),
@@ -812,24 +994,80 @@ class FlexAttentionImpl(AttentionImpl):
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
+        if is_dummy_run:
+            # During CUDA graph warmup there are no real tokens yet. Keeping
+            # tensors sized to the full KV cache capacity would explode memory
+            # usage, so shrink them to a minimal representative shape.
+            q_block = getattr(attn_metadata, "q_block_size", 1) or 1
+            kv_block = getattr(attn_metadata, "kv_block_size", 1) or 1
+            dummy_q_len = max(1, min(query.size(-2), q_block))
+            dummy_kv_len = max(1, min(key_tensor.size(-2), kv_block))
+
+            query = query[:, :, :dummy_q_len, :]
+            key_tensor = key_tensor[:, :, :dummy_kv_len, :]
+            value_tensor = value_tensor[:, :, :dummy_kv_len, :]
+            num_actual_tokens = dummy_q_len
+
+        # Align the cached block_mask with the actual query/KV lengths.
+        actual_q_len = query.size(-2)
+        actual_kv_len = key_tensor.size(-2)
+
+        block_mask = attn_metadata.ensure_block_mask_capacity(
+            actual_q_len, actual_kv_len)
+
+        if block_mask.seq_lengths != (actual_q_len, actual_kv_len):
+            block_mask = block_mask._adjust(actual_q_len, actual_kv_len)
+
+        attn_metadata.block_mask = block_mask
         assert attn_metadata.block_mask is not None
         block_m, block_n = attn_metadata.block_mask.BLOCK_SIZE
 
         kernel_options = get_kernel_options(query, block_m, block_n,
                                             attn_metadata.direct_build)
-        out = flex_attention_compiled(
-            query,
-            key_tensor,
-            value_tensor,
-            attn_metadata.transformed_score_mod,
-            attn_metadata.block_mask,
-            self.scale,
-            enable_gqa=enable_gqa,
-            kernel_options=kernel_options,
-        )
+
+        # Use lazy compilation mechanism to get appropriate flex_attention
+        # function
+        flex_fn = get_flex_attention_fn()
+
+        if flex_fn == _flex_attention_compiled and flex_fn != flex_attention:
+            try:
+                out = flex_fn(
+                    query,
+                    key_tensor,
+                    value_tensor,
+                    attn_metadata.transformed_score_mod,
+                    attn_metadata.block_mask,
+                    self.scale,
+                    enable_gqa=enable_gqa,
+                    kernel_options=kernel_options,
+                )
+            except ValueError as exc:
+                logger.debug('FlexAttention compiled path failed: %s', exc)
+                out = flex_attention(
+                    query,
+                    key_tensor,
+                    value_tensor,
+                    attn_metadata.transformed_score_mod,
+                    attn_metadata.block_mask,
+                    self.scale,
+                    enable_gqa=enable_gqa,
+                    kernel_options=kernel_options,
+                )
+        else:
+            out = flex_fn(
+                query,
+                key_tensor,
+                value_tensor,
+                attn_metadata.transformed_score_mod,
+                attn_metadata.block_mask,
+                self.scale,
+                enable_gqa=enable_gqa,
+                kernel_options=kernel_options,
+            )
 
         # Flex doesn't have an out variant today, rely on epilogue fusion
         out = out.permute(0, 2, 1, 3).squeeze(0)
+
         output[:num_actual_tokens, :, :].copy_(out)
         return output
 

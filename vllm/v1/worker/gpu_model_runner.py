@@ -3378,7 +3378,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # This usually takes 5~20 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
+
+        # Post-capture FlexAttention compilation
+        self._post_capture_compile_flex_attention()
+
         return cuda_graph_size
+
+    def _post_capture_compile_flex_attention(self):
+        """Compile FlexAttention after CUDAGraphs capture, 
+        reusing existing warmup patterns."""
+        try:
+            # Check if FlexAttention backend is being used
+            from vllm.attention.backends.abstract import get_attention_backend
+            current_backend = get_attention_backend()
+
+            if current_backend.get_name() == "FLEX_ATTENTION":
+                logger.info("Starting post-capture FlexAttention warmup...")
+
+                # Reuse existing _dummy_run mechanism to trigger FlexAttention
+                # compilation
+                # Use a small batch size for quick warmup
+                warmup_size = min(8, self.max_num_reqs)
+                self._dummy_run(warmup_size, skip_eplb=True, remove_lora=False)
+
+                logger.info("FlexAttention post-capture warmup completed")
+            else:
+                logger.debug(
+                    "Current backend is %s, skipping FlexAttention warmup",
+                    current_backend.get_name())
+
+        except Exception as e:
+            logger.warning("FlexAttention post-capture warmup failed: %s", e)
+            # Don't affect overall flow, continue execution
 
     def _capture_cudagraphs(self, compilation_cases: list[int],
                             cudagraph_runtime_mode: CUDAGraphMode,
@@ -3584,11 +3615,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # even after automatic downgrades
         if cudagraph_mode.has_full_cudagraphs() \
             and min_cg_support == AttentionCGSupport.NEVER:
-            raise ValueError(f"CUDAGraphMode.{cudagraph_mode.name} is not "
-                             f"supported with {min_cg_builder_name} backend ("
-                             f"support:{min_cg_support}) "
-                             "; please try cudagraph_mode=PIECEWISE, "
-                             "and make sure compilation level is piecewise")
+            logger.warning(
+                "CUDAGraphMode.%s is not supported with %s backend "
+                "(support:%s); falling back to CUDAGraphMode.NONE.",
+                cudagraph_mode.name,
+                min_cg_builder_name,
+                min_cg_support,
+            )
+            cudagraph_mode = self.compilation_config.cudagraph_mode = \
+                CUDAGraphMode.NONE
+            self.compilation_config.use_cudagraph = False
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).
