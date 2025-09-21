@@ -137,8 +137,6 @@ class LLM:
             back to the eager mode.
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
-        disable_async_output_proc: Disable async output processing.
-            This may result in lower performance.
         hf_token: The token to use as HTTP bearer authorization for remote files
             . If `True`, will use the token generated when running
             `huggingface-cli login` (stored in `~/.huggingface`).
@@ -188,7 +186,6 @@ class LLM:
         enforce_eager: bool = False,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
-        disable_async_output_proc: bool = False,
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
@@ -286,7 +283,6 @@ class LLM:
             enforce_eager=enforce_eager,
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
-            disable_async_output_proc=disable_async_output_proc,
             hf_token=hf_token,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
