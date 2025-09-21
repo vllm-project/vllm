@@ -51,13 +51,9 @@ class CUDAGraphMode(enum.Enum):
         return CUDAGraphMode(self.value[1]) if \
             self.separate_routine() else self
 
-    def has_mode(self, mode: 'CUDAGraphMode') -> bool:
-        if self.separate_routine():
-            return mode in self.value
-        return self == mode
-
     def requires_piecewise_compilation(self) -> bool:
-        return self.has_mode(CUDAGraphMode.PIECEWISE)
+        return (self.decode_mode() == CUDAGraphMode.PIECEWISE
+                or self.mixed_mode() == CUDAGraphMode.PIECEWISE)
 
     def max_cudagraph_mode(self) -> 'CUDAGraphMode':
         return CUDAGraphMode(max(
