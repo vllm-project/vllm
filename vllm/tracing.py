@@ -145,6 +145,8 @@ def log_tracing_disabled_warning() -> None:
 
 def maybe_create_tracer(vllm_config: VllmConfig,
                         instrumenting_module_name: str) -> Optional[Tracer]:
+    if vllm_config.observability_config is None:
+        return None
     endpoint = vllm_config.observability_config.otlp_traces_endpoint
     if endpoint is None:
         return None
@@ -162,13 +164,12 @@ def trace_in_every_processed_request(tracer: Tracer, span_name: str,
     """
     new_reqs = scheduler_output.scheduled_new_reqs
     cached_reqs = [
-        requests.get(id)
-        for id in scheduler_output.scheduled_cached_reqs.req_ids
+        requests[id] for id in scheduler_output.scheduled_cached_reqs.req_ids
     ]
     all_reqs = cached_reqs + new_reqs
 
     span_ctxs = [new_span_context(tracer, req, span_name) for req in all_reqs]
-    single_ctx = join_contexts(span_ctxs)
+    single_ctx = join_contexts(span_ctxs)  # type: ignore
     return single_ctx
 
 
