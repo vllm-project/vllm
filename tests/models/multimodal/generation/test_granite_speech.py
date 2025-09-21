@@ -7,8 +7,8 @@ from typing import Optional
 import pytest
 from transformers import AutoModelForSpeechSeq2Seq
 
+from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SampleLogprobs
 
 from ....conftest import (AudioTestAssets, HfRunner, PromptAudioInput,
                           VllmRunner)

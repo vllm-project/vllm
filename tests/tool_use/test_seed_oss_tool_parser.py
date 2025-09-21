@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage, FunctionCall,
                                               ToolCall)
 from vllm.entrypoints.openai.tool_parsers import SeedOssToolParser
-from vllm.transformers_utils.detokenizer import detokenize_incrementally
+from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
 # Use a common model that is likely to be available
