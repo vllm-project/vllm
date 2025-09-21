@@ -209,8 +209,11 @@ class CudagraphDispatcher:
         uniform_query_len = max_query_len if uniform_decode else 0
         return uniform_decode, uniform_query_len
 
-    def get_num_input_tokens(self, num_scheduled_tokens: int, num_reqs: int,
-                             max_query_len: int) -> int:
+    def get_num_input_tokens_local(self, num_scheduled_tokens: int,
+                                   num_reqs: int, max_query_len: int) -> int:
+        """ return num_input_tokens, acounting for cudagraph padding and 
+        tp padding locally, but not across dp.
+        """
         uniform_decode, uniform_query_len = self.caculate_uniform_decode(
             num_scheduled_tokens, num_reqs, max_query_len)
 
@@ -240,6 +243,7 @@ class CudagraphDispatcher:
     def maybe_pad_for_dp(
             self, num_input_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
         if self.runner and hasattr(self.runner, 'get_dp_padding'):
+            assert not self.is_drafter
             return self.runner.get_dp_padding(num_input_tokens)
         return 0, None
 
@@ -255,8 +259,8 @@ class CudagraphDispatcher:
         Returns (runtime_mode, batch_descriptor, num_input_tokens, 
                  num_tokens_across_dp).
         """
-        num_input_tokens = self.get_num_input_tokens(num_scheduled_tokens,
-                                                     num_reqs, max_query_len)
+        num_input_tokens = self.get_num_input_tokens_local(
+            num_scheduled_tokens, num_reqs, max_query_len)
 
         # maybe pad for dp
         num_pad, num_tokens_across_dp = self.maybe_pad_for_dp(num_input_tokens)
