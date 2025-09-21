@@ -136,8 +136,6 @@ class SchedulerOutput:
     # Total number of tokens scheduled for all requests.
     # Equal to sum(num_scheduled_tokens.values())
     total_num_scheduled_tokens: int
-    # Total number of speculative scheduled tokens for all requests.
-    total_num_scheduled_spec_tokens: int
     # req_id -> spec_token_ids
     # If a request does not have any spec decode tokens, it will not be
     # included in the dictionary.
@@ -166,3 +164,10 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+    # Total number of speculative scheduled tokens for all requests.
+    # this is used when both enable async_scheduling and speculative decoding.
+    # define this field so we don't need to calculate it by iterate
+    # scheduled_spec_decode_tokens during prepare_input_ids phase,
+    # it could make a minor optimization.
+    total_num_scheduled_spec_tokens: int = 0
