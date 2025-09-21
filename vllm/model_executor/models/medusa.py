@@ -104,12 +104,11 @@ class Medusa(nn.Module):
     def compute_logits(
         self,
         hidden_states: list[torch.Tensor],
-        sampling_metadata,
     ) -> list[torch.Tensor]:
         logits_lst: list[torch.Tensor] = []
 
         for hs, lm_head in zip(hidden_states, self.lm_heads):
-            _logits = self.logits_processor(lm_head, hs, sampling_metadata)
+            _logits = self.logits_processor(lm_head, hs)
 
             if _logits is None:
                 # _logits should only be None on rank > 0, in which case
