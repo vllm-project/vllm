@@ -15,7 +15,8 @@ from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -183,7 +184,6 @@ class PatchMerger(nn.Module):
         context_dim: int,
         spatial_merge_size: int = 2,
         pre_norm="layernorm",
-        init_merger_std=None,
     ) -> None:
         super().__init__()
         self.hidden_size = context_dim * (spatial_merge_size**2)
@@ -196,16 +196,18 @@ class PatchMerger(nn.Module):
             print("no norm in patch merger")
 
         self.mlp = nn.Sequential(
-            nn.Linear(self.hidden_size, self.hidden_size),
+            ColumnParallelLinear(self.hidden_size,
+                                 self.hidden_size,
+                                 bias=True,
+                                 return_bias=False,
+                                 disable_tp=True),
             nn.GELU(),
-            nn.Linear(self.hidden_size, dim),
+            RowParallelLinear(self.hidden_size,
+                              dim,
+                              bias=True,
+                              return_bias=False,
+                              disable_tp=True),
         )
-
-        if init_merger_std is not None:
-            nn.init.normal_(self.mlp[0].weight, mean=0.0, std=init_merger_std)
-            nn.init.zeros_(self.mlp[0].bias)
-            nn.init.normal_(self.mlp[2].weight, mean=0.0, std=init_merger_std)
-            nn.init.zeros_(self.mlp[2].bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.pre_norm:
@@ -519,7 +521,6 @@ class DotsVisionTransformer(PreTrainedModel):
         self.spatial_merge_size = config.spatial_merge_size
 
         self.patch_embed = DotsViTPreprocessor(config)
-        self._init_weights(self.patch_embed.patchifier.proj)
 
         head_dim = config.embed_dim // config.num_attention_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
@@ -550,19 +551,7 @@ class DotsVisionTransformer(PreTrainedModel):
             dim=config.hidden_size,
             context_dim=config.embed_dim,
             spatial_merge_size=config.spatial_merge_size,
-            init_merger_std=self.config.init_merger_std,
         )
-
-    def _init_weights(self, module):
-        std = self.config.initializer_range
-        if isinstance(module, (nn.Linear, nn.Conv3d)):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
 
     @property
     def dtype(self) -> torch.dtype:
@@ -617,12 +606,9 @@ class DotsVisionTransformer(PreTrainedModel):
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         return max_seqlen, seqlens
 
-    def forward(self,
-                hidden_states: torch.Tensor,
-                grid_thw: torch.Tensor,
-                bf16=True) -> torch.Tensor:
-        if bf16:
-            hidden_states = hidden_states.bfloat16()
+    def forward(self, hidden_states: torch.Tensor,
+                grid_thw: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states.to(self.dtype)
         hidden_states = self.patch_embed(hidden_states, grid_thw)
 
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
