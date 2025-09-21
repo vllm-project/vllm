@@ -6,7 +6,6 @@ import pytest
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, VllmConfig
-from vllm.platforms.interface import UnspecifiedPlatform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import processor as processor_mod
 from vllm.v1.engine.processor import Processor
@@ -33,15 +32,6 @@ def _mk_processor(monkeypatch,
                         "__post_init__",
                         lambda self, *args: None,
                         raising=True)
-    monkeypatch.setattr(UnspecifiedPlatform,
-                        "is_async_output_supported",
-                        classmethod(lambda cls, enforce_eager: True),
-                        raising=True)
-    monkeypatch.setattr(
-        ModelConfig,
-        "verify_async_output_proc",
-        lambda self, parallel_config, speculative_config, device_config: None,
-        raising=True)
     monkeypatch.setattr(ModelConfig,
                         "verify_with_parallel_config",
                         lambda self, parallel_config: None,
