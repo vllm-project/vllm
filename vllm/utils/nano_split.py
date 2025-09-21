@@ -142,11 +142,11 @@ def prepare_nano_split_and_set_hooks(
     forward_contexts = [
         ForwardContext(
             no_compile_layers=prev_forward_context.no_compile_layers,
-            attn_metadata=attn_metadata,
+            attn_metadata=attn_metadatas[i],
             virtual_engine=prev_forward_context.virtual_engine,
             dp_metadata=prev_forward_context.dp_metadata,
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
-        ) for attn_metadata in attn_metadatas
+        ) for i in range(split_config.num_nano_batches)
     ]
 
     @contextmanager
