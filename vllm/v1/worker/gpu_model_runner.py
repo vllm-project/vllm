@@ -636,7 +636,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
-            if (num_computed_tokens <= req_state.num_computed_tokens):
+            if num_computed_tokens <= req_state.num_computed_tokens:
                 # The request was rescheduled after a KV load failure. Clear
                 # the last sampled tokens and rewind the generator state
                 len_output_token_ids = len(req_state.output_token_ids)

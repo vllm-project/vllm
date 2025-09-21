@@ -48,9 +48,9 @@ class CachedRequestState:
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds)
-        # 'last_generator_offset' and 'last_gelen_last_output_token_ids' are
-        # used to allow safe rollback in case a sampled token turns out to be
-        # invalid (e.g., due to KV load errors).
+        # 'last_generator_offset' and 'len_last_output_token_ids' are used to
+        # allow safe rollback in case a sampled token turns out to be invalid
+        # (e.g., due to KV load errors).
         self.last_generator_offset = 0 if self.generator else None
         self.len_last_output_token_ids = len(self.output_token_ids)
 
