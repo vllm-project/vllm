@@ -270,6 +270,7 @@ class Qwen3_VisionTransformer(nn.Module):
         self.temporal_patch_size = vision_config.temporal_patch_size
         self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
         self.use_data_parallel = use_data_parallel
+        self.num_grid_per_side = int(self.num_position_embeddings**0.5)
 
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
@@ -385,9 +386,7 @@ class Qwen3_VisionTransformer(nn.Module):
         else:
             grid_list = [tuple(int(v) for v in grid) for grid in grid_thw]
 
-        num_grid_per_side = int(self.num_position_embeddings**0.5)
-        device = self.pos_embed.weight.device
-        dtype = self.pos_embed.weight.dtype
+        num_grid_per_side = self.num_grid_per_side
         m_size = self.spatial_merge_size
         hidden_dim = self.pos_embed.embedding_dim
 
@@ -397,12 +396,12 @@ class Qwen3_VisionTransformer(nn.Module):
                                     num_grid_per_side - 1,
                                     h,
                                     dtype=torch.float32,
-                                    device=device)
+                                    device=self.device)
             w_idxs = torch.linspace(0,
                                     num_grid_per_side - 1,
                                     w,
                                     dtype=torch.float32,
-                                    device=device)
+                                    device=self.device)
 
             h_floor = h_idxs.to(torch.long)
             w_floor = w_idxs.to(torch.long)
@@ -428,13 +427,14 @@ class Qwen3_VisionTransformer(nn.Module):
 
             indices = torch.stack([idx00, idx01, idx10, idx11], dim=0)
             weights = torch.stack([w00, w01, w10, w11],
-                                  dim=0).to(dtype=dtype, device=device)
+                                  dim=0).to(dtype=self.dtype,
+                                            device=self.device)
             weights = weights.unsqueeze(-1)
 
-            embeds = F.embedding(indices, self.pos_embed.weight)
+            embeds = self.pos_embed(indices)
             weighted_embeds = embeds * weights
             p0, p1, p2, p3 = weighted_embeds.unbind(dim=0)
-            combined = ((p0 + p1) + p2) + p3
+            combined = p0 + p1 + p2 + p3
 
             combined = combined.view(h * w, hidden_dim)
             repeated = combined.unsqueeze(0).expand(t, -1, -1).contiguous()
