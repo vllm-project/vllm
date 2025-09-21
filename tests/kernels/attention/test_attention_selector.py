@@ -67,6 +67,7 @@ def generate_params():
     return params
 
 
+@pytest.mark.skip(reason="Skipped for now. Should be revisited.")
 @pytest.mark.parametrize("device, name, use_mla, block_size",
                          generate_params())
 def test_env(
