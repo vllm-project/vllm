@@ -1692,7 +1692,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def compute_logits(self,
                        sample_hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.model.compute_logits(sample_hidden_states, None)
+        return self.model.compute_logits(sample_hidden_states)
 
     # TODO: Under SPMD mode, sample_from_logits has correctness issue.
     #       Re-enable the torch.compile once the issue is fixed in torchxla.

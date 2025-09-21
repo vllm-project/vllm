@@ -24,7 +24,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
@@ -670,10 +669,8 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
         return self.model(input_ids, positions, intermediate_tensors,
                           inputs_embeds)
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

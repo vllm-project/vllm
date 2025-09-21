@@ -50,7 +50,6 @@ from vllm.model_executor.models.qwen2_5_vl import (
 from vllm.model_executor.models.qwen2_audio import (
     Qwen2AudioProcessingInfo, _get_feat_extract_output_lengths)
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
@@ -955,10 +954,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

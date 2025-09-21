@@ -30,7 +30,6 @@ from vllm.model_executor.models.interfaces import (HasInnerState,
                                                    IsAttentionFree)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
@@ -335,10 +334,8 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

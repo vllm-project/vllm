@@ -26,7 +26,6 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather)
-from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import (MulAndSilu, QuickGELU,
                                                    SiluAndMul)
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -1527,10 +1526,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
