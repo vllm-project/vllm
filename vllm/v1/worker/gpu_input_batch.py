@@ -283,7 +283,6 @@ class InputBatch:
         self.prev_sampled_token_ids: Optional[torch.Tensor] = None
         self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
-        self.prev_req_ids: Optional[list[Optional[str]]] = None
 
     @property
     def req_ids(self) -> list[str]:

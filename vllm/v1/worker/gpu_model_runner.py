@@ -436,7 +436,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Cached outputs.
         self._draft_token_ids: Optional[Union[list[list[int]],
                                               torch.Tensor]] = None
-        self._req_id_to_draft_token_len: Optional[dict] = {}
         self.num_spec_tokens = 0
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens  # noqa
@@ -961,11 +960,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_commmon_tokens += 1
 
         for req_id, cur_index in self.input_batch.req_id_to_index.items():
-            req_state = self.requests[req_id]
+            req_state = self.requests.get(req_id, None)
             if (prev_index := prev_req_id_to_index.get(req_id)) is not None:
                 handle_prev_common_reqs(prev_index)
             # this happens when a requst is resumed from preemption.
-            elif req_state.prev_sampled_tokens is not None:
+            elif (req_state is not None
+                  and req_state.prev_sampled_tokens is not None):
                 prev_index = prev_sampled_len
                 handle_prev_common_reqs(prev_index)
                 cache_sampled_tokens.append(req_state.prev_sampled_tokens)
@@ -979,7 +979,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if cache_sampled_tokens:
             prev_sampled_token_ids = torch.cat(
                 [prev_sampled_token_ids, *cache_sampled_tokens])
-
         for req_id, prev_index in prev_req_id_to_index.items():
             # the request occurs in last step, but disappear in this step.
             # it could be a finished request or a preempted request.
@@ -989,10 +988,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # `_update_states`, if it's resumed again, we need to copy the
             # prev_sampled_token_ids to input_ids of this request.
             if prev_index not in prev_common_req_indices:
-                req_state = self.requests[req_id]
+                req_state = self.requests.get(req_id, None)
+                if req_state is None:
+                    continue
                 req_state.prev_sampled_tokens = prev_sampled_token_ids[
                     prev_index:prev_index + 1].clone
-                if self._draft_token_ids is not None:
+                if self._draft_token_ids is not None and isinstance(
+                        self._draft_token_ids, torch.Tensor):
                     req_state.prev_draft_tokens = self._draft_token_ids[
                         prev_index:prev_index + 1].clone
 
@@ -1039,7 +1041,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self._draft_token_ids is None or not spec_flattened_indices:
             return
 
-        assert not isinstance(self._draft_token_ids, list)
         draft_tokens_index_tensor = torch.tensor(
             spec_flattened_indices,
             dtype=torch.int64,
@@ -2601,7 +2602,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampled_token_ids=sampler_output.sampled_token_ids,
             invalid_req_indices=invalid_req_indices,
             async_output_copy_stream=self.async_output_copy_stream,
-        )
+            vocab_size=self.input_batch.vocab_size)
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
