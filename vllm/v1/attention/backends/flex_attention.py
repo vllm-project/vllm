@@ -30,67 +30,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
-# NOTE: torch.compile(create_block_mask, ...) is left defined but not used;
-# see build_block_mask() for why eager mode is enforced.
-create_block_mask_compiled = torch.compile(create_block_mask,
-                                           fullgraph=True,
-                                           mode="reduce-overhead")
-
-# FlexAttention compilation state management
-_flex_attention_compiled = None
-_flex_attention_compilation_attempted = False
-
-
-def get_flex_attention_fn():
-    """Get appropriate flex_attention function, 
-    reusing existing compilation patterns."""
-    global _flex_attention_compiled, _flex_attention_compilation_attempted
-
-    from vllm.compilation.monitor import cudagraph_capturing_enabled
-
-    if cudagraph_capturing_enabled:
-        # During CUDAGraphs capture: use uncompiled version
-        return flex_attention
-
-    if not _flex_attention_compilation_attempted:
-        # Attempt lazy compilation, reusing existing compilation config
-        try:
-            _flex_attention_compiled = torch.compile(flex_attention,
-                                                     fullgraph=True,
-                                                     mode="reduce-overhead")
-            logger.debug(
-                "FlexAttention compiled successfully after CUDAGraphs capture")
-        except Exception as e:
-            logger.debug(
-                "FlexAttention compilation failed: %s, using uncompiled "
-                "version", e)
-            _flex_attention_compiled = flex_attention
-        _flex_attention_compilation_attempted = True
-
-    return _flex_attention_compiled or flex_attention
-
-
-def _clone_block_mask(block_mask: BlockMask) -> BlockMask:
-    """Clone tensor fields to keep them valid across CUDA graph replays."""
-
-    def maybe_clone(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-        return tensor.clone() if tensor is not None else None
-
-    return BlockMask(
-        block_mask.seq_lengths,
-        block_mask.kv_num_blocks.clone(),
-        block_mask.kv_indices.clone(),
-        maybe_clone(block_mask.full_kv_num_blocks),
-        maybe_clone(block_mask.full_kv_indices),
-        maybe_clone(block_mask.q_num_blocks),
-        maybe_clone(block_mask.q_indices),
-        maybe_clone(block_mask.full_q_num_blocks),
-        maybe_clone(block_mask.full_q_indices),
-        block_mask.BLOCK_SIZE,
-        block_mask.mask_mod,
-    )
-
-
 def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
     device = offsets.device
     counts = offsets[1:] - offsets[:-1]
@@ -603,7 +542,7 @@ class FlexAttentionMetadata:
                 device=self.block_table.device,
                 BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
             )
-        return _clone_block_mask(block_mask)
+        return block_mask
 
     def _build_dense_block_mask(self, q_len: int, kv_len: int) -> BlockMask:
         """Create a dense block mask covering the provided logical lengths.
@@ -658,21 +597,13 @@ class FlexAttentionMetadata:
         rebuilt: Optional[BlockMask] = None
         if (self.doc_ids.numel() > 0 and self.num_actual_tokens > 0
                 and self.total_cache_tokens > 0):
-            original_num_tokens = self.num_actual_tokens
-            original_total_cache_tokens = self.total_cache_tokens
             try:
-                self.num_actual_tokens = max(original_num_tokens, q_len)
-                self.total_cache_tokens = max(original_total_cache_tokens,
-                                              kv_len)
                 if self.direct_build and self.causal:
                     rebuilt = self._build_block_mask_direct()
                 else:
                     rebuilt = self.build_block_mask()
             except Exception:  # noqa: BLE001
                 rebuilt = None
-            finally:
-                self.num_actual_tokens = original_num_tokens
-                self.total_cache_tokens = original_total_cache_tokens
 
         if rebuilt is None:
             rebuilt = self._build_dense_block_mask(q_len, kv_len)
@@ -693,25 +624,11 @@ class FlexAttentionMetadata:
         self.mask_mod = self.get_mask_mod()
         self.transformed_score_mod = self.get_transformed_score_mod()
 
-        # Check if we're in CUDAGraphs capture mode
-        from vllm.compilation.monitor import cudagraph_capturing_enabled
-
-        if cudagraph_capturing_enabled:
-            # During CUDAGraphs capture: create a "sufficiently large"
-            # block_mask
-            # to avoid dynamic creation during forward pass
-            # Use smaller defaults for CUDAGraphs capture compatibility
-            default_q_len = max(self.q_block_size * 2, 128)  # 2 blocks or 128
-            default_kv_len = max(self.kv_block_size * 2,
-                                 128)  # 2 blocks or 128
-            self.block_mask = self._build_dense_block_mask(
-                default_q_len, default_kv_len)
+        # Create block_mask based on available information
+        if self.direct_build and self.causal:
+            self.block_mask = self._build_block_mask_direct()
         else:
-            # Normal mode: create block_mask as usual
-            if self.direct_build and self.causal:
-                self.block_mask = self._build_block_mask_direct()
-            else:
-                self.block_mask = self.build_block_mask()
+            self.block_mask = self.build_block_mask()
 
 
 class FlexAttentionMetadataBuilder(
@@ -1025,45 +942,17 @@ class FlexAttentionImpl(AttentionImpl):
         kernel_options = get_kernel_options(query, block_m, block_n,
                                             attn_metadata.direct_build)
 
-        # Use lazy compilation mechanism to get appropriate flex_attention
-        # function
-        flex_fn = get_flex_attention_fn()
-
-        if flex_fn == _flex_attention_compiled and flex_fn != flex_attention:
-            try:
-                out = flex_fn(
-                    query,
-                    key_tensor,
-                    value_tensor,
-                    attn_metadata.transformed_score_mod,
-                    attn_metadata.block_mask,
-                    self.scale,
-                    enable_gqa=enable_gqa,
-                    kernel_options=kernel_options,
-                )
-            except ValueError as exc:
-                logger.debug('FlexAttention compiled path failed: %s', exc)
-                out = flex_attention(
-                    query,
-                    key_tensor,
-                    value_tensor,
-                    attn_metadata.transformed_score_mod,
-                    attn_metadata.block_mask,
-                    self.scale,
-                    enable_gqa=enable_gqa,
-                    kernel_options=kernel_options,
-                )
-        else:
-            out = flex_fn(
-                query,
-                key_tensor,
-                value_tensor,
-                attn_metadata.transformed_score_mod,
-                attn_metadata.block_mask,
-                self.scale,
-                enable_gqa=enable_gqa,
-                kernel_options=kernel_options,
-            )
+        # Use flex_attention directly (no compilation for CUDA graph compatibility)
+        out = flex_attention(
+            query,
+            key_tensor,
+            value_tensor,
+            attn_metadata.transformed_score_mod,
+            attn_metadata.block_mask,
+            self.scale,
+            enable_gqa=enable_gqa,
+            kernel_options=kernel_options,
+        )
 
         # Flex doesn't have an out variant today, rely on epilogue fusion
         out = out.permute(0, 2, 1, 3).squeeze(0)

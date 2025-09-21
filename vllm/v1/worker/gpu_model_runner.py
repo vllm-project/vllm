@@ -3379,37 +3379,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
-        # Post-capture FlexAttention compilation
-        self._post_capture_compile_flex_attention()
 
         return cuda_graph_size
 
-    def _post_capture_compile_flex_attention(self):
-        """Compile FlexAttention after CUDAGraphs capture, 
-        reusing existing warmup patterns."""
-        try:
-            # Check if FlexAttention backend is being used
-            from vllm.attention.backends.abstract import get_attention_backend
-            current_backend = get_attention_backend()
-
-            if current_backend.get_name() == "FLEX_ATTENTION":
-                logger.info("Starting post-capture FlexAttention warmup...")
-
-                # Reuse existing _dummy_run mechanism to trigger FlexAttention
-                # compilation
-                # Use a small batch size for quick warmup
-                warmup_size = min(8, self.max_num_reqs)
-                self._dummy_run(warmup_size, skip_eplb=True, remove_lora=False)
-
-                logger.info("FlexAttention post-capture warmup completed")
-            else:
-                logger.debug(
-                    "Current backend is %s, skipping FlexAttention warmup",
-                    current_backend.get_name())
-
-        except Exception as e:
-            logger.warning("FlexAttention post-capture warmup failed: %s", e)
-            # Don't affect overall flow, continue execution
 
     def _capture_cudagraphs(self, compilation_cases: list[int],
                             cudagraph_runtime_mode: CUDAGraphMode,
@@ -3611,20 +3583,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     CUDAGraphMode.NONE
             logger.warning(msg)
 
-        # double check that we can support full cudagraph if they are requested
-        # even after automatic downgrades
+        # Check that we can support the requested cudagraph mode
         if cudagraph_mode.has_full_cudagraphs() \
             and min_cg_support == AttentionCGSupport.NEVER:
-            logger.warning(
-                "CUDAGraphMode.%s is not supported with %s backend "
-                "(support:%s); falling back to CUDAGraphMode.NONE.",
-                cudagraph_mode.name,
-                min_cg_builder_name,
-                min_cg_support,
-            )
-            cudagraph_mode = self.compilation_config.cudagraph_mode = \
-                CUDAGraphMode.NONE
-            self.compilation_config.use_cudagraph = False
+            raise ValueError(
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported with "
+                f"{min_cg_builder_name} backend (support: {min_cg_support}). "
+                f"Please use a compatible attention backend or set "
+                f"cudagraph_mode=NONE.")
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).
