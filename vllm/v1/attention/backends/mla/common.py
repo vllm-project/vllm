@@ -412,7 +412,8 @@ M = TypeVar("M", bound=MLACommonMetadata)
 def use_flashinfer_prefill() -> bool:
     # For blackwell default to flashinfer prefill if it's available since
     # it is faster than FA2.
-    return (flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL
+    return (not envs.VLLM_DISABLE_FLASHINFER_PREFILL and flashinfer_available
+            and not envs.VLLM_USE_CUDNN_PREFILL
             and current_platform.is_device_capability(100))
 
 
