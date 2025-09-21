@@ -201,7 +201,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
-
+        total_num_spec_tokens = 0
         # For logging.
         scheduled_timestamp = time.monotonic()
 
@@ -308,6 +308,7 @@ class Scheduler(SchedulerInterface):
                                              request.num_computed_tokens -
                                              request.num_tokens)
                 if num_scheduled_spec_tokens > 0:
+                    total_num_spec_tokens += num_scheduled_spec_tokens
                     # Trim spec_token_ids list to num_scheduled_spec_tokens.
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
@@ -599,6 +600,7 @@ class Scheduler(SchedulerInterface):
             get_freed_mm_hashes(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            total_num_scheduled_spec_tokens=total_num_spec_tokens,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

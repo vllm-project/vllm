@@ -630,10 +630,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # then use it to update actual num_computed_tokens of each request.
         if self.valid_sampled_token_count_event is not None:
             self.valid_sampled_token_count_event.synchronize()
-
+        valid_sampled_token_count = self.valid_sampled_token_count_cpu.tolist()
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = self._update_computed_tokens(
+                valid_sampled_token_count,
                 req_id,
                 req_data.num_computed_tokens[i],
                 req_state.prev_num_draft_len,
@@ -731,6 +732,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _update_computed_tokens(
         self,
+        valid_sampled_token_count: list[int],
         req_id: str,
         num_computed_tokens: int,
         prev_draft_tokens_len: int = 0,
@@ -752,7 +754,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # num_computed_tokens.
         if req_idx is None:
             return num_computed_tokens
-        num_accepted = self.valid_sampled_token_count_cpu[req_idx] - 1
+        num_accepted = valid_sampled_token_count[req_idx] - 1
         num_rejected = prev_draft_tokens_len - num_accepted
         return num_computed_tokens - num_rejected
 
@@ -890,10 +892,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not self.use_async_scheduling or self.num_spec_tokens <= 0:
             return total
 
-        draft_tokens = sum(
+        num_draft_tokens = sum(
             len(spec_tokens) for spec_tokens in
             scheduler_output.scheduled_spec_decode_tokens.values())
-        return total - draft_tokens
+        return total - num_draft_tokens
 
     def _prepare_input_ids(
         self,
@@ -915,7 +917,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
 
-        total_without_spec = self._get_total_without_spec(scheduler_output)
+        total_without_spec = total_num_scheduled_tokens - scheduler_output.total_num_scheduled_spec_tokens  # noqa
         # Async scheduling case, where some decode requests from the previous
         # iteration won't have entries in input_ids_cpu and need to be copied
         # on the GPU from prev_sampled_token_ids.
@@ -934,7 +936,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
         num_commmon_tokens = 0
 
-        def handle_prev_common_reqs(prev_index):
+        def handle_prev_common_reqs(prev_index, req_id):
             nonlocal indices_match, max_flattened_index, num_commmon_tokens
             prev_common_req_indices.append(prev_index)
             # We need to compute the flattened input_ids index of the
@@ -960,14 +962,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_commmon_tokens += 1
 
         for req_id, cur_index in self.input_batch.req_id_to_index.items():
-            req_state = self.requests.get(req_id, None)
             if (prev_index := prev_req_id_to_index.get(req_id)) is not None:
-                handle_prev_common_reqs(prev_index)
+                handle_prev_common_reqs(prev_index, req_id)
             # this happens when a requst is resumed from preemption.
-            elif (req_state is not None
+            elif ((req_state := self.requests.get(req_id, None)) is not None
                   and req_state.prev_sampled_tokens is not None):
                 prev_index = prev_sampled_len
-                handle_prev_common_reqs(prev_index)
+                handle_prev_common_reqs(prev_index, req_id)
                 cache_sampled_tokens.append(req_state.prev_sampled_tokens)
                 # resumed because num_new_tokens=0 in schedule
                 #  but in next step num_new_tokens>0 which in
@@ -992,11 +993,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if req_state is None:
                     continue
                 req_state.prev_sampled_tokens = prev_sampled_token_ids[
-                    prev_index:prev_index + 1].clone
-                if self._draft_token_ids is not None and isinstance(
-                        self._draft_token_ids, torch.Tensor):
+                    prev_index:prev_index + 1]
+                if self._draft_token_ids is not None:
                     req_state.prev_draft_tokens = self._draft_token_ids[
-                        prev_index:prev_index + 1].clone
+                        prev_index:prev_index + 1]
 
         if num_commmon_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
@@ -2336,31 +2336,29 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
-        for req_idx in range(num_sampled_tokens):
-            if self.use_async_scheduling:
-                sampled_ids = [-1] if \
-                    req_idx not in invalid_req_indices_set else None
-            else:
+        if not self.use_async_scheduling:
+            for req_idx in range(num_sampled_tokens):
                 sampled_ids = valid_sampled_token_ids[req_idx]
-            if not sampled_ids:
-                continue
+                if not sampled_ids:
+                    continue
 
-            start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            end_idx = start_idx + len(sampled_ids)
-            assert end_idx <= self.max_model_len, (
-                "Sampled token IDs exceed the max model length. "
-                f"Total number of tokens: {end_idx} > max_model_len: "
-                f"{self.max_model_len}")
+                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                end_idx = start_idx + len(sampled_ids)
+                assert end_idx <= self.max_model_len, (
+                    "Sampled token IDs exceed the max model length. "
+                    f"Total number of tokens: {end_idx} > max_model_len: "
+                    f"{self.max_model_len}")
 
-            self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = sampled_ids
-            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
-            self.input_batch.num_tokens_no_spec[req_idx] = end_idx
-            self.input_batch.num_tokens[req_idx] = end_idx
+                self.input_batch.token_ids_cpu[req_idx,
+                                               start_idx:end_idx] = sampled_ids
+                self.input_batch.is_token_ids[req_idx,
+                                              start_idx:end_idx] = True
+                self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+                self.input_batch.num_tokens[req_idx] = end_idx
 
-            req_id = req_ids[req_idx]
-            req_state = self.requests[req_id]
-            req_state.output_token_ids.extend(sampled_ids)
+                req_id = req_ids[req_idx]
+                req_state = self.requests[req_id]
+                req_state.output_token_ids.extend(sampled_ids)
 
         return (
             num_nans_in_logits,

@@ -136,6 +136,8 @@ class SchedulerOutput:
     # Total number of tokens scheduled for all requests.
     # Equal to sum(num_scheduled_tokens.values())
     total_num_scheduled_tokens: int
+    # Total number of speculative scheduled tokens for all requests.
+    total_num_scheduled_spec_tokens: int
     # req_id -> spec_token_ids
     # If a request does not have any spec decode tokens, it will not be
     # included in the dictionary.
