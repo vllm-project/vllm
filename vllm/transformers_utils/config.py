@@ -598,7 +598,7 @@ def maybe_override_with_speculators_target_model(
         gguf_model_repo = Path(model).parent
     elif gguf_file is not None:
         kwargs["gguf_file"] = gguf_file
-        gguf_model_repo = model
+        gguf_model_repo = Path(model)
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
