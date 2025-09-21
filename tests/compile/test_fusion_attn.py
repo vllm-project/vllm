@@ -334,8 +334,9 @@ else:
                          [7, 256, 533] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("model_name, model_class", MODELS)
-@pytest.mark.parametrize("backend", [_Backend.FLASHINFER] if
-                         current_platform.is_cuda() else [_Backend.ROCM_FLASH])
+@pytest.mark.parametrize("backend",
+                         [_Backend.FLASHINFER] if current_platform.is_cuda()
+                         else [_Backend.TRITON_ATTN_VLLM_V1])
 @pytest.mark.parametrize(
     "split_attention",
     [False, True] if current_platform.is_rocm() else [False])
