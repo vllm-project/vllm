@@ -66,6 +66,13 @@ Further update the model as follows:
 !!! important
     The returned `multimodal_embeddings` must be either a **3D [torch.Tensor][]** of shape `(num_items, feature_size, hidden_size)`, or a **list / tuple of 2D [torch.Tensor][]'s** of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
 
+!!! note
+    By default, vLLM merges the multimodal embeddings into text embeddings depending on the information of their locations defined in
+    [PlaceholderRange][vllm.inputs.multimodal.PlaceholderRange] from input processing.
+    This logic can be found at [get_input_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings].
+
+    You may override this method if additional logic is required for your model when merging embeddings. 
+
 - Implement [get_language_model][vllm.model_executor.models.interfaces.SupportsMultiModal.get_language_model] getter to provide stable access to the underlying language model.
 
     ```python
