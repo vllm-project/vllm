@@ -132,7 +132,7 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          logits_soft_cap, attn_type,
-                         kv_sharing_target_layer_name, **mla_args)
+                         kv_sharing_target_layer_name, use_sparse=True, **mla_args)
         # self.sm_scale = 
         self.topk_indices = None
 
