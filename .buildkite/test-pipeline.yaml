@@ -866,8 +866,6 @@ steps:
   - tests/distributed/
   - vllm/compilation
   - vllm/worker/worker_base.py
-  - vllm/worker/worker.py
-  - vllm/worker/model_runner.py
   - entrypoints/llm/test_collective_rpc.py
   - tests/v1/test_async_llm_dp.py
   - tests/v1/test_external_lb_dp.py
