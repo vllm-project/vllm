@@ -115,36 +115,65 @@ class FlashMLASparseMetadataBuilder(
 @dataclass
 class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+            self,
+            num_heads: int,
+            head_size: int,
+            scale: float,
+            num_kv_heads: int,
+            alibi_slopes: Optional[list[float]],
+            sliding_window: Optional[int],
+            kv_cache_dtype: str,
+            logits_soft_cap: Optional[float],
+            attn_type: str,
+            kv_sharing_target_layer_name: Optional[str],
+            # MLA Specific Arguments
+            **mla_args) -> None:
+        super().__init__(num_heads, head_size, scale, num_kv_heads,
+                         alibi_slopes, sliding_window, kv_cache_dtype,
+                         logits_soft_cap, attn_type,
+                         kv_sharing_target_layer_name, **mla_args)
+        # self.sm_scale = 
+        self.topk_indices = None
+
+
+    def set_topk_indices(self, topk_indices: torch.Tensor):
+        self.topk_indices = topk_indices
 
     def _forward_prefill(
         self,
         q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
         k_scale: torch.Tensor,
+        topk_indices: Optional[torch.Tensor] = None, # sparse attn
     ) -> torch.Tensor:
-        return torch.empty_like(q)
+        assert topk_indices is not None
+
+        # # assume indice of shape [num_prefill_tokens, topk]
+        # block_id_in_req = topk_indices // self.block_size
+
+        logger.info(f"called _forward_prefill")
+        # NOTE(Chen): shape is unsure
+
+        return torch.zeros((q.shape[0], 2048), dtype=q.dtype, device=q.device)
 
     def _forward_decode(
         self,
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-    ) -> torch.Tensor:
-        return torch.empty_like(q)
-
-    def forward(
-        self,
         layer: AttentionLayer,
-        q: torch.Tensor,
-        k_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        topk_indices: Optional[torch.Tensor] = None, # sparse attn
     ) -> torch.Tensor:
-        return output.fill_(0)
+
+        assert topk_indices is not None
+
+        # # assume indice of shape [num_decode_tokens, topk]
+        # block_id_in_req = topk_indices // self.block_size
+
+        logger.info(f"called _forward_decode")
+        # NOTE(Chen): shape is unsure
+        return torch.zeros((q[0].shape[0], 16*512), dtype=q[0].dtype, device=q[0].device), torch.zeros((q[0].shape[0], 128), dtype=q[0].dtype, device=q[0].device)

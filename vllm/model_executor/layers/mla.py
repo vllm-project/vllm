@@ -78,6 +78,8 @@ class MultiHeadLatentAttention(CustomOp):
         self.kv_b_proj = mla_modules.kv_b_proj
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
+        self.indexer = mla_modules.indexer
+        self.topk_tokens = mla_modules.indexer.topk_tokens
 
         # In the MLA backend, kv_cache includes both k_c and
         # pe (i.e. decoupled position embeddings). In particular,
@@ -148,6 +150,12 @@ class MultiHeadLatentAttention(CustomOp):
 
         q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
             positions, q[..., self.qk_nope_head_dim:], k_pe)
+
+        topk_indices = torch.zeros(q.shape[0], self.topk_tokens)
+
+        # NOTE(Chen): a bit hacky, but need to modify Attention.forward 
+        # otherwise. Try to refactor this later.
+        self.mla_attn.impl.set_topk_indices(topk_indices)
 
         attn_out = self.mla_attn(
             q,
