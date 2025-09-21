@@ -42,8 +42,12 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
 # yapf: enable
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-FLASHINFER_WORKSPACE_BUFFER_SIZE = int(
-    os.environ.get("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", 256 * 1024 * 1024))
+_default_workspace_size = 256 * 1024 * 1024
+_env_val = os.environ.get("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", _default_workspace_size)
+try:
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = int(_env_val)
+except (ValueError, TypeError):
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = _default_workspace_size
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
