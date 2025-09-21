@@ -239,7 +239,7 @@ class EagleProposer:
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+        logits = self.model.compute_logits(sample_hidden_states)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
@@ -367,8 +367,7 @@ class EagleProposer:
                 else:
                     last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
-            logits = self.model.compute_logits(last_hidden_states[:batch_size],
-                                               None)
+            logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
@@ -678,9 +677,7 @@ class EagleProposer:
             # Get the output logits for the draft tokens.
             logits = self.model.compute_logits(
                 draft_last_hidden_states.reshape(batch_size * level_num_drafts,
-                                                 -1),
-                None,
-            )
+                                                 -1))
 
             # Sample a draft token for each child at the next tree level.
             num_children = self.child_drafts_per_level[level + 1]
