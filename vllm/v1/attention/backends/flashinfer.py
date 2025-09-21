@@ -3,6 +3,7 @@
 """Attention layer with FlashInfer."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import ClassVar, Optional, Union
 
@@ -41,7 +42,8 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
 # yapf: enable
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+FLASHINFER_WORKSPACE_BUFFER_SIZE = int(
+    os.environ.get("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", 256 * 1024 * 1024))
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8

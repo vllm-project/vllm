@@ -188,6 +188,7 @@ return curr_o @ W_O
 """
 
 import functools
+import os
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from typing import ClassVar, Generic, Optional, TypeVar, Union
@@ -426,7 +427,8 @@ def use_cudnn_prefill() -> bool:
 # Currently 394MB, this can be tuned based on GEMM sizes used.
 # Chosen to be the same as sglang:
 #  https://github.com/sgl-project/sglang/blob/766392c6bda2558b61ce6d1c1bfd8081a549e1f1/python/sglang/global_config.py#L37
-FLASHINFER_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
+FLASHINFER_WORKSPACE_BUFFER_SIZE = int(
+    os.environ.get("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", 394 * 1024 * 1024))
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
