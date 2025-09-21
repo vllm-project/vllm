@@ -580,7 +580,7 @@ class FlexAttentionMetadata:
             full_kv_num_blocks=None,
             full_kv_indices=None,
             BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
-            mask_mod=None,
+            mask_mod=self.mask_mod,
         )
         return block_mask
 
