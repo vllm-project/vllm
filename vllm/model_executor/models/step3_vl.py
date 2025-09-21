@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from itertools import product
 from math import ceil, sqrt
 from typing import Any, Literal, Optional, TypedDict, Union
@@ -24,7 +23,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -897,13 +895,6 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     @property
     def device(self):
         return next(self.parameters()).device
@@ -1068,13 +1059,6 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
