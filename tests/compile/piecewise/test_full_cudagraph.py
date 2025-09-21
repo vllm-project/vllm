@@ -48,7 +48,7 @@ backend_configs = {
     BackendConfig(name="FA3",
                   env_vars={
                       "VLLM_FLASH_ATTN_VERSION": "3",
-                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": 16,
+                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
                   },
                   comp_config={
                       "cudagraph_mode": "FULL",
@@ -69,7 +69,7 @@ backend_configs = {
     BackendConfig(name="FlashAttentionMLA",
                   env_vars={
                       "VLLM_ATTENTION_BACKEND": "FLASH_ATTN_MLA",
-                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": 16,
+                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
                   },
                   comp_config={
                       "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -95,7 +95,7 @@ backend_configs = {
     BackendConfig(name="FA2",
                   env_vars={
                       "VLLM_FLASH_ATTN_VERSION": "2",
-                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": 16,
+                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
                   },
                   comp_config={
                       "cudagraph_mode": "FULL",
