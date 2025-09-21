@@ -304,8 +304,9 @@ class DotsVisionAttention(nn.Module):
         v = v.permute(1, 0, 2, 3).contiguous()
 
         if rotary_pos_emb is not None:
-            q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
-            k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
+            qk_concat = torch.cat([q, k], dim=0)
+            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
+            q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
             if self.attn_backend == _Backend.ROCM_AITER_FA:
