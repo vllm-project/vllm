@@ -273,7 +273,9 @@ def _prepare_seq_groups(
         do_sample = seq_group_metadata.do_sample
 
         if seq_group_metadata.is_prompt:
-            if sampling_params.seed is not None:
+            if seq_group_metadata.request_id in generators:
+                generator = generators[seq_group_metadata.request_id]
+            elif sampling_params.seed is not None:
                 generator = torch.Generator(device=device).manual_seed(
                     sampling_params.seed)
                 if generators is not None:
