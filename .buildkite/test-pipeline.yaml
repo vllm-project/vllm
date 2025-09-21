@@ -148,7 +148,6 @@ steps:
   num_gpus: 4
   source_file_dependencies:
   - vllm/distributed/
-  - vllm/core/
   - tests/distributed/test_utils
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
