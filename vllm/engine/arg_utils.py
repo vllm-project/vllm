@@ -1508,14 +1508,6 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        if self.kv_cache_dtype != "auto":
-            supported = current_platform.is_kv_cache_dtype_supported(
-                self.kv_cache_dtype, model_config)
-            if not supported:
-                _raise_or_fallback(feature_name="--kv-cache-dtype",
-                                   recommend_to_remove=False)
-                return False
-
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
             _raise_or_fallback(feature_name=model_config.architectures,

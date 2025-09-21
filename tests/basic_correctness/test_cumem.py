@@ -122,11 +122,12 @@ def test_cumem_with_cudagraph():
         # sleep mode with safetensors
         ("meta-llama/Llama-3.2-1B", True),
         # sleep mode with pytorch checkpoint
-        ("facebook/opt-125m", False),
+        ("facebook/opt-125m", True),
     ])
 def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
+        assert use_v1
+        m.setenv("VLLM_USE_V1", "1")
         free, total = torch.cuda.mem_get_info()
         used_bytes_baseline = total - free  # in case other process is running
         llm = LLM(model, enable_sleep_mode=True)

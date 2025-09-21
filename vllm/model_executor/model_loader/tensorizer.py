@@ -672,21 +672,15 @@ def tensorize_vllm_model(engine_args: "EngineArgs",
         ) as stream:
             stream.write(encryption_params.key)
 
-    from vllm import LLMEngine
-    from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+    assert envs.VLLM_USE_V1
 
-    if not envs.VLLM_USE_V1:
-        engine = LLMEngine.from_engine_args(engine_args)
-        engine.model_executor.collective_rpc(
-            "save_tensorized_model",
-            kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
-        )
-    else:
-        engine = V1LLMEngine.from_vllm_config(engine_config)
-        engine.collective_rpc(
-            "save_tensorized_model",
-            kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
-        )
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    engine = LLMEngine.from_vllm_config(engine_config)
+    engine.collective_rpc(
+        "save_tensorized_model",
+        kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
+    )
 
 
 def tensorize_lora_adapter(lora_path: str,
