@@ -41,10 +41,11 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         self.think_end_token_id = self.vocab.get(self.think_end_token)
         self.assistant_token_id = self.vocab.get(self.assistant_token)
         if (self.think_start_token_id is None
-                or self.think_end_token_id is None):
+                or self.think_end_token_id is None
+                or self.assistant_token_id is None):
             raise RuntimeError(
                 "Glm4MoeModel reasoning parser could not locate "
-                "think start/end tokens in the tokenizer!")
+                "think start/end or assistant tokens in the tokenizer!")
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         """
