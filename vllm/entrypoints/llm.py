@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar
 
-import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
@@ -19,7 +18,6 @@ from vllm.config import (CompilationConfig, ModelDType,
                          StructuredOutputsConfig, TokenizerMode, is_init_field)
 from vllm.engine.arg_utils import (ConvertOption, EngineArgs, HfOverrides,
                                    PoolerConfig, RunnerOption)
-from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
                                          apply_hf_chat_template,
@@ -54,6 +52,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, as_iter, is_list_of
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -309,11 +308,7 @@ class LLM:
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
-        if envs.VLLM_USE_V1:
-            supported_tasks = self.llm_engine \
-                .get_supported_tasks()  # type: ignore
-        else:
-            supported_tasks = self.llm_engine.model_config.supported_tasks
+        supported_tasks = self.llm_engine.get_supported_tasks()  # type: ignore
 
         logger.info("Supported_tasks: %s", supported_tasks)
 
@@ -1473,8 +1468,6 @@ class LLM:
         Note:
             This method is only available with the V1 LLM engine.
         """
-        from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-        assert isinstance(self.llm_engine, V1LLMEngine)
         return self.llm_engine.get_metrics()
 
     def _validate_and_add_requests(

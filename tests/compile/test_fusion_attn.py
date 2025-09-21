@@ -54,8 +54,7 @@ def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
     # Use global backends
     global backend, backend_unfused
 
-    use_v1 = False  # can be made a param once V1 support added
-    monkeypatch.setenv("VLLM_USE_V1", str(int(use_v1)))
+    monkeypatch.setenv("VLLM_USE_V1", "1")
     monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
 
     # Prompt 4 seems too open-ended, differs between fused and unfused
