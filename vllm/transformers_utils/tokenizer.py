@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import is_model_local_gguf_file
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -149,6 +149,7 @@ def get_tokenizer(
     trust_remote_code: bool = False,
     revision: Optional[str] = None,
     download_dir: Optional[str] = None,
+    gguf_file: Optional[str] = None,
     **kwargs,
 ) -> AnyTokenizer:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
@@ -186,10 +187,12 @@ def get_tokenizer(
         kwargs["truncation_side"] = "left"
 
     # Separate model folder from file path for GGUF models
-    is_gguf = check_gguf_file(tokenizer_name)
-    if is_gguf:
+    is_local_gguf = is_model_local_gguf_file(tokenizer_name)
+    if is_local_gguf:
         kwargs["gguf_file"] = Path(tokenizer_name).name
         tokenizer_name = Path(tokenizer_name).parent
+    elif gguf_file is not None:
+        kwargs["gguf_file"] = gguf_file
 
     # if tokenizer is from official mistral org
     is_from_mistral_org = str(tokenizer_name).split("/")[0] == "mistralai"
@@ -289,4 +292,5 @@ def init_tokenizer_from_configs(model_config: ModelConfig):
         trust_remote_code=model_config.trust_remote_code,
         revision=model_config.tokenizer_revision,
         truncation_side=truncation_side,
+        gguf_file=model_config.gguf_file,
     )

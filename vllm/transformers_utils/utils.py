@@ -17,8 +17,8 @@ def is_s3(model_or_path: str) -> bool:
     return model_or_path.lower().startswith('s3://')
 
 
-def check_gguf_file(model: Union[str, PathLike]) -> bool:
-    """Check if the file is a GGUF model."""
+def is_model_local_gguf_file(model: Union[str, PathLike]) -> bool:
+    """Check if the model is a local GGUF file."""
     model = Path(model)
     if not model.is_file():
         return False
