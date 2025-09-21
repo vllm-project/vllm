@@ -153,14 +153,12 @@ class BlockTable:
             # for block_table_indices calculation.
             virtual_block_size = self.block_size * self.dcp_world_size
 
-            logical_block_idx = positions // virtual_block_size
-
-            # Account for the expanded logical table
+            # Account for the expanded kernel table
             # (always needed with unified tensor)
-            # Each kv_manager_block_size is split into multiple logical blocks
-            # The logical table has been expanded to accommodate this
+            # Each kv_manager_block_size is split into multiple kernel blocks
+            # The kernel table has been expanded to accommodate this
             block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                                   logical_block_idx)
+                                   positions // virtual_block_size)
 
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             # Use virtual_block_size for mask calculation, which marks local
@@ -175,9 +173,8 @@ class BlockTable:
             self.slot_mapping.np[:req_indices.shape[0]] = np.where(
                 mask, slot_mapping, -1)
         else:
-            logical_block_idx = positions // self.block_size
             block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                                   logical_block_idx)
+                                   positions // self.block_size)
 
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
@@ -196,28 +193,28 @@ class BlockTable:
         self.block_table.cpu.fill_(0)
 
     def _map_to_kernel_blocks(self,
-                              kv_manager_block_id: np.ndarray) -> np.ndarray:
-        """Convert kv_manager_block_id IDs to logical block IDs.
+                              kv_manager_block_ids: np.ndarray) -> np.ndarray:
+        """Convert kv_manager_block_id IDs to kernel block IDs.
 
         Example:
-            # kv_manager_block_id: 32 tokens,
+            # kv_manager_block_ids: 32 tokens,
             # Kernel block size: 16 tokens
             # blocks_per_phys_block = 2
-            >>> kv_manager_block_id = np.array([0, 1, 2])
+            >>> kv_manager_block_ids = np.array([0, 1, 2])
             >>> Result: [0, 1, 2, 3, 4, 5]
 
-            # Each kv_manager_block_id maps to 2 logical block id:
-            # kv_manager_block_id 0 → Logical block id [0, 1]
-            # kv_manager_block_id 1 → Logical block id [2, 3]
-            # kv_manager_block_id 2 → Logical block id [4, 5]
+            # Each kv_manager_block_id maps to 2 kernel block id:
+            # kv_manager_block_id 0 → kernel block id [0, 1]
+            # kv_manager_block_id 1 → kernel block id [2, 3]
+            # kv_manager_block_id 2 → kernel block id [4, 5]
         """
         if not self.use_hybrid_blocks:
-            return kv_manager_block_id
+            return kv_manager_block_ids
 
-        logical_block_id = kv_manager_block_id.reshape(
+        kernel_block_ids = kv_manager_block_ids.reshape(
             -1, 1) * self.blocks_per_phys_block + self._bias_array
 
-        return logical_block_id.reshape(-1)
+        return kernel_block_ids.reshape(-1)
 
     def get_device_tensor(self, num_reqs: int) -> torch.Tensor:
         """Returns the device tensor of the block table."""
@@ -261,16 +258,11 @@ class MultiGroupBlockTable:
             # DCP might not be initialized in testing
             dcp_world_size = 1
 
-        if kernel_block_sizes is None:
-            # Use kv_manager_block_size size by default
-            kernel_block_sizes = block_sizes
-
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
                 f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
                 f"must match block_sizes length ({len(block_sizes)})")
 
-        # Use zip to pair block_sizes with kernel_block_sizes one-to-one
         self.block_tables = [
             BlockTable(
                 block_size, max_num_reqs,
