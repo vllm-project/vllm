@@ -1002,6 +1002,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 and current_platform.get_device_capability()[0] == 9)
 
         self.dcp_world_size: Optional[int] = None
+        self.use_sparse = use_sparse
 
     def _flash_attn_varlen_diff_headdims(self,
                                          q,
@@ -1552,7 +1553,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 scale=layer._k_scale,
             )
         
-        if hasattr(self, "topk_indices"):
+        if self.use_sparse:
             topk_indices = self.topk_indices
             decode_topk_indices = topk_indices[:num_decode_tokens]
             prefill_topk_indices = topk_indices[num_decode_tokens:]

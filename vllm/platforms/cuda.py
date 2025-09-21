@@ -236,6 +236,7 @@ class CudaPlatformBase(Platform):
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink, use_sparse) -> str:
         if use_mla:
+            use_sparse = False
             # TODO(lucas): refactor to be more concise
             #  we should probably consider factoring out V1 here
 
