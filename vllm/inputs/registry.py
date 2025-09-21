@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
@@ -15,16 +15,9 @@ from vllm.utils.jsontree import JSONTree, json_map_leaves
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
-                                 MultiModalRegistry)
-    from vllm.sequence import SequenceData
     from vllm.transformers_utils.tokenizer import AnyTokenizer
 else:
     ModelConfig = Any
-    MultiModalDataDict = Any
-    MultiModalPlaceholderDict = Any
-    MultiModalRegistry = Any
-    SequenceData = Any
     AnyTokenizer = Any
 
 _T = TypeVar("_T")
@@ -191,15 +184,3 @@ class InputProcessingContext(InputContext):
                    f"on data={data} with kwargs={allowed_kwargs}")
 
             raise ValueError(msg) from exc
-
-
-class DummyData(NamedTuple):
-    """
-    Dummy data used for profiling.
-
-    Note: This is only used in V0.
-    """
-
-    seq_data: SequenceData
-    multi_modal_data: Optional[MultiModalDataDict] = None
-    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
