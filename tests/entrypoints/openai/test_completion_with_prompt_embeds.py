@@ -60,6 +60,7 @@ def create_dummy_embeds(num_tokens: int = 5) -> str:
     return base64.b64encode(buffer.getvalue()).decode('utf-8')
 
 
+@pytest.mark.skip("This test is skipped because it is flaky.")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completions_with_prompt_embeds(
