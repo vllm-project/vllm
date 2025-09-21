@@ -1350,13 +1350,13 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         *,
         is_multimodal: Optional[torch.Tensor] = None,
-        do_language_embed_multimodal: bool = True,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._get_text_embeddings(
             input_ids,
             self.language_model.get_input_embeddings,
             is_multimodal=is_multimodal,
-            do_language_embed_multimodal=do_language_embed_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None:

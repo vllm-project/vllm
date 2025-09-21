@@ -1342,7 +1342,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         *,
         is_multimodal: Optional[torch.Tensor] = None,
-        do_language_embed_multimodal: bool = True,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(
                 multimodal_embeddings) > 0:
@@ -1356,7 +1356,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            do_language_embed_multimodal=do_language_embed_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

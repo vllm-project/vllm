@@ -107,7 +107,7 @@ class SupportsMultiModal(Protocol):
         multimodal_embeddings: MultiModalEmbeddings,
         *,
         is_multimodal: torch.Tensor,
-        do_language_embed_multimodal: bool = True,
+        handle_oov_mm_token: bool = False,
     ) -> Tensor:
         ...
 
@@ -117,9 +117,9 @@ class SupportsMultiModal(Protocol):
         get_input_embeddings: Callable[[Tensor], Tensor],
         *,
         is_multimodal: Optional[Tensor],
-        do_language_embed_multimodal: bool,
+        handle_oov_mm_token: bool,
     ) -> Tensor:
-        if not do_language_embed_multimodal and is_multimodal is not None:
+        if not handle_oov_mm_token and is_multimodal is not None:
             is_text = ~is_multimodal
             text_embeds = get_input_embeddings(input_ids[is_text])
 
@@ -137,7 +137,7 @@ class SupportsMultiModal(Protocol):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         *,
         is_multimodal: Optional[Tensor] = None,
-        do_language_embed_multimodal: bool = True,
+        handle_oov_mm_token: bool = False,
     ) -> Tensor:
         """
         Apply token embeddings to `input_ids`.
@@ -146,7 +146,7 @@ class SupportsMultiModal(Protocol):
         `input_ids` according to the mask `is_multimodal`.
 
         In case the multi-modal token IDs exceed the vocabulary size of
-        the language model, you can set `do_language_embed_multimodal=False`
+        the language model, you can set `handle_oov_mm_token=False`
         to avoid calling the language model's `get_input_embeddings` method
         on those tokens.
         """
@@ -156,7 +156,7 @@ class SupportsMultiModal(Protocol):
             input_ids,
             self.get_language_model().get_input_embeddings,
             is_multimodal=is_multimodal,
-            do_language_embed_multimodal=do_language_embed_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None:

@@ -646,13 +646,13 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         *,
         is_multimodal: Optional[torch.Tensor] = None,
-        do_language_embed_multimodal: bool = True,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._get_text_embeddings(
             input_ids,
             self.embed_tokens,
             is_multimodal=is_multimodal,
-            do_language_embed_multimodal=do_language_embed_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None:
