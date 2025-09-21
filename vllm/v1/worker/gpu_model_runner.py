@@ -2240,7 +2240,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     return output
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states, None)
+                logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -2258,8 +2258,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     logits = None
                 else:
                     sample_hidden_states = hidden_states[logits_indices]
-                    logits = self.model.compute_logits(sample_hidden_states,
-                                                       None)
+                    logits = self.model.compute_logits(sample_hidden_states)
 
                 model_output_broadcast_data = {}
                 if logits is not None:
@@ -2706,7 +2705,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc.np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
-            logits = self.model.compute_logits(prompt_hidden_states, None)
+            logits = self.model.compute_logits(prompt_hidden_states)
 
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want
@@ -3105,7 +3104,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # To avoid breaking the sampler, we use a random tensor here instead.
         hidden_states = torch.rand_like(hidden_states)
 
-        logits = self.model.compute_logits(hidden_states, None)
+        logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)
 
         dummy_tensors = lambda v: torch.full(
