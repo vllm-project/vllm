@@ -318,7 +318,6 @@ steps:
     - python3 offline_inference/basic/classify.py
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
-    - python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Platform Tests (CUDA) # 4min
   timeout_in_minutes: 15
