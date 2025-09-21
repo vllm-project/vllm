@@ -672,9 +672,11 @@ class DeepseekV2MLAAttention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
-        if hasattr(config, "attn_module_list_cfg"
-                   ) and "attn_index" in config.attn_module_list_cfg[0]:
-            # DSv3.2
+        self.is_v32 = hasattr(
+            config, "attn_module_list_cfg"
+        ) and "attn_index" in config.attn_module_list_cfg[0]
+
+        if self.is_v32:
             self.indexer = Indexer(config, hidden_size, q_lora_rank,
                                    quant_config, cache_config,
                                    f"{prefix}.indexer")
@@ -695,6 +697,7 @@ class DeepseekV2MLAAttention(nn.Module):
             q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else None,
             indexer=self.indexer,
+            is_sparse=self.is_v32,
         )
 
         self.mla_attn = MultiHeadLatentAttention(

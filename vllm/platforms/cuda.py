@@ -234,13 +234,18 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla,
-                             has_sink) -> str:
+                             has_sink, use_sparse) -> str:
         if use_mla:
             # TODO(lucas): refactor to be more concise
             #  we should probably consider factoring out V1 here
 
             from vllm.attention.ops.flashmla import is_flashmla_supported
             from vllm.attention.utils.fa_utils import flash_attn_supports_mla
+
+            if use_sparse:
+                logger.info_once("Using Sparse MLA backend on V1 engine.")
+                return ("vllm.v1.attention.backends.mla.flashmla_sparse."
+                        "FlashMLASparseBackend")
 
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None and cls.is_device_capability(100)

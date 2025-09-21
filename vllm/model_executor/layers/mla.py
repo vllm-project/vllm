@@ -25,6 +25,7 @@ class MLAModules:
     q_b_proj: Optional[torch.nn.Module]
     q_proj: Optional[torch.nn.Module]
     indexer: Optional[torch.nn.Module]
+    is_sparse: bool
 
 
 @CustomOp.register("multi_head_latent_attention")
@@ -93,6 +94,7 @@ class MultiHeadLatentAttention(CustomOp):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_mla=True,
+            use_sparse=mla_modules.is_sparse,
             # MLA Args
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
