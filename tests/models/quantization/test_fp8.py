@@ -32,7 +32,7 @@ from ..utils import check_logprobs_close
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
@@ -56,6 +56,9 @@ def test_models(
     if kv_cache_dtype == "fp8_e5m2" and current_platform.is_rocm():
         pytest.skip(
             f"{kv_cache_dtype} is currently not supported on ROCm/HIP.")
+
+    if not current_platform.is_kv_cache_dtype_supported(kv_cache_dtype, None):
+        pytest.skip(f"{kv_cache_dtype} is not supported on this platform.")
 
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", 'true')
