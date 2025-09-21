@@ -17,7 +17,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
+from vllm.multimodal import NestedTensors
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (cdiv, direct_register_custom_op,
@@ -391,22 +391,6 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
 
     return " + ".join(
         _embedding_count_expression(inner) for inner in embeddings)
-
-
-def merge_multimodal_embeddings_from_map(
-        inputs_embeds: torch.Tensor, multimodal_embeddings: NestedTensors,
-        placeholder_map: MultiModalPlaceholderMap.IndexMap) -> torch.Tensor:
-    """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` using the provided
-    placeholder map .
-
-    Note:
-        This updates ``inputs_embeds`` in place.
-    """
-    flattened_embeddings = _flatten_embeddings(multimodal_embeddings)
-    inputs_embeds[placeholder_map.dest] = flattened_embeddings[
-        placeholder_map.src].to(dtype=inputs_embeds.dtype)
-    return inputs_embeds
 
 
 def _merge_multimodal_embeddings(

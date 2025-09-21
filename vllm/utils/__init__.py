@@ -987,8 +987,10 @@ def find_process_using_port(port: int) -> Optional[psutil.Process]:
     if sys.platform.startswith("darwin"):
         return None
 
+    our_pid = os.getpid()
     for conn in psutil.net_connections():
-        if conn.laddr.port == port:
+        if conn.laddr.port == port and (conn.pid is not None
+                                        and conn.pid != our_pid):
             try:
                 return psutil.Process(conn.pid)
             except psutil.NoSuchProcess:
@@ -3214,7 +3216,7 @@ def cprofile_context(save_file: Optional[str] = None):
 
     Args:
         save_file: path to save the profile result. "1" or
-          None will result in printing to stdout.
+            None will result in printing to stdout.
     """
     import cProfile
 
@@ -3271,7 +3273,7 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
                       and getattr(cfg.attn_config, "alibi", False)))))
 
 
-def sha256(input) -> bytes:
+def sha256(input: Any) -> bytes:
     """Hash any picklable Python object using SHA-256.
 
     The input is serialized using pickle before hashing, which allows
@@ -3288,7 +3290,7 @@ def sha256(input) -> bytes:
     return hashlib.sha256(input_bytes).digest()
 
 
-def sha256_cbor(input) -> bytes:
+def sha256_cbor(input: Any) -> bytes:
     """
     Hash objects using CBOR serialization and SHA-256.
 
@@ -3443,3 +3445,30 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+def length_from_prompt_token_ids_or_embeds(
+    prompt_token_ids: Optional[list[int]],
+    prompt_embeds: Optional[torch.Tensor],
+) -> int:
+    """Calculate the request length (in number of tokens) give either 
+    prompt_token_ids or prompt_embeds.
+    """
+    prompt_token_len = None if prompt_token_ids is None else len(
+        prompt_token_ids)
+    prompt_embeds_len = \
+        None if prompt_embeds is None else len(prompt_embeds)
+
+    if prompt_token_len is None:
+        if prompt_embeds_len is None:
+            raise ValueError(
+                "Neither prompt_token_ids nor prompt_embeds were defined.")
+        return prompt_embeds_len
+    else:
+        if (prompt_embeds_len is not None
+                and prompt_embeds_len != prompt_token_len):
+            raise ValueError(
+                "Prompt token ids and prompt embeds had different lengths"
+                f" prompt_token_ids={prompt_token_len}"
+                f" prompt_embeds={prompt_embeds_len}")
+        return prompt_token_len
