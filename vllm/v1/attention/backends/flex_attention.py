@@ -603,7 +603,11 @@ class FlexAttentionMetadata:
                     rebuilt = self._build_block_mask_direct()
                 else:
                     rebuilt = self.build_block_mask()
-            except Exception:  # noqa: BLE001
+            except Exception as e:
+                logger.warning(
+                    "Failed to build block mask due to: %s. "
+                    "Falling back to a dense block mask. "
+                    "This may impact performance.", e)
                 rebuilt = None
 
         if rebuilt is None:
