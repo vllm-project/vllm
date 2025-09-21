@@ -3,7 +3,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Type, Union
+from typing import Optional, Type, Union
 
 import torch
 
@@ -18,9 +18,6 @@ from vllm.attention.backends.utils import (compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
                                                get_aiter_mla_metadata)
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 def is_aiter_mla_enabled() -> bool:
@@ -110,7 +107,7 @@ class AiterMLAMetadata(MLACommonMetadata):
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     BLOCK_TABLE_EXTENDER: list[list[int]] = [[]]
 
-    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+    def __init__(self, input_builder):
         super().__init__(input_builder)
         assert self.block_size == 1, "AITER MLA requires only block size 1."
 
