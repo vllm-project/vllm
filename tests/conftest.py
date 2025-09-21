@@ -19,6 +19,7 @@ import socket
 import tempfile
 import threading
 from collections.abc import Generator
+from contextlib import nullcontext
 from enum import Enum
 from typing import Any, Callable, Optional, TypedDict, TypeVar, Union, cast
 
@@ -45,14 +46,14 @@ from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
-from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
+from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.sequence import Logprob
 from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.utils import set_default_torch_num_threads
 
 logger = init_logger(__name__)
 
@@ -157,26 +158,6 @@ def cleanup_VLLM_USE_V1(monkeypatch):
     if "VLLM_USE_V1" not in os.environ:
         monkeypatch.setenv("VLLM_USE_V1", "")
         monkeypatch.delenv("VLLM_USE_V1")
-
-
-@pytest.fixture(params=[True, False])
-def run_with_both_engines(request, monkeypatch):
-    # Automatically runs tests twice, once with V1 and once without
-    use_v1 = request.param
-    # Tests decorated with `@skip_v1` are only run without v1
-    skip_v0 = request.node.get_closest_marker("skip_v0")
-    skip_v1 = request.node.get_closest_marker("skip_v1")
-
-    if use_v1:
-        if skip_v1:
-            pytest.skip("Skipping test on vllm V1")
-        monkeypatch.setenv('VLLM_USE_V1', '1')
-    else:
-        if skip_v0:
-            pytest.skip("Skipping test on vllm V0")
-        monkeypatch.setenv('VLLM_USE_V1', '0')
-
-    yield
 
 
 @pytest.fixture(autouse=True)
@@ -296,6 +277,35 @@ class HfRunner:
         return x.to(device)
 
     def __init__(
+        self,
+        model_name: str,
+        dtype: str = "auto",
+        *,
+        model_kwargs: Optional[dict[str, Any]] = None,
+        trust_remote_code: bool = True,
+        is_sentence_transformer: bool = False,
+        is_cross_encoder: bool = False,
+        skip_tokenizer_init: bool = False,
+        auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
+        # Set this to avoid hanging issue
+        default_torch_num_threads: Optional[int] = None,
+    ) -> None:
+        init_ctx = (nullcontext() if default_torch_num_threads is None else
+                    set_default_torch_num_threads(default_torch_num_threads))
+
+        with init_ctx:
+            self._init(
+                model_name=model_name,
+                dtype=dtype,
+                model_kwargs=model_kwargs,
+                trust_remote_code=trust_remote_code,
+                is_sentence_transformer=is_sentence_transformer,
+                is_cross_encoder=is_cross_encoder,
+                skip_tokenizer_init=skip_tokenizer_init,
+                auto_cls=auto_cls,
+            )
+
+    def _init(
         self,
         model_name: str,
         dtype: str = "auto",
@@ -714,26 +724,32 @@ class VllmRunner:
         enable_chunked_prefill: Optional[bool] = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
+        # Set this to avoid hanging issue
+        default_torch_num_threads: Optional[int] = None,
         **kwargs,
     ) -> None:
-        self.llm = LLM(
-            model=model_name,
-            runner=runner,
-            convert=convert,
-            tokenizer=tokenizer_name,
-            tokenizer_mode=tokenizer_mode,
-            trust_remote_code=trust_remote_code,
-            dtype=dtype,
-            seed=seed,
-            swap_space=swap_space,
-            enforce_eager=enforce_eager,
-            disable_log_stats=disable_log_stats,
-            tensor_parallel_size=tensor_parallel_size,
-            max_model_len=max_model_len,
-            block_size=block_size,
-            enable_chunked_prefill=enable_chunked_prefill,
-            **kwargs,
-        )
+        init_ctx = (nullcontext() if default_torch_num_threads is None else
+                    set_default_torch_num_threads(default_torch_num_threads))
+
+        with init_ctx:
+            self.llm = LLM(
+                model=model_name,
+                runner=runner,
+                convert=convert,
+                tokenizer=tokenizer_name,
+                tokenizer_mode=tokenizer_mode,
+                trust_remote_code=trust_remote_code,
+                dtype=dtype,
+                seed=seed,
+                swap_space=swap_space,
+                enforce_eager=enforce_eager,
+                disable_log_stats=disable_log_stats,
+                tensor_parallel_size=tensor_parallel_size,
+                max_model_len=max_model_len,
+                block_size=block_size,
+                enable_chunked_prefill=enable_chunked_prefill,
+                **kwargs,
+            )
 
     def get_inputs(
         self,

@@ -1229,8 +1229,8 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
     Args:
         vllm_config: The global VllmConfig
         kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
-        available_memory: Memory available for KV cache in bytes for each 
-        worker.
+        available_memory: Memory available for KV cache in bytes for each
+            worker. 
 
     Returns:
         The generated KVCacheConfigs for each worker.
