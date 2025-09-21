@@ -293,7 +293,6 @@ class Hermes2ProToolParser(ToolParser):
                 return delta
 
             try:
-
                 current_tool_call = partial_json_parser.loads(
                     tool_call_portion or "{}",
                     flags) if tool_call_portion else None
@@ -308,7 +307,7 @@ class Hermes2ProToolParser(ToolParser):
             # case - we haven't sent the tool name yet. If it's available, send
             #   it. otherwise, wait until it's available.
             if not self.current_tool_name_sent:
-                if (current_tool_call is None):
+                if current_tool_call is None:
                     return None
                 function_name: Union[str, None] = current_tool_call.get("name")
                 if function_name:
@@ -348,6 +347,8 @@ class Hermes2ProToolParser(ToolParser):
             #   JSON to the current partially-parsed JSON
             prev_arguments = (
                 self.prev_tool_call_arr[self.current_tool_id].get("arguments"))
+            if current_tool_call is None:
+                return None
             cur_arguments = current_tool_call.get("arguments")
 
             logger.debug("diffing old arguments: %s", prev_arguments)
@@ -415,9 +416,13 @@ class Hermes2ProToolParser(ToolParser):
             # handle saving the state for the current tool into
             # the "prev" list for use in diffing for the next iteration
             if self.current_tool_id == len(self.prev_tool_call_arr) - 1:
+                if current_tool_call is None:
+                    return None
                 self.prev_tool_call_arr[self.current_tool_id] = \
                     current_tool_call
             else:
+                if current_tool_call is None:
+                    return None
                 self.prev_tool_call_arr.append(current_tool_call)
 
             return delta
