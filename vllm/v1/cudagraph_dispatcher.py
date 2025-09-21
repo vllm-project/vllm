@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
-from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.logger import init_logger
 
@@ -39,11 +39,15 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        assert not self.cudagraph_mode.requires_piecewise_compilation() or \
-            (self.compilation_config.level == CompilationLevel.PIECEWISE and
-             self.compilation_config.splitting_ops_contain_attention()), \
+        not_use_piecewise_compilation = (
+            not self.cudagraph_mode.requires_piecewise_compilation())
+
+        assert not_use_piecewise_compilation or \
+            self.compilation_config.is_attention_compiled_piecewise(), \
             "Compilation level should be CompilationLevel.PIECEWISE when "\
             "cudagraph_mode piecewise cudagraphs is used, "\
+            "and attention should be in splitting_ops or "\
+            "inductor splitting should be used. " \
             f"cudagraph_mode={self.cudagraph_mode}, "\
             f"compilation_level={self.compilation_config.level}, "\
             f"splitting_ops={self.compilation_config.splitting_ops}"
