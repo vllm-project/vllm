@@ -902,6 +902,35 @@ class HunyuanV1ModelBase(nn.Module, SupportsLoRA, SupportsPP):
         ],
     }
 
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
+
+        self.model = HunYuanModel(vllm_config=vllm_config, prefix="model")
+        if get_pp_group().is_last_rank:
+            self.unpadded_vocab_size = config.vocab_size
+            self.lm_head = ParallelLMHead(
+                self.unpadded_vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if config.tie_word_embeddings:
+                self.lm_head.weight = self.model.embed_tokens.weight
+
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                    config.vocab_size,
+                                                    logit_scale)
+        else:
+            self.lm_head = PPMissingLayer()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -947,33 +976,7 @@ class HunyuanV1ModelBase(nn.Module, SupportsLoRA, SupportsPP):
 class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.config = config
-        self.quant_config = quant_config
-
-        self.model = HunYuanModel(vllm_config=vllm_config, prefix="model")
-        if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-            if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
-
-            logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
-        else:
-            self.lm_head = PPMissingLayer()
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         # Set MoE hyperparameters
         self.expert_weights = []
@@ -1040,33 +1043,7 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
 class HunYuanDenseV1Base(HunyuanV1ModelBase):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.config = config
-        self.quant_config = quant_config
-
-        self.model = HunYuanModel(vllm_config=vllm_config, prefix="model")
-        if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-            if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
-
-            logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
-        else:
-            self.lm_head = PPMissingLayer()
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
 
 class HunYuanDenseV1ForCausalLM(HunYuanDenseV1Base):
