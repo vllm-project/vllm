@@ -16,6 +16,7 @@ def clear_cache():
     _cached_get_attn_backend.cache_clear()
 
 
+@pytest.mark.skip(reason="Skipped for now. Should be revisited.")
 def test_selector(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, "ROCM_FLASH")

@@ -32,8 +32,7 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.runai_utils import (ObjectStorageModel,
                                                  is_runai_obj_uri)
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
-                        LazyLoader, common_broadcastable_dtype)
+from vllm.utils import LayerBlockType, LazyLoader, common_broadcastable_dtype
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -1102,10 +1101,6 @@ class ModelConfig:
                         self.hf_config.dual_chunk_attention_config:
                     self.hf_config.dual_chunk_attention_config[
                         "sparse_attention_enabled"] = True
-
-            if envs.VLLM_ATTENTION_BACKEND != STR_DUAL_CHUNK_FLASH_ATTN_VAL:
-                raise ValueError("please set VLLM_ATTENTION_BACKEND to "
-                                 f"{STR_DUAL_CHUNK_FLASH_ATTN_VAL}")
 
     def verify_with_parallel_config(
         self,
