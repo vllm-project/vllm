@@ -731,7 +731,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         req_id: str,
         num_computed_tokens: int,
         prev_draft_tokens_len: int = 0,
-    ) -> None:
+    ) -> int:
         """Update the number of computed tokens for a request.
 
         This is used for speculative decoding with async scheduling, where the
@@ -881,7 +881,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_total_without_spec(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[int, np.ndarray]:
+    ) -> int:
         total = scheduler_output.total_num_scheduled_tokens
         if not self.use_async_scheduling or self.num_spec_tokens <= 0:
             return total
@@ -918,11 +918,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         assert prev_req_id_to_index is not None
         sample_flattened_indices = []
-        spec_flattened_indices = []
-        prev_common_req_indices = []
-        prev_draft_token_indices = []
-        cache_draft_tokens = []
-        cache_sampled_tokens = []
+        spec_flattened_indices: list[int] = []
+        prev_common_req_indices: list[int] = []
+        prev_draft_token_indices: list[int] = []
+        cache_draft_tokens: list[torch.Tensor] = []
+        cache_sampled_tokens: list[torch.Tensor] = []
         indices_match = True
         max_flattened_index = -1
         spec_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -941,8 +941,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # sample_flattened_indices = [0, 2, 5]
             # spec_flattened_indices = [1,   3, 4,    6, 7]
             sample_flattened_indices.append(flattened_index - draft_len)
-            spec_flattened_indices.append(
-                range(flattened_index - 1 - draft_len, flattened_index + 1))
+            spec_flattened_indices.extend(
+                range(flattened_index - draft_len + 1, flattened_index + 1))
             start = prev_index * self.num_spec_tokens
             # prev_draft_token_indices is used to find which draft_tokens_id
             # should be copied to input_ids
@@ -989,7 +989,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     prev_index:prev_index + 1].clone
                 if self._draft_token_ids is not None:
                     req_state.prev_draft_tokens = self._draft_token_ids[
-                        prev_index:prev_index + 1].cloen
+                        prev_index:prev_index + 1].clone
 
         if num_commmon_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
@@ -2688,7 +2688,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                    )
                 if self.valid_sampled_token_count_event is not None:
                     self.valid_sampled_token_count_event.record()
-                self.input_batch.prev_sampled_token_ids = next_token_ids
+                    self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(  # noqa
+                        1)
 
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
