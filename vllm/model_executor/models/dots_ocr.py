@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
-from functools import cached_property
 from typing import Literal, Optional, TypedDict, Union
 
 import torch
@@ -20,7 +19,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.interfaces import (MultiModalEmbeddings,
                                                    SupportsMultiModal,
                                                    SupportsPP)
@@ -33,7 +31,6 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                                               maybe_prefix,
                                               merge_multimodal_embeddings)
 from vllm.model_executor.models.vision import get_vit_attn_backend
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.platforms import _Backend
@@ -683,13 +680,6 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             architectures=["Qwen2ForCausalLM"],
         )
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
@@ -825,18 +815,8 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
