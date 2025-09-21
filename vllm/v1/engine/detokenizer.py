@@ -9,7 +9,6 @@ from tokenizers import Tokenizer
 from tokenizers.decoders import DecodeStream
 from transformers import PreTrainedTokenizerFast
 
-from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
@@ -129,7 +128,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # 2) Evaluate stop strings.
         stop_string = None
         if self.stop and len(self.output_token_ids) > self.min_tokens:
-            stop = StopChecker.check_stop_strings(
+            stop = check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
                 stop=self.stop,
@@ -309,3 +308,42 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.read_offset = read_offset
 
         return decoded_text
+
+
+def check_stop_strings(
+    output_text: str,
+    new_char_count: int,
+    stop: list[str],
+    include_in_output: bool,
+) -> Optional[tuple[str, int]]:
+    """Check if any stop strings are matched and truncate sequence
+    output text accordingly.
+
+    Returns tuple (stop_string, offset) if matched or else None.
+
+    Where stop_string is the matched stop string and offset is the
+    length to which output_text should be truncated, or -1 for no
+    truncation.
+    """
+    if not new_char_count or not stop:
+        return None
+
+    for stop_str in stop:
+        stop_string_len = len(stop_str)
+        # Avoid searching already-searched text.
+        stop_index = output_text.find(stop_str,
+                                      1 - new_char_count - stop_string_len)
+        if stop_index == -1:
+            continue
+
+        if include_in_output:
+            # Truncate to end of stop string.
+            stop_index += stop_string_len
+            if stop_index >= len(output_text):
+                # No truncation required.
+                return stop_str, -1
+
+        # Truncate the output text to either the beginning
+        # or end of the stop string.
+        return stop_str, stop_index
+    return None
