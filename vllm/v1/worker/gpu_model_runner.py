@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import gc
 import itertools
 import time
@@ -54,6 +55,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.tracing import maybe_create_tracer, trace_in_every_processed_request
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, check_use_alibi, get_dtype_size,
                         is_pin_memory_available,
@@ -431,6 +433,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory)
 
+        self.tracer = maybe_create_tracer(
+            self.vllm_config,
+            instrumenting_module_name="vllm.gpu_model_runner")
+
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
                      dtype: torch.dtype,
@@ -589,6 +595,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                trace_headers=new_req_data.trace_headers,
             )
             self.requests[req_id] = req_state
 
@@ -2141,13 +2148,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         finally:
             self.prepare_inputs_event.record()
 
+    @contextlib.contextmanager
+    def record_step(self, step_name: str, scheduler_output: "SchedulerOutput"):
+        with (record_function_or_nullcontext(name=step_name),
+              self.trace_step_or_nullcontext(step_name=step_name,
+                                             scheduler_output=scheduler_output)
+              as stack):
+            yield stack
+
+    def trace_step_or_nullcontext(self, step_name: str,
+                                  scheduler_output: "SchedulerOutput"):
+        if self.tracer is None:
+            return contextlib.nullcontext()
+        return trace_in_every_processed_request(
+            tracer=self.tracer,
+            span_name=step_name,
+            requests=self.requests,
+            scheduler_output=scheduler_output)
+
     @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
-        with record_function_or_nullcontext("Preprocess"):
+        with self.record_step("Preprocess", scheduler_output):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
@@ -2204,7 +2229,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_descriptor,
                 ubatch_slices=ubatch_slices,
-        ), record_function_or_nullcontext("Forward"),
+        ), self.record_step("Forward", scheduler_output),
               self.maybe_get_kv_connector_output(scheduler_output) as
               kv_connector_output):
             model_output = self.model(
@@ -2215,7 +2240,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **model_kwargs,
             )
 
-        with record_function_or_nullcontext("Postprocess"):
+        with self.record_step("Postprocess", scheduler_output):
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
                 hidden_states, aux_hidden_states = model_output
@@ -2275,12 +2300,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 apply_grammar_bitmask(scheduler_output, self.input_batch,
                                       logits, self.device)
 
-        with record_function_or_nullcontext("Sample"):
+        with self.record_step("Sample", scheduler_output):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            with record_function_or_nullcontext("Draft"):
+            with self.record_step("Draft", scheduler_output):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
                     sampled_token_ids,
@@ -2300,7 +2325,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # as inputs, and does not need to wait for bookkeeping to finish.
             propose_draft_token_ids(sampler_output.sampled_token_ids)
 
-        with record_function_or_nullcontext("Bookkeep"):
+        with self.record_step("Bookkeep", scheduler_output):
             (
                 num_nans_in_logits,
                 logprobs_lists,
@@ -2318,7 +2343,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
 
-        with record_function_or_nullcontext("EPLB"):
+        with self.record_step("EPLB", scheduler_output):
             self.eplb_step()
 
         output = ModelRunnerOutput(

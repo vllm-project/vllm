@@ -2,11 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Mapping
-from typing import Optional
+from collections.abc import Iterator, Mapping
+from typing import Optional, Union
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import run_once
+# Moving `TraceHeaders` to tracing.py leads to a circular import
+# because tracing.py imports SchedulerOutput
+from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,
+                                       TraceHeaders)
+from vllm.v1.utils import join_contexts
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
 TRACE_HEADERS = ["traceparent", "tracestate"]
 
@@ -20,7 +27,7 @@ try:
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL)
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.trace import SpanKind, Tracer, set_tracer_provider
+    from opentelemetry.trace import Span, SpanKind, Tracer, set_tracer_provider
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator)
     _is_otel_imported = True
@@ -82,7 +89,7 @@ def get_span_exporter(endpoint):
 
 
 def extract_trace_context(
-        headers: Optional[Mapping[str, str]]) -> Optional[Context]:
+        headers: Optional[TraceHeaders]) -> Optional[Context]:
     if is_otel_available():
         headers = headers or {}
         return TraceContextTextMapPropagator().extract(headers)
@@ -90,7 +97,7 @@ def extract_trace_context(
         return None
 
 
-def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
+def extract_trace_headers(headers: TraceHeaders) -> TraceHeaders:
 
     return {h: headers[h] for h in TRACE_HEADERS if h in headers}
 
@@ -126,7 +133,7 @@ class SpanAttributes:
         "gen_ai.latency.time_in_model_inference"
 
 
-def contains_trace_headers(headers: Mapping[str, str]) -> bool:
+def contains_trace_headers(headers: TraceHeaders) -> bool:
     return any(h in headers for h in TRACE_HEADERS)
 
 
@@ -134,3 +141,54 @@ def contains_trace_headers(headers: Mapping[str, str]) -> bool:
 def log_tracing_disabled_warning() -> None:
     logger.warning(
         "Received a request with trace context but tracing is disabled")
+
+
+def maybe_create_tracer(vllm_config: VllmConfig,
+                        instrumenting_module_name: str) -> Optional[Tracer]:
+    endpoint = vllm_config.observability_config.otlp_traces_endpoint
+    if endpoint is None:
+        return None
+    return init_tracer(instrumenting_module_name, endpoint)
+
+
+def trace_in_every_processed_request(tracer: Tracer, span_name: str,
+                                     requests: Mapping[str,
+                                                       CachedRequestState],
+                                     scheduler_output: SchedulerOutput):
+    """
+    The processed requests are either new scheduled requests or cached requests.
+    Starts an opentelemetry span for every request processed in this step.
+    Returns a context manager.
+    """
+    new_reqs = scheduler_output.scheduled_new_reqs
+    cached_reqs = [
+        requests.get(id)
+        for id in scheduler_output.scheduled_cached_reqs.req_ids
+    ]
+    all_reqs = cached_reqs + new_reqs
+
+    span_ctxs = [new_span_context(tracer, req, span_name) for req in all_reqs]
+    single_ctx = join_contexts(span_ctxs)
+    return single_ctx
+
+
+def new_span_context(tracer: Tracer, req_data: Union[NewRequestData,
+                                                     CachedRequestState],
+                     name: str) -> Iterator[Span]:
+    """
+    Creates an OpenTelemetry span_context that can be used as a 
+    context manager. E.g.
+
+    ```python
+    with new_span_context(tracer, req_data, "Some Work") as span:
+        # do work
+    ```
+    """
+    assert isinstance(req_data, (NewRequestData, CachedRequestState))
+    context: Context = extract_trace_context(req_data.trace_headers)
+    span_context = tracer.start_as_current_span(
+        name=name,
+        kind=SpanKind.INTERNAL,
+        context=context,
+    )
+    return span_context

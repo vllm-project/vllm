@@ -5,7 +5,7 @@ import contextlib
 import multiprocessing
 import time
 import weakref
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from contextlib import AbstractContextManager
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
@@ -380,3 +380,15 @@ def record_function_or_nullcontext(name: str) -> AbstractContextManager:
         return record_function(name)
     else:
         return contextlib.nullcontext()
+
+
+@contextlib.contextmanager
+def join_contexts(contexts: Iterable[AbstractContextManager]):
+    """
+    Join together multiple context managers into a single context manager.
+    https://stackoverflow.com/a/3025119/5730291
+    """
+    with contextlib.ExitStack() as stack:
+        for ctx in contexts:
+            stack.enter_context(ctx)
+        yield stack
