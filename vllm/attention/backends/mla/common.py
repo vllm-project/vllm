@@ -193,8 +193,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Tuple,
-                    Type, TypeVar)
+from typing import Any, Dict, Generic, List, Optional, Tuple, Type, TypeVar
 
 import torch
 
@@ -232,9 +231,6 @@ except ImportError:
         from flash_attn import flash_attn_varlen_func
     except ImportError:
         flash_attn_varlen_func = None
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 is_hip = current_platform.is_rocm()
 
@@ -638,7 +634,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     """
     BLOCK_TABLE_EXTENDER: list[list[int]] = []
 
-    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+    def __init__(self, input_builder):
         self.input_builder = input_builder
         self.runner = input_builder.runner
         self.sliding_window = input_builder.sliding_window
@@ -668,9 +664,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         self.num_decode_tokens = 0
         self.has_prefix_cache_hit = False
 
-    def _add_seq_group(
-            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool, prefix_cache_hit: bool):
+    def _add_seq_group(self, inter_data, chunked_prefill_enabled: bool,
+                       prefix_cache_hit: bool):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         2. block table.
