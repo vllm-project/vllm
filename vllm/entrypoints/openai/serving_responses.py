@@ -58,6 +58,8 @@ from vllm.entrypoints.openai.protocol import (DeltaMessage, ErrorResponse,
                                               InputTokensDetails,
                                               OutputTokensDetails,
                                               RequestResponseMetadata,
+                                              ResponseReasoningPartAddedEvent,
+                                              ResponseReasoningPartDoneEvent,
                                               ResponsesRequest,
                                               ResponsesResponse, ResponseUsage,
                                               StreamingResponsesResponse)
@@ -473,9 +475,14 @@ class OpenAIServingResponses(OpenAIServing):
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
 
+        input_messages = None
+        output_messages = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
+            if request.enable_response_messages:
+                input_messages = context.messages[:context.num_init_messages]
+                output_messages = context.messages[context.num_init_messages:]
             num_tool_output_tokens = context.num_tool_output_tokens
             if len(output) > 0:
                 if context.finish_reason == "length":
@@ -494,6 +501,12 @@ class OpenAIServingResponses(OpenAIServing):
             output = self._make_response_output_items(request, final_output,
                                                       tokenizer)
 
+            # TODO: context for non-gptoss models doesn't use messages
+            # so we can't get them out yet
+            if request.enable_response_messages:
+                raise NotImplementedError(
+                    "enable_response_messages is currently"
+                    " only supported for gpt-oss")
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
@@ -517,6 +530,8 @@ class OpenAIServingResponses(OpenAIServing):
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
+            input_messages=input_messages,
+            output_messages=output_messages,
             model_name=model_name,
             created_time=created_time,
             output=output,
@@ -1280,14 +1295,13 @@ class OpenAIServingResponses(OpenAIServing):
                         # Deal with tool call here
                         pass
                     elif previous_item.channel == "analysis":
+                        content = ResponseReasoningTextContent(
+                            text=previous_item.content[0].text,
+                            type="reasoning_text",
+                        )
                         reasoning_item = ResponseReasoningItem(
                             type="reasoning",
-                            content=[
-                                ResponseReasoningTextContent(
-                                    text=previous_item.content[0].text,
-                                    type="reasoning_text",
-                                ),
-                            ],
+                            content=[content],
                             status="completed",
                             id=current_item_id,
                             summary=[],
@@ -1300,6 +1314,15 @@ class OpenAIServingResponses(OpenAIServing):
                                 output_index=current_output_index,
                                 content_index=current_content_index,
                                 text=previous_item.content[0].text,
+                            ))
+                        yield _increment_sequence_number_and_return(
+                            ResponseReasoningPartDoneEvent(
+                                type="response.reasoning_part.done",
+                                sequence_number=-1,
+                                item_id=current_item_id,
+                                output_index=current_output_index,
+                                content_index=current_content_index,
+                                part=content,
                             ))
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemDoneEvent(
@@ -1412,17 +1435,15 @@ class OpenAIServingResponses(OpenAIServing):
                             ))
                         current_content_index += 1
                         yield _increment_sequence_number_and_return(
-                            ResponseContentPartAddedEvent(
-                                type="response.content_part.added",
+                            ResponseReasoningPartAddedEvent(
+                                type="response.reasoning_part.added",
                                 sequence_number=-1,
                                 output_index=current_output_index,
                                 item_id=current_item_id,
                                 content_index=current_content_index,
-                                part=ResponseOutputText(
-                                    type="output_text",
+                                part=ResponseReasoningTextContent(
                                     text="",
-                                    annotations=[],
-                                    logprobs=[],
+                                    type="reasoning_text",
                                 ),
                             ))
                     yield _increment_sequence_number_and_return(

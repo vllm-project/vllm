@@ -987,8 +987,10 @@ def find_process_using_port(port: int) -> Optional[psutil.Process]:
     if sys.platform.startswith("darwin"):
         return None
 
+    our_pid = os.getpid()
     for conn in psutil.net_connections():
-        if conn.laddr.port == port:
+        if conn.laddr.port == port and (conn.pid is not None
+                                        and conn.pid != our_pid):
             try:
                 return psutil.Process(conn.pid)
             except psutil.NoSuchProcess:
@@ -3214,7 +3216,7 @@ def cprofile_context(save_file: Optional[str] = None):
 
     Args:
         save_file: path to save the profile result. "1" or
-          None will result in printing to stdout.
+            None will result in printing to stdout.
     """
     import cProfile
 
@@ -3271,7 +3273,7 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
                       and getattr(cfg.attn_config, "alibi", False)))))
 
 
-def sha256(input) -> bytes:
+def sha256(input: Any) -> bytes:
     """Hash any picklable Python object using SHA-256.
 
     The input is serialized using pickle before hashing, which allows
@@ -3288,7 +3290,7 @@ def sha256(input) -> bytes:
     return hashlib.sha256(input_bytes).digest()
 
 
-def sha256_cbor(input) -> bytes:
+def sha256_cbor(input: Any) -> bytes:
     """
     Hash objects using CBOR serialization and SHA-256.
 

@@ -20,10 +20,10 @@ if has_triton_kernels():
         from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
                                                matmul_ogs)
         from triton_kernels.routing import routing
-    except ModuleNotFoundError:
+    except (ModuleNotFoundError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
-            "version is compatible.")
+            "version is compatible. Error: %s", e)
 
 
 def triton_kernel_moe_forward(
@@ -179,6 +179,7 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
