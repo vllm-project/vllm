@@ -25,36 +25,52 @@ class BlockTable:
         device: torch.device,
         kernel_block_size: int,
     ):
-        """Manages the mapping between logical and physical memory blocks
-        for KV cache.
+        """Manages KV cache block allocation and token-to-block mapping for
+        efficient inference.
 
-        The BlockTable handles the conversion between kv_manager_block_size size
-        (actual memory allocation) and kernel block size (computation
-        granularity). When these sizes differ, it implements a hybrid block
-        system for memory efficiency.
+        The BlockTable manages the relationship between token positions and
+        their corresponding memory blocks in the KV cache, supporting flexible
+        block size configurations to optimize both memory usage and
+        computational efficiency. It implements a hybrid block system that
+        bridges potential differences between memory allocation granularity
+        and kernel computation requirements.
+
+        Key functionality:
+        - Maps token positions to KV cache memory blocks for efficient lookup
+        - Handles hybrid block configurations when allocation and computation
+          sizes differ
+        - Manages slot mappings for batched processing of multiple requests
+        - Provides efficient GPU/CPU buffer management for block metadata
+        - Supports distributed processing with DCP (Distributed Context
+          Parallelism)
 
         Args:
-            block_size: kv_manager_block size
-            kernel_block_size: Kernel block size - the granularity at which
-                attention kernels operate during computation.
+            block_size: Block size used for KV cache memory allocation
             max_num_reqs: Maximum number of concurrent requests supported.
             max_num_blocks_per_req: Maximum number of blocks per request.
             max_num_batched_tokens: Maximum number of tokens in a batch.
             pin_memory: Whether to pin memory for faster GPU transfers.
             device: Target device for the block table.
+            kernel_block_size: The block_size of underlying attention kernel.
+                Will be the same as `block_size` if `block_size` is supported
+                by the attention kernel.
     """
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
 
-        # Handle hybrid block system
         if kernel_block_size == block_size:
-            # No splitting - use kv_manager_block_size size directly
+            # Standard case: allocation and computation use same block size
+            # No block splitting needed, direct mapping
             self.block_size = block_size
             self.blocks_per_phys_block = 1
             self.use_hybrid_blocks = False
         else:
+            # Hybrid case: allocation block size differs from kernel block size
+            # Memory blocks are subdivided to match kernel requirements
+            # Example: 32-token memory blocks with 16-token kernel blocks
+            # → Each memory block corresponds to 2 kernel blocks
             if block_size % kernel_block_size != 0:
                 raise ValueError(
                     f"kernel_block_size {kernel_block_size} must divide "
@@ -67,7 +83,6 @@ class BlockTable:
         self.max_num_blocks_per_req = max_num_blocks_per_req * \
                                         self.blocks_per_phys_block
 
-        # Use CpuGpuBuffer for unified memory management
         self.block_table = self._make_buffer(self.max_num_reqs,
                                              self.max_num_blocks_per_req,
                                              dtype=torch.int32)
@@ -76,7 +91,6 @@ class BlockTable:
         self.slot_mapping = self._make_buffer(self.max_num_batched_tokens,
                                               dtype=torch.int64)
 
-        # Pre-compute bias array for physical to logical block conversion
         if self.use_hybrid_blocks:
             self._bias_array = np.arange(0,
                                          self.blocks_per_phys_block).reshape(
@@ -101,8 +115,7 @@ class BlockTable:
             return
 
         if self.use_hybrid_blocks:
-            block_ids = self._convert_physical_to_logical_blocks(
-                np.array(block_ids))
+            block_ids = self._map_to_kernel_blocks(np.array(block_ids))
 
         num_blocks = len(block_ids)
         start = self.num_blocks_per_row[row_idx]
@@ -115,9 +128,8 @@ class BlockTable:
 
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
-        self.block_table.np[tgt, :num_blocks] = self.block_table.np[
-            src, :num_blocks]
-        self.num_blocks_per_row[tgt] = num_blocks
+        block_table_np = self.block_table.np
+        block_table_np[tgt, :num_blocks] = block_table_np[src, :num_blocks]
 
     def swap_row(self, src: int, tgt: int) -> None:
         src_tgt, tgt_src = [src, tgt], [tgt, src]
@@ -183,8 +195,8 @@ class BlockTable:
         self.block_table.gpu.fill_(0)
         self.block_table.cpu.fill_(0)
 
-    def _convert_physical_to_logical_blocks(
-            self, kv_manager_block_id: np.ndarray) -> np.ndarray:
+    def _map_to_kernel_blocks(self,
+                              kv_manager_block_id: np.ndarray) -> np.ndarray:
         """Convert kv_manager_block_id IDs to logical block IDs.
 
         Example:
