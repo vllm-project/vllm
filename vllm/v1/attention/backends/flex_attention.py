@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
+
 def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
     device = offsets.device
     counts = offsets[1:] - offsets[:-1]
@@ -942,7 +943,7 @@ class FlexAttentionImpl(AttentionImpl):
         kernel_options = get_kernel_options(query, block_m, block_n,
                                             attn_metadata.direct_build)
 
-        # Use flex_attention directly (no compilation for CUDA graph compatibility)
+        # Use flex_attention directly (no compilation for CUDA graph compat)
         out = flex_attention(
             query,
             key_tensor,
