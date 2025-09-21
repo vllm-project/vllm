@@ -51,6 +51,9 @@ except ImportError:
     class Tracer:  # type: ignore
         pass
 
+    class Span:  # type: ignore
+        pass
+
 
 def is_otel_available() -> bool:
     return _is_otel_imported
