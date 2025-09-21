@@ -178,7 +178,7 @@ class GPUModelRunner:
             num_reqs=num_reqs,
             device=self.device,
         )
-        logits = self.model.compute_logits(hidden_states, None)
+        logits = self.model.compute_logits(hidden_states)
         self.sampler(logits, sampling_metadata)
 
     def profile_run(self) -> None:
@@ -377,7 +377,7 @@ class GPUModelRunner:
         input_batch: InputBatch,
     ) -> SamplerOutput:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+        logits = self.model.compute_logits(sample_hidden_states)
         pos = input_batch.positions[input_batch.logits_indices]
         idx_mapping_np = input_batch.idx_mapping_np
         num_reqs = logits.shape[0]
