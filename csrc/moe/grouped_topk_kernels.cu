@@ -577,10 +577,10 @@ __global__ void group_idx_and_topk_idx_kernel(
         int32_t offset = i_group * num_experts_per_group;
         for (int32_t i = lane_id; i < align_num_experts_per_group;
              i += WARP_SIZE) {
-          T candidates =
-              (i < num_experts_per_group) && is_finite(scores_with_bias[offset + i])
-                  ? scores_with_bias[offset + i]
-                  : neg_inf<T>();
+          T candidates = (i < num_experts_per_group) &&
+                                 is_finite(scores_with_bias[offset + i])
+                             ? scores_with_bias[offset + i]
+                             : neg_inf<T>();
           queue.add(candidates, offset + i);
         }
         if (group_scores[i_group] == topk_group_value) {
