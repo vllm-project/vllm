@@ -5,8 +5,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
-                    TypeVar, Union)
+from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import numpy as np
 import torch
@@ -20,9 +19,6 @@ from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import ModelRunnerBase
 
 # Error string(s) for encoder/decoder
 # unsupported attention scenarios
@@ -286,7 +282,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
 class CommonAttentionState(AttentionState):
 
-    def __init__(self, runner: "ModelRunnerBase"):
+    def __init__(self, runner):
         self.runner = runner
         self._is_graph_capturing = False
 

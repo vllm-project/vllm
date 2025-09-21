@@ -4,18 +4,13 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
-                    Protocol, Set, Tuple, Type, TypeVar)
+from typing import (Any, Dict, Generic, List, Optional, Protocol, Set, Tuple,
+                    Type, TypeVar)
 
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.multimodal import MultiModalPlaceholderMap
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import (ModelRunnerBase,
-                                               ModelRunnerInputBase,
-                                               ModelRunnerInputBuilderBase)
 
 
 class AttentionType:
@@ -170,7 +165,7 @@ class AttentionState(ABC, Generic[T]):
     lifetime of the model runner."""
 
     @abstractmethod
-    def __init__(self, runner: "ModelRunnerBase"):
+    def __init__(self, runner: Any):
         ...
 
     @abstractmethod
@@ -210,7 +205,7 @@ class AttentionState(ABC, Generic[T]):
         ...
 
     @abstractmethod
-    def begin_forward(self, model_input: "ModelRunnerInputBase") -> None:
+    def begin_forward(self, model_input) -> None:
         """Prepare state for forward pass."""
         ...
 
@@ -219,7 +214,7 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
     """Abstract class for attention metadata builders."""
 
     @abstractmethod
-    def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
+    def __init__(self, input_builder) -> None:
         """Create the builder, remember some configuration and parameters."""
         raise NotImplementedError
 
