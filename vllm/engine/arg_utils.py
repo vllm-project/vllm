@@ -44,8 +44,8 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.config import (get_model_path, is_interleaved,
                                             maybe_override_with_speculators)
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
-                        GiB_bytes, get_ip, is_in_ray_actor)
+from vllm.utils import (FlexibleArgumentParser, GiB_bytes, get_ip,
+                        is_in_ray_actor)
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 # yapf: enable
@@ -1162,17 +1162,6 @@ class EngineArgs:
         else:
             self._set_default_args_v0(model_config)
         assert self.enable_chunked_prefill is not None
-
-        if envs.VLLM_ATTENTION_BACKEND in [STR_DUAL_CHUNK_FLASH_ATTN_VAL]:
-            assert self.enforce_eager, (
-                "Cuda graph is not supported with DualChunkFlashAttention. "
-                "To run the model in eager mode, set 'enforce_eager=True' "
-                "or use '--enforce-eager' in the CLI.")
-            assert current_platform.is_cuda(), (
-                "DualChunkFlashAttention is only supported on CUDA platform.")
-            assert not use_v1, (
-                "DualChunkFlashAttention is not supported on V1 engine. "
-                "To run the model in V0 engine, try set 'VLLM_USE_V1=0'")
 
         sliding_window: Optional[int] = None
         if not is_interleaved(model_config.hf_text_config):
