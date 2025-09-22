@@ -11,6 +11,7 @@ from typing_extensions import TypeVar
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
@@ -77,10 +78,15 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger = PrometheusStatLogger(vllm_config)
 
+        executor_backend = (
+            self.vllm_config.parallel_config.distributed_executor_backend)
+        parallel_config = vllm_config.parallel_config
+        self.external_launcher_dp = (parallel_config.data_parallel_size > 1 and
+                                     executor_backend == "external_launcher")
         # important: init dp group before init the engine_core
         # In the decoupled engine case this is handled in EngineCoreProc.
-        parallel_config = vllm_config.parallel_config
-        if not multiprocess_mode and parallel_config.data_parallel_size > 1:
+        if not multiprocess_mode and parallel_config.data_parallel_size > 1 \
+            and not self.external_launcher_dp:
             self.dp_group = parallel_config.stateless_init_dp_group()
         else:
             self.dp_group = None
@@ -119,6 +125,11 @@ class LLMEngine:
         if not multiprocess_mode:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+
+        if self.external_launcher_dp:
+            # If we use DP in external launcher mode, we reuse the
+            # existing DP group used for data communication.
+            self.dp_group = get_dp_group().cpu_group
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
@@ -331,5 +342,6 @@ class LLMEngine:
         return self.collective_rpc("apply_model", args=(func, ))
 
     def __del__(self):
-        if dp_group := getattr(self, "dp_group", None):
+        if dp_group := getattr(self, "dp_group",
+                               None) and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)

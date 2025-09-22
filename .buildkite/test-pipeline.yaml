@@ -165,10 +165,18 @@ steps:
   - tests/v1/test_hybrid_lb_dp.py
   - tests/v1/engine/test_engine_core_client.py
   commands:
-  # test with tp=2 and external_dp=2
+  # test with torchrun tp=2 and external_dp=2
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
-  # test with tp=2 and pp=2
+  # test with torchrun tp=2 and pp=2
   - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+  # test with torchrun tp=4 and dp=1
+  - TP_SIZE=4 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+  # test with torchrun tp=2, pp=2 and dp=1
+  - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+  # test with torchrun tp=1 and dp=4 with ep
+  - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+  # test with torchrun tp=2 and dp=2 with ep
+  - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
   # test with internal dp
   - python3 ../examples/offline_inference/data_parallel.py --enforce-eager
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
