@@ -157,10 +157,8 @@ STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
 # register, corresponding to possible backends
 STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
 STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
-STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
-STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 MB_bytes = 1_000_000
@@ -3216,7 +3214,7 @@ def cprofile_context(save_file: Optional[str] = None):
 
     Args:
         save_file: path to save the profile result. "1" or
-          None will result in printing to stdout.
+            None will result in printing to stdout.
     """
     import cProfile
 
@@ -3273,7 +3271,7 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
                       and getattr(cfg.attn_config, "alibi", False)))))
 
 
-def sha256(input) -> bytes:
+def sha256(input: Any) -> bytes:
     """Hash any picklable Python object using SHA-256.
 
     The input is serialized using pickle before hashing, which allows
@@ -3290,7 +3288,7 @@ def sha256(input) -> bytes:
     return hashlib.sha256(input_bytes).digest()
 
 
-def sha256_cbor(input) -> bytes:
+def sha256_cbor(input: Any) -> bytes:
     """
     Hash objects using CBOR serialization and SHA-256.
 
