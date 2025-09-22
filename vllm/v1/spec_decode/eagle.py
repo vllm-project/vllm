@@ -354,7 +354,7 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             # M-RoPE
             if self.uses_mrope:
-                self.positions[:,:batch_size] = clamped_positions
+                self.positions[:, :batch_size] = clamped_positions
             else:
                 self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states

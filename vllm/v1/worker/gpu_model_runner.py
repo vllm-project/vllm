@@ -1829,7 +1829,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     target_positions = \
                         self.mrope_positions.gpu[:, :num_scheduled_tokens]
                 else:
-                    target_positions = self.positions.gpu[:num_scheduled_tokens]
+                    target_positions = self.positions.gpu[:
+                                                          num_scheduled_tokens]
                 if self.use_aux_hidden_state_outputs:
                     target_hidden_states = torch.cat(
                         [h[:num_scheduled_tokens] for h in aux_hidden_states],
