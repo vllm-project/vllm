@@ -1784,21 +1784,6 @@ def _raise_or_fallback(feature_name: str, recommend_to_remove: bool):
     logger.warning(msg)
 
 
-def _warn_or_fallback(feature_name: str) -> bool:
-    if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
-        logger.warning(
-            "Detected VLLM_USE_V1=1 with %s. Usage should "
-            "be considered experimental. Please report any "
-            "issues on Github.", feature_name)
-        should_exit = False
-    else:
-        logger.info(
-            "%s is experimental on VLLM_USE_V1=1. "
-            "Falling back to V0 Engine.", feature_name)
-        should_exit = True
-    return should_exit
-
-
 def human_readable_int(value):
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
