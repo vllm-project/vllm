@@ -588,6 +588,13 @@ class Platform:
         return False
 
     @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        """
+        Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
     def use_sync_weight_loader(cls) -> bool:
         """
         Returns if the current platform needs to sync weight loader.
