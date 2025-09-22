@@ -27,6 +27,7 @@ python examples/offline_inference/pooling/embed_matryoshka_fy.py
 ```
 
 ## Multi vector retrieval usage
+
 ```bash
 python examples/offline_inference/pooling/multi_vector_retrieval.py
 ```
