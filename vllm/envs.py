@@ -436,9 +436,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
-    # enabled by default.
+    # disabled by default.
     "VLLM_USE_STANDALONE_COMPILE":
-    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
+    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "0") == "1",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
