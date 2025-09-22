@@ -1942,7 +1942,7 @@ class FusedMoE(CustomOp):
                                                     self.is_sequence_parallel)
 
                 if (not self.is_sequence_parallel and self.reduce_results
-                        and self.tp_size > 1):
+                        and (self.tp_size > 1 or self.ep_size > 1)):
                     states = self.maybe_all_reduce_tensor_model_parallel(
                         states)
 

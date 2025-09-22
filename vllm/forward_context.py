@@ -51,32 +51,27 @@ class BatchDescriptor(NamedTuple):
 
 def _compute_sp_num_tokens(num_tokens_across_dp_cpu: torch.Tensor,
                            sequence_parallel_size: int) -> list[int]:
-    dp_sp_tokens = ((num_tokens_across_dp_cpu + sequence_parallel_size - 1) //
-                    sequence_parallel_size)
+    sp_tokens = ((num_tokens_across_dp_cpu + sequence_parallel_size - 1) //
+                 sequence_parallel_size)
 
-    #  rank 0 in world size 4 is assigned as DP rank 0, TP rank 0, EP rank 0
-    #  rank 1 in world size 4 is assigned as DP rank 0, TP rank 1, EP rank 1
-    #  rank 2 in world size 4 is assigned as DP rank 1, TP rank 0, EP rank 2
-    #  rank 3 in world size 4 is assigned as DP rank 1, TP rank 1, EP rank 3
-
-    dp_sp_tokens = dp_sp_tokens.repeat_interleave(sequence_parallel_size)
-    return dp_sp_tokens.tolist()
+    sp_tokens = sp_tokens.repeat_interleave(sequence_parallel_size)
+    return sp_tokens.tolist()
 
 
 def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: torch.Tensor,
                                       sequence_parallel_size: int,
                                       max_num_tokens: int,
                                       chunk_idx: int) -> list[int]:
-    dp_size = len(num_tokens_across_dp_cpu)
 
-    dp_sp_tokens = _compute_sp_num_tokens(num_tokens_across_dp_cpu,
-                                          sequence_parallel_size)
+    sp_tokens = _compute_sp_num_tokens(num_tokens_across_dp_cpu,
+                                       sequence_parallel_size)
+    sp_size = len(sp_tokens)
 
-    local_size = [-1] * dp_size
-    for i in range(dp_size):
+    local_size = [-1] * sp_size
+    for i in range(sp_size):
         # Take into account sharding if MoE activation is sequence parallel.
         local_size[i] = min(max_num_tokens,
-                            dp_sp_tokens[i] - (max_num_tokens * chunk_idx))
+                            sp_tokens[i] - (max_num_tokens * chunk_idx))
         if local_size[i] <= 0:
             local_size[i] = 1  # ensure lockstep even if done
     return local_size
@@ -123,11 +118,11 @@ class DPMetadata:
     # DP and TP rank.
     # When sp_size==1, this is just the cummulative num tokens across DP.
     def cu_tokens_across_sp(self, sp_size: int) -> torch.Tensor:
-        num_tokens_across_dp_sp_cpu = (
+        num_tokens_across_sp_cpu = (
             (self.num_tokens_across_dp_cpu - 1 + sp_size) // sp_size)
-        num_tokens_across_dp_sp_cpu = (
-            num_tokens_across_dp_sp_cpu.repeat_interleave(sp_size))
-        return torch.cumsum(num_tokens_across_dp_sp_cpu, dim=0)
+        num_tokens_across_sp_cpu = (
+            num_tokens_across_sp_cpu.repeat_interleave(sp_size))
+        return torch.cumsum(num_tokens_across_sp_cpu, dim=0)
 
     @staticmethod
     def should_ubatch_across_dp(

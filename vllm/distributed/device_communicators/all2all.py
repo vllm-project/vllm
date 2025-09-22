@@ -27,10 +27,10 @@ class NaiveAll2AllManager(All2AllManagerBase):
         super().__init__(cpu_group)
 
     def naive_multicast(self, x: torch.Tensor,
-                        cu_multicast_tokens_cpu: torch.Tensor,
+                        cu_tokens_across_sp_cpu: torch.Tensor,
                         is_sequence_parallel: bool) -> torch.Tensor:
         assert (len(x.shape) == 2)
-        buffer = torch.empty((cu_multicast_tokens_cpu[-1], x.size(1)),
+        buffer = torch.empty((cu_tokens_across_sp_cpu[-1], x.size(1)),
                              device=x.device,
                              dtype=x.dtype)
 
@@ -38,12 +38,12 @@ class NaiveAll2AllManager(All2AllManagerBase):
         world_size = (self.world_size
                       if is_sequence_parallel else self.dp_world_size)
 
-        start = 0 if rank == 0 else cu_multicast_tokens_cpu[rank - 1]
-        end = cu_multicast_tokens_cpu[rank]
+        start = 0 if rank == 0 else cu_tokens_across_sp_cpu[rank - 1]
+        end = cu_tokens_across_sp_cpu[rank]
         buffer[start:end, :].copy_(x)
         for idx in range(world_size):
-            start = 0 if idx == 0 else cu_multicast_tokens_cpu[idx - 1]
-            end = cu_multicast_tokens_cpu[idx]
+            start = 0 if idx == 0 else cu_tokens_across_sp_cpu[idx - 1]
+            end = cu_tokens_across_sp_cpu[idx]
             get_ep_group().broadcast(buffer[start:end, :], idx)
 
         return buffer
@@ -56,13 +56,13 @@ class NaiveAll2AllManager(All2AllManagerBase):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         sp_size = self.tp_group.world_size if is_sequence_parallel else 1
         dp_metadata = get_forward_context().dp_metadata
-        cu_dispatched_tokens_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
+        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
 
         hidden_states = self.naive_multicast(hidden_states,
-                                             cu_dispatched_tokens_cpu,
+                                             cu_tokens_across_sp_cpu,
                                              is_sequence_parallel)
         router_logits = self.naive_multicast(router_logits,
-                                             cu_dispatched_tokens_cpu,
+                                             cu_tokens_across_sp_cpu,
                                              is_sequence_parallel)
         return hidden_states, router_logits
 
@@ -74,10 +74,10 @@ class NaiveAll2AllManager(All2AllManagerBase):
 
         dp_metadata = get_forward_context().dp_metadata
         sp_size = self.tp_group.world_size if is_sequence_parallel else 1
-        cu_combined_tokens_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
+        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
 
-        start = 0 if ep_rank == 0 else cu_combined_tokens_cpu[ep_rank - 1]
-        end = cu_combined_tokens_cpu[ep_rank]
+        start = 0 if ep_rank == 0 else cu_tokens_across_sp_cpu[ep_rank - 1]
+        end = cu_tokens_across_sp_cpu[ep_rank]
 
         all_hidden_states = get_ep_group().all_reduce(hidden_states)
         hidden_states = all_hidden_states[start:end, :]
