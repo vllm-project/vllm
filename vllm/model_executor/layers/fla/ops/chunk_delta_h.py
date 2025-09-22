@@ -59,8 +59,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    chunknum_T: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_v, i_nh, i_tc = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(
@@ -72,7 +73,20 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
+    
+    # Calculate time range for this thread
+    T_per_thread = tl.cdiv(T, chunknum_T)
+    T_start = i_tc * T_per_thread
+    T_end = min((i_tc + 1) * T_per_thread, T)
+    
+    # Skip if this thread has no work
+    if T_start >= T:
+        return
 
+    # Calculate chunk range for this thread
+    chunk_start = T_start // BT
+    chunk_end = tl.cdiv(T_end, BT)
+    
     # [BK, BV]
     b_h1 = tl.zeros([64, BV], dtype=tl.float32)
     if K > 64:
@@ -82,13 +96,13 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     if K > 192:
         b_h4 = tl.zeros([64, BV], dtype=tl.float32)
 
-    # calculate offset
+    # calculate offset - adjust for time range
     h += (boh * H + i_h) * K * V
-    v += (bos * H + i_h) * V
-    k += (bos * Hg + i_h // (H // Hg)) * K
-    w += (bos * H + i_h) * K
+    v += (bos * H + i_h) * V + T_start * H * V
+    k += (bos * Hg + i_h // (H // Hg)) * K + T_start * Hg * K
+    w += (bos * H + i_h) * K + T_start * H * K
     if SAVE_NEW_VALUE:
-        v_new += (bos * H + i_h) * V
+        v_new += (bos * H + i_h) * V + T_start * H * V
     stride_v = H * V
     stride_h = H * K * V
     stride_k = Hg * K
@@ -98,8 +112,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     if STORE_FINAL_STATE:
         ht = ht + i_nh * K * V
 
-    # load initial state
-    if USE_INITIAL_STATE:
+    # load initial state or previous chunk's final state
+    if USE_INITIAL_STATE and chunk_start == 0:
+        # Load from initial state when starting from the beginning
         p_h0_1 = tl.make_block_ptr(h0, (K, V), (V, 1), (0, i_v * BV), (64, BV),
                                    (1, 0))
         b_h1 += tl.load(p_h0_1, boundary_check=(0, 1)).to(tl.float32)
@@ -115,9 +130,27 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             p_h0_4 = tl.make_block_ptr(h0, (K, V), (V, 1), (192, i_v * BV),
                                        (64, BV), (1, 0))
             b_h4 += tl.load(p_h0_4, boundary_check=(0, 1)).to(tl.float32)
+    elif chunk_start > 0:
+        # Load state from previous chunk's final state
+        prev_chunk_idx = chunk_start - 1
+        p_h1 = tl.make_block_ptr(h + prev_chunk_idx * stride_h, (K, V), (V, 1),
+                                 (0, i_v * BV), (64, BV), (1, 0))
+        b_h1 = tl.load(p_h1, boundary_check=(0, 1)).to(tl.float32)
+        if K > 64:
+            p_h2 = tl.make_block_ptr(h + prev_chunk_idx * stride_h, (K, V), (V, 1),
+                                     (64, i_v * BV), (64, BV), (1, 0))
+            b_h2 = tl.load(p_h2, boundary_check=(0, 1)).to(tl.float32)
+        if K > 128:
+            p_h3 = tl.make_block_ptr(h + prev_chunk_idx * stride_h, (K, V), (V, 1),
+                                     (128, i_v * BV), (64, BV), (1, 0))
+            b_h3 = tl.load(p_h3, boundary_check=(0, 1)).to(tl.float32)
+        if K > 192:
+            p_h4 = tl.make_block_ptr(h + prev_chunk_idx * stride_h, (K, V), (V, 1),
+                                     (192, i_v * BV), (64, BV), (1, 0))
+            b_h4 = tl.load(p_h4, boundary_check=(0, 1)).to(tl.float32)
 
     # main recurrence
-    for i_t in range(NT):
+    for i_t in range(chunk_start, chunk_end):
         p_h1 = tl.make_block_ptr(h + i_t * stride_h, (K, V), (V, 1),
                                  (0, i_v * BV), (64, BV), (1, 0))
         tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
@@ -140,46 +173,47 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                      b_h4.to(p_h4.dtype.element_ty),
                      boundary_check=(0, 1))
 
-        p_v = tl.make_block_ptr(v, (T, V), (stride_v, 1), (i_t * BT, i_v * BV),
+        # Adjust offsets to be relative to this thread's time range
+        t_offset = i_t * BT - T_start
+        p_v = tl.make_block_ptr(v, (T_end - T_start, V), (stride_v, 1), (t_offset, i_v * BV),
                                 (BT, BV), (1, 0))
-        p_v_new = tl.make_block_ptr(v_new, (T, V), (stride_v, 1),
-                                    (i_t * BT, i_v * BV), (BT, BV),
+        p_v_new = tl.make_block_ptr(v_new, (T_end - T_start, V), (stride_v, 1),
+                                    (t_offset, i_v * BV), (BT, BV),
                                     (1, 0)) if SAVE_NEW_VALUE else None
         b_v_new = tl.zeros([BT, BV], dtype=tl.float32)
-        p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 0),
+        p_w = tl.make_block_ptr(w, (T_end - T_start, K), (stride_w, 1), (t_offset, 0),
                                 (BT, 64), (1, 0))
         b_w = tl.load(p_w, boundary_check=(0, 1))
         b_v_new += tl.dot(b_w, b_h1.to(b_w.dtype))
         if K > 64:
-            p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 64),
+            p_w = tl.make_block_ptr(w, (T_end - T_start, K), (stride_w, 1), (t_offset, 64),
                                     (BT, 64), (1, 0))
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_v_new += tl.dot(b_w, b_h2.to(b_w.dtype))
         if K > 128:
-            p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 128),
+            p_w = tl.make_block_ptr(w, (T_end - T_start, K), (stride_w, 1), (t_offset, 128),
                                     (BT, 64), (1, 0))
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_v_new += tl.dot(b_w, b_h3.to(b_w.dtype))
         if K > 192:
-            p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 192),
+            p_w = tl.make_block_ptr(w, (T_end - T_start, K), (stride_w, 1), (t_offset, 192),
                                     (BT, 64), (1, 0))
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_v_new += tl.dot(b_w, b_h4.to(b_w.dtype))
         b_v_new = -b_v_new + tl.load(p_v, boundary_check=(0, 1))
 
         if SAVE_NEW_VALUE:
-            p_v_new = tl.make_block_ptr(v_new, (T, V), (stride_v, 1),
-                                        (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             tl.store(p_v_new,
                      b_v_new.to(p_v_new.dtype.element_ty),
                      boundary_check=(0, 1))
 
         if USE_G:
-            m_t = (i_t * BT + tl.arange(0, BT)) < T
-            last_idx = min((i_t + 1) * BT, T) - 1
+            actual_t = T_start + t_offset
+            m_t = (actual_t + tl.arange(0, BT)) < T
+            last_idx = min(actual_t + BT, T) - 1
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
-            p_g = tl.make_block_ptr(g + bos * H + i_h, (T, ), (H, ),
-                                    (i_t * BT, ), (BT, ), (0, ))
+            p_g = tl.make_block_ptr(g + bos * H + i_h + T_start * H, (T_end - T_start, ), (H, ),
+                                    (t_offset, ), (BT, ), (0, ))
             b_g = tl.load(p_g, boundary_check=(0, ))
             b_v_new = b_v_new * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
             b_g_last = exp(b_g_last)
@@ -191,28 +225,28 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             if K > 192:
                 b_h4 = b_h4 * b_g_last
         b_v_new = b_v_new.to(k.dtype.element_ty)
-        p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (0, i_t * BT),
+        p_k = tl.make_block_ptr(k, (K, T_end - T_start), (1, stride_k), (0, t_offset),
                                 (64, BT), (0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_h1 += tl.dot(b_k, b_v_new)
         if K > 64:
-            p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (64, i_t * BT),
+            p_k = tl.make_block_ptr(k, (K, T_end - T_start), (1, stride_k), (64, t_offset),
                                     (64, BT), (0, 1))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_h2 += tl.dot(b_k, b_v_new)
         if K > 128:
-            p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (128, i_t * BT),
+            p_k = tl.make_block_ptr(k, (K, T_end - T_start), (1, stride_k), (128, t_offset),
                                     (64, BT), (0, 1))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_h3 += tl.dot(b_k, b_v_new)
         if K > 192:
-            p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (192, i_t * BT),
+            p_k = tl.make_block_ptr(k, (K, T_end - T_start), (1, stride_k), (192, t_offset),
                                     (64, BT), (0, 1))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_h4 += tl.dot(b_k, b_v_new)
 
-    # epilogue
-    if STORE_FINAL_STATE:
+    # epilogue - only store final state for the last time chunk
+    if STORE_FINAL_STATE and i_tc == chunknum_T - 1:
         p_ht = tl.make_block_ptr(ht, (K, V), (V, 1), (0, i_v * BV), (64, BV),
                                  (1, 0))
         tl.store(p_ht, b_h1.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
@@ -246,6 +280,7 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_value: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    chunknum_T: Optional[int] = None,  # Number of chunks to split time dimension
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, Hg, K, V = *k.shape, u.shape[-1]
     H = u.shape[-2]
@@ -261,6 +296,28 @@ def chunk_gated_delta_rule_fwd_h(
             chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
+    # Calculate optimal chunknum_T if not provided
+    if chunknum_T is None:
+        # Get number of SMs on the current GPU
+        device_props = torch.cuda.get_device_properties(k.device)
+        num_sms = device_props.multi_processor_count
+        
+        # Estimate grid dimensions (assuming typical BV values)
+        # We use a conservative estimate for BV
+        estimated_bv = 32  # Common value for BV
+        grid_dim_0 = triton.cdiv(V, estimated_bv)
+        grid_dim_1 = N * H
+        
+        # Calculate minimum chunknum_T needed
+        base_grid_size = grid_dim_0 * grid_dim_1
+        assert base_grid_size > 0
+        min_chunknum_t = max(1, triton.cdiv(num_sms, base_grid_size))
+            
+        # Round up to next power of 2
+        chunknum_T = 1
+        while chunknum_T < min_chunknum_t:
+            chunknum_T *= 2
+        
     h = k.new_empty(B, NT, H, K, V)
     final_state = k.new_empty(
         N, H, K, V, dtype=torch.float32) if output_final_state else None
@@ -268,7 +325,7 @@ def chunk_gated_delta_rule_fwd_h(
     v_new = torch.empty_like(u) if save_new_value else None
 
     def grid(meta):
-        return (triton.cdiv(V, meta['BV']), N * H)
+        return (triton.cdiv(V, meta['BV']), N * H, chunknum_T)
 
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,
@@ -286,5 +343,6 @@ def chunk_gated_delta_rule_fwd_h(
         Hg=Hg,
         K=K,
         V=V,
-        BT=BT)
+        BT=BT,
+        chunknum_T=chunknum_T)
     return h, v_new, final_state
