@@ -33,6 +33,7 @@ class NgramProposer:
         self.valid_ngram_num_drafts = np.zeros((max_num_seqs), dtype=np.int32)
 
         # Max number of threads for numba parallel processing.
+        self.num_tokens_threshold = 8192
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         cpu_count = os.cpu_count()
         if cpu_count:
@@ -91,7 +92,7 @@ class NgramProposer:
             # If total tokens is small, using multiple threads
             # may slow down due to overhead.
             total_tokens = np.sum(num_tokens_no_spec)
-            if total_tokens >= 8192:
+            if total_tokens >= self.num_tokens_threshold:
                 final_num_threads = max(
                     1, min(self.num_numba_thread_available,
                            num_ngram_requests))

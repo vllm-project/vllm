@@ -170,19 +170,27 @@ def test_ngram_proposer():
     assert np.array_equal(result[0], np.array([3, 1]))
     assert np.array_equal(result[1], np.array([]))
 
-    # test 0 thread available: can happen if TP size > CPU count
+    # test if 0 threads available: can happen if TP size > CPU count
     ngram_proposer = get_ngram_proposer(min_n=2, max_n=2, k=2)
     ngram_proposer.num_numba_thread_available = 0
+    # set max_model_len to 2 * threshold to ensure multithread is used
+    num_tokens_threshold = ngram_proposer.num_tokens_threshold
+    ngram_proposer.max_model_len = 2 * num_tokens_threshold
     # using multibatch test
-    token_ids_cpu = np.array([[1, 2, 3, 1, 2], [4, 5, 6, -1, -1]])
+    middle_integer = num_tokens_threshold // 2
+    input_1 = [_ for _ in range(num_tokens_threshold)] 
+    input_1 += [middle_integer, middle_integer+1]
+    input_2 = [-1] * len(input_1)
+    input_2[:3] = [4, 5, 6]
+    token_ids_cpu = np.array([input_1, input_2])
     result = ngram_proposer.propose(
         sampled_token_ids=[[0], [1]],
         req_ids=["0", "1"],
-        num_tokens_no_spec=np.array([5, 3]),
+        num_tokens_no_spec=np.array([len(input_1), 3]),
         token_ids_cpu=token_ids_cpu,
         spec_decode_unsupported_reqs=(),
     )
     assert len(result[0]) == 2
-    assert np.array_equal(result[0], np.array([3, 1]))
+    assert np.array_equal(result[0], np.array([middle_integer+2, middle_integer+3]))
     assert np.array_equal(result[1], np.array([]))
 
