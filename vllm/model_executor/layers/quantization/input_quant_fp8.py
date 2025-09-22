@@ -132,25 +132,30 @@ class QuantFP8(CustomOp):
         padded_dim = num_groups * self.group_size
 
         if padded_dim != hidden_dim:
-            padding = padded_dim - hidden_dim
-            x = F.pad(x, (0, padding), mode='constant', value=0.0)
+            x_pad = torch.zeros((*orig_shape[:-1], padded_dim),
+                                dtype=x.dtype,
+                                device=x.device)
+            x_pad[..., :hidden_dim] = x
+            x = x_pad
+        x_grouped = x.reshape(-1, num_groups, self.group_size)
 
-        x_grouped = x.view(-1, num_groups, self.group_size)
-        absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
+        # Per-group absmax in fp32
+        absmax = torch.amax(x_grouped.abs().to(torch.float32),
+                            dim=-1,
+                            keepdim=True)
         scales = (absmax / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
 
-        x_scaled = x_grouped / scales
-        x_quant = x_scaled.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
+        x_scaled = (x_grouped.to(torch.float32) / scales)
+        x_scaled.clamp_(_FP8_MIN, _FP8_MAX)
+        x_quant = x_scaled.to(_FP8_DTYPE).reshape(-1, padded_dim)
 
-        x_quant = x_quant.view(-1, padded_dim)
         if padded_dim != hidden_dim:
-            x_quant = x_quant[..., :hidden_dim]
-        x_quant = x_quant.view(orig_shape)
+            x_quant = x_quant.narrow(-1, 0, hidden_dim)
+        x_quant = x_quant.reshape(orig_shape)
 
-        scales = scales.squeeze(-1)
-        scales = scales.reshape(orig_shape[:-1] + (num_groups, ))
+        scales = scales.squeeze(-1).reshape((*orig_shape[:-1], num_groups))
 
         if self.column_major_scales:
-            scales = scales.transpose(-2, -1).contiguous()
+            scales = scales.transpose(-2, -1).contiguous().transpose(-1, -2)
 
         return x_quant, scales
