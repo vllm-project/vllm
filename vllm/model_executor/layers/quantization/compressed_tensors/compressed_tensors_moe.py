@@ -33,7 +33,8 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize, reorder_w1w3_to_w3w1,
     select_nvfp4_gemm_impl)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
+    expert_weight_is_col_major, get_col_major_tma_aligned_tensor,
+    requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer, marlin_make_workspace_new,
     marlin_moe_permute_scales)
@@ -51,12 +52,6 @@ from vllm.scalar_type import scalar_types
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
 logger = init_logger(__name__)
-
-
-def _is_col_major(x: torch.Tensor) -> bool:
-    assert x.dim() == 3
-    b, m, n = x.shape
-    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
 
 
 class GPTQMarlinState(Enum):
@@ -802,10 +797,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
 
             # Ensure column-major TMA alignment expected by DeepGEMM.
-            if _is_col_major(layer.w13_weight_scale):
+            if expert_weight_is_col_major(layer.w13_weight_scale):
                 layer.w13_weight_scale = get_col_major_tma_aligned_tensor(
                     layer.w13_weight_scale)
-            if _is_col_major(layer.w2_weight_scale):
+            if expert_weight_is_col_major(layer.w2_weight_scale):
                 layer.w2_weight_scale = get_col_major_tma_aligned_tensor(
                     layer.w2_weight_scale)
 
