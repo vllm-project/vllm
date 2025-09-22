@@ -1502,12 +1502,6 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False
 
-        # Platforms must decide if they can support v1 for this model
-        if not current_platform.supports_v1(model_config=model_config):
-            _raise_or_fallback(
-                feature_name=f"device type={current_platform.device_type}",
-                recommend_to_remove=False)
-            return False
         #############################################################
         # Experimental Features - allow users to opt in.
 
@@ -1523,12 +1517,6 @@ class EngineArgs:
                 _raise_or_fallback(feature_name=name,
                                    recommend_to_remove=False)
                 return False
-
-        # The platform may be supported on V1, but off by default for now.
-        if not current_platform.default_v1(  # noqa: SIM103
-                model_config=model_config) and _warn_or_fallback(
-                    current_platform.device_name):
-            return False
 
         if (current_platform.is_cpu()
                 and model_config.get_sliding_window() is not None):

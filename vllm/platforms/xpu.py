@@ -195,10 +195,6 @@ class XPUPlatform(Platform):
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        return True
-
-    @classmethod
     def device_count(cls) -> int:
         return torch.xpu.device_count()
 
