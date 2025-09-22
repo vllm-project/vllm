@@ -287,7 +287,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             self.rocm_aiter_fused_experts = None  # type: ignore
         
-        self.flashinfer_cutlass_moe_enabled = has_flashinfer_cutlass_fused_moe() and envs.VLLM_USE_FLASHINFER_MOE_FP16
+        self.flashinfer_cutlass_moe_enabled = has_flashinfer_cutlass_fused_moe() and envs.VLLM_USE_FLASHINFER_MOE_FP16 and self.moe.moe_parallel_config.use_ep
         if self.flashinfer_cutlass_moe_enabled:
             logger.info_once("Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod")
             from .flashinfer_cutlass_moe import flashinfer_cutlass_moe
@@ -296,9 +296,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                                   tp_rank=self.moe.moe_parallel_config.tp_rank,
                                                   tp_size=self.moe.moe_parallel_config.tp_size,
                                                   ep_rank=self.moe.moe_parallel_config.ep_rank,
-                                                  ep_size=self.moe.moe_parallel_config.ep_size)
+                                                  ep_size=self.moe.moe_parallel_config.ep_size,
+                                                  use_dp=self.moe.moe_parallel_config.dp_size > 1)
         else:
-            logger.info_once("FlashInfer CUTLASS MoE is available but not enabled, consider setting VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.")
+            logger.info_once("FlashInfer CUTLASS MoE is available for EP but not enabled, consider setting VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.")
             self.flashinfer_cutlass_moe = None  # type: ignore
 
     def maybe_make_prepare_finalize(

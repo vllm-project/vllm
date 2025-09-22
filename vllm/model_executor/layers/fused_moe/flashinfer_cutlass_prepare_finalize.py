@@ -77,7 +77,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     sizes=get_local_sizes(),
                 )
             a1_m, a1_n = a1q.shape
-            a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
+            if quant_config.quant_dtype == "nvfp4":
+                a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
