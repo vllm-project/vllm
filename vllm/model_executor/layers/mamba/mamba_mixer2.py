@@ -9,7 +9,6 @@ if TYPE_CHECKING:
 import torch
 from torch import nn
 
-from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,

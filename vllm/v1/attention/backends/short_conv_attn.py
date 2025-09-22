@@ -9,8 +9,8 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
-                                              split_decodes_and_prefills,
-                                              compute_causal_conv1d_metadata)
+                                              compute_causal_conv1d_metadata,
+                                              split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 

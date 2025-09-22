@@ -9,13 +9,11 @@ import torch
 from torch import nn
 from transformers import GraniteMoeHybridConfig
 
-from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
@@ -29,7 +27,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-from vllm.utils import LayerBlockType
 
 from .granitemoe import GraniteMoeMoE
 from .granitemoeshared import GraniteMoeSharedMLP
@@ -362,8 +359,6 @@ class GraniteMoeHybridModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        attn_metadata = get_forward_context().attn_metadata
-
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -381,11 +376,9 @@ class GraniteMoeHybridModel(nn.Module):
         for i, layer in enumerate(self.layers):
             if isinstance(layer, GraniteMoeHybridAttentionDecoderLayer):
                 num_attn += 1
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual
-            )
+            hidden_states, residual = layer(positions=positions,
+                                            hidden_states=hidden_states,
+                                            residual=residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -603,7 +596,8 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
 
-        hidden_states = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
 
         return hidden_states
 

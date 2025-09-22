@@ -11,7 +11,6 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
-from vllm import envs
 from vllm.attention import Attention, AttentionBackend, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, ModelConfig, SpeculativeConfig,
@@ -196,13 +195,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
-            self.tp_size,
-            self.num_k_heads,
-            self.num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
-            self.conv_kernel_size,
-            self.num_spec)
+            self.tp_size, self.num_k_heads, self.num_v_heads, self.head_k_dim,
+            self.head_v_dim, self.conv_kernel_size, self.num_spec)
 
     def __init__(
         self,
@@ -1185,12 +1179,9 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         num_spec = (vllm_config.speculative_config.num_speculative_tokens
                     if vllm_config.speculative_config else 0)
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
-            tp_size,
-            hf_config.linear_num_key_heads,
-            hf_config.linear_num_value_heads,
-            hf_config.linear_key_head_dim,
-            hf_config.linear_value_head_dim,
-            hf_config.linear_conv_kernel_dim,
+            tp_size, hf_config.linear_num_key_heads,
+            hf_config.linear_num_value_heads, hf_config.linear_key_head_dim,
+            hf_config.linear_value_head_dim, hf_config.linear_conv_kernel_dim,
             num_spec)
 
     def compute_logits(

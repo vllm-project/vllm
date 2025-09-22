@@ -15,7 +15,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
-from vllm import envs
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
@@ -338,20 +337,19 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
 
             num_prefills = getattr(attn_metadata, "num_prefills", 0)
             if num_prefills > 0:
-                num_decode_tokens = getattr(attn_metadata,
-                                            "num_decode_tokens", 0)
+                num_decode_tokens = getattr(attn_metadata, "num_decode_tokens",
+                                            0)
                 for prefill_idx in range(num_prefills):
-                    q_start = attn_metadata.query_start_loc[
-                        num_decode_tokens + prefill_idx]
-                    q_end = attn_metadata.query_start_loc[num_decode_tokens
-                                                          + prefill_idx +
-                                                          1]
+                    q_start = attn_metadata.query_start_loc[num_decode_tokens +
+                                                            prefill_idx]
+                    q_end = attn_metadata.query_start_loc[num_decode_tokens +
+                                                          prefill_idx + 1]
                     query_len = q_end - q_start
                     context_len = attn_metadata.seq_lens[
                         num_decode_tokens + prefill_idx] - query_len
                     if context_len == 0:
-                        block_to_clear = state_indices_tensor[
-                            num_decode_tokens + prefill_idx]
+                        block_to_clear = state_indices_tensor[num_decode_tokens
+                                                              + prefill_idx]
                         kv_cache[block_to_clear, ...] = 0
 
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0

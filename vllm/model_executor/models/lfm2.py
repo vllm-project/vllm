@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from transformers import Lfm2Config
 
-from vllm import envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig

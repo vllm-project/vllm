@@ -8,7 +8,6 @@ if TYPE_CHECKING:
 
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -236,8 +235,7 @@ def short_conv(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states,
-                      output=output)
+    self.forward_cuda(hidden_states=hidden_states, output=output)
 
 
 def short_conv_fake(

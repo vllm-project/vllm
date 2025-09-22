@@ -8,12 +8,9 @@ import torch
 from torch import nn
 from transformers import MambaConfig
 
-from vllm import envs
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
@@ -27,7 +24,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (HasInnerState,
                                                    IsAttentionFree)
 from vllm.sequence import IntermediateTensors
-from vllm.utils import LayerBlockType
 
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -146,10 +142,9 @@ class Mamba2Model(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for i, layer in enumerate(self.layers):
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual)
+            hidden_states, residual = layer(positions=positions,
+                                            hidden_states=hidden_states,
+                                            residual=residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -257,9 +252,6 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         )
         if config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.backbone.embeddings)
-
-        # Used to track and store by the Mamba cache between steps.
-        self.mamba_cache: Optional[MambaCacheManager] = None
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)

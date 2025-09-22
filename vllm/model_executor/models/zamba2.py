@@ -15,12 +15,10 @@ import torch
 from torch import nn
 from transformers import Zamba2Config
 
-from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -753,8 +751,6 @@ class Zamba2Model(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
         hidden_states = inputs_embeds
-
-        attn_metadata = get_forward_context().attn_metadata
 
         # Process through layers
         original_hidden_states = torch.clone(hidden_states)

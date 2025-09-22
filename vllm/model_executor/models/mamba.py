@@ -8,7 +8,6 @@ import torch
 from torch import nn
 from transformers import MambaConfig
 
-from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
@@ -25,7 +24,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (HasInnerState,
                                                    IsAttentionFree, SupportsPP)
 from vllm.sequence import IntermediateTensors
-from vllm.utils import LayerBlockType
 
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -147,10 +145,9 @@ class MambaModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual)
+            hidden_states, residual = layer(positions=positions,
+                                            hidden_states=hidden_states,
+                                            residual=residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -230,7 +227,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
 
-        hidden_states = self.backbone(input_ids, positions, intermediate_tensors, inputs_embeds)
+        hidden_states = self.backbone(input_ids, positions,
+                                      intermediate_tensors, inputs_embeds)
 
         return hidden_states
 

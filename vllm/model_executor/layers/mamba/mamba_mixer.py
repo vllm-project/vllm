@@ -10,8 +10,6 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
-from vllm import envs
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
@@ -181,23 +179,18 @@ class MambaMixer(MambaBase, CustomOp):
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         return discrete_time_step, B, C
 
-    def forward(self,
-                hidden_states: torch.Tensor,
-                output: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor, output: torch.Tensor):
         torch.ops.vllm.mamba_mixer(
             hidden_states,
             output,
             self.prefix,
         )
 
-    def forward_native(self,
-                       hidden_states: torch.Tensor,
+    def forward_native(self, hidden_states: torch.Tensor,
                        output: torch.Tensor):
         pass
 
-    def forward_cuda(self,
-                     hidden_states: torch.Tensor,
-                     output: torch.Tensor):
+    def forward_cuda(self, hidden_states: torch.Tensor, output: torch.Tensor):
         """
         Run the Mamba-1 SSM pipeline.
 
@@ -455,8 +448,7 @@ def mamba_mixer(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states,
-                      output=output)
+    self.forward_cuda(hidden_states=hidden_states, output=output)
 
 
 def mamba_mixer_fake(

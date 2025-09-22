@@ -14,7 +14,6 @@ import torch.distributed
 from torch import nn
 from transformers import MiniMaxConfig
 
-from vllm import envs
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -618,8 +617,6 @@ class MiniMaxText01Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-
-        minimax_cache_index = 0
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
