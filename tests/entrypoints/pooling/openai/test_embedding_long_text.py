@@ -216,7 +216,7 @@ def server_with_chunked_processing():
         "--enforce-eager",
         "--max-model-len",
         "512",  # Set smaller max_model_len to trigger chunking mechanism
-        '--override-pooler-config',
+        '--pooler-config',
         ('{"pooling_type": "MEAN", "normalize": true, '
          '"enable_chunked_processing": true, "max_embed_len": 10000}'),
         "--gpu-memory-utilization",

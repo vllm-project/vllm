@@ -29,7 +29,9 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
                         resolve_obj_by_qualname, set_process_title)
-from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_configs,
+from vllm.v1.core.kv_cache_utils import (BlockHash,
+                                         generate_scheduler_kv_cache_config,
+                                         get_kv_cache_configs,
                                          get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -128,6 +130,9 @@ class EngineCore:
             log_stats=self.log_stats,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+        if self.scheduler.connector is not None:  # type: ignore
+            self.model_executor.init_kv_output_aggregator(
+                self.scheduler.connector.get_finished_count())  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = engine_receiver_cache_from_config(
@@ -193,16 +198,10 @@ class EngineCore:
 
         kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
                                                 available_gpu_memory)
-
-        # All workers have the same kv_cache_config except layer names, so use
-        # an arbitrary one to initialize the scheduler.
-        assert all([
-            cfg.num_blocks == kv_cache_configs[0].num_blocks
-            for cfg in kv_cache_configs
-        ])
-        num_gpu_blocks = kv_cache_configs[0].num_blocks
+        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
+            kv_cache_configs)
+        num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         num_cpu_blocks = 0
-        scheduler_kv_cache_config = kv_cache_configs[0]
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)

@@ -6,14 +6,12 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Iterable, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig
-from vllm.core.scheduler import SchedulerOutputs
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.pooling_params import PoolingParams
@@ -76,8 +74,7 @@ class EngineClient(ABC):
         include_stop_str_in_output = params.include_stop_str_in_output
 
         preprocessor = await self.get_input_preprocessor()
-        tokenizer_group = preprocessor.get_tokenizer_group()
-        tokenizer = await tokenizer_group.get_lora_tokenizer_async()
+        tokenizer = preprocessor.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
 
         if is_explicit_encoder_decoder_prompt(prompt):
@@ -250,21 +247,13 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def get_decoding_config(self) -> DecodingConfig:
-        """Get the decoding configuration of the vLLM engine."""
-        ...
-
-    @abstractmethod
     async def get_input_preprocessor(self) -> InputPreprocessor:
         """Get the input processor of the vLLM engine."""
         ...
 
     @abstractmethod
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        """Get the appropriate tokenizer for the request"""
+    async def get_tokenizer(self) -> AnyTokenizer:
+        """Get the tokenizer"""
         ...
 
     async def get_io_processor(self) -> IOProcessor:
@@ -275,11 +264,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def do_log_stats(
-        self,
-        scheduler_outputs: Optional[SchedulerOutputs] = None,
-        model_output: Optional[list[SamplerOutput]] = None,
-    ) -> None:
+    async def do_log_stats(self) -> None:
         ...
 
     @abstractmethod
