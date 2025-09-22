@@ -9,12 +9,8 @@ from vllm.utils import resolve_obj_by_qualname
 
 
 class _Backend(enum.Enum):
-    FLASH_ATTN = enum.auto()
     FLASH_ATTN_VLLM_V1 = enum.auto()
     TRITON_ATTN_VLLM_V1 = enum.auto()
-    XFORMERS = enum.auto()
-    ROCM_FLASH = enum.auto()
-    ROCM_AITER_MLA = enum.auto()  # Supported by V1
     ROCM_AITER_MLA_VLLM_V1 = enum.auto()
     ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
@@ -25,14 +21,11 @@ class _Backend(enum.Enum):
     TRITON_MLA = enum.auto()  # Supported by V1
     TRITON_MLA_VLLM_V1 = enum.auto()
     CUTLASS_MLA = enum.auto()
-    FLASHMLA = enum.auto()  # Supported by V1
     FLASHMLA_VLLM_V1 = enum.auto()
     FLASH_ATTN_MLA = enum.auto()  # Supported by V1
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
-    DUAL_CHUNK_FLASH_ATTN = enum.auto()
-    DIFFERENTIAL_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
@@ -40,18 +33,10 @@ class _Backend(enum.Enum):
 
 
 BACKEND_MAPPING = {
-    _Backend.FLASH_ATTN:
-    "vllm.attention.backends.flash_attn.FlashAttentionBackend",  # noqa: E501
     _Backend.FLASH_ATTN_VLLM_V1:
     "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",  # noqa: E501
     _Backend.TRITON_ATTN_VLLM_V1:
     "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",  # noqa: E501
-    _Backend.XFORMERS:
-    "vllm.attention.backends.xformers.XFormersBackend",  # noqa: E501
-    _Backend.ROCM_FLASH:
-    "vllm.attention.backends.rocm_flash_attn.ROCmFlashAttentionBackend",  # noqa: E501
-    _Backend.ROCM_AITER_MLA:
-    "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend",  # noqa: E501
     _Backend.ROCM_AITER_MLA_VLLM_V1:
     "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",  # noqa: E501
     _Backend.ROCM_AITER_FA:
@@ -72,8 +57,6 @@ BACKEND_MAPPING = {
     "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",  # noqa: E501
     _Backend.CUTLASS_MLA:
     "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",  # noqa: E501
-    _Backend.FLASHMLA:
-    "vllm.attention.backends.flashmla.FlashMLABackend",  # noqa: E501
     _Backend.FLASHMLA_VLLM_V1:
     "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",  # noqa: E501
     _Backend.FLASH_ATTN_MLA:
@@ -82,10 +65,6 @@ BACKEND_MAPPING = {
     "vllm.v1.attention.backends.pallas.PallasAttentionBackend",  # noqa: E501
     _Backend.PALLAS_VLLM_V1:
     "vllm.v1.attention.backends.pallas.PallasAttentionBackend",  # noqa: E501
-    _Backend.DUAL_CHUNK_FLASH_ATTN:
-    "vllm.attention.backends.dual_chunk_flash_attn.DualChunkFlashAttentionBackend",  # noqa: E501
-    _Backend.DIFFERENTIAL_FLASH_ATTN:
-    "vllm.attention.backends.differential_flash_attn.DifferentialFlashAttentionBackend",  # noqa: E501
     _Backend.NO_ATTENTION:
     "vllm.attention.backends.placeholder_attn.PlaceholderAttentionBackend",  # noqa: E501
     _Backend.FLEX_ATTENTION:
