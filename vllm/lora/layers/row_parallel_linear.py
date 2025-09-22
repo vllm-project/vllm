@@ -39,7 +39,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         shard_size = self.input_size
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
-        lora_a = lora_a[start_idx:end_idx, :]
+        lora_a = lora_a[:,start_idx:end_idx]
         return lora_a
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
@@ -122,7 +122,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         shard_size = self.lora_b_stacked[0].shape[2]
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
-        lora_b = lora_b[:, start_idx:end_idx]
+        lora_b = lora_b[ start_idx:end_idx,:]
         return lora_b
 
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
