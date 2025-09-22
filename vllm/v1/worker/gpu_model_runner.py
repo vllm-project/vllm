@@ -2921,7 +2921,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.vllm_config,
             )
 
-        # If we failed to microbatch, currently need to resyncrhonize
+        # If we failed to microbatch, currently need to resynchronize
         # TODO(lucas,sage): we should be able to avoid this second sync by
         #  refactoring `get_dp_padding_ubatch` and `get_dp_padding` into
         #  a single `coordinate_batch_across_dp` function.
