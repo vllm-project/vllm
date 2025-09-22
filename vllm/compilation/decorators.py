@@ -301,30 +301,13 @@ def _support_torch_compile(
                 logger.debug(
                     "enable_cpp_symbolic_shape_guards config not available")
 
-            with patch.object(InliningInstructionTranslator, "inline_call",
-                              patched_inline_call), torch._dynamo.config.patch(
-                                  **dynamo_config_patches
-<<<<<<< HEAD
-                              ), maybe_use_cudagraph_partition_wrapper(
-                                  self.vllm_config):
-                from vllm.model_executor.parameter import (
-                    BasevLLMParameter, ModelWeightParameter, RowvLLMParameter,
-                    _ColumnvLLMParameter)
-                with (
-                        torch._dynamo.config.patch(
-                            "traceable_tensor_subclasses", [
-                                BasevLLMParameter, ModelWeightParameter,
-                                _ColumnvLLMParameter, RowvLLMParameter
-                            ]),
-                        patch(
-                            "torch._dynamo.variables.torch.can_dispatch_torch_function",  # noqa: E501
-                            return_false)):
-                    output = self.compiled_callable(*args, **kwargs)
-=======
-                              ), _torch27_patch_tensor_subclasses():
-
+            with patch.object(
+                    InliningInstructionTranslator, "inline_call",
+                    patched_inline_call), torch._dynamo.config.patch(
+                        **dynamo_config_patches
+                    ), maybe_use_cudagraph_partition_wrapper(
+                        self.vllm_config), _torch27_patch_tensor_subclasses():
                 output = self.compiled_callable(*args, **kwargs)
->>>>>>> 9adfb5582 (break out function, gate torch)
             return output
 
         # usually, capturing the model once is enough, and then we can
@@ -338,7 +321,6 @@ def _support_torch_compile(
     return cls
 
 
-<<<<<<< HEAD
 @contextlib.contextmanager
 def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
     """
@@ -386,8 +368,9 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
     if (compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and compilation_config.use_inductor_graph_partition):
         torch._inductor.utils.set_customized_partition_wrappers(None)
-=======
-@contextlib.contextmanger
+
+
+@contextlib.contextmanager
 def _torch27_patch_tensor_subclasses():
     from vllm.model_executor.parameter import (BasevLLMParameter,
                                                ModelWeightParameter,
@@ -411,4 +394,3 @@ def _torch27_patch_tensor_subclasses():
                 "torch._dynamo.variables.torch.can_dispatch_torch_function",  # noqa: E501
                 return_false)):
         yield
->>>>>>> 9adfb5582 (break out function, gate torch)
