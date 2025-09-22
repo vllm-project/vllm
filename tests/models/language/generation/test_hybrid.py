@@ -34,6 +34,7 @@ HYBRID_MODELS = [
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
     "Goekdeniz-Guelmez/MiniMax01Text-Dev",
+    "tiny-random/qwen3-next-moe",
 ]
 
 FULL_CUDA_GRAPH_MODELS = [
