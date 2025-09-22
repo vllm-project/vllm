@@ -212,6 +212,7 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: Optional[str] = None,
+        pg_options: Optional[Any] = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -225,7 +226,9 @@ class GroupCoordinator:
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend)
+                ranks,
+                backend=torch_distributed_backend,
+                pg_options=pg_options)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             cpu_group = torch.distributed.new_group(ranks, backend="gloo")
@@ -902,14 +905,19 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
-def init_world_group(ranks: list[int], local_rank: int,
-                     backend: str) -> GroupCoordinator:
+def init_world_group(
+    ranks: list[int],
+    local_rank: int,
+    backend: str,
+    pg_options: Optional[Any] = None,
+) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
         local_rank=local_rank,
         torch_distributed_backend=backend,
         use_device_communicator=False,
         group_name="world",
+        pg_options=pg_options,
     )
 
 
@@ -919,6 +927,7 @@ def init_model_parallel_group(
     backend: str,
     use_message_queue_broadcaster: bool = False,
     group_name: Optional[str] = None,
+    pg_options: Optional[Any] = None,
 ) -> GroupCoordinator:
 
     return GroupCoordinator(
@@ -928,6 +937,7 @@ def init_model_parallel_group(
         use_device_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
+        pg_options=pg_options,
     )
 
 
@@ -1020,12 +1030,15 @@ def set_custom_all_reduce(enable: bool):
     _ENABLE_CUSTOM_ALL_REDUCE = enable
 
 
-def init_distributed_environment(world_size: int = -1,
-                                 rank: int = -1,
-                                 distributed_init_method: str = "env://",
-                                 local_rank: int = -1,
-                                 backend: str = "nccl",
-                                 timeout: Optional[timedelta] = None):
+def init_distributed_environment(
+    world_size: int = -1,
+    rank: int = -1,
+    distributed_init_method: str = "env://",
+    local_rank: int = -1,
+    backend: str = "nccl",
+    timeout: Optional[timedelta] = None,
+    pg_options_dict: Optional[dict[str, Any]] = None,
+):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
@@ -1078,7 +1091,9 @@ def init_distributed_environment(world_size: int = -1,
     global _WORLD, _NODE_COUNT
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = init_world_group(ranks, local_rank, backend)
+        world_pg_options = pg_options_dict.get(
+            "world") if pg_options_dict else None
+        _WORLD = init_world_group(ranks, local_rank, backend, world_pg_options)
         _NODE_COUNT = _node_count(_WORLD.cpu_group)
         logger.debug("Detected %d nodes in the distributed environment",
                      _NODE_COUNT)
@@ -1092,6 +1107,7 @@ def initialize_model_parallel(
     pipeline_model_parallel_size: int = 1,
     decode_context_model_parallel_size: Optional[int] = 1,
     backend: Optional[str] = None,
+    pg_options_dict: Optional[dict[str, Any]] = None,
 ) -> None:
     """
     Initialize model parallel groups.
@@ -1149,11 +1165,13 @@ def initialize_model_parallel(
     group_ranks = [x.tolist() for x in group_ranks]
 
     # message queue broadcaster is only used in tensor model parallel group
+    tp_pg_options = pg_options_dict.get("tp") if pg_options_dict else None
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
                                     use_message_queue_broadcaster=True,
-                                    group_name="tp")
+                                    group_name="tp",
+                                    pg_options=tp_pg_options)
 
     # Build the DCP model-parallel groups.
     global _DCP
@@ -1166,11 +1184,13 @@ def initialize_model_parallel(
     group_ranks = all_ranks.reshape(
         -1, decode_context_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
+    dcp_pg_options = pg_options_dict.get("dcp") if pg_options_dict else None
     _DCP = init_model_parallel_group(group_ranks,
                                      get_world_group().local_rank,
                                      backend,
                                      use_message_queue_broadcaster=True,
-                                     group_name="dcp")
+                                     group_name="dcp",
+                                     pg_options=dcp_pg_options)
 
     # Build the pipeline model-parallel groups.
     global _PP
@@ -1179,31 +1199,36 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(2, 3).reshape(
         -1, pipeline_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
+    pp_pg_options = pg_options_dict.get("pp") if pg_options_dict else None
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
-                                    group_name="pp")
-
+                                    group_name="pp",
+                                    pg_options=pp_pg_options)
     global _DP
     assert _DP is None, ("data parallel group is already initialized")
     group_ranks = all_ranks.transpose(1,
                                       3).reshape(-1,
                                                  data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
+    dp_pg_options = pg_options_dict.get("dp") if pg_options_dict else None
     _DP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
-                                    group_name="dp")
+                                    group_name="dp",
+                                    pg_options=dp_pg_options)
 
     global _EP
     assert _EP is None, ("expert parallel group is already initialized")
     group_ranks = all_ranks.transpose(1, 2).reshape(
         -1, data_parallel_size * tensor_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
+    ep_pg_options = pg_options_dict.get("ep") if pg_options_dict else None
     _EP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
-                                    group_name="ep")
+                                    group_name="ep",
+                                    pg_options=ep_pg_options)
 
     logger.info(
         "rank %s in world size %s is assigned as "
@@ -1217,6 +1242,7 @@ def ensure_model_parallel_initialized(
     pipeline_model_parallel_size: int,
     decode_context_model_parallel_size: Optional[int] = 1,
     backend: Optional[str] = None,
+    pg_options_dict: Optional[dict[str, Any]] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
@@ -1227,7 +1253,8 @@ def ensure_model_parallel_initialized(
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
                                   pipeline_model_parallel_size,
-                                  decode_context_model_parallel_size, backend)
+                                  decode_context_model_parallel_size, backend,
+                                  pg_options_dict)
         return
 
     assert (
