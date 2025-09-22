@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm import LLM, envs
+from vllm import LLM
 from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 
 from ..conftest import HfRunner, VllmRunner
@@ -24,14 +24,6 @@ MODELS = [
 ]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def test_vllm_gc_ed():
@@ -76,17 +68,6 @@ def test_models(
     model_executor: str,
     enable_prompt_embeds: bool,
 ) -> None:
-
-    if enable_prompt_embeds and envs.is_set(
-            "VLLM_USE_V1") and envs.VLLM_USE_V1:
-        pytest.skip("enable_prompt_embeds is not supported in v1.")
-
-    if not envs.VLLM_USE_V1:
-        if async_scheduling:
-            pytest.skip("async_scheduling only supported in v1.")
-        if model_executor != "uni":
-            pytest.skip("only test uniproc executor for v0.")
-
     if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")
@@ -164,11 +145,6 @@ def test_models_distributed(
     extra_env: dict[str, str],
     enable_prompt_embeds: bool,
 ) -> None:
-
-    if enable_prompt_embeds and envs.is_set(
-            "VLLM_USE_V1") and envs.VLLM_USE_V1:
-        pytest.skip("enable_prompt_embeds is not supported in v1.")
-
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 

@@ -421,6 +421,51 @@ def resolve_mistral_chat_template(
     return None
 
 
+_PROCESSOR_CHAT_TEMPLATES = dict[tuple[str, bool], Optional[str]]()
+"""
+Used in `_try_get_processor_chat_template` to avoid calling
+`cached_get_processor` again if the processor fails to be loaded.
+
+This is needed because `lru_cache` does not cache when an exception happens.
+"""
+
+
+def _try_get_processor_chat_template(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    model_config: ModelConfig,
+) -> Optional[str]:
+    cache_key = (tokenizer.name_or_path, model_config.trust_remote_code)
+    if cache_key in _PROCESSOR_CHAT_TEMPLATES:
+        return _PROCESSOR_CHAT_TEMPLATES[cache_key]
+
+    try:
+        processor = cached_get_processor(
+            tokenizer.name_or_path,
+            processor_cls=(
+                PreTrainedTokenizer,
+                PreTrainedTokenizerFast,
+                ProcessorMixin,
+            ),
+            trust_remote_code=model_config.trust_remote_code,
+        )
+        if (
+            isinstance(processor, ProcessorMixin)
+            and hasattr(processor, "chat_template")
+            and (chat_template := processor.chat_template) is not None
+        ):
+            _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
+            return chat_template
+    except Exception:
+        logger.debug(
+            "Failed to load AutoProcessor chat template for %s",
+            tokenizer.name_or_path,
+            exc_info=True,
+        )
+
+    _PROCESSOR_CHAT_TEMPLATES[cache_key] = None
+    return None
+
+
 def resolve_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: Optional[str],
@@ -434,28 +479,10 @@ def resolve_hf_chat_template(
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
-        try:
-            processor = cached_get_processor(
-                tokenizer.name_or_path,
-                processor_cls=(
-                    PreTrainedTokenizer,
-                    PreTrainedTokenizerFast,
-                    ProcessorMixin,
-                ),
-                trust_remote_code=model_config.trust_remote_code,
-            )
-            if (
-                isinstance(processor, ProcessorMixin)
-                and hasattr(processor, "chat_template")
-                and processor.chat_template is not None
-            ):
-                return processor.chat_template
-        except Exception:
-            logger.debug(
-                "Failed to load AutoProcessor chat template for %s",
-                tokenizer.name_or_path,
-                exc_info=True,
-            )  # noqa: E501
+        chat_template = _try_get_processor_chat_template(tokenizer,
+                                                         model_config)
+        if chat_template is not None:
+            return chat_template
 
     # 3rd priority: AutoTokenizer chat template
     try:
@@ -800,9 +827,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         super().__init__()
 
         self._tracker = tracker
-
+        multimodal_config = self._tracker.model_config.multimodal_config
+        media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
         self._connector = MediaConnector(
-            media_io_kwargs=self._tracker._model_config.media_io_kwargs,
+            media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
         )
 
@@ -883,8 +911,10 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         super().__init__()
 
         self._tracker = tracker
+        multimodal_config = self._tracker.model_config.multimodal_config
+        media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
         self._connector = MediaConnector(
-            media_io_kwargs=self._tracker._model_config.media_io_kwargs,
+            media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
         )
 
@@ -1447,9 +1477,11 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
             and isinstance(message["tool_calls"], list)
         ):
             for item in message["tool_calls"]:
-                item["function"]["arguments"] = json.loads(
-                    item["function"]["arguments"]
-                )
+                # if arguments is None or empty string, set to {}
+                if content := item["function"].get("arguments"):
+                    item["function"]["arguments"] = json.loads(content)
+                else:
+                    item["function"]["arguments"] = {}
 
 
 def parse_chat_messages(
