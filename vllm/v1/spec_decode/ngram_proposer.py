@@ -32,10 +32,12 @@ class NgramProposer:
                                           dtype=np.int32)
         self.valid_ngram_num_drafts = np.zeros((max_num_seqs), dtype=np.int32)
 
-        # Max number of threads for numba parallel processing.
+        # Threshold of total number of tokens in the batch to enable
+        # multi-threading in numba batch propose.
         self.num_tokens_threshold = 8192
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         cpu_count = os.cpu_count()
+        # Max number of threads for numba parallel processing.
         if cpu_count:
             # Divide by 2 to use physical cores
             # and not logical cores (hyper-threading).
