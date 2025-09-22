@@ -3273,7 +3273,7 @@ class ECTransferConfig:
                              f"Supported roles are {get_args(ECRole)}")
 
         if self.ec_connector is not None and self.ec_role is None:
-            raise ValueError("Please specify ec_disagg_role when ec_connector "
+            raise ValueError("Please specify ec_role when ec_connector "
                              f"is set, supported roles are {get_args(ECRole)}")
 
     @property
