@@ -6,6 +6,7 @@ import typing
 from typing import Callable
 
 import torch
+
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 
