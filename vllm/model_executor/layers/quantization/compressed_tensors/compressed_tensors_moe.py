@@ -662,8 +662,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
             set_weight_attrs(w13_weight_scale, extra_weight_attrs)
             set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-            layer.register_parameter("w13_weight_scale_inv", w13_weight_scale)
-            layer.register_parameter("w2_weight_scale_inv", w2_weight_scale)
 
         # INPUT_SCALES
         if self.static_input_scales:
@@ -804,11 +802,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
 
             # Ensure column-major TMA alignment expected by DeepGEMM.
-            if _is_col_major(layer.w13_weight_scale_inv):
-                layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
+            if _is_col_major(layer.w13_weight_scale):
+                layer.w13_weight_scale = get_col_major_tma_aligned_tensor(
                     layer.w13_weight_scale)
-            if _is_col_major(layer.w2_weight_scale_inv):
-                layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
+            if _is_col_major(layer.w2_weight_scale):
+                layer.w2_weight_scale = get_col_major_tma_aligned_tensor(
                     layer.w2_weight_scale)
 
     def maybe_make_prepare_finalize(
