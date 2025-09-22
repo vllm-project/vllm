@@ -404,8 +404,7 @@ class GPUModelRunner:
 
         needs_prompt_logprobs = np.any(
             self.req_states.needs_prompt_logprobs[idx_mapping_np])
-        if needs_prompt_logprobs:
-            pass
+        assert not needs_prompt_logprobs
 
         if use_dp_sampler:
             # All-gather the outputs.
