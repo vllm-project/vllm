@@ -319,6 +319,14 @@ Supported models:
 
 Flags: `--tool-call-parser glm45`
 
+### Command-A Models (`command`)
+
+Supported models:
+
+* `CohereLabs/c4ai-command-a-03-2025` (The chat template is already included in the Hugging Face model files.)
+
+Flags: `--tool-call-parser command`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
