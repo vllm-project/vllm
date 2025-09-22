@@ -223,6 +223,10 @@ class EplbState:
     """
     The flag indicates whether the EPLB is running in async mode.
     """
+    cuda_device_index: Optional[int] = None
+    """
+    CUDA device index for the async EPLB worker thread.
+    """
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -377,6 +381,11 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
+        device_index: Optional[int] = None
+        if device.type == "cuda":
+            device_index = device.index
+            if device_index is None and torch.cuda.is_available():
+                device_index = torch.cuda.current_device()
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
         return cls(
             physical_to_logical_map,
@@ -392,6 +401,7 @@ class EplbState:
             expert_load_window_size=expert_load_window_size,
             expert_rearrangement_step=expert_rearrangement_step,
             expert_rearrangement_step_interval=eplb_step_interval,
+            cuda_device_index=device_index,
         )
 
     def step(self,
@@ -650,9 +660,17 @@ class EplbState:
 
         ep_group = get_ep_group().device_group
         rank = ep_group.rank()
+        device_index = self.cuda_device_index
+        device_description = (f"cuda:{device_index}"
+                              if device_index is not None else
+                              "default CUDA device")
+
         logger.info(f"[EPLB Debug] Rank {rank}: eplb_async_loop starting")
 
         def thread_target():
+            if device_index is not None:
+                torch.cuda.set_device(device_index)
+                logger.info(f"[EPLB Debug] Rank {rank}: async thread using CUDA device {device_description}")
             logger.info(f"[EPLB Debug] Rank {rank}: async thread started")
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -662,7 +680,8 @@ class EplbState:
                     self.transfer_run_periodically(model=model,
                                                    ep_group=ep_group,
                                                    is_profile=is_profile,
-                                                   rank_mapping=rank_mapping))
+                                                   rank_mapping=rank_mapping,
+                                                   device_index=device_index))
                 logger.info(f"[EPLB Debug] Rank {rank}: transfer_run_periodically completed in async loop")
             except Exception as e:
                 logger.exception("async loop error (Rank %d): %s", rank,
@@ -681,8 +700,10 @@ class EplbState:
             model,
             ep_group: ProcessGroup,
             is_profile: bool = False,
-            rank_mapping: Optional[dict[int, int]] = None):
-        experts_stream = torch.cuda.Stream()
+            rank_mapping: Optional[dict[int, int]] = None,
+            device_index: Optional[int] = None):
+        experts_stream = (torch.cuda.Stream(device=device_index)
+                          if device_index is not None else torch.cuda.Stream())
         logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting persistent transfer_run_periodically")
 
         while not self.shutdown_event.is_set():
