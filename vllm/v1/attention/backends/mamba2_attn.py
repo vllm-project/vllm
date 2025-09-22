@@ -3,6 +3,7 @@
 import math
 from dataclasses import dataclass
 from typing import Optional
+import numpy as np
 
 import torch
 
@@ -131,7 +132,6 @@ class Mamba2AttentionMetadata:
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: Optional[dict] = None
-    cu_seqlen: Optional[int] = None
     batch_ptr: Optional[torch.Tensor] = None
     token_chunk_offset_ptr: Optional[torch.Tensor] = None
 
@@ -160,6 +160,11 @@ class Mamba2AttentionMetadataBuilder(
         # currently we really only support the FlashAttention backend
         has_initial_states_p = None
         prep_initial_states = False
+
+        # for causal_conv1d
+        nums_dict = None
+        batch_ptr = None
+        token_chunk_offset_ptr = None
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
@@ -198,6 +203,51 @@ class Mamba2AttentionMetadataBuilder(
                         query_start_loc_p, self.chunk_size,
                         num_prefill_tokens))
 
+            # Needed for causal_conv1d
+            seqlens = query_start_loc_p.diff().to('cpu')
+            nums_dict = {}  # type: ignore
+            for BLOCK_M in [8]:  # cover all BLOCK_M values
+                nums = -(-seqlens // BLOCK_M)
+                nums_dict[BLOCK_M] = {}
+                nums_dict[BLOCK_M]['nums'] = nums
+                nums_dict[BLOCK_M]['tot'] = nums.sum().item()
+                mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums))
+                nums_dict[BLOCK_M]['mlist'] = mlist
+                mlist_len = len(nums_dict[BLOCK_M]['mlist'])
+                nums_dict[BLOCK_M]['mlist_len'] = mlist_len
+                MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
+                offsetlist = []  # type: ignore
+                for idx, num in enumerate(nums):
+                    offsetlist.extend(range(num))
+                offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+                nums_dict[BLOCK_M]['offsetlist'] = offsetlist
+
+                if batch_ptr is None:
+                    # Update default value after class definition
+                    batch_ptr = torch.full((MAX_NUM_PROGRAMS, ),
+                                            PAD_SLOT_ID,
+                                            dtype=torch.int32,
+                                            device='cuda')
+                    token_chunk_offset_ptr = torch.full(
+                        (MAX_NUM_PROGRAMS, ),
+                        PAD_SLOT_ID,
+                        dtype=torch.int32,
+                        device='cuda')
+                else:
+                    if batch_ptr.nelement() < MAX_NUM_PROGRAMS:
+                        batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(
+                            PAD_SLOT_ID)
+                        token_chunk_offset_ptr.resize_(  # type: ignore
+                            MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+
+                batch_ptr[0:mlist_len].copy_(mlist)
+                token_chunk_offset_ptr[  # type: ignore
+                    0:mlist_len].copy_(offsetlist)
+                nums_dict[BLOCK_M]['batch_ptr'] = batch_ptr
+                nums_dict[BLOCK_M]['token_chunk_offset_ptr'] = (
+                    token_chunk_offset_ptr)  # type: ignore
+
+
         elif num_decodes <= self.decode_cudagraph_max_bs:
             # Pad state tensor for CUDA graph
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
@@ -220,5 +270,8 @@ class Mamba2AttentionMetadataBuilder(
             chunk_indices_p=chunk_indices_p,
             chunk_offsets_p=chunk_offsets_p,
             state_indices_tensor=state_indices_tensor,
+            nums_dict=nums_dict,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         return attn_metadata

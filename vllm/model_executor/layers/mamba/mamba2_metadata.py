@@ -161,6 +161,7 @@ def update_metadata(x: torch.Tensor, query_start_loc: torch.Tensor,
                 dtype=torch.int32,
                 device='cuda')
         else:
+            assert False
             if mamba2_metadata.batch_ptr.nelement() < MAX_NUM_PROGRAMS:
                 mamba2_metadata.batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(
                     PAD_SLOT_ID)
