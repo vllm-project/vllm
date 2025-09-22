@@ -74,10 +74,9 @@ class JAISConfig(PretrainedConfig):
         use_cache (`bool`, *optional*, defaults to `True`):
             Whether or not the model should return the last key/values
             attentions (not used by all models).
-        scale_attn_by_inverse_layer_idx (`bool`, *optional*,
-            defaults to `False`):
-            Whether to additionally scale attention weights by
-            `1 / layer_idx + 1`.
+        scale_attn_by_inverse_layer_idx (`bool`, *optional*, default `True`):
+            Whether to additionally scale attention weights 
+            by `1 / layer_idx + 1`.
         reorder_and_upcast_attn (`bool`, *optional*, defaults to `False`):
             Whether to scale keys (K) prior to computing attention
             (dot-product)

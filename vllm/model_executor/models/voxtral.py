@@ -30,7 +30,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 # yapf: disable
 from vllm.model_executor.models.whisper import WhisperEncoder
 # yapf: enable
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, MultiModalUUIDDict,
@@ -454,10 +453,8 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     @classmethod
     def get_speech_to_text_config(cls, model_config: ModelConfig,
@@ -585,11 +582,11 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
              r"language_model.model.layers.\1.mlp.down_proj"),
             (r"layers\.(\d+)\.feed_forward\.w3",
              r"language_model.model.layers.\1.mlp.up_proj"),
-            (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.wo",
-             r"whisper_encoder.whisper_encoder.layers.\1.layers.self_attn.out_proj"
-             ),
             (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.w(.*)",
              r"whisper_encoder.whisper_encoder.layers.\1.layers.self_attn.\2_proj"
+             ),
+            (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.attention.wo",
+             r"whisper_encoder.whisper_encoder.layers.\1.layers.self_attn.out_proj"
              ),
             (r"mm_whisper_embeddings\.whisper_encoder\.transformer\.layers\.(\d+)\.feed_forward.w(\d+)",
              r"whisper_encoder.whisper_encoder.layers.\1.layers.mlp.fc\2"),

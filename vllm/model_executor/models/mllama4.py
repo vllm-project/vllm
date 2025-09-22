@@ -41,7 +41,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -106,22 +105,21 @@ class Llama4VisionMLP(nn.Module):
         use_data_parallel: bool = False,
     ):
         super().__init__()
-        cls_fc1 = (ReplicatedLinear
-                   if use_data_parallel else ColumnParallelLinear)
-        self.fc1 = cls_fc1(
+        self.fc1 = ColumnParallelLinear(
             input_size=input_size,
             output_size=intermediate_size,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.fc1",
+            disable_tp=use_data_parallel,
         )
-        cls_fc2 = ReplicatedLinear if use_data_parallel else RowParallelLinear
-        self.fc2 = cls_fc2(
+        self.fc2 = RowParallelLinear(
             input_size=intermediate_size,
             output_size=output_size,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.fc2",
+            disable_tp=use_data_parallel,
         )
         self.activation_fn = nn.GELU()
         self.output_activation = output_activation
@@ -388,11 +386,10 @@ class Llama4VisionEncoder(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            inputs_embeds (`torch.FloatTensor` of shape
-                    `(batch_size, sequence_length, hidden_size)`):
-                Optionally, instead of passing `input_ids` you can choose to
-                directly pass an embedded representation. This is useful if you
-                want more control over how to convert `input_ids` indices into
+            hidden_states: Input tensor of shape 
+                (batch_size, sequence_length, hidden_size).
+                Hidden states from the model embeddings, representing 
+                the input tokens.
                 associated vectors than the model's internal embedding
                 lookup matrix.
         """
@@ -419,20 +416,15 @@ class Llama4UnfoldConvolution(nn.Module):
             kernel_size = (kernel_size, kernel_size)
         self.unfold = torch.nn.Unfold(kernel_size=kernel_size,
                                       stride=config.patch_size)
-        params = {
-            "input_size":
-            config.num_channels * kernel_size[0] * kernel_size[1],
-            "output_size": config.hidden_size,
-            "bias": False,
-            "quant_config": quant_config,
-            "prefix": f"{prefix}.linear",
-        }
-        if use_data_parallel:
-            cls = ReplicatedLinear
-        else:
-            cls = ColumnParallelLinear
-            params["gather_output"] = True
-        self.linear = cls(**params)
+        self.linear = ColumnParallelLinear(
+            input_size=config.num_channels * kernel_size[0] * kernel_size[1],
+            output_size=config.hidden_size,
+            bias=False,
+            gather_output=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear",
+            disable_tp=use_data_parallel,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.unfold(hidden_states)
@@ -863,10 +855,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def separate_weights(
         self,

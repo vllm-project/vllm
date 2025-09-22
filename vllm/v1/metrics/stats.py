@@ -3,7 +3,7 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -43,6 +43,7 @@ class SchedulerStats:
         default_factory=PrefixCacheStats)
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
+    kv_connector_stats: Optional[dict[str, Any]] = None
 
     num_corrupted_reqs: int = 0
 
@@ -67,6 +68,9 @@ class RequestStateStats:
     scheduled_ts: float = 0.0
     first_token_ts: float = 0.0
     last_token_ts: float = 0.0
+
+    # first token latency
+    first_token_latency: float = 0.0
 
 
 @dataclass
@@ -116,6 +120,7 @@ class IterationStats:
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
+            req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
 

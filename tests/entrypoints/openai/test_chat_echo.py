@@ -22,6 +22,8 @@ def server():
         "--enforce-eager",
         "--max-model-len",
         "4080",
+        "--max-logprobs",  # test prompt_logprobs equal to -1
+        "151936"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -77,3 +79,46 @@ async def test_chat_session_with_echo_and_continue_final_message(
     else:
         assert message.content is not None and saying not in message.content
     assert message.role == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_prompt_logprobs(client: openai.AsyncOpenAI):
+    messages = [{
+        "role": "system",
+        "content": "You are a helpful assistant."
+    }, {
+        "role": "user",
+        "content": "Beijing is the capital of which country?"
+    }]
+
+    completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        extra_body={"prompt_logprobs": -1},
+    )
+
+    assert completion.prompt_logprobs is not None
+    assert len(completion.prompt_logprobs) > 0
+
+
+@pytest.mark.asyncio
+async def test_top_logprobs(client: openai.AsyncOpenAI):
+    messages = [{
+        "role": "system",
+        "content": "You are a helpful assistant."
+    }, {
+        "role": "user",
+        "content": "Beijing is the capital of which country?"
+    }]
+
+    completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        extra_body={
+            "top_logprobs": -1,
+            "logprobs": "true",
+        },
+    )
+    assert completion.choices[0].logprobs is not None
+    assert completion.choices[0].logprobs.content is not None
+    assert len(completion.choices[0].logprobs.content) > 0
