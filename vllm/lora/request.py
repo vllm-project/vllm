@@ -6,8 +6,6 @@ from typing import Optional
 
 import msgspec
 
-from vllm.adapter_commons.request import AdapterRequest
-
 
 class LoRARequest(
         msgspec.Struct,
@@ -24,8 +22,6 @@ class LoRARequest(
     lora_int_id must be globally unique for a given adapter.
     This is currently not enforced in vLLM.
     """
-    __metaclass__ = AdapterRequest
-
     lora_name: str
     lora_int_id: int
     lora_path: str = ""
@@ -35,6 +31,8 @@ class LoRARequest(
     tensorizer_config_dict: Optional[dict] = None
 
     def __post_init__(self):
+        if self.lora_int_id < 1:
+            raise ValueError(f"id must be > 0, got {self.lora_int_id}")
         if self.lora_local_path:
             warnings.warn(
                 "The 'lora_local_path' attribute is deprecated "

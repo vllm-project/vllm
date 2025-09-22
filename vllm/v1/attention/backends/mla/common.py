@@ -381,6 +381,7 @@ class MLACommonMetadata(Generic[D]):
 
     num_reqs: int
     max_query_len: int
+    max_seq_len: int
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     query_start_loc: torch.Tensor
@@ -411,7 +412,8 @@ M = TypeVar("M", bound=MLACommonMetadata)
 def use_flashinfer_prefill() -> bool:
     # For blackwell default to flashinfer prefill if it's available since
     # it is faster than FA2.
-    return (flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL
+    return (not envs.VLLM_DISABLE_FLASHINFER_PREFILL and flashinfer_available
+            and not envs.VLLM_USE_CUDNN_PREFILL
             and current_platform.is_device_capability(100))
 
 
@@ -443,11 +445,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
         self.kv_cache_spec = kv_cache_spec
-        self.device = device
         scheduler_config = vllm_config.scheduler_config
         self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
+        cache_config = vllm_config.cache_config
+        self.compilation_config = vllm_config.compilation_config
+        self.device = device
+
         self.num_heads = self.model_config.get_num_attention_heads(
             parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
@@ -460,7 +464,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        # Dont try to access the runner on AMD
+        # Don't try to access the runner on AMD
         if self.aot_schedule:
             self.page_size = self.kv_cache_spec.block_size
 
@@ -581,7 +585,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             window_left=self._global_hyperparameters.window_left,
             logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
             q_data_type=self.model_config.dtype,
-            kv_data_type=self.kv_cache_spec.dtype,
         )
 
         # Prepare context prefills
@@ -602,16 +605,17 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     logits_soft_cap=self._global_hyperparameters.
                     logits_soft_cap,
                     q_data_type=self.model_config.dtype,
-                    kv_data_type=self.kv_cache_spec.dtype,
                 )
 
         prefill.prefill_main = self._fi_prefill_main
         prefill.prefill_chunks = self._fi_prefill_chunks
 
-    def _build_decode(
-            self, block_table_tensor: torch.Tensor, seq_lens_cpu: torch.Tensor,
-            seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
-            query_start_loc_device: torch.Tensor) -> MLACommonDecodeMetadata:
+    def _build_decode(self, block_table_tensor: torch.Tensor,
+                      seq_lens_cpu: torch.Tensor,
+                      seq_lens_device: torch.Tensor,
+                      query_start_loc_cpu: torch.Tensor,
+                      query_start_loc_device: torch.Tensor,
+                      num_decode_tokens: int) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
@@ -624,11 +628,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         Currently, only decode is supported for full cudagraphs with MLA.
         """
         m = common_attn_metadata
-        assert m.num_reqs == m.num_actual_tokens, \
+        assert m.num_reqs <= (m.num_actual_tokens *
+                              self.reorder_batch_threshold), \
             "MLA only supports decode-only full CUDAGraph capture. " \
             "Make sure all cudagraph capture sizes <= max_num_seq."
 
-        assert m.max_query_len == 1  # decode-only
+        assert m.max_query_len <= self.reorder_batch_threshold  # decode only
 
         return self.build(0, m)
 
@@ -639,6 +644,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
+        max_seq_len = common_attn_metadata.max_seq_len
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
@@ -819,11 +825,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 seq_lens_device=seq_lens[:num_decodes],
                 query_start_loc_cpu=query_start_loc_cpu[:num_decodes + 1],
                 query_start_loc_device=query_start_loc[:num_decodes + 1],
+                num_decode_tokens=num_decode_tokens,
             )
 
         attn_metadata = self.metadata_cls(
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
+            max_seq_len=max_seq_len,
             num_actual_tokens=num_tokens,
             query_start_loc=query_start_loc,
             slot_mapping=slot_mapping,
@@ -1313,7 +1321,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         dcp_world_size: int,
     ):
-        assert k_scale is None, "DCP not support sacled kvcache now."
+        assert k_scale is None, "DCP not support scaled kvcache now."
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.chunked_context is not None

@@ -124,9 +124,16 @@ pull_request_rules:
     - or:
       - files~=^examples/.*gpt[-_]?oss.*\.py
       - files~=^tests/.*gpt[-_]?oss.*\.py
+      - files~=^tests/entrypoints/openai/test_response_api_with_harmony.py
+      - files~=^tests/entrypoints/test_context.py
       - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
       - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
+      - files~=^vllm/entrypoints/harmony_utils.py
+      - files~=^vllm/entrypoints/tool_server.py
+      - files~=^vllm/entrypoints/tool.py
+      - files~=^vllm/entrypoints/context.py
       - title~=(?i)gpt[-_]?oss
+      - title~=(?i)harmony
   actions:
     label:
       add:
@@ -164,7 +171,7 @@ pull_request_rules:
       - files=examples/online_serving/openai_chat_completion_structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
       - files~=^tests/v1/structured_output/
-      - files=tests/v1/entrypoints/llm/test_guided_generate.py
+      - files=tests/v1/entrypoints/llm/test_struct_output_generate.py
       - files~=^vllm/v1/structured_output/
   actions:
     label:
@@ -273,6 +280,20 @@ pull_request_rules:
       users:
         - "sangstar"
 
+- name: assign reviewer for modelopt changes
+  conditions:
+    - or:
+        - files~=^vllm/model_executor/layers/quantization/modelopt\.py$
+        - files~=^vllm/model_executor/layers/quantization/__init__\.py$
+        - files~=^tests/models/quantization/test_modelopt\.py$
+        - files~=^tests/quantization/test_modelopt\.py$
+        - files~=^tests/models/quantization/test_nvfp4\.py$
+        - files~=^docs/features/quantization/modelopt\.md$
+  actions:
+    assign:
+      users:
+        - "Edwardf0t1"
+
 - name: remove 'needs-rebase' label when conflict is resolved
   conditions:
       - -conflict
@@ -281,3 +302,20 @@ pull_request_rules:
     label:
       remove:
         - needs-rebase
+
+- name: label-kv-connector
+  description: Automatically apply kv-connector label
+  conditions:
+    - or:
+      - files~=^examples/online_serving/disaggregated[^/]*/.*
+      - files~=^examples/offline_inference/disaggregated[^/]*/.*
+      - files~=^examples/others/lmcache/
+      - files~=^tests/v1/kv_connector/
+      - files~=^vllm/distributed/kv_transfer/
+      - title~=(?i)\bP/?D\b
+      - title~=(?i)NIXL
+      - title~=(?i)LMCache
+  actions:
+    label:
+      add:
+        - kv-connector

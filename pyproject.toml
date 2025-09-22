@@ -70,7 +70,6 @@ line-length = 80
 "vllm/_version.py" = ["ALL"]
 # Python 3.8 typing - skip V0 code
 "vllm/attention/**/*.py" = ["UP006", "UP035"]
-"vllm/core/**/*.py" = ["UP006", "UP035"]
 "vllm/engine/**/*.py" = ["UP006", "UP035"]
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
@@ -115,10 +114,8 @@ follow_imports = "silent"
 # move the directory here and remove it from tools/mypy.sh
 files = [
     "vllm/*.py",
-    "vllm/adapter_commons",
     "vllm/assets",
     "vllm/entrypoints",
-    "vllm/core",
     "vllm/inputs",
     "vllm/logging_utils",
     "vllm/multimodal",
@@ -145,6 +142,7 @@ skip_gitignore = true
 
 [tool.pytest.ini_options]
 markers = [
+    "slow_test",
     "skip_global_cleanup",
     "core_model: enable this model test in each PR instead of only nightly",
     "hybrid_model: models that contain mamba layers (including pure SSM and hybrid architectures)",
@@ -228,6 +226,7 @@ fo = "fo"
 ba = "ba"
 
 [tool.typos.type.py.extend-words]
+ba = "ba"
 
 [tool.typos.type.cpp]
 extend-glob = ["*.cu"]
@@ -344,3 +343,6 @@ extend-ignore-re = []
 windo = "windo"
 
 [tool.typos.type.vimscript.extend-words]
+
+[tool.uv]
+no-build-isolation-package = ["torch"]

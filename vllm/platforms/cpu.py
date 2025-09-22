@@ -75,12 +75,12 @@ class CpuPlatform(Platform):
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
-        elif sys.platform.startswith(
-                "darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
-            # TODO: change this condition to check if the platform support bf16
-            # instead of checking the OS. For instance M2 shall supports bf16
-            # already. But we need to modify `cpu_extension.cmake` to activate
-            # the feature in the build.
+        elif (self.get_cpu_architecture() == CpuArchEnum.ARM
+              and sys.platform.startswith("darwin")):
+            if (subprocess.check_output(
+                ["sysctl -n hw.optional.arm.FEAT_BF16"],
+                    shell=True).strip() == b"1"):
+                return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
@@ -125,10 +125,6 @@ class CpuPlatform(Platform):
         Set the device for the current platform.
         """
         torch.cpu.set_device(device)
-
-    @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
 
     @classmethod
     def inference_mode(cls):
@@ -185,6 +181,11 @@ class CpuPlatform(Platform):
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
+        # Disable DBO
+        if parallel_config.enable_dbo:
+            logger.warning(
+                "Dual-Batch Overlap is not supported on CPU, disabled.")
+            parallel_config.enable_dbo = False
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationLevel
@@ -346,4 +347,8 @@ class CpuPlatform(Platform):
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
+        return True
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
         return True

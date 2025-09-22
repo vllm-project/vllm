@@ -8,11 +8,12 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
-from vllm.config import LoRAConfig
+from vllm.config import ModelConfig, VllmConfig
+from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)
-from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.models import (LoRAMapping, LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager)
 from vllm.lora.peft_helper import PEFTHelper
@@ -435,10 +436,19 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device,
         target_modules=["layer1.dense1", "dense2"],
         lora_dtype=DEFAULT_DTYPE,
     )
+
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config,
+                             lora_config=lora_config)
+
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
     worker_adapter_manager = LRUCacheWorkerLoRAManager(
-        4, 2,
-        dummy_model.unpadded_vocab_size - lora_config.lora_extra_vocab_size,
-        lora_config, device, EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
+        vllm_config, device, EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
+
+    worker_adapter_manager.max_num_seqs = 4
+    worker_adapter_manager.max_num_batched_tokens = 2
+
     worker_adapter_manager.create_lora_manager(dummy_model)
 
     mapping = LoRAMapping([], [])
@@ -517,10 +527,20 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device,
                              max_cpu_loras=4,
                              max_loras=4,
                              lora_dtype=DEFAULT_DTYPE)
-    worker_adapter_manager = WorkerLoRAManager(
-        4, 2, dummy_model_gate_up.unpadded_vocab_size -
-        lora_config.lora_extra_vocab_size, lora_config, device,
-        EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
+
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config,
+                             lora_config=lora_config)
+
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+
+    worker_adapter_manager = WorkerLoRAManager(vllm_config, device,
+                                               EMBEDDING_MODULES,
+                                               EMBEDDING_PADDING_MODULES)
+    worker_adapter_manager.vocab_size = (
+        dummy_model_gate_up.unpadded_vocab_size -
+        lora_config.lora_extra_vocab_size)
     worker_adapter_manager.create_lora_manager(dummy_model_gate_up)
 
     dummy_lora_files = f"{tmp_path}/lora_adapter"

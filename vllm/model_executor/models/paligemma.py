@@ -9,10 +9,10 @@ from transformers import BatchFeature, PaliGemmaConfig
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, MultiModalKwargsItems)
+                                    MultiModalInputs, MultiModalKwargsItems,
+                                    MultiModalUUIDDict)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -203,13 +203,13 @@ class PaliGemmaMultiModalProcessor(
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> MultiModalInputs:
         mm_inputs = super().apply(prompt,
                                   mm_data,
                                   hf_processor_mm_kwargs,
                                   tokenization_kwargs,
-                                  mm_hash_overrides=mm_hash_overrides)
+                                  mm_uuids=mm_uuids)
         prompt_token_ids = mm_inputs["prompt_token_ids"]
 
         tokenizer = self.info.get_tokenizer()
@@ -402,10 +402,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
