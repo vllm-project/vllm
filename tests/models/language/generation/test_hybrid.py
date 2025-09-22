@@ -33,26 +33,10 @@ HYBRID_MODELS = [
     "LiquidAI/LFM2-1.2B",
 ]
 
-V1_SUPPORTED_MODELS = [
-    "state-spaces/mamba-130m-hf",
-    "ai21labs/Jamba-tiny-dev",
-    "pfnet/plamo-2-1b",
-    "yujiepan/mamba2-codestral-v0.1-tiny-random",
-    "Zyphra/Zamba2-1.2B-instruct",
-    "hmellor/tiny-random-BambaForCausalLM",
-    "ibm-granite/granite-4.0-tiny-preview",
-    "tiiuae/Falcon-H1-0.5B-Base",
-    "LiquidAI/LFM2-1.2B",
-]
-
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
-]
-
-V0_UNSUPPORTED_MODELS = [
-    "LiquidAI/LFM2-1.2B",
 ]
 
 FP32_STATE_MODELS = [
@@ -88,20 +72,16 @@ def test_models(
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
-    if model in V1_SUPPORTED_MODELS:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-            vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, num_logprobs)
-    else:
-        vllm_v1_outputs = None
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
-    if model in V1_SUPPORTED_MODELS:
-        check_logprobs_close(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=vllm_v1_outputs,
-            name_0="hf",
-            name_1="vllm-v1",
-        )
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
 
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
