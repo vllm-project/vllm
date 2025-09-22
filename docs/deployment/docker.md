@@ -85,8 +85,8 @@ DOCKER_BUILDKIT=1 docker build . \
     adding `--security-opt label=disable` when running `podman build` command to avoid certain [existing issues](https://github.com/containers/buildah/discussions/4184).
 
 !!! note
-    During building image, wheel build can be too large, depending on specified arguments. Consider skipping check
-    `RUN_WHEEL_CHECK=false`.
+    The wheel build can be too large, causing a build failure. To disable the size check,
+    add `--build-arg RUN_WHEEL_CHECK=false` to your `docker build` command.
 
 ## Building for Arm64/aarch64
 
