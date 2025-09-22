@@ -10,7 +10,6 @@ from typing import (Any, Dict, Generic, List, Optional, Protocol, Set, Tuple,
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-from vllm.multimodal import MultiModalPlaceholderMap
 
 
 class AttentionType:
@@ -115,15 +114,6 @@ class AttentionMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
-
-    # The index maps that relate multi-modal embeddings to the corresponding
-    # placeholders.
-    #
-    # N.B. These aren't really related to attention and don't belong on this
-    # type -- this is just a temporary solution to make them available to
-    # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[Dict[
-        str, MultiModalPlaceholderMap.IndexMap]]
 
     # Enable/disable KV scales calculation. This is so that we can disable the
     # calculation until after prefill and cuda graph capture.
