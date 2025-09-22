@@ -1,34 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""High-Performance Triton-only Attention layer."""
+"""Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
+from functools import cache
 from typing import ClassVar, Optional
 
 import torch
 
+from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.attention.ops.triton_unified_attention import unified_attention
+from vllm.attention.ops.chunked_prefill_paged_decode import (
+    chunked_prefill_paged_decode)
+from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey, kFp8StaticTensorSym)
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
-elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops
-
 logger = init_logger(__name__)
 
 
 @dataclass
-class TritonAttentionMetadata:
+class RocmAttentionMetadata:
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
@@ -57,8 +58,8 @@ class TritonAttentionMetadata:
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
 
 
-class TritonAttentionMetadataBuilder(
-        AttentionMetadataBuilder[TritonAttentionMetadata]):
+class RocmAttentionMetadataBuilder(
+        AttentionMetadataBuilder[RocmAttentionMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
@@ -76,7 +77,7 @@ class TritonAttentionMetadataBuilder(
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
-    ) -> TritonAttentionMetadata:
+    ) -> RocmAttentionMetadata:
         attn_metadata = self.build(0, common_attn_metadata)
         # When doing full graph capture, setting seq_lens to
         # max_model_len will cause graph capture to be extremely
@@ -87,7 +88,7 @@ class TritonAttentionMetadataBuilder(
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> TritonAttentionMetadata:
+              fast_build: bool = False) -> RocmAttentionMetadata:
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
@@ -115,7 +116,7 @@ class TritonAttentionMetadataBuilder(
             suffix_kv_lens = None
             prefix_scheduler_metadata = None
 
-        attn_metadata = TritonAttentionMetadata(
+        attn_metadata = RocmAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -133,35 +134,40 @@ class TritonAttentionMetadataBuilder(
         return attn_metadata
 
 
-class TritonAttentionBackend(AttentionBackend):
+class RocmAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
-        # Triton Attention supports any head size above 32
-        if head_size < 32:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
+            attn_type = cls.__name__.removesuffix("Backend")
             raise ValueError(
-                f"Head size {head_size} is not supported by TritonAttention."
-                f"Head sizes need to be larger or equal 32 for this backend. "
+                f"Head size {head_size} is not supported by {attn_type}. "
+                f"Supported head sizes are: {supported_head_sizes}. "
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes.")
 
     @staticmethod
     def get_name() -> str:
-        return "TRITON_ATTN_VLLM_V1"
+        return "ROCM_ATTN_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> type["TritonAttentionImpl"]:
-        return TritonAttentionImpl
+    def get_impl_cls() -> type["RocmAttentionImpl"]:
+        return RocmAttentionImpl
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
-        return TritonAttentionMetadata
+        return RocmAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -172,18 +178,27 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
 
     @staticmethod
-    def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
-        return TritonAttentionMetadataBuilder
+    def get_builder_cls() -> type["RocmAttentionMetadataBuilder"]:
+        return RocmAttentionMetadataBuilder
 
 
-class TritonAttentionImpl(AttentionImpl):
+@cache
+def use_aiter_unified_attention() -> bool:
+    """Check if aiter unified attention should be used."""
+    # VLLM_ROCM_USE_AITER_MHA needs to set to 0 as well as it is set
+    # to 1 as default
+    return envs.VLLM_ROCM_USE_AITER \
+        and envs.VLLM_USE_AITER_UNIFIED_ATTENTION
+
+
+class RocmAttentionImpl(AttentionImpl):
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
@@ -222,15 +237,33 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        TritonAttentionBackend.validate_head_size(head_size)
+        RocmAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "TritonAttentionImpl")
+                                      "RocmAttentionImpl")
 
         self.fp8_dtype = current_platform.fp8_dtype()
+        self.force_prefill_decode_attn = \
+            envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+
+        if not self.force_prefill_decode_attn:
+            # If not using prefill decode attention, we use the Triton
+            # unified attention implementation.
+            if use_aiter_unified_attention():
+                logger.info_once(
+                    "Using aiter unified attention for RocmAttentionImpl")
+                from aiter.ops.triton.unified_attention import (
+                    unified_attention)
+                self.unified_attention = unified_attention
+            else:
+                logger.info_once(
+                    "Using vllm unified attention for RocmAttentionImpl")
+                from vllm.attention.ops.triton_unified_attention import (
+                    unified_attention)
+                self.unified_attention = unified_attention
 
         self.sinks = sinks
         if sinks is not None:
@@ -246,19 +279,19 @@ class TritonAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: TritonAttentionMetadata,
+        attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass with Paged Attention impl. in Triton.
+        """Forward pass with FlashAttention.
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, 2, block_size, num_kv_heads, head_size]
+                [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -268,7 +301,7 @@ class TritonAttentionImpl(AttentionImpl):
         if output_block_scale is not None:
             raise NotImplementedError(
                 "fused block_scale output quantization is not yet supported"
-                " for TritonAttentionImpl")
+                " for RocmAttentionImpl")
 
         if attn_metadata is None:
             # Profiling run.
@@ -285,22 +318,40 @@ class TritonAttentionImpl(AttentionImpl):
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
 
+        use_prefill_decode_attn = self.force_prefill_decode_attn
         num_actual_tokens = attn_metadata.num_actual_tokens
-        key_cache, value_cache = kv_cache.unbind(1)
+
+        if use_prefill_decode_attn:
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size)
+        else:
+            key_cache, value_cache = kv_cache.unbind(0)
 
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
-            ops.reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+            if use_prefill_decode_attn:
+                PagedAttention.write_to_paged_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
+            else:
+                ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
@@ -324,28 +375,52 @@ class TritonAttentionImpl(AttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+        if use_prefill_decode_attn:
+            # Compute attention and update output up to `num_actual_tokens`.
+            chunked_prefill_paged_decode(
+                query=query[:num_actual_tokens],
+                key=key[:num_actual_tokens],
+                value=value[:num_actual_tokens],
+                output=output[:num_actual_tokens],
+                kv_cache_dtype=self.kv_cache_dtype,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                block_table=block_table,
+                query_start_loc=cu_seqlens_q,
+                seq_lens=seqused_k,
+                max_seq_len=max_seqlen_k,
+                max_query_len=max_seqlen_q,
+                k_scale=layer._k_scale,
+                v_scale=layer._v_scale,
+                alibi_slopes=self.alibi_slopes,
+                sliding_window=self.sliding_window[0],
+                sm_scale=self.scale,
+                output_scale=output_scale,
+                sinks=self.sinks,
+            )
 
-        unified_attention(
-            q=query[:num_actual_tokens],
-            k=key_cache,
-            v=value_cache,
-            out=output[:num_actual_tokens],
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=seqused_k,
-            max_seqlen_k=max_seqlen_k,
-            softmax_scale=self.scale,
-            causal=True,
-            alibi_slopes=self.alibi_slopes,
-            window_size=self.sliding_window,
-            block_table=block_table,
-            softcap=self.logits_soft_cap,
-            q_descale=None,  # Not supported
-            k_descale=layer._k_scale.expand(descale_shape),
-            v_descale=layer._v_scale.expand(descale_shape),
-            sinks=self.sinks,
-            output_scale=output_scale,
-        )
+        else:
+            descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+
+            self.unified_attention(
+                q=query[:num_actual_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=output[:num_actual_tokens],
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=seqused_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                q_descale=None,  # Not supported
+                k_descale=layer._k_scale.expand(descale_shape),
+                v_descale=layer._v_scale.expand(descale_shape),
+                sinks=self.sinks,
+                output_scale=output_scale)
 
         return output

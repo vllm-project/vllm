@@ -1494,6 +1494,7 @@ class EngineArgs:
             "FLEX_ATTENTION",
             "TREE_ATTN",
             "XFORMERS_VLLM_V1",
+            "ROCM_ATTN_VLLM_V1",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
