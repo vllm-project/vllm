@@ -306,7 +306,8 @@ class Scheduler(SchedulerInterface):
             if request.spec_token_ids:
                 num_scheduled_spec_tokens = (num_new_tokens +
                                              request.num_computed_tokens -
-                                             request.num_tokens)
+                                             request.num_tokens -
+                                             request.num_output_placeholders)
                 if num_scheduled_spec_tokens > 0:
                     total_num_spec_tokens += num_scheduled_spec_tokens
                     # Trim spec_token_ids list to num_scheduled_spec_tokens.
