@@ -222,7 +222,6 @@ def fused_recurrent_gated_delta_rule_fwd(
         IS_VARLEN=cu_seqlens is not None,
         IS_CONTINUOUS_BATCHING=ssm_state_indices is not None,
         IS_SPEC_DECODING=num_accepted_tokens is not None,
-        num_warps=1,
         num_stages=3,
     )
     o = o.squeeze(0)
