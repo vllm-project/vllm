@@ -86,7 +86,7 @@ DOCKER_BUILDKIT=1 docker build . \
 
 !!! note
     During building image, wheel build can be too large, depending on specified arguments. Consider skipping check
-    `RUN_WHEEL_CHECK`.
+    `RUN_WHEEL_CHECK=false`.
 
 ## Building for Arm64/aarch64
 
