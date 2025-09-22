@@ -685,21 +685,17 @@ class MambaMixer2(MambaBase, CustomOp):
                 mamba2_metadata = update_metadata(x, query_start_loc_p,
                                                   mamba2_metadata)
 
-            kernel_conv1d_indices = state_indices_tensor_p
+            BLOCK_M = list(mamba2_metadata.nums_dict.keys())[0]
             if cache_enabled:
-                # Kernel expects to have the initial state here
-                # and overwrites it -> use final state location
-                if has_initial_states_p is not None \
-                    and has_initial_states_p.sum() > 0:
-                    conv_state_idx_input = state_indices_tensor_p.gather(
-                        1, last_state_idx_p.unsqueeze(1))
-                    conv_state_idx_output = state_indices_tensor_p.gather(
-                        1, current_last_idx_p.unsqueeze(1))
-                    conv_state[conv_state_idx_output[
-                        has_initial_states_p]] = conv_state[
-                            conv_state_idx_input[has_initial_states_p]]
-                kernel_conv1d_indices = state_indices_tensor_p.gather(
-                    1, current_last_idx_p.unsqueeze(1)).squeeze(1)
+                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
+                stride_state_indices = state_indices_tensor_p.shape[-1]
+            else:
+                current_first_idx_p = None
+                current_last_idx_p = None
+                seq_lens_completed_p = None
+                last_state_idx_p = None
+                n_blocks_to_fill = None
+                stride_state_indices = 1
 
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
@@ -708,53 +704,17 @@ class MambaMixer2(MambaBase, CustomOp):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
-                cache_indices=kernel_conv1d_indices,
+                cache_indices=state_indices_tensor_p,
+                n_blocks_to_fill=n_blocks_to_fill,
+                current_first_idx=current_first_idx_p,
+                current_last_idx=current_last_idx_p,
+                last_state_idx=last_state_idx_p,
+                seq_lens_completed=seq_lens_completed_p,
+                stride_cache_chunk=mamba_block_size // BLOCK_M,
+                stride_state_indices=stride_state_indices,
                 metadata=mamba2_metadata,
                 query_start_loc=query_start_loc_p).transpose(
                     0, 1)[:num_prefill_tokens]
-
-            if cache_enabled:
-
-                def copy_to_conv_state(conv_state_block_idx, x, x_offset,
-                                       x_end, query_start_loc):
-                    conv_state[conv_state_block_idx, :, 0] = torch.transpose(
-                        x[:, query_start_loc + x_offset -
-                          3:x_end:mamba_block_size], 1, 0)
-                    conv_state[conv_state_block_idx, :, 1] = torch.transpose(
-                        x[:, query_start_loc + x_offset -
-                          2:x_end:mamba_block_size], 1, 0)
-                    conv_state[conv_state_block_idx, :, 2] = torch.transpose(
-                        x[:, query_start_loc + x_offset -
-                          1:x_end:mamba_block_size], 1, 0)
-
-                if cache_strategy == "all":
-                    n_blocks_to_fill = current_last_idx_p - current_first_idx_p
-                    # Iterate over sequences that require state storing:
-                    for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
-                        cache_blocks_to_fill = state_indices_tensor_p[
-                            seq_idx, current_first_idx_p[seq_idx]:
-                            current_first_idx_p[seq_idx] +
-                            n_blocks_to_fill[seq_idx]]
-                        from_where = x[:, query_start_loc_p[seq_idx]:
-                                       query_start_loc_p[seq_idx + 1]]
-                        # if last computation ended just before the end of block
-                        if last_computed_offset_p[seq_idx] + 3 >= \
-                            mamba_block_size:
-                            # the current x doesn't have the proper values
-                            # We need to get them from the past state.
-                            # Trick: The indices will go negative:
-                            # e.g. x[:,-3], x[:,-2], x[:,-1]
-                            # so pass x := concat(x, last_state)
-                            # to enable reading from the back
-                            # Note: Maybe always do this and remove "if"?
-                            from_where = torch.concat([
-                                from_where, conv_state[cache_blocks_to_fill[0]]
-                            ], 1)
-                        copy_to_conv_state(
-                            cache_blocks_to_fill, from_where, mamba_block_size,
-                            mamba_block_size * n_blocks_to_fill[seq_idx],
-                            mamba_block_size * current_first_idx_p[seq_idx] -
-                            seq_lens_completed_p[seq_idx])
 
             hidden_states_p, B_p, C_p = split_hidden_states_B_C_fn(
                 hidden_states_B_C_p)
@@ -842,7 +802,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
                 #For all seqs, store the last state (Note: might be partial):
                 ssm_state[state_indices_tensor_p.gather(1,
-                          current_last_idx_p.unsqueeze(1)).squeeze(1)] = \
+                        current_last_idx_p.unsqueeze(1)).squeeze(1)] = \
                     states[0, last_chunk_p]
             else:
                 varlen_state = mamba_outputs
@@ -862,17 +822,12 @@ class MambaMixer2(MambaBase, CustomOp):
                 #Note:
                 # for decode always: current_first_idx_d == current_last_idx_d
                 # at block boundaries: current_first_idx_d > last_state_idx_d
-
-                # copy initial state to new location,
-                # as update kernel works in place
-                #if (current_last_idx_d > last_state_idx_d).any():
-                # (skip IF as it breaks CUDA graphs)
-                conv_state[state_indices_tensor_d_output] = conv_state[
-                    state_indices_tensor_d_input]
             else:
                 # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
+                current_last_idx_d = None
+                last_state_idx_d = None
 
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
@@ -881,7 +836,10 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=state_indices_tensor_d_output)
+                conv_state_indices=state_indices_tensor_d,
+                current_last_idx=current_last_idx_d,
+                last_state_idx=last_state_idx_d,
+            )
 
             hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(
                 hidden_states_B_C_d)
