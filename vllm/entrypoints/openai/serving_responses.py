@@ -233,7 +233,6 @@ class OpenAIServingResponses(OpenAIServing):
             )
 
         # Handle the previous response ID.
-        # fbvscode.set_trace()
         prev_response_id = request.previous_response_id
         if prev_response_id is not None:
             async with self.response_store_lock:
