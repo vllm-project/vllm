@@ -228,18 +228,18 @@ class W8A8BlockFp8LinearOp:
     ) -> torch.Tensor:
         assert self.input_quant_op is not None
         if self.is_hopper:
-            padded_x = torch.nn.functional.pad(
+            # We pad unconditionally (even if shape is already divisible by 4)
+            # to support dynamic shape for input_2d.shape[0] in torch.compile
+            x = torch.nn.functional.pad(
                 input_2d, (0, 0, 0, -input_2d.shape[0] % 4))
-            q_input, x_scale = self.input_quant_op(padded_x)
-            output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
-                                       list(self.weight_group_shape),
-                                       input_2d.dtype, True)
-            output = output[0:input_2d.shape[0], ...]
         else:
-            q_input, x_scale = self.input_quant_op(input_2d)
-            output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
+            x = input_2d
+        
+        q_input, x_scale = self.input_quant_op(x)
+        output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
                                        list(self.weight_group_shape),
-                                       input_2d.dtype, False)
+                                       input_2d.dtype, self.is_hopper)
+        output = output[0:input_2d.shape[0], ...]
         return output
 
     def _run_aiter(
