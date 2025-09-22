@@ -126,6 +126,7 @@ if TYPE_CHECKING:
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
+    VLLM_USE_STANDALONE_COMPILE: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
@@ -437,9 +438,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
-    # enabled by default.
+    # disabled by default.
     "VLLM_USE_STANDALONE_COMPILE":
-    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
+    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "0") == "1",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
