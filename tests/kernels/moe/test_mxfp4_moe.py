@@ -1,21 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
 import importlib.metadata
 from dataclasses import dataclass
+from importlib.util import find_spec
 from typing import Optional
 
 import pytest
 import torch
 from packaging import version
 
+from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+    QuarkLinearMethod, QuarkW4A4MXFP4)
+from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkW4A4MXFp4MoEMethod)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
-QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
-    "quark") is not None and version.parse(
-        importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
+QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
+    importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
 
 TRTLLM_GEN_MXFP4_AVAILABLE = current_platform.is_cuda(
 ) and current_platform.is_device_capability(100)
@@ -39,6 +42,12 @@ class ModelCase:
     tp: int
 
 
+@pytest.fixture(scope="function", autouse=True)
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
 @pytest.mark.parametrize('model_case', [
     ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=1),
     ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
@@ -55,21 +64,19 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
                      tensor_parallel_size=model_case.tp,
                      load_format="dummy") as llm:
 
-        # TODO: llm.apply_model(check_model) currently relies on V0 internals.
-        # Re-enable this later.
-        # def check_model(model):
-        #     layer = model.model.layers[0]
+        def check_model(model):
+            layer = model.model.layers[0]
 
-        #     qkv_proj = layer.self_attn.qkv_proj
+            qkv_proj = layer.self_attn.qkv_proj
 
-        #     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-        #     assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
+            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+            assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
 
-        #     assert isinstance(layer.mlp.experts.quant_method,
-        #                       QuarkW4A4MXFp4MoEMethod)
+            assert isinstance(layer.mlp.experts.quant_method,
+                              QuarkW4A4MXFp4MoEMethod)
 
-        # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
-        #     llm.apply_model(check_model)
+        if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
+            llm.apply_model(check_model)
 
         output = llm.generate_greedy("Today I am in the French Alps and",
                                      max_tokens=20)
