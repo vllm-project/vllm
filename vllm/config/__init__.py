@@ -2824,9 +2824,16 @@ class VllmConfig:
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
-        custom_ops = self.compilation_config.custom_ops
-        if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
-            custom_ops.append("+quant_fp8")
+        # Enable quant_fp8 CUDA ops when we do block-wise quantization
+        # due to an incorrect group shape issue when compiling native
+        #
+        # Also, on H100 since it's faster than native implementation
+        # https://github.com/vllm-project/vllm/issues/25094
+        if (self.quant_config is not None
+                and self.quant_config.weight_block_size is not None):
+            custom_ops = self.compilation_config.custom_ops
+            if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
+                custom_ops.append("+quant_fp8")
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:

@@ -20,9 +20,11 @@ from vllm.platforms import current_platform
         (8, 513, 64),  # Non-divisible (native only)
     ])
 @pytest.mark.parametrize("seed", [42])
+@pytest.mark.parametrize("use_ue8m0", [True, False])
 @torch.inference_mode()
 def test_quantfp8_group_functionality(batch_size: int, hidden_dim: int,
-                                      group_size: int, seed: int) -> None:
+                                      group_size: int, seed: int,
+                                      use_ue8m0: bool) -> None:
     """Test QuantFP8 group quantization with various configurations.
 
     Tests both CUDA and native implementations, column-major scales,
@@ -38,7 +40,8 @@ def test_quantfp8_group_functionality(batch_size: int, hidden_dim: int,
     group_shape = GroupShape(1, group_size)
     quant_op = QuantFP8(static=False,
                         group_shape=group_shape,
-                        column_major_scales=False)
+                        column_major_scales=False,
+                        use_ue8m0=use_ue8m0)
 
     # 1. Test native implementation (always available)
     x_quant_native, scales_native = quant_op.forward_native(x.clone())
@@ -48,7 +51,8 @@ def test_quantfp8_group_functionality(batch_size: int, hidden_dim: int,
     # 2. Test column-major scales configuration
     quant_op_col = QuantFP8(static=False,
                             group_shape=group_shape,
-                            column_major_scales=True)
+                            column_major_scales=True,
+                            use_ue8m0=use_ue8m0)
     _, scales_col = quant_op_col.forward_native(x.clone())
     assert scales_col.shape == (expected_num_groups, batch_size)
 

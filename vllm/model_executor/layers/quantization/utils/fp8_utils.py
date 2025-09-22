@@ -104,7 +104,10 @@ if current_platform.is_rocm():
         aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
 
-def _w8a8_block_fp8_matmul_func(
+# TODO we should be able to change the type of block_size to GroupShape
+# after we resolve GroupShape compilation issue
+# https://github.com/vllm-project/vllm/issues/25270
+def _w8a8_triton_block_scaled_mm_func(
     qx: torch.Tensor,
     weight: torch.Tensor,
     x_scale: torch.Tensor,
@@ -112,11 +115,11 @@ def _w8a8_block_fp8_matmul_func(
     block_size: list[int],
     output_dtype: torch.dtype,
 ) -> torch.Tensor:
-    return w8a8_block_fp8_matmul(qx, weight, x_scale, weight_scale, block_size,
-                                 output_dtype)
+    return w8a8_triton_block_scaled_mm(qx, weight, x_scale, weight_scale,
+                                       block_size, output_dtype)
 
 
-def _w8a8_block_fp8_matmul_func_fake(
+def _w8a8_triton_block_scaled_mm_fake(
     qx: torch.Tensor,
     weight: torch.Tensor,
     x_scale: torch.Tensor,
@@ -130,10 +133,10 @@ def _w8a8_block_fp8_matmul_func_fake(
 
 
 direct_register_custom_op(
-    "w8a8_block_fp8_matmul_func",
-    _w8a8_block_fp8_matmul_func,
+    "w8a8_triton_block_scaled_mm_func",
+    _w8a8_triton_block_scaled_mm_func,
     mutates_args=[],
-    fake_impl=_w8a8_block_fp8_matmul_func_fake,
+    fake_impl=_w8a8_triton_block_scaled_mm_fake,
     dispatch_key="CUDA",
 )
 
@@ -209,7 +212,7 @@ class W8A8BlockFp8LinearOp:
 
         assert self.deepgemm_input_quant_op is not None
         q_input, x_scale = self.deepgemm_input_quant_op(input_2d)
-        return torch.ops.vllm.w8a8_block_fp8_matmul_deepgemm(
+        return torch.ops.vllm.w8a8_deepgemm_block_scaled_mm(
             q_input,
             weight,
             x_scale,
@@ -252,7 +255,7 @@ class W8A8BlockFp8LinearOp:
             q_input, weight, x_scale, weight_scale, self.weight_group_shape,
             input_2d.dtype)
 
-    def _run_w8a8_block_fp8_matmul(
+    def _run_triton(
         self,
         input_2d: torch.Tensor,
         weight: torch.Tensor,
@@ -260,7 +263,7 @@ class W8A8BlockFp8LinearOp:
     ) -> torch.Tensor:
         assert self.input_quant_op is not None
         q_input, x_scale = self.input_quant_op(input_2d)
-        return torch.ops.vllm.w8a8_block_fp8_matmul_func(
+        return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             q_input, weight, x_scale, weight_scale, self.weight_group_shape,
             input_2d.dtype)
 
@@ -280,11 +283,10 @@ class W8A8BlockFp8LinearOp:
                                                 use_ue8m0=False))
         if use_aiter_and_is_supported:
             return self._run_aiter, None
-        return self._run_w8a8_block_fp8_matmul, (QuantFP8(
-            False,
-            self.act_quant_group_shape,
-            column_major_scales=False,
-            use_ue8m0=False))
+        return self._run_triton, (QuantFP8(False,
+                                           self.act_quant_group_shape,
+                                           column_major_scales=False,
+                                           use_ue8m0=False))
 
 
 def input_to_float8(
@@ -536,7 +538,7 @@ def per_token_group_quant_fp8(
 
 
 @triton.jit
-def _w8a8_block_fp8_matmul(
+def _w8a8_triton_block_scaled_mm(
     # Pointers to inputs and output
     A,
     B,
@@ -661,7 +663,7 @@ def get_w8a8_block_fp8_configs(N: int, K: int, block_n: int,
     return None
 
 
-def w8a8_block_fp8_matmul(
+def w8a8_triton_block_scaled_mm(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -721,7 +723,7 @@ def w8a8_block_fp8_matmul(
         return (triton.cdiv(M, META["BLOCK_SIZE_M"]) *
                 triton.cdiv(N, META["BLOCK_SIZE_N"]), )
 
-    _w8a8_block_fp8_matmul[grid](
+    _w8a8_triton_block_scaled_mm[grid](
         A,
         B,
         C,
