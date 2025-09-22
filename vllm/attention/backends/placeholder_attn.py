@@ -4,7 +4,7 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -13,9 +13,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadataBuilder)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.multimodal import MultiModalPlaceholderMap
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import (ModelInputForGPUBuilder)
 from vllm.utils import async_tensor_h2d
 
 # Placeholder attention backend for models like Mamba and pooling models that
@@ -204,7 +201,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
 class PlaceholderAttentionMetadataBuilder(
         AttentionMetadataBuilder[PlaceholderAttentionMetadata]):
 
-    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+    def __init__(self, input_builder):
 
         self.input_builder = input_builder
         self.runner = input_builder.runner
@@ -220,9 +217,7 @@ class PlaceholderAttentionMetadataBuilder(
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
 
-    def _add_seq_group(
-            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool):
+    def _add_seq_group(self, inter_data, chunked_prefill_enabled: bool):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         """

@@ -54,8 +54,7 @@ def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
     # Use global backends
     global backend, backend_unfused
 
-    use_v1 = False  # can be made a param once V1 support added
-    monkeypatch.setenv("VLLM_USE_V1", str(int(use_v1)))
+    monkeypatch.setenv("VLLM_USE_V1", "1")
     monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
 
     # Prompt 4 seems too open-ended, differs between fused and unfused
@@ -335,8 +334,9 @@ else:
                          [7, 256, 533] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("model_name, model_class", MODELS)
-@pytest.mark.parametrize("backend", [_Backend.FLASHINFER] if
-                         current_platform.is_cuda() else [_Backend.ROCM_FLASH])
+@pytest.mark.parametrize("backend",
+                         [_Backend.FLASHINFER] if current_platform.is_cuda()
+                         else [_Backend.TRITON_ATTN_VLLM_V1])
 @pytest.mark.parametrize(
     "split_attention",
     [False, True] if current_platform.is_rocm() else [False])

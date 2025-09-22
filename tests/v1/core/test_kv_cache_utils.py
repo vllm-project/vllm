@@ -18,12 +18,14 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash, FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
     estimate_max_model_len, generate_block_hash_extra_keys,
-    get_kv_cache_configs, get_max_concurrency_for_kv_cache_config,
-    get_request_block_hasher, hash_block_tokens, init_none_hash,
-    is_kv_cache_type_uniform, make_block_hash_with_group_id)
+    generate_scheduler_kv_cache_config, get_kv_cache_configs,
+    get_max_concurrency_for_kv_cache_config, get_request_block_hasher,
+    hash_block_tokens, init_none_hash, is_kv_cache_spec_uniform,
+    make_block_hash_with_group_id)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
-                                        KVCacheTensor, SlidingWindowSpec)
+                                        KVCacheTensor, SlidingWindowSpec,
+                                        UniformTypeKVCacheSpecs)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -927,36 +929,36 @@ def test_merge_kv_cache_spec():
     assert merged_layer_spec.sliding_window == 1
 
 
-def test_is_kv_cache_type_uniform():
+def test_is_kv_cache_spec_uniform():
     kv_cache_spec = {
         "layer_1": new_kv_cache_spec(num_kv_heads=32),
         "layer_2": new_kv_cache_spec(num_kv_heads=32),
     }
-    assert is_kv_cache_type_uniform(kv_cache_spec)
+    assert is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_kv_cache_spec(num_kv_heads=32),
         "layer_2": new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
     }
-    assert is_kv_cache_type_uniform(kv_cache_spec)
+    assert is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_kv_cache_spec(num_kv_heads=32),
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
     }
-    assert not is_kv_cache_type_uniform(kv_cache_spec)
+    assert not is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
     }
-    assert is_kv_cache_type_uniform(kv_cache_spec)
+    assert is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=2),
     }
-    assert not is_kv_cache_type_uniform(kv_cache_spec)
+    assert not is_kv_cache_spec_uniform(kv_cache_spec)
 
 
 @pytest.mark.parametrize(
@@ -1286,14 +1288,28 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # different hidden size, unimplemented
+    # different hidden size
     kv_cache_specs_hybrid = {
         'layer_1': new_kv_cache_spec(head_size=128),
-        'layer_2': new_kv_cache_spec(),
+        'layer_2': new_kv_cache_spec(head_size=64),
     }
-    with pytest.raises(NotImplementedError):
-        get_kv_cache_configs(vllm_config, [kv_cache_specs_hybrid],
-                             [mem_per_block_per_layer * 2 * 32])[0]
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid],
+        [mem_per_block_per_layer * 3 * 32])[0]
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(size=mem_per_block_per_layer * 32 * 2,
+                          shared_by=["layer_1"]),
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_2"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"],
+                             UniformTypeKVCacheSpecs(
+                                 block_size=16,
+                                 kv_cache_specs=kv_cache_specs_hybrid))
+        ])
 
     # Test num_gpu_blocks_override
     vllm_config.cache_config.num_gpu_blocks_override = 16
@@ -1324,3 +1340,75 @@ def test_get_kv_cache_configs_attention_free():
             kv_cache_groups=[],
         )
     ]
+
+
+def test_generate_uniform_type_kv_cache_specs():
+    # All layers are full attention, can be merged
+    kv_cache_specs = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_kv_cache_spec(head_size=128),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec == UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs=kv_cache_specs)
+
+    # Full attention + sliding window, cannot be merged
+    kv_cache_specs = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_sliding_window_spec(sliding_window=1),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is None
+
+    # different order of full attention + sliding window, cannot be merged
+    kv_cache_specs = {
+        'layer_1': new_sliding_window_spec(sliding_window=1),
+        'layer_2': new_kv_cache_spec(),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is None
+
+    # Same-size sliding window, can be merged
+    kv_cache_specs = {
+        'layer_1': new_sliding_window_spec(sliding_window=1),
+        'layer_2': new_sliding_window_spec(sliding_window=1, head_size=128),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec == UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs=kv_cache_specs)
+
+    # different block sizes, cannot be merged
+    kv_cache_specs = {
+        'layer_1': new_kv_cache_spec(block_size=16),
+        'layer_2': new_kv_cache_spec(block_size=32),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is None
+
+
+def test_generate_scheduler_kv_cache_config():
+    kv_cache_specs = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_kv_cache_spec(head_size=128),
+    }
+    kv_cache_configs = [
+        KVCacheConfig(
+            num_blocks=10,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(['layer_1', 'layer_2'],
+                                 UniformTypeKVCacheSpecs(
+                                     block_size=16,
+                                     kv_cache_specs=kv_cache_specs)),
+            ],
+        )
+    ]
+    scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
+        kv_cache_configs)
+    assert scheduler_kv_cache_config == KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(['layer_1', 'layer_2'], new_kv_cache_spec())
+        ],
+    )
