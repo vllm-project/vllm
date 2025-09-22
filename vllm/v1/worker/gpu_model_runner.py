@@ -3594,30 +3594,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ]
 
         # Generate kernel_block_sizes that matches each block_size
-        # For attention backends that support virtual block splitting,
-        # use the supported block sizes from the backend
-        # For other backends (like Mamba), use [0] (no splitting)
-        kernel_block_sizes = []
-        for kv_cache_group_id, kv_cache_group in enumerate(
-                kv_cache_config.kv_cache_groups):
-            if isinstance(kv_cache_group.kv_cache_spec,
-                          EncoderOnlyAttentionSpec):
-                continue
-            elif isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
-                # This is an attention backend that supports virtual
-                # block splitting. Get the supported block sizes from
-                # the backend.
-                attn_groups = self.attn_groups[kv_cache_group_id]
-                kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-                backend_cls = attn_groups[0].backend
-                selected_kernel_size = self._select_kernel_block_size(
-                    kv_manager_block_size, backend_cls)
-                kernel_block_sizes.append(selected_kernel_size)
-            else:
-                # This is likely Mamba or other non-attention cache,
-                # no splitting.
-                kernel_block_sizes.append(
-                    kv_cache_group.kv_cache_spec.block_size)
+        kernel_block_sizes = self._prepare_kernel_block_sizes(kv_cache_config)
 
         if block_sizes != [
                 self.cache_config.block_size
@@ -3684,6 +3661,47 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for attn_group in attn_groups:
                 yield self.kv_cache_config.kv_cache_groups[
                     kv_cache_spec_id].kv_cache_spec, attn_group
+
+    def _prepare_kernel_block_sizes(
+            self, kv_cache_config: KVCacheConfig) -> list[int]:
+        """
+        Generate kernel_block_sizes that matches each block_size.
+
+        For attention backends that support virtual block splitting,
+        use the supported block sizes from the backend.
+        For other backends (like Mamba), use the same block size (no splitting).
+
+        Args:
+            kv_cache_config: The KV cache configuration.
+
+        Returns:
+            list[int]: List of kernel block sizes for each cache group.
+        """
+        kernel_block_sizes = []
+        for kv_cache_group_id, kv_cache_group in enumerate(
+                kv_cache_config.kv_cache_groups):
+            if isinstance(kv_cache_group.kv_cache_spec,
+                          EncoderOnlyAttentionSpec):
+                continue
+            elif isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
+                # This is an attention backend that supports virtual
+                # block splitting. Get the supported block sizes from
+                # the backend.
+                attn_groups = self.attn_groups[kv_cache_group_id]
+                kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+                backend_cls = attn_groups[0].backend
+                selected_kernel_size = self._select_kernel_block_size(
+                    kv_manager_block_size, backend_cls)
+                kernel_block_sizes.append(selected_kernel_size)
+            elif isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+                # This is likely Mamba or other non-attention cache,
+                # no splitting.
+                kernel_block_sizes.append(
+                    kv_cache_group.kv_cache_spec.block_size)
+            else:
+                raise NotImplementedError(
+                    f"unknown kv cache spec {kv_cache_group.kv_cache_spec}")
+        return kernel_block_sizes
 
     def _reshape_kv_cache_tensors(
         self,
