@@ -157,7 +157,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("-c", "--check", action="store_true")
     parser.add_argument(
-        "--dtype", type=str, choices=["half", "bfloat16", "float"], default="half"
+        "--dtype", type=str, choices=["half", "bfloat16", "float"], default="bfloat16"
     )
     parser.add_argument(
         "--hidden-sizes",
