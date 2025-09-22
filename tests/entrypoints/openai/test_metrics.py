@@ -432,7 +432,7 @@ def test_metrics_exist_run_batch(use_v1: bool):
             "--port",
             port,
         ],
-                                env={"VLLM_USE_V1": "1" if use_v1 else "0"})
+                                env={"VLLM_USE_V1": "1"})
 
         def is_server_up(url):
             try:
