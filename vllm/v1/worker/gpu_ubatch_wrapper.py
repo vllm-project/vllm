@@ -9,7 +9,8 @@ import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
+from vllm.distributed.device_communicators.pynccl_allocator import (
+    set_graph_pool_id)
 from vllm.forward_context import (create_forward_context, get_forward_context,
                                   override_forward_context)
 from vllm.logger import init_logger
