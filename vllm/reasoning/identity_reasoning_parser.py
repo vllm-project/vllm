@@ -30,8 +30,8 @@ class IdentityReasoningParser(ReasoningParser):
                 "constructor during construction.")
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        # Always return False, since we never treat reasoning specially
-        return False
+        # Always return True, since we never treat reasoning specially
+        return True
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # Identity: return all tokens as content
