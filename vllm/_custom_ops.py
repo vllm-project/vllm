@@ -2104,6 +2104,7 @@ def fusedQuantizeNv(
     return torch.ops._qutlass_C.fusedQuantizeNv(a, b, xh_e2m1, xh_e4m3,
                                                 global_scale)
 
+
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
     """
     Perform Hadamard transforms using [Hadacore](https://arxiv.org/abs/2412.08832)
@@ -2126,4 +2127,3 @@ if hasattr(torch.ops._C, "hadacore_transform"):
     def _hadacore_transform_fake(x: torch.Tensor,
                                  inplace: bool) -> torch.Tensor:
         return torch.empty_like(x) if not inplace else x
-
