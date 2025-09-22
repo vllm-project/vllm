@@ -4,6 +4,7 @@ import contextlib
 import copy
 import logging
 import math
+import os
 import queue
 import threading
 import time
@@ -53,6 +54,7 @@ logger = init_logger(__name__)
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
     from nixl._api import nixl_agent as NixlWrapper
+    from nixl._api import nixlBind
     logger.info("NIXL is available")
 except ImportError:
     logger.warning("NIXL is not available")
@@ -1174,9 +1176,11 @@ class NixlConnectorWorker:
             for handle, _xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
+                    # Get telemetry from NIXL
+                    if self._enable_telemetry:
+                        res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                        self.xfer_stats.record_transfer(res)
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    # TODO (NickLucche) Get from NIXL telemetry once integrated
-                    self.xfer_stats.record_transfer()
                 elif xfer_state == "PROC":
                     in_progress = True
                     continue
@@ -1448,14 +1452,26 @@ class NixlKVConnectorStats(KVConnectorStats):
     """Container for transfer performance metrics"""
 
     def __post_init__(self):
-        if "num_successful_transfers" not in self.data:
-            self.data["num_successful_transfers"] = 0
+        if not self.data:
+            # Empty container init, no data is passed in.
+            self.reset()
 
     def reset(self):
-        self.data = {"num_successful_transfers": 0}
+        # Must be serializable
+        self.data: dict[str, Union[int, list[float]]] = {
+            "num_successful_transfers": 0,
+            "transfer_duration": [],
+            "post_duration": [],
+            "bytes_transferred": [],
+            "num_descriptors": [],
+        }
 
-    def record_transfer(self):
-        # TODO: record actual transfer stats when available
+    def record_transfer(self, res: nixlBind.nixlXferTelemetry):
+        # Simplifying some of the metrics here: time us->ms, bytes->MB
+        self.data["transfer_duration"].append(res.xferDuration / 1e3)
+        self.data["post_duration"].append(res.postDuration / 1e3)
+        self.data["bytes_transferred"].append(res.totalBytes / 2**20)
+        self.data["num_descriptors"].append(res.descCount)
         self.data["num_successful_transfers"] += 1
 
     def clone_and_reset(self) -> "NixlKVConnectorStats":
@@ -1468,12 +1484,48 @@ class NixlKVConnectorStats(KVConnectorStats):
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
-            self.data["num_successful_transfers"] += other.data[
-                "num_successful_transfers"]
+            for k, v in other.data.items():
+                if k == "num_successful_transfers":
+                    self.data[k] += v
+                else:
+                    self.data[k].extend(v)
         return self
 
     def reduce(self) -> dict[str, Union[int, float]]:
-        # TODO: reduce stats to a single value, calculate latency/throughput
+        # Compute compact representative stats suitable for CLI logging
+        if self.is_empty():
+            return {
+                "Num successful transfers": 0,
+                "Avg xfer time (ms)": 0,
+                "P90 xfer time (ms)": 0,
+                "Avg post time (ms)": 0,
+                "P90 post time (ms)": 0,
+                "Avg MB per transfer": 0,
+                "Throughput (MB/s)": 0,
+                "Avg number of descriptors": 0,
+            }
+        n = self.data["num_successful_transfers"]
+
+        xfer_ms = np.asarray(self.data["transfer_duration"])
+        post_ms = np.asarray(self.data["post_duration"])
+        mb = np.asarray(self.data["bytes_transferred"])
+        descs = np.asarray(self.data["num_descriptors"], dtype=np.uint32)
+
+        total_mb = mb.sum()
+        avg_mb = total_mb / n
+
+        total_time_seconds = xfer_ms.sum() / 1e3
+        throughput_mb_s = total_mb / total_time_seconds
+
+        avg_descs = descs.mean()
+
         return {
-            "num_successful_transfers": self.data["num_successful_transfers"]
+            "Num successful transfers": n,
+            "Avg xfer time (ms)": round(xfer_ms.mean(), 3),
+            "P90 xfer time (ms)": round(np.percentile(xfer_ms, 90), 3),
+            "Avg post time (ms)": round(post_ms.mean(), 3),
+            "P90 post time (ms)": round(np.percentile(post_ms, 90), 3),
+            "Avg MB per transfer": round(avg_mb, 3),
+            "Throughput (MB/s)": round(throughput_mb_s, 3),
+            "Avg number of descriptors": round(avg_descs, 1),
         }
