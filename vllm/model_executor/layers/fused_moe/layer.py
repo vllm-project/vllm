@@ -851,8 +851,7 @@ class FusedMoE(CustomOp):
                     if dp_size is not None else get_dp_group().world_size)
 
         self.is_sequence_parallel = is_sequence_parallel
-        if self.is_sequence_parallel:
-            self.sp_size = tp_size_
+        self.sp_size = tp_size_ if is_sequence_parallel else 1
 
         vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
@@ -1902,7 +1901,7 @@ class FusedMoE(CustomOp):
 
             if do_naive_dispatch_combine:
                 hidden_states, router_logits = get_ep_group().dispatch(
-                    hidden_states, router_logits)
+                    hidden_states, router_logits, self.is_sequence_parallel)
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
@@ -1939,11 +1938,11 @@ class FusedMoE(CustomOp):
             def reduce_output(states: torch.Tensor,
                               do_combine: bool = True) -> torch.Tensor:
                 if do_naive_dispatch_combine and do_combine:
-                    states = get_ep_group().combine(states)
+                    states = get_ep_group().combine(states,
+                                                    self.is_sequence_parallel)
 
                 if (not self.is_sequence_parallel and self.reduce_results
                         and self.tp_size > 1):
-                    raise AssertionError()
                     states = self.maybe_all_reduce_tensor_model_parallel(
                         states)
 

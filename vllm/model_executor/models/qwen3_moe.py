@@ -121,7 +121,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        #self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.is_sequence_parallel = False
 
         if self.tp_size > config.num_experts:
             raise ValueError(

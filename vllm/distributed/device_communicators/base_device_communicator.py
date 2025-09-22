@@ -48,10 +48,6 @@ class All2AllManagerBase:
         self.rank = dist.get_rank(cpu_group)
         self.world_size = dist.get_world_size(cpu_group)
 
-        # Between Attn and MoE layers, we use sequence parallelism for the
-        # hidden states.
-        self.sp_world_size = self.tp_group.world_size
-
         # all2all communication often has separate implementations for
         # intra-node and inter-node communication
         self.internode = not all(in_the_same_node_as(cpu_group, source_rank=0))
@@ -68,12 +64,12 @@ class All2AllManagerBase:
     def dispatch(self,
                  hidden_states: torch.Tensor,
                  router_logits: torch.Tensor,
-                 sp_size: int = 1):
+                 is_sequence_parallel: bool = False):
         raise NotImplementedError
 
     def combine(self,
                 hidden_states: torch.Tensor,
-                sp_size: int = 1) -> torch.Tensor:
+                is_sequence_parallel: bool = False):
         raise NotImplementedError
 
     def destroy(self):
@@ -270,15 +266,20 @@ class DeviceCommunicatorBase:
             module.quant_method.init_prepare_finalize(module)
 
     def dispatch(
-            self, hidden_states: torch.Tensor,
-            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
         return hidden_states, router_logits
 
-    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def combine(self,
+                hidden_states: torch.Tensor,
+                is_sequence_parallel: bool = False) -> torch.Tensor:
         """
         Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.
