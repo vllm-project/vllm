@@ -638,8 +638,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             return None
 
         if self.mxfp4_backend == Mxfp4Backend.TRITON:
-            w1_scale = layer.w13_precision_config
-            w2_scale = layer.w2_precision_config
+            w1_scale = self.w13_precision_config
+            w2_scale = self.w2_precision_config
         else:
             w1_scale = layer.w13_weight_scale
             w2_scale = layer.w2_weight_scale
