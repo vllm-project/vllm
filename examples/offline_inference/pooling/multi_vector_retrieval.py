@@ -32,6 +32,15 @@ def main(args: Namespace):
     # You should pass runner="pooling" for embedding models
     llm = LLM(**vars(args))
 
+    # Generate embedding. The output is a list of EmbeddingRequestOutputs.
+    outputs = llm.embed(prompts)
+
+    # Print the outputs.
+    print("\nGenerated Outputs:\n" + "-" * 60)
+    for prompt, output in zip(prompts, outputs):
+        embeds = output.outputs.embedding
+        print(len(embeds))
+
     # Generate embedding for each token. The output is a list of PoolingRequestOutput.
     outputs = llm.encode(prompts, pooling_task="encode")
 
@@ -40,7 +49,6 @@ def main(args: Namespace):
     for prompt, output in zip(prompts, outputs):
         multi_vector = output.outputs.data
         print(multi_vector.shape)
-
 
 
 if __name__ == "__main__":
