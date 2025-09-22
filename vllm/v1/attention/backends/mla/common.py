@@ -381,6 +381,7 @@ class MLACommonMetadata(Generic[D]):
 
     num_reqs: int
     max_query_len: int
+    max_seq_len: int
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     query_start_loc: torch.Tensor
@@ -411,7 +412,8 @@ M = TypeVar("M", bound=MLACommonMetadata)
 def use_flashinfer_prefill() -> bool:
     # For blackwell default to flashinfer prefill if it's available since
     # it is faster than FA2.
-    return (flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL
+    return (not envs.VLLM_DISABLE_FLASHINFER_PREFILL and flashinfer_available
+            and not envs.VLLM_USE_CUDNN_PREFILL
             and current_platform.is_device_capability(100))
 
 
@@ -462,7 +464,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        # Dont try to access the runner on AMD
+        # Don't try to access the runner on AMD
         if self.aot_schedule:
             self.page_size = self.kv_cache_spec.block_size
 
@@ -583,7 +585,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             window_left=self._global_hyperparameters.window_left,
             logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
             q_data_type=self.model_config.dtype,
-            kv_data_type=self.kv_cache_spec.dtype,
         )
 
         # Prepare context prefills
@@ -604,7 +605,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     logits_soft_cap=self._global_hyperparameters.
                     logits_soft_cap,
                     q_data_type=self.model_config.dtype,
-                    kv_data_type=self.kv_cache_spec.dtype,
                 )
 
         prefill.prefill_main = self._fi_prefill_main
@@ -644,6 +644,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
+        max_seq_len = common_attn_metadata.max_seq_len
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
@@ -830,6 +831,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         attn_metadata = self.metadata_cls(
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
+            max_seq_len=max_seq_len,
             num_actual_tokens=num_tokens,
             query_start_loc=query_start_loc,
             slot_mapping=slot_mapping,
@@ -1319,7 +1321,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         dcp_world_size: int,
     ):
-        assert k_scale is None, "DCP not support sacled kvcache now."
+        assert k_scale is None, "DCP not support scaled kvcache now."
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.chunked_context is not None

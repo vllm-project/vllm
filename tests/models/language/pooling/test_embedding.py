@@ -19,7 +19,7 @@ from ...utils import check_embeddings_close
         # model code with bidirectional attention.
         # [Decoder-only]
         pytest.param("BAAI/bge-multilingual-gemma2",
-                     marks=[pytest.mark.core_model]),
+                     marks=[pytest.mark.core_model, pytest.mark.slow_test]),
         pytest.param(
             "intfloat/e5-mistral-7b-instruct",
             # CPU v1 doesn't support sliding window
@@ -29,7 +29,10 @@ from ...utils import check_embeddings_close
         # [Encoder-only]
         pytest.param(
             "BAAI/bge-base-en-v1.5",
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[
+                pytest.mark.core_model, pytest.mark.cpu_model,
+                pytest.mark.slow_test
+            ],
         ),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-small"),
@@ -55,7 +58,7 @@ def test_models(
 
     vllm_extra_kwargs = {}
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
-        vllm_extra_kwargs["override_pooler_config"] = \
+        vllm_extra_kwargs["pooler_config"] = \
             PoolerConfig(pooling_type="MEAN", normalize=False)
 
     max_model_len: Optional[int] = 512

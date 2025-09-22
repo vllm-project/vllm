@@ -48,7 +48,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
@@ -601,10 +600,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -626,9 +623,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         loaded_weight: torch.Tensor,
     ) -> tuple[str, torch.Tensor]:
 
-        def permute(w: torch.Tensor, n_heads: int):
+        def permute(w: torch.Tensor, n_heads: int, attn_out: int):
             attn_in = self.config.head_dim * n_heads
-            attn_out = self.config.hidden_size
 
             return w.view(n_heads, attn_in // n_heads // 2, 2,
                           attn_out).transpose(1, 2).reshape(attn_in, attn_out)
@@ -637,12 +633,24 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         modules = name.split(".")
 
         # rotary embeds should be sliced
+        # If using quantized model in mistral format,
+        # quantization scales (qscale_weight) also need to be sliced
         if "wk" in modules and modules[-1] == "weight":
             loaded_weight = permute(loaded_weight,
-                                    self.config.num_key_value_heads)
+                                    self.config.num_key_value_heads,
+                                    self.config.hidden_size)
+        elif "wk" in modules and modules[
+                -1] == "qscale_weight" and loaded_weight.numel() > 1:
+            loaded_weight = permute(loaded_weight,
+                                    self.config.num_key_value_heads, 1)
         elif "wq" in modules and modules[-1] == "weight":
             loaded_weight = permute(loaded_weight,
-                                    self.config.num_attention_heads)
+                                    self.config.num_attention_heads,
+                                    self.config.hidden_size)
+        elif "wq" in modules and modules[
+                -1] == "qscale_weight" and loaded_weight.numel() > 1:
+            loaded_weight = permute(loaded_weight,
+                                    self.config.num_attention_heads, 1)
 
         num_modules = len(modules)
         for i in range(num_modules):

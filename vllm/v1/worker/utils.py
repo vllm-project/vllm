@@ -7,14 +7,15 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.config import ModelConfig, SchedulerConfig
+from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.attention.layer import Attention
@@ -129,8 +130,17 @@ class MultiModalBudget:
 @dataclass
 class AttentionGroup:
     backend: type[AttentionBackend]
-    metadata_builder: AttentionMetadataBuilder
+    metadata_builders: list[AttentionMetadataBuilder]
     layer_names: list[str]
+    kv_cache_spec: KVCacheSpec
+
+    def get_metadata_builder(self,
+                             ubatch_id: Optional[int] = None
+                             ) -> AttentionMetadataBuilder:
+        if ubatch_id is None:
+            return self.metadata_builders[0]
+        assert len(self.metadata_builders) > ubatch_id
+        return self.metadata_builders[ubatch_id]
 
 
 def sanity_check_mm_encoder_outputs(
@@ -195,7 +205,8 @@ def gather_mm_placeholders(
     """
     Reconstructs the embeddings from the placeholder tokens.
 
-    This is the operation of [scatter_mm_placeholders][].
+    This is the operation of [`scatter_mm_placeholders`]
+    [vllm.v1.worker.utils.scatter_mm_placeholders].
     """
     if is_embed is None:
         return placeholders
@@ -269,7 +280,17 @@ def bind_kv_cache(
             # One typical case is encoder-decoder model, e.g., bart.
             # The cross attention and self attention in the same decoder layer
             # has different layer_name but the same layer_index.
-            raise NotImplementedError
+
+            # TODO - analyze where runner_kv_caches is used and the right
+            # way to ensure it properly reflects multiple attention layers
+            # in the same decoder block.
+            if current_platform.is_cuda() or current_platform.is_xpu():
+                # We know that the GPU runner is not impacted by this
+                # case. Some test code depends on runner_kv_caches, but
+                # not in a way that's impacted by ignoring this.
+                pass
+            else:
+                raise NotImplementedError
         layer_name = layer_names[0]
         runner_kv_caches.append(kv_caches[layer_name])
 
@@ -277,3 +298,28 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+def is_residual_scattered_for_sp(vllm_config: VllmConfig,
+                                 num_input_tokens: int) -> bool:
+    """Check if the residual tensor is scattered for sequence parallelism.
+
+    The residual tensor is scattered across tensor parallel ranks when sequence
+    parallelism and tensor parallelism is enabled, and the number of
+    input tokens is one of the compilation sizes.
+    """
+    if not vllm_config.compilation_config.pass_config.\
+        enable_sequence_parallelism:
+        return False
+
+    tp = vllm_config.parallel_config.tensor_parallel_size
+
+    if tp == 1:
+        return False
+
+    # When sequence parallelism is enabled, we always pad num_input_tokens
+    # to be a multiple of tensor_parallel_size (tp) earlier.
+    assert num_input_tokens % tp == 0
+
+    # Currently, SP is only enabled for static size fx graphs.
+    return (num_input_tokens in vllm_config.compilation_config.compile_sizes)

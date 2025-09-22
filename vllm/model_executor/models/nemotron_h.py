@@ -44,16 +44,16 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
                                                    SupportsLoRA, SupportsPP,
                                                    SupportsQuant)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader, make_empty_intermediate_tensors_factory, make_layers,
-    maybe_prefix)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+    AutoWeightsLoader, WeightsMapper, make_empty_intermediate_tensors_factory,
+    make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronHConfig
 from vllm.utils import LayerBlockType
@@ -426,38 +426,36 @@ class NemotronHModel(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        attb_params_mapping = {
-            "q_proj": "q",
-            "k_proj": "k",
-            "v_proj": "v",
-        }
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if "embeddings" in name:
-                name = name.replace("embeddings", "embed_tokens")
+            if "scale" in name:
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
-            if "A_log" in name:
-                name = name.replace("A_log", "A")
-                loaded_weight = loaded_weight.to(torch.float32)
+            # load stacked params
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
 
-            if "D" in name:
-                loaded_weight = loaded_weight.to(torch.float32)
-
-            if "dt_bias" in name:
-                loaded_weight = loaded_weight.to(torch.float32)
-
-            # load attn params
-            if any(proj in name for proj in ["q_proj", "k_proj", "v_proj"]):
-                weight_name = next(proj
-                                   for proj in ["q_proj", "k_proj", "v_proj"]
-                                   if proj in name)
-                name = name.replace(weight_name, "qkv_proj")
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight,
-                              attb_params_mapping[weight_name])
+                weight_loader(param, loaded_weight, shard_id)
+                break
+
             # load other params
             else:
                 param = params_dict[name]
@@ -471,6 +469,14 @@ class NemotronHModel(nn.Module):
 
 class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                            IsHybrid, SupportsQuant):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"backbone": "model"},
+        orig_to_new_substr={
+            "A_log": "A",
+            "embeddings": "embed_tokens"
+        },
+    )
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -558,6 +564,7 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         # Used to track and store by the Mamba cache between steps.
         self.mamba_cache: Optional[MambaCacheManager] = None
@@ -614,18 +621,11 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        # update name in weights before passing to loader
-        updated_weights = []
-        for name, loaded_weight in weights:
-            name = name.replace("backbone", "model")
-            updated_weights.append((name, loaded_weight))
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(updated_weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

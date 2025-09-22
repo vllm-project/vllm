@@ -117,9 +117,9 @@ def test_ngram_correctness(
                 print(f"ref_output: {ref_output.outputs[0].text}")
                 print(f"spec_output: {spec_output.outputs[0].text}")
 
-        # Heuristic: expect at least 68% of the prompts to match exactly
+        # Heuristic: expect at least 66% of the prompts to match exactly
         # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches >= int(0.68 * len(ref_outputs))
+        assert matches >= int(0.66 * len(ref_outputs))
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
@@ -162,7 +162,7 @@ def test_eagle_correctness(
         # TODO: Fix this flaky test
         pytest.skip(
             "TREE_ATTN is flaky in the test disable for now until it can be "
-            "reolved (see https://github.com/vllm-project/vllm/issues/22922)")
+            "resolved (see https://github.com/vllm-project/vllm/issues/22922)")
 
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)

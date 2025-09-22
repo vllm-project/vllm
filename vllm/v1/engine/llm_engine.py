@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from copy import copy
 from typing import Any, Callable, Optional, Union
 
+import torch.nn as nn
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
@@ -19,8 +20,9 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.transformers_utils.tokenizer_group import (
-    TokenizerGroup, init_tokenizer_from_configs)
+from vllm.tracing import init_tracer
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device
 from vllm.v1.engine.core_client import EngineCoreClient
@@ -32,6 +34,7 @@ from vllm.v1.metrics.loggers import (PrometheusStatLogger, StatLoggerBase,
                                      StatLoggerFactory)
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -65,6 +68,7 @@ class LLMEngine:
                 "Set VLLM_USE_V1=0 and file and issue on Github.")
 
         self.vllm_config = vllm_config
+        self.observability_config = vllm_config.observability_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
@@ -87,9 +91,7 @@ class LLMEngine:
         else:
             # Tokenizer (+ ensure liveness if running in another process).
             self.tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config,
-                scheduler_config=vllm_config.scheduler_config,
-                lora_config=vllm_config.lora_config)
+                model_config=vllm_config.model_config)
 
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config=vllm_config,
@@ -99,6 +101,11 @@ class LLMEngine:
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
                                                 log_stats=self.log_stats)
+        if self.observability_config.otlp_traces_endpoint is not None:
+            tracer = init_tracer(
+                "vllm.llm_engine",
+                self.observability_config.otlp_traces_endpoint)
+            self.output_processor.tracer = tracer
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -290,7 +297,7 @@ class LLMEngine:
         assert self.log_stats, "Stat logging disabled"
         return get_metrics_snapshot()
 
-    def get_tokenizer_group(self) -> TokenizerGroup:
+    def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
@@ -314,11 +321,14 @@ class LLMEngine:
         return self.engine_core.pin_lora(lora_id)
 
     def collective_rpc(self,
-                       method: Union[str, Callable[..., _R]],
+                       method: Union[str, Callable[[WorkerBase], _R]],
                        timeout: Optional[float] = None,
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
+
+    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+        return self.collective_rpc("apply_model", args=(func, ))
 
     def __del__(self):
         if dp_group := getattr(self, "dp_group", None):

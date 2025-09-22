@@ -9,7 +9,7 @@ import torch
 import torch._dynamo.decorators
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
-                                               _score_mod_signature,
+                                               _score_mod_signature, and_masks,
                                                create_block_mask,
                                                flex_attention)
 
@@ -292,6 +292,7 @@ class FlexAttentionMetadata:
     q_block_size: int = 16
     kv_block_size: int = 16
     transformed_score_mod: Optional[_score_mod_signature] = None
+    sliding_window: Optional[int] = None
 
     def _convert_physical_to_logical(
         self,
@@ -379,6 +380,53 @@ class FlexAttentionMetadata:
             return request_lookup[q_idx] == request_lookup[kv_idx]
 
         return final_mask_mod
+
+    def get_sliding_window_mask_mod(self) -> _mask_mod_signature:
+        """Creates the sliding window mask_mod function for FlexAttention.
+
+        Note that the sliding window mask here is bidirectional, we need
+        to mask it with the bidirectional/causal mask for encoder/decoder.
+        """
+
+        if self.sliding_window is None:
+            raise ValueError(
+                "sliding_window must be set for sliding window attention")
+
+        def sliding_window_mask_mod(b: torch.Tensor, h: torch.Tensor,
+                                    q_idx: torch.Tensor, kv_idx: torch.Tensor):
+            return torch.abs(q_idx - kv_idx) < self.sliding_window
+
+        def final_mask_mod(
+            b: torch.Tensor,
+            h: torch.Tensor,
+            q_idx: torch.Tensor,
+            physical_kv_idx: torch.Tensor,
+        ) -> torch.Tensor:
+            (is_valid, logical_q_idx,
+             logical_kv_idx) = self._convert_physical_to_logical(
+                 self.doc_ids, q_idx, physical_kv_idx)
+            return torch.where(
+                is_valid,
+                sliding_window_mask_mod(b, h, logical_q_idx, logical_kv_idx),
+                False,
+            )
+
+        return final_mask_mod if self.causal else sliding_window_mask_mod
+
+    def get_mask_mod(self):
+        # Stage-1: initialize the base mask_mod
+        # (causal mask for decoder or bidirectional mask for encoder)
+        if self.causal:
+            mask_mod = self.get_causal_mask_mod()
+        else:
+            mask_mod = self.get_bidirectional_mask_mod()
+        # stage-2: add external mask_mod for special attention during
+        # forwarding runtime to create the combined mask_mod.
+        if self.sliding_window is not None:
+            # Add sliding window mask for sliding window attention
+            sliding_window_mask_mod = self.get_sliding_window_mask_mod()
+            mask_mod = and_masks(mask_mod, sliding_window_mask_mod)
+        return mask_mod
 
     def get_transformed_score_mod(self) -> Optional[_score_mod_signature]:
         """Creates the transformed score_mod function for FlexAttention.
@@ -472,12 +520,9 @@ class FlexAttentionMetadata:
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
     def build_block_mask(self) -> BlockMask:
-        if self.causal:
-            mask_mod = self.get_causal_mask_mod()
-            kv_len = self.total_cache_tokens
-        else:
-            mask_mod = self.get_bidirectional_mask_mod()
-            kv_len = self.num_actual_tokens
+        mask_mod = self.get_mask_mod()
+        kv_len = (self.total_cache_tokens
+                  if self.causal else self.num_actual_tokens)
         return create_block_mask_compiled(
             mask_mod,
             None,
@@ -498,11 +543,7 @@ class FlexAttentionMetadata:
         self.doc_ids = _offsets_to_doc_ids_tensor(self.query_start_loc)
         self.num_blocks = self.total_cache_tokens // self.block_size
 
-        if self.causal:
-            self.mask_mod = self.get_causal_mask_mod()
-        else:
-            self.mask_mod = self.get_bidirectional_mask_mod()
-
+        self.mask_mod = self.get_mask_mod()
         self.transformed_score_mod = self.get_transformed_score_mod()
 
         if self.direct_build and self.causal:
@@ -516,10 +557,11 @@ class FlexAttentionMetadataBuilder(
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
-        self.device = device
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config)
@@ -606,7 +648,7 @@ class FlexAttentionMetadataBuilder(
 
 
 class FlexAttentionImpl(AttentionImpl):
-    sliding_window: Optional[tuple[int, int]]
+    sliding_window: Optional[int]
     alibi_slopes: Optional[torch.Tensor]
     logits_soft_cap: Optional[float]
 
@@ -640,11 +682,9 @@ class FlexAttentionImpl(AttentionImpl):
                 "FlexAttention does not support alibi slopes yet.")
         else:
             self.alibi_slopes = None
-        if sliding_window is not None:
-            raise NotImplementedError(
-                "FlexAttention does not support sliding window yet.")
-        else:
-            self.sliding_window = (-1, -1)
+
+        self.sliding_window = sliding_window
+
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
         if self.logits_soft_cap is not None:
@@ -711,6 +751,21 @@ class FlexAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        if attn_metadata.sliding_window != self.sliding_window:
+            attn_metadata.sliding_window = self.sliding_window
+            if attn_metadata.direct_build:
+                # TODO: Support skipping the computation of sliding window
+                # in direct block mask building code path.
+                logger.warning_once(
+                    "Using direct block mask building with sliding window, "
+                    "which is suboptimal now. Performance may be degraded.")
+                # update mask mod in attention metadata
+                attn_metadata.mask_mod = attn_metadata.get_mask_mod()
+                attn_metadata.block_mask = (
+                    attn_metadata._build_block_mask_direct())
+            else:
+                attn_metadata.block_mask = attn_metadata.build_block_mask()
+
         if not attn_metadata.causal:
             assert self.attn_type == AttentionType.ENCODER_ONLY
 
@@ -718,6 +773,15 @@ class FlexAttentionImpl(AttentionImpl):
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key, value),
             )
+
+            query = query[:, :, :num_actual_tokens, :]
+            if ((key_tensor.size(-2) > num_actual_tokens)
+                    or (value_tensor.size(-2) > num_actual_tokens)):
+                # In the encoder-only model with torch.compile,
+                # qkv might be padded, which might cause exception.
+                # see: https://github.com/vllm-project/vllm/pull/24872#discussion_r2353252290
+                key_tensor = key_tensor[:, :, :num_actual_tokens, :]
+                value_tensor = value_tensor[:, :, :num_actual_tokens, :]
 
         else:
             assert self.attn_type == AttentionType.DECODER
@@ -743,7 +807,8 @@ class FlexAttentionImpl(AttentionImpl):
                 (query, key_cache, value_cache),
             )
 
-        query = query[:, :, :num_actual_tokens, :]
+            query = query[:, :, :num_actual_tokens, :]
+
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
