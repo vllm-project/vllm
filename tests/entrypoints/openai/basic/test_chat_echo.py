@@ -47,7 +47,7 @@ async def test_chat_session_with_echo_and_continue_final_message(
 
 
 @pytest.mark.asyncio
-async def test_prompt_logprobs(client: openai.AsyncOpenAI):
+async def test_prompt_logprobs(client: openai.AsyncOpenAI, model_name):
     messages = [{
         "role": "system",
         "content": "You are a helpful assistant."
@@ -57,7 +57,7 @@ async def test_prompt_logprobs(client: openai.AsyncOpenAI):
     }]
 
     completion = await client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         messages=messages,
         extra_body={"prompt_logprobs": -1},
     )
@@ -67,7 +67,7 @@ async def test_prompt_logprobs(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_top_logprobs(client: openai.AsyncOpenAI):
+async def test_top_logprobs(client: openai.AsyncOpenAI, model_name):
     messages = [{
         "role": "system",
         "content": "You are a helpful assistant."
@@ -77,7 +77,7 @@ async def test_top_logprobs(client: openai.AsyncOpenAI):
     }]
 
     completion = await client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         messages=messages,
         extra_body={
             "top_logprobs": -1,
