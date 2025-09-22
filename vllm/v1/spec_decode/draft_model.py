@@ -111,7 +111,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             last_hidden_states = self.model(**model_kwargs)
 
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+        logits = self.model.compute_logits(sample_hidden_states)
         positions = target_positions[last_token_indices]
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
@@ -203,8 +203,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             ):
                 last_hidden_states = self.model(**model_kwargs)
 
-            logits = self.model.compute_logits(last_hidden_states[:batch_size],
-                                               None)
+            logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
