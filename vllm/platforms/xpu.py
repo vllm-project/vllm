@@ -113,12 +113,9 @@ class XPUPlatform(Platform):
         # lazy import to avoid circular import
         from vllm.config import CompilationLevel, CUDAGraphMode
         compilation_config = vllm_config.compilation_config
-        if compilation_config.cudagraph_mode is None or \
-                compilation_config.cudagraph_mode.max_cudagraph_mode() \
-                    != CUDAGraphMode.NONE:
-            logger.info("[XPU] CUDA graph is not supported on XPU, disabling "
-                        "cudagraphs. Fallback to cudagraph_mode=NONE")
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE, \
+            "CUDA graph mode should be NONE on XPU"
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -168,6 +165,10 @@ class XPUPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        return False
 
     @classmethod
     def is_pin_memory_available(cls):
