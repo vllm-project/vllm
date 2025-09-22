@@ -18,7 +18,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.loggers import GlobalStatLogger, LoggingStatLogger
+from vllm.v1.metrics.loggers import AggregatedStatLogger, LoggingStatLogger
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -389,7 +389,7 @@ class MockLoggingStatLogger(LoggingStatLogger):
         self.log = MagicMock()
 
 
-class MockGlobalStatLogger(GlobalStatLogger):
+class MockAggregatedStatLogger(AggregatedStatLogger):
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -425,8 +425,8 @@ async def test_customize_loggers(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_customize_global_loggers(monkeypatch):
-    """Test that we can customize the loggers.
+async def test_customize_aggregated_loggers(monkeypatch):
+    """Test that we can customize the aggregated loggers.
     If a customized logger is provided at the init, it should
     be added to the default loggers.
     """
@@ -437,8 +437,7 @@ async def test_customize_global_loggers(monkeypatch):
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(
                 TEXT_ENGINE_ARGS,
-                stat_loggers=[MockLoggingStatLogger],
-                stat_logger_global=MockGlobalStatLogger,
+                stat_loggers=[MockLoggingStatLogger, MockAggregatedStatLogger],
             )
         after.callback(engine.shutdown)
 
@@ -448,9 +447,9 @@ async def test_customize_global_loggers(monkeypatch):
         assert len(stat_loggers) == 1
         assert len(
             stat_loggers[0]) == 2  # LoggingStatLogger + MockLoggingStatLogger
-        global_logger = engine.logger_manager.global_logger
-        assert global_logger is not None
-        global_logger.log.assert_called_once()
+        aggregated_loggers = engine.logger_manager.aggregated_loggers
+        assert len(aggregated_loggers) == 1
+        aggregated_loggers[0].log.assert_called_once()
         stat_loggers[0][0].log.assert_called_once()
 
 

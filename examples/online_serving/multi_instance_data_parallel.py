@@ -9,7 +9,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.v1.metrics.loggers import GlobalStatLogger, LoggingStatLogger
+from vllm.v1.metrics.loggers import AggregatedStatLogger, LoggingStatLogger
 
 """
 To run this example, run the following commands simultaneously with
@@ -53,15 +53,10 @@ async def main():
     def per_engine_logger_factory(config: VllmConfig, rank: int) -> LoggingStatLogger:
         return LoggingStatLogger(config, rank)
 
-    def global_logger_factory(
-        config: VllmConfig, engine_idxs: Optional[list[int]]
-    ) -> GlobalStatLogger:
-        return GlobalStatLogger(config, engine_indexes=engine_idxs)
-
     engine_client = AsyncLLMEngine.from_engine_args(
         engine_args,
-        stat_loggers=[per_engine_logger_factory],
-        stat_logger_global=global_logger_factory,
+        # Example: Using both regular loggers and aggregated logger
+        stat_loggers=[per_engine_logger_factory, AggregatedStatLogger],
     )
     stop_logging_event = threading.Event()
     logging_thread = threading.Thread(
