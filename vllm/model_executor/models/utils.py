@@ -13,14 +13,13 @@ from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (get_cuda_view_from_cpu_tensor, is_pin_memory_available,
                         is_uva_available)
-from vllm.distributed.ec_transfer import (get_ec_transfer,
-                                          has_ec_transfer)
 
 logger = init_logger(__name__)
 
@@ -276,10 +275,11 @@ class AutoWeightsLoader:
         # filter out weights with first-prefix/substr to skip in name
         if has_ec_transfer() and get_ec_transfer().is_producer:
             weights = ((name, weight) for name, weight in weights
-                        if not self._can_skip(name) and not name.startswith("language_model.model.layers"))
+                       if not self._can_skip(name)
+                       and not name.startswith("language_model.model.layers"))
         else:
             weights = ((name, weight) for name, weight in weights
-                        if not self._can_skip(name))
+                       if not self._can_skip(name))
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
         return autoloaded_weights
