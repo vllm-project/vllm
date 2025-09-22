@@ -21,7 +21,7 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
-                        get_ip, get_open_port, make_async)
+                        get_open_port, make_async)
 from vllm.v1.outputs import SamplerOutput
 
 if ray is not None:
@@ -73,6 +73,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
             # For TPU or XPU, avoid compiling NVIDIA's NCCL
             if current_platform.is_tpu() or current_platform.is_xpu():
                 os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
+
+            if current_platform.is_cpu():
+                os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "auto"
 
         # If the env var is set, it uses the Ray's compiled DAG API
         # which optimizes the control plane overhead.
@@ -152,6 +155,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
+        num_cpus = envs.VLLM_RAY_PER_WORKER_CPUS
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
@@ -192,7 +196,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             bundle_indices = bundle_indices[:self.parallel_config.world_size]
 
         worker_metadata: List[RayWorkerMetaData] = []
-        driver_ip = get_ip()
+        driver_ip = ray.util.get_node_ip_address()
         for rank, bundle_id in enumerate(bundle_indices):
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
@@ -209,6 +213,15 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     **ray_remote_kwargs,
                 )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
                                            rpc_rank=rank)
+            elif current_platform.ray_device_key == "CPU":
+                worker = ray.remote(
+                    num_cpus=num_cpus,
+                    num_gpus=0,
+                    scheduling_strategy=scheduling_strategy,
+                    **ray_remote_kwargs,
+                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
+                                           rpc_rank=rank)
+
             else:
                 worker = ray.remote(
                     num_cpus=0,
@@ -622,7 +635,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                         "(which wraps vLLM _PP GroupCoordinator) "
                         "for Ray Compiled Graph communication.")
         else:
-            logger.info("Using Ray's NCCL communicator for "
+            logger.info("Using Ray's default communicator for "
                         "Ray Compiled Graph communication.")
 
         return forward_dag.experimental_compile(
