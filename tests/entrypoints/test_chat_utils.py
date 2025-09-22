@@ -23,7 +23,7 @@ from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
 from vllm.multimodal import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
                                    encode_video_base64)
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -69,12 +69,7 @@ def phi3v_model_config_mm_interleaved():
 
 @pytest.fixture(scope="module")
 def phi3v_tokenizer():
-    return TokenizerGroup(
-        tokenizer_id=PHI3V_MODEL_ID,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
-    )
+    return get_tokenizer(PHI3V_MODEL_ID)
 
 
 @pytest.fixture(scope="function")
@@ -91,12 +86,7 @@ def qwen2_audio_model_config():
 
 @pytest.fixture(scope="module")
 def qwen2_audio_tokenizer():
-    return TokenizerGroup(
-        tokenizer_id=QWEN2AUDIO_MODEL_ID,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
-    )
+    return get_tokenizer(QWEN2AUDIO_MODEL_ID)
 
 
 @pytest.fixture(scope="function")
@@ -115,12 +105,7 @@ def qwen25omni_model_config_mm_interleaved():
 
 @pytest.fixture(scope="module")
 def qwen25omni_tokenizer():
-    return TokenizerGroup(
-        tokenizer_id=QWEN25OMNI_MODEL_ID,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
-    )
+    return get_tokenizer(QWEN25OMNI_MODEL_ID)
 
 
 @pytest.fixture(scope="function")
@@ -136,12 +121,7 @@ def mistral_model_config():
 
 @pytest.fixture(scope="module")
 def mistral_tokenizer():
-    return TokenizerGroup(
-        tokenizer_id=MISTRAL_MODEL_ID,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
-    )
+    return get_tokenizer(MISTRAL_MODEL_ID)
 
 
 @pytest.fixture(scope="module")
@@ -2250,15 +2230,11 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype)
 
-    # Build the tokenizer group and grab the underlying tokenizer
-    tokenizer_group = TokenizerGroup(
+    # Build the tokenizer
+    tokenizer = get_tokenizer(
         model,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
         trust_remote_code=model_config.trust_remote_code,
     )
-    tokenizer = tokenizer_group.tokenizer
 
     tools = ([{
         "type": "function",
@@ -2307,14 +2283,10 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype)
 
-    tokenizer_group = TokenizerGroup(
+    tokenizer = get_tokenizer(
         model,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
         trust_remote_code=model_config.trust_remote_code,
     )
-    tokenizer = tokenizer_group.tokenizer
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_hf_chat_template(
@@ -2368,14 +2340,10 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype)
 
-    tokenizer_group = TokenizerGroup(
+    tokenizer = get_tokenizer(
         model_config.tokenizer,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
         trust_remote_code=model_config.trust_remote_code,
     )
-    tokenizer = tokenizer_group.tokenizer
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_hf_chat_template(
@@ -2432,14 +2400,10 @@ def test_resolve_content_format_examples(template_path, expected_format):
         trust_remote_code=True,
     )
 
-    tokenizer_group = TokenizerGroup(
+    dummy_tokenizer = get_tokenizer(
         PHI3V_MODEL_ID,  # Dummy
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
         trust_remote_code=model_config.trust_remote_code,
     )
-    dummy_tokenizer = tokenizer_group.tokenizer
     dummy_tokenizer.chat_template = None
 
     chat_template = load_chat_template(EXAMPLES_DIR / template_path)

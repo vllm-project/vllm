@@ -34,7 +34,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2DecoderLayer
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .utils import maybe_prefix
@@ -140,12 +139,10 @@ class MiMoMultiTokenPredictor(nn.Module):
         self,
         hidden_states: torch.Tensor,
         lm_head: ParallelLMHead,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         self.mtp_layers[str(self.mtp_start_layer_idx + spec_step_idx)]
-        logits = self.logits_processor(lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(lm_head, hidden_states)
         return logits
 
 
@@ -158,7 +155,8 @@ class MiMoMTP(nn.Module):
                                              prefix=maybe_prefix(
                                                  prefix, "model"))
         self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                      self.config.hidden_size)
+                                      self.config.hidden_size,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
 
     def forward(
         self,
@@ -177,11 +175,10 @@ class MiMoMTP(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> Optional[torch.Tensor]:
         return self.model.compute_logits(hidden_states, self.lm_head,
-                                         sampling_metadata, spec_step_idx)
+                                         spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -240,6 +237,15 @@ class MiMoMTP(nn.Module):
 
     def map_model_name_to_mtp_param_name(self, name: str) -> str:
         import regex as re
+
+        # append mtp_start_layer_idx
+        pattern = r"(model\.mtp_layers\.)(\d+)(\.)"
+        match = re.match(pattern, name)
+        if match:
+            original_num = int(match.group(2))
+            new_num = original_num + self.config.num_hidden_layers
+            name = name.replace(match.group(), f"{match.group(1)}{new_num}.")
+        # check for early turn
         name_without_prefix = [
             "token_layernorm", "hidden_layernorm", "input_proj",
             "final_layernorm"
@@ -247,10 +253,11 @@ class MiMoMTP(nn.Module):
         for sub_name in name_without_prefix:
             if sub_name in name:
                 return name
-        pattern = r"model.mtp_layers.(\d+)."
-        group = re.match(pattern, name)
-        if group is not None:
-            name = name.replace(group.group(), group.group() + "mtp_block.")
+        # add mtp_block
+        pattern = r"(model\.mtp_layers\.\d+\.)"
+        match = re.match(pattern, name)
+        if match:
+            name = name.replace(match.group(), match.group() + "mtp_block.")
         return name
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:

@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections import defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import torch
 
@@ -12,10 +11,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder)
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.multimodal import MultiModalPlaceholderMap
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import (ModelInputForGPUBuilder)
 from vllm.utils import async_tensor_h2d
 
 # Placeholder attention backend for models like Mamba and pooling models that
@@ -144,8 +139,6 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=self.
-            multi_modal_placeholder_index_maps,
             enable_kv_scales_calculation=self.enable_kv_scales_calculation,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
@@ -181,7 +174,6 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             seq_lens=None,
             seq_lens_tensor=seq_lens_tensor,
@@ -204,7 +196,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
 class PlaceholderAttentionMetadataBuilder(
         AttentionMetadataBuilder[PlaceholderAttentionMetadata]):
 
-    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+    def __init__(self, input_builder):
 
         self.input_builder = input_builder
         self.runner = input_builder.runner
@@ -213,16 +205,11 @@ class PlaceholderAttentionMetadataBuilder(
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
         self.curr_seq_lens: List[int] = []
-        self.multimodal_placeholder_maps: Dict[
-            str,
-            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
 
-    def _add_seq_group(
-            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool):
+    def _add_seq_group(self, inter_data, chunked_prefill_enabled: bool):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         """
@@ -237,12 +224,6 @@ class PlaceholderAttentionMetadataBuilder(
             self.context_lens.append(context_len)
 
             if is_prompt:
-                mm_maps = inter_data.multi_modal_placeholder_maps
-                if mm_maps:
-                    for modality, placeholders in mm_maps.items():
-                        self.multimodal_placeholder_maps[modality].extend(
-                            placeholders)
-
                 self.num_prefills += 1
                 self.num_prefill_tokens += token_len
                 self.prefill_seq_lens.append(seq_len)
@@ -300,12 +281,6 @@ class PlaceholderAttentionMetadataBuilder(
         seq_start_loc_tensor = async_tensor_h2d(seq_start_loc, torch.int32,
                                                 device, self.runner.pin_memory)
 
-        placeholder_index_maps = {
-            modality: placeholder_map.index_map()
-            for modality, placeholder_map in
-            self.multimodal_placeholder_maps.items()
-        }
-
         # Placeholders
         slot_mapping_tensor = torch.empty(0)
         block_tables = torch.empty(0)
@@ -313,7 +288,6 @@ class PlaceholderAttentionMetadataBuilder(
         return PlaceholderAttentionMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
-            multi_modal_placeholder_index_maps=placeholder_index_maps,
             enable_kv_scales_calculation=True,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,

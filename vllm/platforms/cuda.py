@@ -138,16 +138,6 @@ class CudaPlatformBase(Platform):
         raise NotImplementedError
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        if enforce_eager and not envs.VLLM_USE_V1:
-            logger.warning(
-                "To see benefits of async output processing, enable CUDA "
-                "graph. Since, enforce-eager is enabled, async output "
-                "processor cannot be used")
-            return False
-        return True
-
-    @classmethod
     def is_fully_connected(cls, device_ids: list[int]) -> bool:
         raise NotImplementedError
 
@@ -213,14 +203,17 @@ class CudaPlatformBase(Platform):
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
-                and compilation_config.cudagraph_mode
-                not in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE]):
+                and compilation_config.cudagraph_mode != CUDAGraphMode.NONE):
+            # TODO: Piecewise Cuda graph might be enabled
+            # if torch compile cache key issue fixed
+            # See https://github.com/vllm-project/vllm/pull/25093
             logger.info(
-                "Data Parallel with DeepEP high-throughput: using PIECEWISE "
-                "CUDA graphs and excluding MoE ops from capture. Set "
-                "VLLM_ALL2ALL_BACKEND=deepep_low_latency if you need MoE "
-                "graphs captured as well.")
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                "Data Parallel: disabling cudagraphs since DP "
+                "with DeepEP high-throughput kernels are not CUDA Graph "
+                "compatible. The DeepEP low-latency kernels are CUDA Graph "
+                "compatible. Set the all_to_all backend to deepep_low_latency "
+                "to use those kernels instead.")
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
     @classmethod
     def get_current_memory_usage(cls,
@@ -278,6 +271,11 @@ class CudaPlatformBase(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
+        if not use_v1:
+            raise RuntimeError(
+                "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
+                "to select a supported backend.")
+
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             backend_class_str = backend_to_class_str(selected_backend, use_v1)
@@ -430,6 +428,10 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
         return True
 
 

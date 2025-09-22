@@ -103,6 +103,8 @@ def get_rope(
                     is_neox_style,
                     dtype,
                     mrope_section=rope_scaling["mrope_section"],
+                    mrope_interleaved=rope_scaling.get("mrope_interleaved",
+                                                       False),
                 )
             else:
                 rotary_emb = RotaryEmbedding(

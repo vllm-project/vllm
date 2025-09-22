@@ -280,7 +280,7 @@ class CompletionRenderer(BaseRenderer):
         if truncate_prompt_tokens < 0:
             truncate_prompt_tokens = self.model_config.max_model_len
 
-        if max_length is not None and truncate_prompt_tokens > max_length:
+        if max_length is not None and truncate_prompt_tokens > max_length:  # type: ignore[operator]
             raise ValueError(
                 f"truncate_prompt_tokens ({truncate_prompt_tokens}) "
                 f"cannot be greater than max_length ({max_length}). "
@@ -383,7 +383,7 @@ class CompletionRenderer(BaseRenderer):
         """Create validated EngineTokensPrompt."""
         if max_length is not None and len(token_ids) > max_length:
             raise ValueError(
-                f"This maximum context length is {max_length} tokens. "
+                f"This model's maximum context length is {max_length} tokens. "
                 f"However, your request has {len(token_ids)} input tokens. "
                 "Please reduce the length of the input messages.")
 
