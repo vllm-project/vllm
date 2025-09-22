@@ -487,6 +487,12 @@ class CompilationConfig:
                              "supported with torch>=2.9.0.dev. Set "
                              "use_inductor_graph_partition=False instead.")
 
+        for op in self.custom_ops:
+            if op[0] not in {'+', '-'} and op not in {'all', 'none'}:
+                raise ValueError(f"Invalid syntax '{op}' for custom op, "
+                                 "must be 'all', 'none', '+op' or '-op' "
+                                 "(where 'op' is the registered op name)")
+
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
@@ -532,8 +538,8 @@ class CompilationConfig:
             for x in self.compile_sizes:
                 if isinstance(x, str):
                     assert x == "cudagraph_capture_sizes", \
-                    "Unrecognized size type in compile_sizes, " \
-                    f"expect 'cudagraph_capture_sizes', got {x}"
+                        "Unrecognized size type in compile_sizes, " \
+                        f"expect 'cudagraph_capture_sizes', got {x}"
                     computed_compile_sizes.extend(self.cudagraph_capture_sizes)
                 else:
                     assert isinstance(x, int)
@@ -628,3 +634,41 @@ class CompilationConfig:
 
         return use_fx_graph_piecewise_compilation or \
             use_inductor_piecewise_compilation
+
+    def custom_op_log_check(self):
+        """
+        This method logs the enabled/disabled custom ops and checks that the
+        passed custom_ops field only contains relevant ops.
+        It is called at the end of set_current_vllm_config,
+        after the custom ops have been instantiated.
+        """
+
+        if len(self.enabled_custom_ops) + len(self.disabled_custom_ops) == 0:
+            logger.debug("No custom ops found in model.")
+            return
+
+        logger.debug("enabled custom ops: %s", self.enabled_custom_ops)
+        logger.debug("disabled custom ops: %s", self.disabled_custom_ops)
+
+        all_ops_in_model = (self.enabled_custom_ops | self.disabled_custom_ops)
+        for op in self.custom_ops:
+            if op in {"all", "none"}:
+                continue
+
+            assert op[0] in {'+', '-'}, "Invalid custom op syntax " \
+                                        "(should be checked during init)"
+
+            # check if op name exists in model
+            op_name = op[1:]
+            if op_name not in all_ops_in_model:
+                from vllm.model_executor.custom_op import CustomOp
+
+                # Does op exist at all or is it just not present in this model?
+                # Note: Only imported op classes appear in the registry.
+                missing_str = "doesn't exist (or wasn't imported/registered)" \
+                    if op_name not in CustomOp.op_registry \
+                    else "not present in model"
+
+                enable_str = "enabling" if op[0] == '+' else "disabling"
+                logger.warning_once("Op '%s' %s, %s with '%s' has no effect",
+                                    op_name, missing_str, enable_str, op)
