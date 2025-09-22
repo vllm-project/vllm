@@ -68,6 +68,7 @@ class _Backend(enum.Enum):
     TREE_ATTN = enum.auto()
     XFORMERS_VLLM_V1 = enum.auto()
     ROCM_ATTN_VLLM_V1 = enum.auto()
+    ROCM_AITER_UNIFIED_ATTN = enum.auto()
 
 
 class PlatformEnum(enum.Enum):

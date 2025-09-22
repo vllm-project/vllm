@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
-    VLLM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -106,6 +105,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
+    VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -423,12 +423,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
     lambda:
     (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
-     ("true", "1")),
-
-    # Use AITER triton unified attention for V1 attention
-    "VLLM_USE_AITER_UNIFIED_ATTENTION":
-    lambda:
-    (os.getenv("VLLM_USE_AITER_UNIFIED_ATTENTION", "False").lower() in
      ("true", "1")),
 
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
@@ -865,6 +859,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FP8BMM":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in
              ("true", "1")),
+
+    # Use AITER triton unified attention for V1 attention
+    "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "False").lower() in
+     ("true", "1")),
 
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
@@ -1396,7 +1396,6 @@ def compute_hash() -> str:
         "VLLM_FUSED_MOE_CHUNK_SIZE",
         "VLLM_FLASHINFER_MOE_BACKEND",
         "VLLM_V1_USE_PREFILL_DECODE_ATTENTION",
-        "VLLM_USE_AITER_UNIFIED_ATTENTION",
         "VLLM_ATTENTION_BACKEND",
         "VLLM_USE_FLASHINFER_SAMPLER",
         "VLLM_DISABLED_KERNELS",
@@ -1421,6 +1420,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_MLA",
         "VLLM_ROCM_USE_AITER_MHA",
         "VLLM_ROCM_USE_AITER_FP8BMM",
+        "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION",
         "VLLM_ROCM_USE_SKINNY_GEMM",
         "VLLM_ROCM_FP8_PADDING",
         "VLLM_ROCM_MOE_PADDING",
