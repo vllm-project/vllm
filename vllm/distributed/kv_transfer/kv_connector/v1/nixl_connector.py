@@ -1349,6 +1349,9 @@ class NixlConnectorWorker:
             executor.shutdown(wait=False)
         if listener_t := getattr(self, "_nixl_handshake_listener_t", None):
             listener_t.join(timeout=0)
+        for handles in self._recving_transfers.values():
+            for handle, _ in handles:
+                self.nixl_wrapper.release_xfer_handle(handle)
         if self.src_xfer_side_handle:
             self.nixl_wrapper.release_dlist_handle(self.src_xfer_side_handle)
         for dst_xfer_side_handle in self.dst_xfer_side_handles.values():
