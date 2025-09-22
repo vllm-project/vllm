@@ -190,6 +190,7 @@ if TYPE_CHECKING:
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+    VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -441,6 +442,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # disabled by default.
     "VLLM_USE_STANDALONE_COMPILE":
     lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "0") == "1",
+
+    # Debug pattern matching inside custom passes.
+    # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
+    "VLLM_PATTERN_MATCH_DEBUG":
+    lambda: os.environ.get("VLLM_PATTERN_MATCH_DEBUG", None),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
