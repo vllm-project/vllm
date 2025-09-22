@@ -224,6 +224,8 @@ class GptOssModel(nn.Module):
             self.config.vocab_size,
             self.config.hidden_size,
         )
+        # For modeling_speculative, different name expected
+        self.embed_tokens = self.embedding
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
             lambda prefix: TransformerBlock(
