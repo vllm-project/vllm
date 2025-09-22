@@ -69,6 +69,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: "VllmConfig",
                  kv_cache_config: KVCacheConfig, role: KVConnectorRole):
+        if len(kv_cache_config.kv_cache_groups) > 1:
+            raise NotImplementedError(
+                "P2pNcclConnector does not support hybrid allocator for now."
+                "Please set `--disable-hybrid-kv-cache-manager`.")
         super().__init__(vllm_config=vllm_config,
                          kv_cache_config=kv_cache_config,
                          role=role)
