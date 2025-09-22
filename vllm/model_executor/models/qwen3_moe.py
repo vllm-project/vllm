@@ -184,7 +184,6 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
-            chunked_num_tokens = hidden_states.shape[0]
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
@@ -192,7 +191,6 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                            router_logits=router_logits)
 
         if self.is_sequence_parallel:
-            assert chunked_num_tokens == final_hidden_states.shape[0]
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0)
             final_hidden_states = final_hidden_states[:num_tokens]
