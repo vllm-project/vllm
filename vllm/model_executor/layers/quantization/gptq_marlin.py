@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import torch
 
@@ -36,11 +36,17 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.utils.gptq_utils import (
+        GPTQQuantizationConfig)
+else:
+    GPTQQuantizationConfig = Any
+
 logger = init_logger(__name__)
 
 
 def get_moe_quant_method(
-    config: QuantizationConfig,
+    config: GPTQQuantizationConfig,
     layer: torch.nn.Module,
     prefix: str,
     moe_method_cls: type,
