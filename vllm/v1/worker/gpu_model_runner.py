@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
+import nvtx
 import numpy as np
 import torch
 import torch.distributed
@@ -2131,7 +2132,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
-        with record_function_or_nullcontext("Preprocess"):
+        with record_function_or_nullcontext("Preprocess"), nvtx.annotate("pre"):
             self._update_states(scheduler_output)
             if not scheduler_output.total_num_scheduled_tokens:
                 if not has_kv_transfer_group():
@@ -2194,6 +2195,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 batch_descriptor=batch_descriptor,
                 ubatch_slices=ubatch_slices,
         ), record_function_or_nullcontext("Forward"),
+            nvtx.annotate("fwd"),
               self.maybe_get_kv_connector_output(scheduler_output) as
               kv_connector_output):
             model_output = self.model(
@@ -2204,7 +2206,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **model_kwargs,
             )
 
-        with record_function_or_nullcontext("Postprocess"):
+        with record_function_or_nullcontext("Postprocess"), nvtx.annotate("post"):
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
                 hidden_states, aux_hidden_states = model_output
@@ -2265,7 +2267,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 apply_grammar_bitmask(scheduler_output, self.input_batch,
                                       logits, self.device)
 
-        with record_function_or_nullcontext("Sample"):
+        with record_function_or_nullcontext("Sample"), nvtx.annotate("sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         def propose_draft_token_ids(sampled_token_ids):
@@ -2290,7 +2292,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # as inputs, and does not need to wait for bookkeeping to finish.
             propose_draft_token_ids(sampler_output.sampled_token_ids)
 
-        with record_function_or_nullcontext("Bookkeep"):
+        with record_function_or_nullcontext("Bookkeep"), nvtx.annotate("bookkeep"):
             (
                 num_nans_in_logits,
                 logprobs_lists,
@@ -2308,7 +2310,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
 
-        with record_function_or_nullcontext("EPLB"):
+        with record_function_or_nullcontext("EPLB"), nvtx.annotate("eplb"):
             self.eplb_step()
 
         output = ModelRunnerOutput(
