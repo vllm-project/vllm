@@ -6,6 +6,8 @@ import pytest
 
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
 from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+from vllm.v1.metrics.loggers import LoggingStatLogger
+from vllm.v1.metrics.stats import IterationStats
 
 
 class DummyStatLogger:
@@ -29,6 +31,15 @@ class DummyStatLogger:
 
     def log_engine_initialized(self):
         self.engine_initialized = True
+
+
+class DummyLoggingStatLogger(LoggingStatLogger):
+    """
+    A dummy logging stat logger for testing purposes.
+    Implemented the record and log APIs
+    """
+    def get_num_preempted_reqs(self) -> int:
+        return self.num_preempted_reqs
 
 
 @pytest.fixture
@@ -62,7 +73,7 @@ async def test_async_llm_replace_default_loggers(
 @pytest.mark.asyncio
 async def test_async_llm_add_to_default_loggers(log_stats_enabled_engine_args):
     """
-    It's still possible to use custom stat loggers exclusively by passing 
+    It's still possible to use custom stat loggers exclusively by passing
     disable_log_stats=True in addition to a list of custom stat loggers.
     """
     # Create engine_args with disable_log_stats=True for this test
@@ -79,5 +90,43 @@ async def test_async_llm_add_to_default_loggers(log_stats_enabled_engine_args):
 
     # log_stats is still True, since custom stat loggers are used
     assert engine.log_stats
+
+    engine.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_logger_iteration_stats(log_stats_enabled_engine_args):
+    """
+    """
+    # Create engine_args with disable_log_stats=True for this test
+    disabled_log_engine_args = copy.deepcopy(log_stats_enabled_engine_args)
+    disabled_log_engine_args.disable_log_stats = True
+
+    # Disable default loggers; pass custom stat logger to the constructor
+    engine = AsyncLLM.from_engine_args(disabled_log_engine_args,
+                                       stat_loggers=[DummyLoggingStatLogger])
+
+    dummy_logger = engine.logger_manager.per_engine_logger_dict[0][0]
+
+    assert len(engine.logger_manager.per_engine_logger_dict[0]) == 1
+    assert isinstance(dummy_logger, DummyLoggingStatLogger)
+
+    stats_1 = IterationStats()
+    stats_1.num_preempted_reqs = 1
+    stats_1.num_generation_tokens = 10
+    stats_1.num_prompt_tokens = 100
+
+    stats_2 = IterationStats()
+    stats_2.num_preempted_reqs = 2
+    stats_2.num_generation_tokens = 20
+    stats_2.num_prompt_tokens = 200
+
+    # Expect the record will update the local iteration stats correctly
+    dummy_logger.record(scheduler_stats=None, iteration_stats=stats_1)
+    dummy_logger.record(scheduler_stats=None, iteration_stats=stats_2)
+
+    assert dummy_logger.num_preempted_reqs == 3
+    assert dummy_logger.num_generation_tokens == 30
+    assert dummy_logger.num_prompt_tokens == 300
 
     engine.shutdown()
