@@ -45,7 +45,7 @@ class NgramProposer:
             # since other components like frontend (incl tokenization)
             # and Structured Outputs also use multiple threads.
             # TODO(ekagra-ranjan): bump up the cap from 1 to 8
-            # when TP parallization for ngram is implemented.
+            # when TP parallelization for ngram is implemented.
             self.num_numba_thread_available = min(1, (cpu_count // 2))
             # Divide by tp_size to ensure each tensor parallel rank
             # has some threads since all ranks will run this.

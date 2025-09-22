@@ -178,8 +178,8 @@ def test_ngram_proposer():
     ngram_proposer.max_model_len = 2 * num_tokens_threshold
     # using multibatch test
     middle_integer = num_tokens_threshold // 2
-    input_1 = [_ for _ in range(num_tokens_threshold)] 
-    input_1 += [middle_integer, middle_integer+1]
+    input_1 = [_ for _ in range(num_tokens_threshold)]
+    input_1 += [middle_integer, middle_integer + 1]
     input_2 = [-1] * len(input_1)
     input_2[:3] = [4, 5, 6]
     token_ids_cpu = np.array([input_1, input_2])
@@ -191,6 +191,6 @@ def test_ngram_proposer():
         spec_decode_unsupported_reqs=(),
     )
     assert len(result[0]) == 2
-    assert np.array_equal(result[0], np.array([middle_integer+2, middle_integer+3]))
+    assert np.array_equal(result[0],
+                          np.array([middle_integer + 2, middle_integer + 3]))
     assert np.array_equal(result[1], np.array([]))
-
