@@ -1084,6 +1084,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logits_indices = query_start_loc[1:] - 1
             num_draft_tokens = None
             spec_decode_metadata = None
+            self.num_draft_tokens.gpu = None
+            self.num_accepted_tokens.gpu = None
         else:
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
