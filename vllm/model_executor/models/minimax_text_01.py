@@ -403,7 +403,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
     def forward(self,
                 hidden_states: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: Union[list[dict], Optional[torch.Tensor]],
                 attn_metadata: AttentionMetadata,
                 residual: Optional[torch.Tensor],
                 is_warmup: bool = False,
@@ -417,7 +416,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
             hidden_states=layernorm_output,
             output=self_attention_output,
             positions=positions,
-            kv_caches=kv_caches,
         )
 
         residual = residual * self.layernorm_attention_alpha

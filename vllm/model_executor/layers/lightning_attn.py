@@ -486,7 +486,7 @@ def lightning_attention(
         ed = ed.view(1, -1, 1, 1)
 
     # Split the computation into chunks for better parallelism
-    m = 128 if d >= 128 else 64
+    m = 128 if d >= 128 else 64 if d >= 64 else 32
     assert d % m == 0, f"Dimension d ({d}) must be divisible by m ({m})"
     arr = [m * i for i in range(d // m + 1)]
     if arr[-1] != d:

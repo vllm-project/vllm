@@ -20,7 +20,9 @@ pytestmark = pytest.mark.hybrid_model
 SSM_MODELS = [
     "state-spaces/mamba-130m-hf",
     "tiiuae/falcon-mamba-tiny-dev",
-    "yujiepan/mamba2-codestral-v0.1-tiny-random",
+    # mamba2-codestral in transformers is broken pending:
+    # https://github.com/huggingface/transformers/pull/40861
+    #"yujiepan/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
@@ -31,6 +33,7 @@ HYBRID_MODELS = [
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
+    "Goekdeniz-Guelmez/MiniMax01Text-Dev",
 ]
 
 FULL_CUDA_GRAPH_MODELS = [
