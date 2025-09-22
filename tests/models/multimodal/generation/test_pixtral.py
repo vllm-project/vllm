@@ -12,13 +12,12 @@ from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
 from transformers import AutoProcessor
 
-from vllm import RequestOutput, SamplingParams, TextPrompt, TokensPrompt
+from vllm import SamplingParams, TextPrompt, TokensPrompt
+from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.multimodal import MultiModalDataBuiltins
-from vllm.multimodal.inputs import PlaceholderRange
-from vllm.sequence import Logprob, SampleLogprobs
 
 from ....utils import VLLM_PATH, large_gpu_test
-from ...utils import check_logprobs_close, dummy_hf_overrides
+from ...utils import check_logprobs_close
 
 if TYPE_CHECKING:
     from _typeshed import StrPath
@@ -185,55 +184,3 @@ def test_chat(vllm_runner, max_model_len: int, model: str, dtype: str,
                          outputs_1_lst=logprobs,
                          name_0="h100_ref",
                          name_1="output")
-
-
-@pytest.fixture
-def prompt(request, local_asset_server) -> TextPrompt:
-    names = request.param
-    urls = [local_asset_server.url_for(n) for n in names]
-    return _create_engine_inputs_hf(urls)
-
-
-@pytest.mark.parametrize(
-    "prompt,expected_ranges",
-    [
-        pytest.param(IMG_URLS[:1], [PlaceholderRange(offset=11, length=494)]),
-        pytest.param(IMG_URLS[1:4], [
-            PlaceholderRange(offset=11, length=266),
-            PlaceholderRange(offset=277, length=1056),
-            PlaceholderRange(offset=1333, length=418)
-        ])
-    ],
-)
-def test_multi_modal_placeholders(vllm_runner, prompt: TextPrompt,
-                                  expected_ranges: list[PlaceholderRange],
-                                  monkeypatch) -> None:
-
-    # This placeholder checking test only works with V0 engine
-    # where `multi_modal_placeholders` is returned with `RequestOutput`
-    monkeypatch.setenv("VLLM_USE_V1", "0")
-    with vllm_runner(
-            "mistral-community/pixtral-12b",
-            max_model_len=8192,
-            limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
-            load_format="dummy",
-            hf_overrides=dummy_hf_overrides,
-    ) as vllm_model:
-        outputs = vllm_model.llm.generate(prompt)
-
-        assert len(outputs) == 1, f"{len(outputs)=}"
-        output: RequestOutput = outputs[0]
-        assert hasattr(output,
-                       "multi_modal_placeholders"), f"{output.__dict__=}"
-        assert "image" in output.multi_modal_placeholders, \
-            f"{output.multi_modal_placeholders.keys()=}"
-        image_placeholder_ranges: list[
-            PlaceholderRange] = output.multi_modal_placeholders["image"]
-        assert len(image_placeholder_ranges) == len(
-            expected_ranges), f"{image_placeholder_ranges=}"
-        for real_range, expected_range in zip(image_placeholder_ranges,
-                                              expected_ranges):
-            assert real_range.offset == expected_range.offset, \
-                f"{real_range=} {expected_range=}"
-            assert real_range.length == expected_range.length, \
-                f"{real_range=} {expected_range=}"

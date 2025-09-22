@@ -19,7 +19,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.deepseek_v2 import (DeepseekV2DecoderLayer,
                                                     DeepseekV3ForCausalLM)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -37,8 +36,6 @@ class DeepseekV2Model(nn.Module):
         super().__init__()
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.vocab_size = self.config.vocab_size
 
@@ -51,11 +48,8 @@ class DeepseekV2Model(nn.Module):
 
         self.layers = nn.ModuleList([
             DeepseekV2DecoderLayer(
-                self.config,
+                vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
             ) for i in range(self.config.num_hidden_layers)
         ])
 
@@ -204,7 +198,8 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
 
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
-                                      quant_config=quant_config)
+                                      quant_config=quant_config,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
@@ -226,21 +221,20 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+
+        def transform(inputs):
+            name, loaded_weight = inputs
+            if "lm_head" not in name:
+                name = "model." + name
+            return name, loaded_weight
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,
         )
-
-        model_weights = {}
-        for name, loaded_weight in weights:
-            if "lm_head" not in name:
-                name = "model." + name
-            model_weights[name] = loaded_weight
-        loader.load_weights(model_weights.items())
+        loader.load_weights(map(transform, weights))

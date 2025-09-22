@@ -24,7 +24,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
@@ -76,7 +75,6 @@ class OAIAttention(nn.Module):
 
         self.sinks = torch.nn.Parameter(
             torch.empty(config.num_attention_heads // tp_size,
-                        dtype=torch.bfloat16,
                         requires_grad=False))
 
         self.q_size = self.num_attention_heads * self.head_dim // tp_size
@@ -145,8 +143,7 @@ class MLPBlock(torch.nn.Module):
         self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.router = torch.nn.Linear(config.hidden_size,
-                                      config.num_local_experts,
-                                      dtype=torch.bfloat16)
+                                      config.num_local_experts)
         assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(num_experts=config.num_local_experts,
                                 top_k=config.num_experts_per_tok,
@@ -655,6 +652,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
             self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
@@ -671,10 +669,8 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
         return self.model(input_ids, positions, intermediate_tensors,
                           inputs_embeds)
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

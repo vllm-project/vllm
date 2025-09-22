@@ -9,7 +9,7 @@ model alternates between state space model layers and attention-based layers.
 """
 from collections.abc import Iterable
 from itertools import cycle
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -41,7 +41,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid
@@ -528,8 +527,6 @@ class Zamba2MambaDecoderLayer(nn.Module):
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
             mamba_cache_params: Parameters for Mamba's state caches 
                 (one for conv, one for ssm)
-            sequence_idx: Index tensor for identifying sequences in batch
-                Required for proper chunked processing in prefill
             transformer_hidden_states: Optional output from transformer path
                 Added to input if provided (used in hybrid architecture)
             positions: Optional position IDs (unused in Mamba)
@@ -591,8 +588,6 @@ class Zamba2HybridLayer(nn.Module):
         
         Args:
             shared_transformer: Transformer decoder layer for attention pathway
-            linear: Linear projection for transformer output before Mamba
-            mamba: Mamba decoder layer for state space pathway
         """
         super().__init__()
         self.block_idx = block_idx
@@ -630,8 +625,6 @@ class Zamba2HybridLayer(nn.Module):
             positions: Position IDs for positional embeddings
             mamba_cache_params: Parameters for Mamba's state caches 
                 (one for conv, one for ssm)
-            sequence_idx: Indices for identifying sequences in batch,
-                required for proper chunked processing in prefill
             
         Returns:
             Output tensor combining transformer and Mamba representations
@@ -915,8 +908,8 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             prefix: Optional prefix for parameter names
         
         Raises:
-            AssertionError: If prefix caching is enabled (not supported by 
-            Mamba)
+            AssertionError: If prefix caching is enabled 
+                (not supported by Mamba)
         """
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -947,6 +940,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         # Tie weights with input embeddings if using same dimensions
         self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
@@ -971,7 +965,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
                 inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs) -> torch.Tensor:
+                **kwargs: Any) -> torch.Tensor:
         """Forward pass through the model.
         
         Args:
@@ -1012,9 +1006,9 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
         return hidden_states
 
-    def copy_inputs_before_cuda_graphs(self, input_buffers: dict[str,
-                                                                 torch.Tensor],
-                                       **kwargs) -> dict[str, torch.Tensor]:
+    def copy_inputs_before_cuda_graphs(
+            self, input_buffers: dict[str, torch.Tensor],
+            **kwargs: Any) -> dict[str, torch.Tensor]:
         """Copy inputs before CUDA graph capture.
         
         Args:
@@ -1041,7 +1035,6 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         """Compute logits for next token prediction.
         
@@ -1052,8 +1045,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         Returns:
             Logits for next token prediction
         """
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

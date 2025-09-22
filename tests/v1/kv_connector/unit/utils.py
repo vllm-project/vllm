@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
     SharedStorageConnector)
+from vllm.utils import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
@@ -127,11 +128,11 @@ def create_request(request_id: int,
                    use_all_1s_for_prompt_tokens: bool = False,
                    num_remote_blocks: int = 3,
                    block_size: int = 16,
-                   hash_fn: Callable = hash) -> Request:
+                   hash_fn: Callable = sha256) -> Request:
     """Make dummy request for testing."""
     global _none_hash_initialized
     if not _none_hash_initialized:
-        init_none_hash(hash)
+        init_none_hash(hash_fn)
         _none_hash_initialized = True
 
     kv_transfer_params: Optional[dict[str, Any]] = None
@@ -175,6 +176,7 @@ def create_model_runner_output(
     finished_sending: Optional[list[str]] = None,
     finished_recving: Optional[list[str]] = None,
     use_eos: bool = False,
+    token_id: int = 0,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
 
@@ -183,7 +185,7 @@ def create_model_runner_output(
     req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
     # Make sampled tokens.
-    sampled_token = EOS_TOKEN_ID if use_eos else 0
+    sampled_token = EOS_TOKEN_ID if use_eos else token_id
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
     kv_connector_output = None if (
