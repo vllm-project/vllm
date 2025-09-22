@@ -97,7 +97,9 @@ class TestCudagraphDispatcher:
 
         # Test dispatch logic
         # 1. non-uniform batch, size in cudagraph size list
-        desc_full_exact = BatchDescriptor(num_tokens=8, uniform_decode=False)
+        desc_full_exact = BatchDescriptor(num_tokens=8,
+                                          uniform_decode=False,
+                                          num_reqs=8)
         rt_mode, key = dispatcher.dispatch(desc_full_exact)
         if params["cudagraph_mode"] == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
@@ -109,7 +111,9 @@ class TestCudagraphDispatcher:
             assert rt_mode == CUDAGraphMode.NONE
 
         # 2. uniform decode batch, size in cudagraph size list
-        desc_uniform_exact = BatchDescriptor(num_tokens=8, uniform_decode=True)
+        desc_uniform_exact = BatchDescriptor(num_tokens=8,
+                                             uniform_decode=True,
+                                             num_reqs=8)
         rt_mode, key = dispatcher.dispatch(desc_uniform_exact)
         if params["cudagraph_mode"] == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
@@ -126,7 +130,9 @@ class TestCudagraphDispatcher:
             assert rt_mode == CUDAGraphMode.NONE
 
         # 3. No key match
-        desc_no_match = BatchDescriptor(num_tokens=15, uniform_decode=False)
+        desc_no_match = BatchDescriptor(num_tokens=15,
+                                        uniform_decode=False,
+                                        num_reqs=8)
         rt_mode, key = dispatcher.dispatch(desc_no_match)
         assert rt_mode == CUDAGraphMode.NONE
         assert key is None
@@ -290,8 +296,8 @@ class TestCudagraphIntegration:
         input_3 = persistent_input_buffer[:3]
 
         desc_1 = BatchDescriptor(num_tokens=1)
-        desc_2 = BatchDescriptor(num_tokens=2)
-        desc_3_unseen = BatchDescriptor(num_tokens=3)
+        desc_2 = BatchDescriptor(num_tokens=2, num_reqs=2)
+        desc_3_unseen = BatchDescriptor(num_tokens=3, num_reqs=3)
 
         # 0. global warmup
         with set_forward_context(attn_metadata=None,

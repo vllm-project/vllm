@@ -910,11 +910,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> tuple[PerLayerAttnMetadata, torch.Tensor,
                Optional[SpecDecodeMetadata], np.ndarray,
                Optional[CommonAttentionMetadata], int, Optional[UBatchSlices],
-               Optional[torch.Tensor]]:
+               Optional[torch.Tensor], int, bool]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
-            logits_indices, spec_decode_metadata
+            logits_indices: tensor for logit computation,
+            spec_decode_metadata: speculative decoding metadata,
+            num_scheduled_tokens: number of scheduled tokens,
+            spec_decode_common_attn_metadata: common attention metadata for 
+                spec decode,
+            max_num_scheduled_tokens: maximum scheduled tokens,
+            ubatch_slices: micro-batch slices,
+            num_tokens_after_padding: padded token count,
+            padded_num_reqs: padded request count,
+            uniform_decode: whether this is uniform decode batch
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1026,7 +1035,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # like FlashAttention requires that
         self.query_start_loc.np[num_reqs + 1:].fill(cu_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
-        query_start_loc = self.query_start_loc.gpu[:num_reqs + 1]
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
         num_tokens_padded = num_tokens_unpadded + self.get_local_padding(
@@ -1037,13 +1045,47 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                          num_tokens_padded,
                          self.vllm_config)
 
+        # Predict CUDA graph mode early to determine if request padding
+        # is needed
+        # for attention backends
+        num_input_tokens = num_tokens_padded
+        if ubatch_slices is not None:
+            num_input_tokens = num_input_tokens // 2
+
+        uniform_decode = (max_num_scheduled_tokens
+                          == self.uniform_decode_query_len) and (
+                              total_num_scheduled_tokens
+                              == num_reqs * max_num_scheduled_tokens)
+        preliminary_batch_descriptor = BatchDescriptor(
+            num_tokens=num_input_tokens,
+            uniform_decode=uniform_decode,
+            num_reqs=num_reqs)
+        predicted_cudagraph_mode = (
+            self.cudagraph_dispatcher.predict_cudagraph_mode(
+                preliminary_batch_descriptor))
+
+        # Apply request padding for full CUDA graphs to ensure attention
+        # backends receive consistent tensor shapes during capture/replay
+        if predicted_cudagraph_mode == CUDAGraphMode.FULL:
+            padded_num_reqs = self._get_padded_num_reqs_for_cudagraph(num_reqs)
+        else:
+            padded_num_reqs = num_reqs
+
+        # Now create query_start_loc with consistent padded size
+        # Fill padded region with same value to maintain non-decreasing property
+        self.query_start_loc.np[num_reqs + 1:padded_num_reqs + 1].fill(
+            cu_num_tokens[-1])
+        self.query_start_loc.copy_to_gpu()
+        query_start_loc = self.query_start_loc.gpu[:padded_num_reqs + 1]
+
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
         # Fill unused with 0 for full cuda graph mode.
-        self.seq_lens.np[num_reqs:].fill(0)
+        # For full CUDA graphs, pad out to the padded number of requests
+        self.seq_lens.np[num_reqs:padded_num_reqs].fill(0)
         self.seq_lens.copy_to_gpu()
-        seq_lens = self.seq_lens.gpu[:num_reqs]
+        seq_lens = self.seq_lens.gpu[:padded_num_reqs]
         max_seq_len = self.seq_lens.np[:num_reqs].max().item()
 
         num_tokens = [
@@ -1098,7 +1140,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
             self.num_draft_tokens.np[:num_reqs] = num_draft_tokens
-            self.num_draft_tokens.np[num_reqs:].fill(0)
+            self.num_draft_tokens.np[num_reqs:padded_num_reqs].fill(0)
             self.num_draft_tokens.copy_to_gpu()
 
         logits_indices_padded = None
@@ -1111,15 +1153,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
         # Used in the below loop.
-        query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
-        seq_lens_cpu = self.seq_lens.cpu[:num_reqs]
+        query_start_loc_cpu = self.query_start_loc.cpu[:padded_num_reqs + 1]
+        seq_lens_cpu = self.seq_lens.cpu[:padded_num_reqs]
         num_computed_tokens_cpu = (
-            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
+            self.input_batch.num_computed_tokens_cpu_tensor[:padded_num_reqs])
         spec_decode_common_attn_metadata = None
         if use_spec_decode:
             self.num_accepted_tokens.np[:num_reqs] = (
                 self.input_batch.num_accepted_tokens_cpu[:num_reqs])
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.np[num_reqs:padded_num_reqs].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
 
         # Prepare the attention metadata for each KV cache group and make layers
@@ -1127,14 +1169,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
             encoder_seq_lens = self._get_encoder_seq_lens(
-                scheduler_output, kv_cache_group_spec.kv_cache_spec, num_reqs)
+                scheduler_output, kv_cache_group_spec.kv_cache_spec,
+                padded_num_reqs)
 
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
                 # Encoder-only layers do not have KV cache, so we need to
                 # create a dummy block table and slot mapping for them.
                 blk_table_tensor = torch.zeros(
-                    (num_reqs, 1),
+                    (padded_num_reqs, 1),
                     dtype=torch.int32,
                     device=self.device,
                 )
@@ -1146,7 +1189,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_common_prefix_blocks = 0
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
-                blk_table_tensor = blk_table.get_device_tensor(num_reqs)
+                blk_table_tensor = blk_table.get_device_tensor(padded_num_reqs)
                 slot_mapping = blk_table.slot_mapping.gpu[:
                                                           total_num_scheduled_tokens]
 
@@ -1164,7 +1207,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 seq_lens=seq_lens,
                 seq_lens_cpu=seq_lens_cpu,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=num_reqs,
+                num_reqs=padded_num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
                 max_seq_len=max_seq_len,
@@ -1197,8 +1240,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                   GDNAttentionMetadataBuilder):
                     extra_attn_metadata_args = dict(
                         num_accepted_tokens=self.num_accepted_tokens.
-                        gpu[:num_reqs],
-                        num_draft_tokens=self.num_draft_tokens.gpu[:num_reqs],
+                        gpu[:padded_num_reqs],
+                        num_draft_tokens=self.num_draft_tokens.
+                        gpu[:padded_num_reqs],
                     )
 
                 if ubatch_slices is not None:
@@ -1230,7 +1274,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
                 max_num_scheduled_tokens, ubatch_slices,
-                num_tokens_after_padding)
+                num_tokens_after_padding, padded_num_reqs, uniform_decode)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1732,6 +1776,37 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
 
+    def _get_padded_num_reqs_for_cudagraph(self, num_reqs: int) -> int:
+        """
+        Calculate the padded number of requests for full CUDA graph
+        compatibility.
+        Uses actual CUDA graph capture sizes when available, falls back
+        to power-of-2.
+        """
+        max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
+
+        if num_reqs <= 1:
+            # Safe fallback for single request case
+            capture_sizes = self.compilation_config.cudagraph_capture_sizes
+            if capture_sizes and len(capture_sizes) > 0:
+                min_capture_size = min(capture_sizes)
+                return min(max(2, min_capture_size), max_num_seqs)
+            return min(2, max_num_seqs)
+
+        # First try to find a suitable capture size
+        capture_sizes = self.compilation_config.cudagraph_capture_sizes
+        if capture_sizes:
+            # Find smallest capture size >= num_reqs
+            suitable_sizes = [
+                size for size in sorted(capture_sizes) if size >= num_reqs
+            ]
+            if suitable_sizes:
+                return min(suitable_sizes[0], max_num_seqs)
+
+        # Fallback to power-of-2 if no suitable capture size
+        padded_reqs = 1 << (num_reqs - 1).bit_length()
+        return min(padded_reqs, max_num_seqs)
+
     def get_dp_padding(self,
                        num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
         """
@@ -2167,8 +2242,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Prepare the decoder inputs.
                 (attn_metadata, logits_indices, spec_decode_metadata,
                  num_scheduled_tokens_np, spec_decode_common_attn_metadata,
-                 max_query_len, ubatch_slices, num_tokens_after_padding
-                 ) = self._prepare_inputs(scheduler_output)
+                 max_query_len, ubatch_slices, num_tokens_after_padding,
+                 final_num_reqs_padded,
+                 uniform_decode) = self._prepare_inputs(scheduler_output)
 
             (
                 num_scheduled_tokens,
@@ -2185,12 +2261,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if ubatch_slices is not None:
                 num_input_tokens = num_input_tokens // 2
 
-            uniform_decode = (max_query_len
-                              == self.uniform_decode_query_len) and (
-                                  num_scheduled_tokens
-                                  == self.input_batch.num_reqs * max_query_len)
+            # Use actual final values including any request padding for dispatch
             batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                               uniform_decode=uniform_decode)
+                                               uniform_decode=uniform_decode,
+                                               num_reqs=final_num_reqs_padded)
             cudagraph_runtime_mode, batch_descriptor = \
                 self.cudagraph_dispatcher.dispatch(batch_descriptor)
 

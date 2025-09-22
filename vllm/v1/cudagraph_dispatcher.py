@@ -73,9 +73,15 @@ class CudagraphDispatcher:
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
             for bs in self.compilation_config.cudagraph_capture_sizes:
+                # For mixed mode, we use a representative num_reqs that works
+                # for most batches. The actual dispatch will handle variations.
+                representative_num_reqs = min(
+                    bs, self.vllm_config.scheduler_config.max_num_seqs)
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
-                    BatchDescriptor(num_tokens=bs, uniform_decode=False))
+                    BatchDescriptor(num_tokens=bs,
+                                    uniform_decode=False,
+                                    num_reqs=representative_num_reqs))
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.
@@ -88,10 +94,60 @@ class CudagraphDispatcher:
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
             for bs in cudagraph_capture_sizes_for_decode:
+                # For full decode mode, num_reqs is typically
+                # bs / uniform_decode_query_len
+                # but we use a safe upper bound here
+                representative_num_reqs = min(
+                    bs // uniform_decode_query_len,
+                    self.vllm_config.scheduler_config.max_num_seqs)
+                representative_num_reqs = max(
+                    1, representative_num_reqs)  # At least 1
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,
-                    BatchDescriptor(num_tokens=bs, uniform_decode=True))
+                    BatchDescriptor(num_tokens=bs,
+                                    uniform_decode=True,
+                                    num_reqs=representative_num_reqs))
         self.keys_initialized = True
+
+    def _find_matching_cudagraph_key(
+        self, batch_descriptor: BatchDescriptor
+    ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor]]:
+        """
+        Internal method to find the matching CUDA graph key for a batch
+        descriptor.
+        Returns (mode, key_descriptor) where key_descriptor is the actual key
+        that matches.
+        """
+        # check if key exists for full cudagraph (exact match)
+        if batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
+            return CUDAGraphMode.FULL, batch_descriptor
+
+        # otherwise, check if non-uniform key exists for full cudagraph
+        non_uniform_key = batch_descriptor.non_uniform
+        if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.FULL]:
+            return CUDAGraphMode.FULL, non_uniform_key
+
+        # also check if non-uniform key exists for more "general"
+        # piecewise cudagraph
+        if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
+            return CUDAGraphMode.PIECEWISE, non_uniform_key
+
+        # no match found
+        return CUDAGraphMode.NONE, None
+
+    def predict_cudagraph_mode(
+            self, batch_descriptor: BatchDescriptor) -> CUDAGraphMode:
+        """
+        Predict the CUDA graph mode for a given batch descriptor without
+        dispatching. This is used for early decision making before metadata
+        construction to determine if request padding is needed.
+        """
+        # if not initialized, just skip dispatching.
+        if not self.keys_initialized:
+            return CUDAGraphMode.NONE
+
+        mode, _ = self._find_matching_cudagraph_key(batch_descriptor)
+        return mode
 
     def dispatch(
         self, batch_descriptor: BatchDescriptor
@@ -107,19 +163,4 @@ class CudagraphDispatcher:
                                 "initialized. No cudagraph will be used.")
             return CUDAGraphMode.NONE, None
 
-        # check if key exists for full cudagraph
-        if batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
-            return CUDAGraphMode.FULL, batch_descriptor
-
-        # otherwise, check if non-uniform key exists
-        non_uniform_key = batch_descriptor.non_uniform
-        if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.FULL]:
-            return CUDAGraphMode.FULL, non_uniform_key
-
-        # also check if non-uniform key exists for more "general"
-        # piecewise cudagraph
-        if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
-            return CUDAGraphMode.PIECEWISE, non_uniform_key
-
-        # finally, just return no cudagraphs
-        return CUDAGraphMode.NONE, None
+        return self._find_matching_cudagraph_key(batch_descriptor)
