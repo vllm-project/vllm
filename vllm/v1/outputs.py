@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, NamedTuple, Optional
 import torch
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    from vllm.distributed.kv_transfer.kv_connector.metrics import (
         KVConnectorStats)
 
 

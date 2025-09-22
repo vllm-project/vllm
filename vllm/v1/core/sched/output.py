@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    from vllm.distributed.kv_transfer.kv_connector.base import (
         KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec

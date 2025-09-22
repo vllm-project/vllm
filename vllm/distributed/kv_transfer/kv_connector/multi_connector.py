@@ -9,12 +9,11 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.base import (
+    KVConnectorBase, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVConnectorStats)
+from vllm.distributed.kv_transfer.kv_connector.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -72,7 +71,7 @@ class MultiKVConnectorStats(KVConnectorStats):
         self.data[connector_id] = stats
 
 
-class MultiConnector(KVConnectorBase_V1):
+class MultiConnector(KVConnectorBase):
     """
     A wrapper for using multiple KVConnectors at the same time.
 
@@ -84,7 +83,7 @@ class MultiConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
-        self._connectors: list[KVConnectorBase_V1] = []
+        self._connectors: list[KVConnectorBase] = []
         self._ktc_kv_transfer_config = []
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "connectors")

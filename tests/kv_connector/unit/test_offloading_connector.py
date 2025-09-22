@@ -12,8 +12,8 @@ import torch
 from vllm import SamplingParams
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+from vllm.distributed.kv_transfer.kv_connector import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.offloading_connector import (
     OffloadingConnector, OffloadingConnectorMetadata)
 from vllm.forward_context import ForwardContext
 from vllm.utils import sha256
@@ -115,7 +115,7 @@ class RequestRunner:
             kv_connector_extra_config={
                 "spec_name": "MockOffloadingSpec",
                 "spec_module_path":
-                "tests.v1.kv_connector.unit.test_offloading_connector",
+                "tests.kv_connector.unit.test_offloading_connector",
                 "block_size": offloaded_block_size,
             })
 

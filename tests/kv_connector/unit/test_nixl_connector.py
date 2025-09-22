@@ -18,14 +18,13 @@ import torch
 
 from vllm import LLM
 from vllm.config import KVTransferConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVConnectorStats)
-from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+from vllm.distributed.kv_transfer.kv_connector.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.multi_connector import (
     MultiKVConnectorStats)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+from vllm.distributed.kv_transfer.kv_connector.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker, NixlKVConnectorStats)
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.forward_context import ForwardContext
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -249,7 +248,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
 class TestNixlHandshake:
 
     @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper",
         FakeNixlWrapper)
     def test_multi_xfer_one_engine(
         self,
@@ -321,7 +320,7 @@ class TestNixlHandshake:
             connector.clear_connector_metadata()
 
     @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper",
         FakeNixlWrapper)
     @pytest.mark.parametrize("decode_tp_size, prefill_tp_size", [
         (1, 1),
@@ -379,7 +378,7 @@ class TestNixlHandshake:
         raise TimeoutError("Took too long to complete async handshake.")
 
     @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper",
         FakeNixlWrapper)
     def test_concurrent_load_kv(
         self,
@@ -432,7 +431,7 @@ class TestNixlHandshake:
         raise TimeoutError("Took too long to complete async handshake.")
 
     @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper",
         FakeNixlWrapper)
     def test_handshake_fails_on_kv_cache_layout_mismatch(self, dist_init):
         """
@@ -444,7 +443,7 @@ class TestNixlHandshake:
         # Mock TP world size to 2 to force heterogeneous TP when
         # remote_tp_size=1
         with patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.get_tensor_model_parallel_world_size",  # noqa: E501
+                "vllm.distributed.kv_transfer.kv_connector.nixl_connector.get_tensor_model_parallel_world_size",  # noqa: E501
                 return_value=2):
             # Initialize connector and worker (with fake NIXL wrapper)
             connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
@@ -481,9 +480,8 @@ class TestNixlHandshake:
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
 # we put here is important. First run ray, it will clean up the resources, then
 # the rest of the tests.
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
-    FakeNixlWrapper)
+@patch("vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper",
+       FakeNixlWrapper)
 def test_kv_connector_stats(dist_init):
     """Test that KV transfer stats are properly recorded and retrieved."""
     vllm_config = create_vllm_config()
@@ -685,9 +683,8 @@ def test_multi_kv_connector_stats_aggregation():
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
-    FakeNixlWrapper)
+@patch("vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper",
+       FakeNixlWrapper)
 def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     """
     Test lifecycle of an aborted Remote Prefill request hitting the timeout.
@@ -809,9 +806,9 @@ def test_register_kv_caches(dist_init):
         unique_tensor[0].data_ptr(), unique_tensor[1].data_ptr()
     ]
 
-    with patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper") as mock_nixl_wrapper, \
-         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Event"), \
-         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Thread"):  # noqa: E501
+    with patch("vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper") as mock_nixl_wrapper, \
+         patch("vllm.distributed.kv_transfer.kv_connector.nixl_connector.threading.Event"), \
+         patch("vllm.distributed.kv_transfer.kv_connector.nixl_connector.threading.Thread"):  # noqa: E501
 
         # Create connector
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
