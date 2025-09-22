@@ -341,16 +341,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
 
-    def calc_kv_scales(self, query, key, value):
-        self._q_scale.copy_(torch.abs(query).max() / self.q_range)
-        self._k_scale.copy_(torch.abs(key).max() / self.k_range)
-        self._v_scale.copy_(torch.abs(value).max() / self.v_range)
-        self._q_scale_float = self._q_scale.item()
-        self._k_scale_float = self._k_scale.item()
-        self._v_scale_float = self._v_scale.item()
-        # We only calculate the scales once
-        self.calculate_kv_scales = False
-
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
         s += f", num_heads={self.impl.num_heads}"  # type: ignore
@@ -552,6 +542,52 @@ def maybe_save_kv_layer_to_connector(
     assert isinstance(attn_metadata, dict)
     connector.save_kv_layer(layer_name, kv_cache_layer,
                             attn_metadata[layer_name])
+
+
+def unified_kv_scale_calc(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    q_range: torch.Tensor,
+    k_range: torch.Tensor,
+    v_range: torch.Tensor,
+    scale_calc: bool,
+) -> None:
+
+    if not scale_calc:
+        return
+
+    q_scale.copy_(torch.abs(query).max() / q_range)
+    k_scale.copy_(torch.abs(key).max() / k_range)
+    v_scale.copy_(torch.abs(value).max() / v_range)
+
+
+def unified_kv_scale_calc_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    q_range: torch.Tensor,
+    k_range: torch.Tensor,
+    v_range: torch.Tensor,
+    scale_calc: bool,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="unified_kv_scale_calc",
+    op_func=unified_kv_scale_calc,
+    mutates_args=["q_scale", "k_scale", "v_scale"],
+    fake_impl=unified_kv_scale_calc_fake,
+    dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
+)
 
 
 def unified_attention(
