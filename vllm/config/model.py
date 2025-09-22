@@ -20,7 +20,7 @@ import vllm.envs as envs
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.pooler import PoolerConfig
-from vllm.config.utils import assert_hashable, config
+from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
@@ -61,7 +61,7 @@ else:
 
 logger = init_logger(__name__)
 
-RunnerOption = Literal["auto", "generate", "pooling", "draft"]
+RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify", "reward"]
 ConvertOption = Literal["auto", ConvertType]
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
@@ -678,8 +678,27 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
-        if getattr(self, "runner_type", self.runner) == "pooling":
-            return "TransformersModel"
+        runner_arch_default = None
+        convert_arch_default = None
+        if defaults := try_match_architecture_defaults(self.architectures[0]):
+            _, (runner_arch_default, convert_arch_default) = defaults
+        runner: RunnerType = getattr_iter(self, ("runner_type", "runner"),
+                                          runner_arch_default)
+        if runner is not None:
+            self.runner_type = runner
+        convert: ConvertType = getattr_iter(self, ("convert_type", "convert"),
+                                            convert_arch_default)
+        if convert is not None:
+            self.convert_type = convert
+
+        if runner == "pooling":
+            if convert == "embed":
+                return "TransformersForEmbedding"
+            if convert == "classify":
+                return "TransformersForClassification"
+            if convert == "reward":
+                return "TransformersForReward"
+
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal

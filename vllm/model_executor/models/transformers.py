@@ -39,6 +39,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import (ClassifierPooler,
+                                               DispatchPooler, Pooler)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
@@ -56,6 +58,7 @@ from vllm.utils import is_list_of
 
 from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
+from .interfaces_base import VllmModelForPooling
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     flatten_bn, make_empty_intermediate_tensors_factory,
                     maybe_prefix)
@@ -702,8 +705,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-@support_torch_compile(enable_if=can_enable_torch_compile)
-class TransformersModel(TransformersBase):
+class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
     hf_to_vllm_mapper = WeightsMapper(
         # These are applied in order, so the order matters!
         orig_to_new_prefix={
@@ -716,11 +718,9 @@ class TransformersModel(TransformersBase):
             "": "model.",
             # Remove `model.` prefix if it was already there
             "model.model.": "model.",
-            # Pooling adapters will be adjacent to `model`
-            "model.pooler": "pooler",
-            "model.score": "score",
-            # Classifier adapter's classifier layer is renamed to score
-            "model.classifier": "score",
+            # Classifier/scoring heads will be adjacent to `model`
+            "model.score": "classifier",
+            "model.classifier": "classifier",
         },
         orig_to_new_suffix={
             # Replace legacy suffixes used for norms
@@ -731,13 +731,10 @@ class TransformersModel(TransformersBase):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        # After creating a pooling model, `pooler` will be duplicated.
-        # The one inside `model` comes from the Transformers modelling code.
-        # The one after `model` is an adapter from vLLM.
-        # We want to use the adapter so we nullify the original pooler.
-        if getattr(self.model, "pooler", None) is not None:
-            self.skip_prefixes.append("pooler.")
-            self.model.pooler = torch.nn.Identity()
+        # Skip unsupported output embeddings layers
+        self.skip_prefixes.append("model.predictions.")
+        self.skip_prefixes.append("model.embeddings_project.")
+        self.skip_prefixes.append("model.discriminator_predictions.")
 
         # Some encoder models have the position_ids buffer in the checkpoint.
         # vLLM will always pass position_ids as an argument, so we skip loading
@@ -771,6 +768,73 @@ class TransformersModel(TransformersBase):
                     f"transformers>={required}, but got {installed}")
 
         return super().create_attention_instances(attn_type)
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersEmbeddingModel(TransformersPoolingBase):
+    default_pooling_type = "CLS"
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode": Pooler.for_encode(pooler_config),
+            "embed": Pooler.for_embed(pooler_config),
+        })
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersForSequenceClassification(TransformersPoolingBase):
+    default_pooling_type = "CLS"
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        self.classifier = nn.Linear(
+            self.text_config.hidden_size,
+            self.text_config.num_labels,
+            dtype=self.model_config.head_dtype,
+        )
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "classify":
+            ClassifierPooler(
+                pooling=self.model.pooler,
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_seq_cls(
+                    vllm_config.model_config),
+            ),
+            "score":
+            ClassifierPooler(
+                pooling=self.model.pooler,
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
+                    vllm_config.model_config),
+            ),
+        })
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersForReward(TransformersPoolingBase):
+    default_pooling_type = "ALL"
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+        })
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)

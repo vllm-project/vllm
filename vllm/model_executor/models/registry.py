@@ -297,9 +297,15 @@ _SPECULATIVE_DECODING_MODELS = {
 
 _TRANSFORMERS_SUPPORTED_MODELS = {
     # Embedding models
-    "AlbertForMaskedLM": ("transformers", "TransformersModel"),
-    "CamembertForMaskedLM": ("transformers", "TransformersModel"),
-    "ElectraForPreTraining": ("transformers", "TransformersModel"),
+    "AlbertForMaskedLM": ("transformers", "TransformersEmbeddingModel"),
+    "CamembertForMaskedLM": ("transformers", "TransformersEmbeddingModel"),
+    "ElectraForPreTraining": ("transformers", "TransformersEmbeddingModel"),
+    "MPNetForMaskedLM": ("transformers", "TransformersEmbeddingModel"),
+    # Cross-encoder models
+    "AlbertForSequenceClassification": ("bert", "TransformersForSequenceClassification"),  # noqa: E501
+    "CamembertForSequenceClassification": ("bert", "TransformersForSequenceClassification"),  # noqa: E501
+    "ElectraForSequenceClassification": ("bert", "TransformersForSequenceClassification"),  # noqa: E501
+    "MPNetForSequenceClassification": ("bert", "TransformersForSequenceClassification"),  # noqa: E501
     # Text generation models
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
@@ -307,9 +313,11 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
-    "TransformersModel": ("transformers", "TransformersModel"),
+    "TransformersForEmbedding": ("transformers", "TransformersForEmbedding"),
+    "TransformersForSequenceClassification": ("transformers", "TransformersForSequenceClassification"),  # noqa: E501
+    "TransformersForReward": ("transformers", "TransformersForReward"),
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
-    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
 }
 # yapf: enable
 
