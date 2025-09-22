@@ -112,10 +112,6 @@ class FlashAttentionBackend(AttentionBackend):
         return block_size % 16 == 0
 
     @classmethod
-    def is_v1(cls) -> bool:
-        return True
-
-    @classmethod
     def is_mla(cls) -> bool:
         return False
 

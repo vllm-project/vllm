@@ -112,10 +112,6 @@ class FlexAttentionBackend(AttentionBackend):
         return []
 
     @classmethod
-    def is_v1(cls) -> bool:
-        return True
-
-    @classmethod
     def is_mla(cls) -> bool:
         return False
 

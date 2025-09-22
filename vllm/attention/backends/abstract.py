@@ -139,10 +139,6 @@ class AttentionBackend(ABC):
                 or block_size in supported_block_sizes)
 
     @classmethod
-    def is_v1(cls) -> bool:
-        raise NotImplementedError
-
-    @classmethod
     def is_mla(cls) -> bool:
         raise NotImplementedError
 
@@ -187,11 +183,6 @@ class AttentionBackend(ABC):
             invalid_reasons.append("kv_cache_dtype not supported")
         if not cls.supports_block_size(block_size):
             invalid_reasons.append("block_size not supported")
-        if (use_v1 != cls.is_v1()):
-            if use_v1:
-                invalid_reasons.append("V1 not supported")
-            else:
-                invalid_reasons.append("V0 not supported")
         if (use_mla != cls.is_mla()):
             if use_mla:
                 invalid_reasons.append("MLA not supported")
