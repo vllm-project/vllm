@@ -46,27 +46,17 @@ def _get_backend_priorities():
 
     # fmt: off
     return {
-        # V1 non-MLA backends
-        _Backend.FLASHINFER_VLLM_V1: 0,
-        _Backend.FLASH_ATTN_VLLM_V1: 1,
-        _Backend.TRITON_ATTN_VLLM_V1: 2,
-        _Backend.FLEX_ATTENTION: 3,
-        # V0 non-MLA backends
-        # NOTE: backends with V1 versions must match
-        # the numeric values of their V1 counterparts
+        # non-MLA backends
+        _Backend.FLASHINFER: 0,
         _Backend.FLASH_ATTN: 1,
-        _Backend.XFORMERS: 4,
+        _Backend.TRITON_ATTN: 2,
+        _Backend.FLEX_ATTENTION: 3,
 
-        # V1 MLA backends
+        # MLA backends
         _Backend.CUTLASS_MLA: 0,
         _Backend.FLASHINFER_MLA: 1,
-        _Backend.FLASHMLA_VLLM_V1: 2,
-        _Backend.FLASH_ATTN_MLA: 3,
-        _Backend.TRITON_MLA_VLLM_V1: 4,
-        # V0 MLA backends
-        # NOTE: backends with V1 versions must match
-        # the numeric values of their V1 counterparts
         _Backend.FLASHMLA: 2,
+        _Backend.FLASH_ATTN_MLA: 3,
         _Backend.TRITON_MLA: 4,
     }
     # fmt: on
