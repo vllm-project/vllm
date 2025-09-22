@@ -695,6 +695,33 @@ class EplbState:
         logger.info(f"[EPLB Debug] Rank {rank}: async thread started and returned")
         return thread
 
+    def _update_layer_mapping_from_new(self, layer: int) -> None:
+        if (self.new_physical_to_logical_map is None
+                or self.new_logical_to_physical_map is None
+                or self.new_logical_replica_count is None):
+            return
+
+        target_device = self.physical_to_logical_map.device
+        new_physical = self.new_physical_to_logical_map
+        if self.physical_to_logical_map.shape[1] != new_physical.shape[1]:
+            self.physical_to_logical_map = new_physical.to(target_device)
+        else:
+            self.physical_to_logical_map[layer].copy_(
+                new_physical[layer].to(target_device))
+
+        logical_device = self.logical_to_physical_map.device
+        new_logical = self.new_logical_to_physical_map[layer].to(logical_device)
+        max_slots = self.logical_to_physical_map.shape[-1]
+        slot_delta = max_slots - new_logical.shape[-1]
+        if slot_delta > 0:
+            new_logical = torch.nn.functional.pad(new_logical, (0, slot_delta),
+                                                  value=-1)
+        self.logical_to_physical_map[layer].copy_(new_logical)
+
+        replica_device = self.logical_replica_count.device
+        self.logical_replica_count[layer].copy_(
+            self.new_logical_replica_count[layer].to(replica_device))
+
     async def transfer_run_periodically(
             self,
             model,
@@ -786,6 +813,8 @@ class EplbState:
                     self.layer_to_transfer].tolist(),
                 ep_group=ep_group)
             logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: move_from_buffer completed for layer {self.layer_to_transfer}")
+            transferred_layer = self.layer_to_transfer
+            self._update_layer_mapping_from_new(transferred_layer)
             # After the main thread consumes, advance layer_to_transfer
             self.layer_to_transfer += 1
             self.ep_buffer_ready = 0
@@ -805,26 +834,8 @@ class EplbState:
         assert self.new_logical_to_physical_map is not None
         assert self.new_logical_replica_count is not None
         if not is_profile:
-            if self.physical_to_logical_map.shape[
-                    1] != self.new_physical_to_logical_map.shape[1]:
-                self.physical_to_logical_map = \
-                self.new_physical_to_logical_map.to(
-                    self.physical_to_logical_map.device)
-            else:
-                self.physical_to_logical_map.copy_(
-                    self.new_physical_to_logical_map)
-            max_physical_slots = self.new_logical_to_physical_map.shape[-1]
-            assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
-            self.new_logical_to_physical_map = \
-                torch.nn.functional.pad(
-                self.new_logical_to_physical_map,
-                (0,
-                 self.logical_to_physical_map.shape[-1] - max_physical_slots),
-                value=-1,
-            )
-            self.logical_to_physical_map.copy_(
-                self.new_logical_to_physical_map)
-            self.logical_replica_count.copy_(self.new_logical_replica_count)
+            for layer_idx in range(self.physical_to_logical_map.shape[0]):
+                self._update_layer_mapping_from_new(layer_idx)
 
     @staticmethod
     def recv_state() -> tuple[torch.Tensor, torch.Tensor]:
