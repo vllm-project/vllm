@@ -44,7 +44,7 @@ class model_aware_kv_ops_helper:
         # When VLLM_MLA_DISABLE=1, standard FA is used instead, leading
         # to a kv_cache shape of [2, num_blks, blk_size,
         # num_key_value_heads / tp, qk_nope_head_dim + qk_rope_head_dim].
-        # For more details, see vllm/attention/backends/mla/common.py.
+        # For more details, see vllm/v1/attention/backends/mla/common.py.
         if self.is_deepseek_mla and self.use_mla_opt:
             head_size = model_config.kv_lora_rank + \
                 model_config.qk_rope_head_dim
