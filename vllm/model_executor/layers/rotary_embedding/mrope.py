@@ -233,7 +233,7 @@ class MRotaryEmbedding(RotaryEmbedding):
             self.mscale = float(
                 yarn_get_mscale(self.scaling_factor) * attn_factor)
         else:
-            self.mscale = None
+            self.mscale = 1.0
 
         # In Qwen2.5-VL, the maximum index value is related to the duration of
         # the input video. We enlarge max_position_embeddings to 4 times to get
