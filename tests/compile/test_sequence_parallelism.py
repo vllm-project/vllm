@@ -6,10 +6,12 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.compilation.fusion import FusionPass
+from vllm.compilation.fusion import RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
+from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.compilation.sequence_parallelism import SequenceParallelismPass
+from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import (CompilationConfig, DeviceConfig, ModelConfig,
                          PassConfig, VllmConfig)
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -104,7 +106,7 @@ class TestQuantModel(torch.nn.Module):
         # Initialize weights
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
-        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=False)
+        self.fp8_linear = Fp8LinearOp(act_quant_static=True)
 
         self.scale = torch.rand(1, dtype=torch.float32)
         # Create a weight that is compatible with torch._scaled_mm,
@@ -137,8 +139,7 @@ class TestQuantModel(torch.nn.Module):
         # layer normalization
         norm_output, residual_output = self.norm(all_reduce, residual)
 
-        # for static input quantization
-        # self.fp8_linear is initialized with use_per_token_if_dynamic=False
+        # scaled_mm with static input quantization
         fp8_linear_result = self.fp8_linear.apply(norm_output,
                                                   self.w,
                                                   self.wscale,
@@ -253,15 +254,19 @@ def sequence_parallelism_pass_on_test_model(
                                            dtype=dtype,
                                            seed=42)
 
-    sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
     noop_pass = NoOpEliminationPass(vllm_config)
+    sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
     func_pass = FixFunctionalizationPass(vllm_config)
+    cleanup_pass = PostCleanupPass(vllm_config)
 
-    passes_for_backend = [noop_pass, sequence_parallelism_pass]
+    passes_for_backend: list[VllmInductorPass] = \
+        [noop_pass, sequence_parallelism_pass]
 
     if enable_fusion:
-        fusion_pass = FusionPass.instance(vllm_config)
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
         passes_for_backend.append(fusion_pass)
+
+    passes_for_backend.append(cleanup_pass)
 
     backend_no_func = TestBackend(*passes_for_backend)
     backend_func = TestBackend(*passes_for_backend, func_pass)
@@ -278,6 +283,8 @@ def sequence_parallelism_pass_on_test_model(
     compiled_model_no_func(hidden_states, residual)
     compiled_model_func = torch.compile(model, backend=backend_func)
     compiled_model_func(hidden_states, residual)
+
+    assert sequence_parallelism_pass.matched_count == 1
 
     # In pre-nodes, all reduce should be there,
     # reduce scatter and all gather should not

@@ -3392,7 +3392,7 @@ def length_from_prompt_token_ids_or_embeds(
     prompt_token_ids: Optional[list[int]],
     prompt_embeds: Optional[torch.Tensor],
 ) -> int:
-    """Calculate the request length (in number of tokens) give either 
+    """Calculate the request length (in number of tokens) give either
     prompt_token_ids or prompt_embeds.
     """
     prompt_token_len = None if prompt_token_ids is None else len(
@@ -3413,3 +3413,16 @@ def length_from_prompt_token_ids_or_embeds(
                 f" prompt_token_ids={prompt_token_len}"
                 f" prompt_embeds={prompt_embeds_len}")
         return prompt_token_len
+
+
+@contextlib.contextmanager
+def set_env_var(key, value):
+    old = os.environ.get(key)
+    os.environ[key] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            del os.environ[key]
+        else:
+            os.environ[key] = old

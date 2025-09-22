@@ -64,9 +64,8 @@ class NoOpEliminationPass(VllmInductorPass):
     out: "f16[s0, 4096]" = at[1]
     """
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph):
-        self.begin()
-        self.dump_graph(graph, "before_noop_elimination")
         count = 0
         # Remove no-op reshapes/views:
         for node in graph.nodes:
@@ -121,8 +120,6 @@ class NoOpEliminationPass(VllmInductorPass):
                     count += 1
 
         logger.debug("Removed %s no-op reshapes and slices", count)
-        self.dump_graph(graph, "after_noop_elimination")
-        self.end_and_log()
 
     # ---------------------- Reshape helpers ----------------------
     def reshape_dims_equivalent(self, dim: Union[int, torch.fx.Node],
