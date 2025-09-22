@@ -971,7 +971,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 self._run_prefill_context_chunk_cudnn
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
-        elif is_vllm_fa:  # Use FlashAttention
+        elif "flash_attn_varlen_func" in globals():  # Use FlashAttention
             logger.debug_once("Using FlashAttention prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fa
