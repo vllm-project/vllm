@@ -3541,47 +3541,40 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         Returns:
             The selected kernel block size (largest available)
+            - return kv_manager_block_size if supported
+            - otherwise, return max supported block size that is a factor
+              of kv_manager_block_size
 
         Raises:
             ValueError: If no valid kernel block size can be found that
                        satisfies the backend's constraints
         """
-        supported_constraints = backend_cls.get_supported_block_size()
-        selected_kernel_size = kv_manager_block_size
-        constraint_satisfied = False
-        valid_constraints = []
+        supported_block_size = backend_cls.get_supported_block_size()
 
-        for constraint in supported_constraints:
-            if (isinstance(constraint, int)
-                    and kv_manager_block_size % constraint == 0):
-                valid_constraints.append(constraint)
-            elif (isinstance(constraint, MultipleOf)
-                  and kv_manager_block_size % constraint.base == 0):
-                valid_constraints.append(constraint.base)
+        # if kv_manager_block_size is supported by the attention backend,
+        # return it.
+        for block_size in supported_block_size:
+            if isinstance(block_size, int):
+                if kv_manager_block_size == block_size:
+                    return kv_manager_block_size
+            elif (isinstance(block_size, MultipleOf)
+                  and kv_manager_block_size % block_size.base == 0):
+                return kv_manager_block_size
 
-        if valid_constraints:
-            selected_kernel_size = max(valid_constraints)
-            constraint_satisfied = True
+        # Otherwise, we can't find a valid block_size from the
+        # `MultipleOf`-style candidates. So find the largest one from
+        # the `int`-style candidates.
+        compatible_sizes = [
+            block_size for block_size in supported_block_size
+            if isinstance(block_size, int) and kv_manager_block_size %
+            block_size == 0
+        ]
 
-        if not constraint_satisfied and supported_constraints:
-            # Only raise error if there are actual constraints to satisfy
-            # and none of them were met
-            constraint_strs = []
-            for constraint in supported_constraints:
-                if isinstance(constraint, int):
-                    constraint_strs.append(f"{constraint}")
-                elif isinstance(constraint, MultipleOf):
-                    constraint_strs.append(f"multiple of {constraint.base}")
-
+        if not compatible_sizes:
             raise ValueError(
-                f"Physical block size {kv_manager_block_size} does not "
-                f"satisfy any constraints for {backend_cls.__name__} "
-                f"backend. Supported constraints: "
-                f"{', '.join(constraint_strs)}. "
-                f"The physical block size must be compatible with at least "
-                f"one constraint.")
+                f"No compatible block size for {kv_manager_block_size}")
 
-        return selected_kernel_size
+        return max(compatible_sizes)
 
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:
