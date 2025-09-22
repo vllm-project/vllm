@@ -503,7 +503,7 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
 
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        if current_platform.support_static_graph_mode():
             # if cudagraph_mode is not explicitly set by users, set default
             # value
             if self.compilation_config.cudagraph_mode is None:

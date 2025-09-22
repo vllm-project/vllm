@@ -67,6 +67,7 @@ class _Backend(enum.Enum):
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
     XFORMERS_VLLM_V1 = enum.auto()
+    ROCM_ATTN_VLLM_V1 = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
@@ -584,6 +585,13 @@ class Platform:
     def support_hybrid_kv_cache(cls) -> bool:
         """
         Returns if the hybrid kv cache is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        """
+        Returns if the graph mode is supported by the current platform.
         """
         return False
 
