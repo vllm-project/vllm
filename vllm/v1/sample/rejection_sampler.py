@@ -351,17 +351,17 @@ def generate_uniform_probs(
     without a seed.
 
     Args:
-        num_tokens : int
+        num_tokens: int
             Total number of tokens.
-        num_draft_tokens : List[List[int]]
+        num_draft_tokens: List[List[int]]
             Number of draft tokens per request.
-        generators : Optional[Dict[int, torch.Generator]]
+        generators: Optional[Dict[int, torch.Generator]]
             A dictionary mapping indices in the batch to
             `torch.Generator` objects.
-        device : torch.device
+        device: torch.device
             The device on which to allocate the tensor.
     Returns:
-        uniform_rand : torch.Tensor
+        uniform_rand: torch.Tensor
             A tensor of shape `(num_tokens, )` containing uniform
             random values in the range [0, 1).
     """
