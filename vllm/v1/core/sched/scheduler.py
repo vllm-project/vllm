@@ -83,9 +83,14 @@ class Scheduler(SchedulerInterface):
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
         if self.vllm_config.kv_transfer_config is not None:
-            assert len(self.kv_cache_config.kv_cache_groups) == 1, (
-                "Multiple KV cache groups are not currently supported "
-                "with KV connectors")
+            if len(self.kv_cache_config.kv_cache_groups) > 1:
+                logger.warning_once(
+                    "Hybrid KV cache manager and KV cache connector are "
+                    "enabled together. The support of this "
+                    "combination is experimental and we do not "
+                    "recommend using it in production. For "
+                    "production use please set "
+                    "`--disable-hybrid-kv-cache-manager`.")
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported "
                 "with KV connectors")
