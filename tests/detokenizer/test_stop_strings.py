@@ -32,10 +32,6 @@ def _test_stopping(llm: LLM,
     assert output.stop_reason == expected_reason
 
 
-def _set_async_mode(llm, is_async):
-    llm.llm_engine.scheduler[0].use_async_output_proc = is_async
-
-
 def _stop_basic(llm):
     _test_stopping(llm,
                    stop=["."],
@@ -103,40 +99,8 @@ def test_stop_strings():
     # async output processing below.
     llm = LLM(MODEL, enforce_eager=envs.VLLM_USE_V1)
 
-    if envs.VLLM_USE_V1:
-        _stop_basic(llm)
-    else:
-        _set_async_mode(llm, True)
-        _stop_basic(llm)
-
-        _set_async_mode(llm, False)
-        _stop_basic(llm)
-
-    if envs.VLLM_USE_V1:
-        _stop_multi_tokens(llm)
-    else:
-        _set_async_mode(llm, True)
-        _stop_multi_tokens(llm)
-
-        _set_async_mode(llm, False)
-        _stop_multi_tokens(llm)
-
-    if envs.VLLM_USE_V1:
-        _stop_partial_token(llm)
-    else:
-        _set_async_mode(llm, True)
-        _stop_partial_token(llm)
-
-        _set_async_mode(llm, False)
-        _stop_partial_token(llm)
-
-    if envs.VLLM_USE_V1:
-        # FIXME: this does not respect include_in_output=False
-        # _stop_token_id(llm)
-        pass
-    else:
-        _set_async_mode(llm, True)
-        _stop_token_id(llm)
-
-        _set_async_mode(llm, False)
-        _stop_token_id(llm)
+    _stop_basic(llm)
+    _stop_multi_tokens(llm)
+    _stop_partial_token(llm)
+    # FIXME: this does not respect include_in_output=False
+    # _stop_token_id(llm)

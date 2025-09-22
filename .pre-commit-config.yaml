@@ -155,11 +155,10 @@ repos:
     additional_dependencies: [regex]
   - id: check-pickle-imports
     name: Prevent new pickle/cloudpickle imports
-    entry: python tools/check_pickle_imports.py
+    entry: python tools/pre_commit/check_pickle_imports.py
     language: python
     types: [python]
-    pass_filenames: false
-    additional_dependencies: [pathspec, regex]
+    additional_dependencies: [regex]
   - id: validate-config
     name: Validate configuration has default values and that each field has a docstring
     entry: python tools/validate_config.py
