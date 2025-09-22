@@ -512,6 +512,7 @@ async def test_function_calling(client: OpenAI, model_name: str):
     }]
 
     response = await client.responses.create(
+        # id="test_function_calling_non_resp", # TODO
         model=model_name,
         input="What's the weather like in Paris today?",
         tools=tools,
