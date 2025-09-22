@@ -271,6 +271,7 @@ class SingleTypeKVCacheManager(ABC):
         Returns:
             The last token (leftmost token) index that is inside attn window.
         """
+        # The default behavior is to not remove any blocks.
         return 0
 
 
@@ -641,12 +642,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # Return empty blocks to indicate no cache hits
         raise NotImplementedError(
             "CrossAttentionManager does not support caching")
-
-    def remove_skipped_blocks(self, request_id: str,
-                              num_computed_tokens: int) -> None:
-        # Cross-attention blocks represent encoder states which are needed
-        # for the entire decoding process, so no blocks should be skipped
-        pass
 
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
