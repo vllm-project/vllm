@@ -959,7 +959,9 @@ def get_current_model_prefix() -> str:
         "Current model prefix is not set. "
     return _current_prefix
 
+
 T = TypeVar("T")
+
 
 def get_layers_from_vllm_config(
         vllm_config: VllmConfig,
