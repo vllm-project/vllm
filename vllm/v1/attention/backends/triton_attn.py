@@ -8,9 +8,9 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash)
+from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
