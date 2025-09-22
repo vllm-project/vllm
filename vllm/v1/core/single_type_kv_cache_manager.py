@@ -231,19 +231,47 @@ class SingleTypeKVCacheManager(ABC):
 
         raise NotImplementedError
 
-    @abstractmethod
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
         """
         Remove the blocks that are no longer needed from `blocks` and free the 
         blocks. The removed blocks should be replaced by null_block.
         Need to be customized for each attention type.
-
         Args:
             request_id: The request ID.
             num_computed_tokens: The number of tokens that have been computed.
         """
-        raise NotImplementedError
+        # Remove the blocks that are no longer be in the sliding window and
+        # skipped during the attention computation.
+        last_useful_token = self.get_last_useful_token(num_computed_tokens)
+        if last_useful_token <= 0:
+            # This indicates that ALL tokens are inside attention window.
+            # Thus we do not need to free any blocks outside attention window.
+            return
+        last_useful_block = last_useful_token // self.block_size
+        blocks = self.req_to_blocks[request_id]
+        removed_blocks: list[KVCacheBlock] = []
+        for i in range(last_useful_block - 1, -1, -1):
+            if blocks[i] == self._null_block:
+                # If the block is already a null block, the blocks before it
+                # should also have been set to null blocks by the previous calls
+                # to this function.
+                break
+            removed_blocks.append(blocks[i])
+            blocks[i] = self._null_block
+        self.block_pool.free_blocks(removed_blocks)
+
+    def get_last_useful_token(self, num_computed_tokens: int) -> int:
+        """
+        Get the last token (leftmost token) index that is inside attn window.
+
+        Args:
+            num_computed_tokens: The number of tokens that have been computed.
+
+        Returns:
+            The last token (leftmost token) index that is inside attn window.
+        """
+        return 0
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
@@ -283,11 +311,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             for computed in computed_blocks:
                 computed.pop()
         return computed_blocks
-
-    def remove_skipped_blocks(self, request_id: str,
-                              num_computed_tokens: int) -> None:
-        # No need to remove blocks for full attention.
-        pass
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
@@ -372,23 +395,19 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 computed.pop()
         return computed_blocks
 
-    def remove_skipped_blocks(self, request_id: str,
-                              num_computed_tokens: int) -> None:
-        # Remove the blocks that are no longer be in the sliding window and
-        # skipped during the attention computation.
-        last_useful_token = num_computed_tokens - self.sliding_window + 1
-        last_useful_block = last_useful_token // self.block_size
-        blocks = self.req_to_blocks[request_id]
-        removed_blocks: list[KVCacheBlock] = []
-        for i in range(last_useful_block - 1, -1, -1):
-            if blocks[i] == self._null_block:
-                # If the block is already a null block, the blocks before it
-                # should also have been set to null blocks by the previous calls
-                # to this function.
-                break
-            removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
-        self.block_pool.free_blocks(removed_blocks)
+    def get_last_useful_token(self, num_computed_tokens: int) -> int:
+        """
+        Get the last token (leftmost token) index that is inside
+        sliding window.
+
+        Args:
+            num_computed_tokens: The number of tokens that have been computed.
+
+        Returns:
+            The last token (leftmost token) index that is inside 
+            sliding window.
+        """
+        return num_computed_tokens - self.sliding_window + 1
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
@@ -483,40 +502,22 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 break
         return computed_blocks
 
-    def remove_skipped_blocks(self, request_id: str,
-                              num_computed_tokens: int) -> None:
-        # Remove the blocks that are no longer be in the chunked attention
-        # window and skipped during the attention computation.
+    def get_last_useful_token(self, num_computed_tokens: int) -> int:
+        """
+        Get the last token (leftmost token) index that is inside chunked local
+        attention window.
 
-        # [chunk 0][chunk 1]local_attention_start_idx ... current
-        # we computed previous number of chunks to get the idx of
-        # current chunk window starting offset,
-        # e.g. for computed 1024 tokens, the 1024th token (0 indexed)
-        # is in the second chunk, there are 1 prev chunk, the start idx
-        # is 1024. for 1023, it will be 0.
-        num_cached_block = self.num_cached_block.get(request_id, 0)
+        Args:
+            num_computed_tokens: The number of tokens that have been computed.
+
+        Returns:
+            The last token (leftmost token) index that is inside chunked local
+            attention window.
+        """
         local_attention_start_idx = (
             num_computed_tokens
         ) // self.attention_chunk_size * self.attention_chunk_size
-        first_useful_block_idx = local_attention_start_idx // self.block_size
-        if num_cached_block > 0:
-            # Make sure we don't delete the last cached block
-            first_useful_block_idx = min(first_useful_block_idx,
-                                         num_cached_block - 1)
-        # if block size = 128, 0 -> block 0, 1024 (= 128 * 8) ->
-        # block 8, 372 (= 128 * 2 + 116) -> block 2
-        blocks = self.req_to_blocks[request_id]
-        removed_blocks: list[KVCacheBlock] = []
-        # we need to keep the last block to get the previous hash key
-        for i in range(first_useful_block_idx - 1, -1, -1):
-            if blocks[i] == self._null_block:
-                # If the block is already a null block, the blocks before it
-                # should also have been set to null blocks by the previous calls
-                # to this function.
-                break
-            removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
-        self.block_pool.free_blocks(removed_blocks)
+        return local_attention_start_idx
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
@@ -548,12 +549,6 @@ class MambaManager(SingleTypeKVCacheManager):
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
         return computed_blocks
-
-    def remove_skipped_blocks(self, request_id: str,
-                              num_computed_tokens: int) -> None:
-        # Each request will always have 1 block at this moment, so no need to
-        # remove blocks.
-        pass
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
