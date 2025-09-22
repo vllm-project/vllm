@@ -2478,8 +2478,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.supports_mm_inputs:
                 mm_embeds = self._gather_mm_embeddings(scheduler_output,
                                                        shift_computed_tokens=1)
-            if self.speculative_config.use_eagle():
-                assert isinstance(self.drafter, EagleProposer)
+            if (self.speculative_config.use_eagle()
+                    or self.speculative_config.uses_draft_model()):
+                assert isinstance(self.drafter,
+                                  (EagleProposer, DraftModelProposer))
+                cudagraph_args = dict(
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
+                )
                 draft_token_ids = self.drafter.propose(
                     target_token_ids=target_token_ids,
                     target_positions=target_positions,
@@ -2489,17 +2495,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     sampling_metadata=sampling_metadata,
                     common_attn_metadata=common_attn_metadata,
                     mm_embeds=mm_embeds,
-                )
-            elif self.speculative_config.uses_draft_model():
-                assert isinstance(self.drafter, DraftModelProposer)
-                draft_token_ids = self.drafter.propose(
-                    target_token_ids=target_token_ids,
-                    target_positions=target_positions,
-                    next_token_ids=next_token_ids,
-                    last_token_indices=token_indices_to_sample,
-                    common_attn_metadata=common_attn_metadata,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_descriptor,
+                    cudagraph_args=cudagraph_args,
                 )
         return draft_token_ids
 
