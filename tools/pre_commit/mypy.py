@@ -28,7 +28,6 @@ FILES = [
     "vllm/*.py",
     "vllm/assets",
     "vllm/entrypoints",
-    "vllm/core",
     "vllm/inputs",
     "vllm/logging_utils",
     "vllm/multimodal",
@@ -36,7 +35,6 @@ FILES = [
     "vllm/transformers_utils",
     "vllm/triton_utils",
     "vllm/usage",
-    "vllm/utils",
 ]
 
 # After fixing errors resulting from changing follow_imports
