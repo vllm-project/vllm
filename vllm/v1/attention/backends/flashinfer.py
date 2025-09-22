@@ -145,7 +145,7 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_block_size() -> list[Union[int, MultipleOf]]:
-        return [MultipleOf(16)]
+        return [MultipleOf(1)]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
