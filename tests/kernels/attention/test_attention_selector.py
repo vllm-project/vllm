@@ -130,7 +130,7 @@ def test_env(
                                                    block_size,
                                                    False,
                                                    use_mla=use_mla)
-                        expected = f"{name}"
+                        expected = name
                         assert backend.get_name() == expected
                 else:
                     backend = get_attn_backend(16,
@@ -202,7 +202,7 @@ def test_env(
                                                            block_size,
                                                            False,
                                                            use_mla=use_mla)
-                                expected = f"{name}"
+                                expected = name
                                 assert backend.get_name() == expected
                     elif name == "FLASH_ATTN_MLA":
                         backend = get_attn_backend(16,
