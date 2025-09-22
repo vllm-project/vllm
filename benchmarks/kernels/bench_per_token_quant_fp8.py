@@ -163,15 +163,15 @@ if __name__ == "__main__":
         "--hidden-sizes",
         type=int,
         nargs="+",
-        default=None,
-        help="Hidden sizes to benchmark (default: 1,16,64,128,256,512,1024,2048,4096)",
+        default=[896, 1024, 2048, 4096, 7168],
+        help="Hidden sizes to benchmark",
     )
     parser.add_argument(
         "--batch-sizes",
         type=int,
         nargs="+",
-        default=None,
-        help="Batch sizes to benchmark (default: 1,16,32,64,128)",
+        default=[1, 16, 128, 512, 1024],
+        help="Batch sizes to benchmark",
     )
     parser.add_argument(
         "--group-sizes",
@@ -192,8 +192,8 @@ if __name__ == "__main__":
 
     dtype = STR_DTYPE_TO_TORCH_DTYPE[args.dtype]
 
-    hidden_sizes = args.hidden_sizes or [1, 16, 64, 128, 256, 512, 1024, 2048, 4096]
-    batch_sizes = args.batch_sizes or [1, 16, 32, 64, 128]
+    hidden_sizes = args.hidden_sizes
+    batch_sizes = args.batch_sizes
 
     if args.group_sizes is not None:
         group_shapes = []
