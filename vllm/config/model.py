@@ -27,12 +27,14 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    is_interleaved, try_get_generation_config, try_get_safetensors_metadata,
+    is_interleaved, maybe_override_with_speculators_target_model,
+    try_get_generation_config, try_get_safetensors_metadata,
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.runai_utils import (ObjectStorageModel,
                                                  is_runai_obj_uri)
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import LayerBlockType, LazyLoader, common_broadcastable_dtype
+from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
+                        LazyLoader, common_broadcastable_dtype)
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -221,6 +223,8 @@ class ModelConfig:
     that this name(s) will also be used in `model_name` tag content of
     prometheus metrics, if multiple names provided, metrics tag will take the
     first one."""
+    use_async_output_proc: bool = True
+    """Whether to use async output processor."""
     config_format: Union[str, ConfigFormat] = "auto"
     """The format of the model config to load:\n
     - "auto" will try to load the config in hf format if available else it
@@ -413,6 +417,15 @@ class ModelConfig:
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
+
+        if self.runner != "draft":
+            # If we're not running the draft model, check for speculators config
+            # If speculators config, set model / tokenizer to be target model
+            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code)
 
         if (backend := envs.VLLM_ATTENTION_BACKEND
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
@@ -1102,6 +1115,41 @@ class ModelConfig:
                     self.hf_config.dual_chunk_attention_config[
                         "sparse_attention_enabled"] = True
 
+            if envs.VLLM_ATTENTION_BACKEND != STR_DUAL_CHUNK_FLASH_ATTN_VAL:
+                raise ValueError("please set VLLM_ATTENTION_BACKEND to "
+                                 f"{STR_DUAL_CHUNK_FLASH_ATTN_VAL}")
+
+    def verify_async_output_proc(self, parallel_config, speculative_config,
+                                 device_config) -> None:
+        if not self.use_async_output_proc:
+            # Nothing to check
+            return
+
+        if parallel_config.pipeline_parallel_size > 1:
+            self.use_async_output_proc = False
+            return
+
+        # Reminder: Please update docs/features/compatibility_matrix.md
+        # If the feature combo become valid
+        from vllm.platforms import current_platform
+        if not current_platform.is_async_output_supported(self.enforce_eager):
+            self.use_async_output_proc = False
+            return
+
+        if envs.VLLM_USE_RAY_SPMD_WORKER:
+            self.use_async_output_proc = False
+            return
+
+        # Async postprocessor is not necessary for pooling models
+        # since there is no token generation
+        if self.runner_type == "pooling":
+            self.use_async_output_proc = False
+
+        # Reminder: Please update docs/features/compatibility_matrix.md
+        # If the feature combo become valid
+        if speculative_config:
+            self.use_async_output_proc = False
+
     def verify_with_parallel_config(
         self,
         parallel_config: ParallelConfig,
@@ -1125,12 +1173,31 @@ class ModelConfig:
             self._verify_with_expert_parallelism()
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
-        if (pipeline_parallel_size > 1
-                and not self.registry.is_pp_supported_model(
-                    self.architectures, self)):
-            raise NotImplementedError(
-                "Pipeline parallelism is not supported for this model. "
-                "Supported models implement the `SupportsPP` interface.")
+        if pipeline_parallel_size > 1:
+            if not self.registry.is_pp_supported_model(self.architectures,
+                                                       self):
+                raise NotImplementedError(
+                    "Pipeline parallelism is not supported for this model. "
+                    "Supported models implement the `SupportsPP` interface.")
+
+            if self.use_async_output_proc:
+                self.use_async_output_proc = False
+
+        decode_context_parallel_size = \
+            parallel_config.decode_context_parallel_size
+        if decode_context_parallel_size > 1 and not self.use_mla:
+            total_num_kv_heads = self.get_total_num_kv_heads()
+            assert tensor_parallel_size > total_num_kv_heads, (
+                f"tensor parallel size {tensor_parallel_size} must be greater "
+                f"than total num kv heads {total_num_kv_heads} when enable "
+                f"decode context parallel for GQA/MQA")
+
+            max_dcp_size = tensor_parallel_size // total_num_kv_heads
+            assert decode_context_parallel_size <= max_dcp_size, (
+                f"decode context parallel size must less than or equal to "
+                f"(tensor parallel size {tensor_parallel_size} // total "
+                f"num kv heads {total_num_kv_heads}) = {max_dcp_size}, "
+                f"but got {decode_context_parallel_size}")
 
     def get_sliding_window(self) -> Optional[int]:
         """Get the sliding window size from the HF text config if present."""

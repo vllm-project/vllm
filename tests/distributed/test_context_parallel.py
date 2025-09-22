@@ -36,6 +36,7 @@ class ParallelSetup(NamedTuple):
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
     load_format: Optional[str] = None
+    attn_backend: Optional[str] = None
 
 
 @dataclass
@@ -67,6 +68,7 @@ class CPTestSettings:
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         load_format: Optional[str] = None,
+        attn_backend: Optional[str] = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False]:
@@ -86,7 +88,8 @@ class CPTestSettings:
             vllm_major_versions=["1"],
             runner=runner,
             test_options=CPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format),
+                                       load_format=load_format,
+                                       attn_backend=attn_backend),
         )
 
     def iter_params(self, model_id: str):
@@ -119,7 +122,7 @@ def _compare_cp_with_tp(
         chunked_prefill,
     ) = parallel_setup
 
-    multi_node_only, load_format = test_options
+    multi_node_only, load_format, attn_backend = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
@@ -180,6 +183,8 @@ def _compare_cp_with_tp(
     cp_env = tp_env = {
         "VLLM_USE_V1":
         vllm_major_version,  # Note(hc): DCP only support V1 engine only
+        "VLLM_ATTENTION_BACKEND":
+        attn_backend,
     }
 
     cp_args = [
@@ -227,12 +232,17 @@ CP_TEXT_GENERATION_MODELS = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat":
     [CPTestSettings.detailed(),
      CPTestSettings.detailed(tp_base=2)],
+     "bigcode/gpt_bigcode-santacoder": [
+        CPTestSettings.detailed(attn_backend="FLASHINFER"),
+        CPTestSettings.detailed(tp_base=2,attn_backend="FLASHINFER"),
+    ],
 }
 
 CP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
+    "bigcode/gpt_bigcode-santacoder",
 ]
 
 
