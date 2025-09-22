@@ -598,6 +598,10 @@ class AsyncLLM(EngineClient):
 
         return self.tokenizer
 
+    async def get_kv_handshake_metadata(self) -> Optional[dict]:
+        """Get KV connector handshake metadata if available."""
+        return self.engine_core.get_kv_handshake_metadata()
+
     async def is_tracing_enabled(self) -> bool:
         return self.observability_config.otlp_traces_endpoint is not None
 

@@ -43,6 +43,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_hf_chat_template,
                                          resolve_mistral_chat_template)
+from vllm.entrypoints.kv_handshake import set_up_kv_handshake_server
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -1890,11 +1891,44 @@ async def run_server_worker(listen_address,
         app = build_app(args)
 
         vllm_config = await engine_client.get_vllm_config()
+
         await init_app_state(engine_client, vllm_config, app.state, args)
 
         logger.info("Starting vLLM API server %d on %s",
                     vllm_config.parallel_config._api_process_rank,
                     listen_address)
+
+        kv_conn_metadata_server = None
+
+        # DEBUG: Log client_config details
+        logger.debug("DEBUG: client_config = %s", client_config)
+        if client_config:
+            logger.debug("DEBUG: client_config keys = %s",
+                         list(client_config.keys()))
+
+        # Check for kv_handshake_metadata from client_config (non-V1 path)
+        if client_config and "kv_handshake_metadata" in client_config:
+            kv_metadata = client_config["kv_handshake_metadata"]
+            logger.debug("DEBUG: Found kv_handshake_metadata length = %d",
+                         len(str(kv_metadata)))
+        else:
+            logger.debug(
+                "DEBUG: No kv_handshake_metadata in client_config, " \
+                "checking engine_client"
+            )
+            # For V1 path, get metadata from engine_client
+            kv_metadata = None
+            if hasattr(engine_client, 'get_kv_handshake_metadata'):
+                kv_metadata = await engine_client.get_kv_handshake_metadata()
+
+        if kv_metadata:
+            try:
+                kv_conn_metadata_server = await \
+                    set_up_kv_handshake_server(vllm_config, kv_metadata)
+            except Exception as e:
+                logger.error("Failed to start NIXL side channel server: %s", e)
+                raise
+
         shutdown_task = await serve_http(
             app,
             sock=sock,
@@ -1919,6 +1953,12 @@ async def run_server_worker(listen_address,
     try:
         await shutdown_task
     finally:
+        if kv_conn_metadata_server is not None:
+            try:
+                await kv_conn_metadata_server.stop_async()
+            except Exception as e:
+                logger.warning("Error stopping NIXL side channel server: %s",
+                               e)
         sock.close()
 
 
