@@ -75,13 +75,9 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
             and module.quant_method.block_quant):
         return False
 
-    try:
-        w, _, block_sizes = _extract_data_from_linear_base_module(module)
-        return (block_sizes == deep_gemm_block_shape() and w.ndim == 2
-                and w.shape[0] % block_size == 0
-                and w.shape[1] % block_size == 0)
-    except Exception:
-        return False
+    w, _, block_sizes = _extract_data_from_linear_base_module(module)
+    return (block_sizes == deep_gemm_block_shape() and w.ndim == 2
+            and w.shape[0] % block_size == 0 and w.shape[1] % block_size == 0)
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:

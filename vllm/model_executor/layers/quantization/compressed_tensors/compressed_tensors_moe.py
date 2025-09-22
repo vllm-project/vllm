@@ -518,7 +518,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             assert self.weight_quant.strategy == QuantizationStrategy.BLOCK
             logger.debug("WQ = %s", str(self.weight_quant))
             self.weight_block_size = self.weight_quant.block_structure
-            # TODO: self.weight_quant.dynamic
+            assert self.weight_quant.dynamic is not None
         else:
             self.weight_block_size = None
         self.block_quant = self.weight_block_size is not None
@@ -550,15 +550,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             or self.is_fp8_w8a8_sm100)
         self.disable_expert_map = False
 
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size_per_partition: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
 
         layer.intermediate_size_per_partition = intermediate_size_per_partition
         layer.hidden_size = hidden_size
@@ -668,6 +662,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
             set_weight_attrs(w13_weight_scale, extra_weight_attrs)
             set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+            layer.register_parameter("w13_weight_scale_inv", w13_weight_scale)
+            layer.register_parameter("w2_weight_scale_inv", w2_weight_scale)
 
         # INPUT_SCALES
         if self.static_input_scales:
@@ -690,7 +686,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # Fp8 moe kernels require a single activation scale.
         # We take the max of all the scales in case they differ.
         if self.static_input_scales:
-            # TODO(bnell): Is this assert right?
             assert self.input_quant.strategy == QuantizationStrategy.TENSOR
             if (layer.w13_input_scale is None or layer.w2_input_scale is None):
                 raise ValueError(
@@ -793,7 +788,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 device=device,
                 dtype=torch.int64)
 
-        # XXXXXXXXXXXXX
         if is_deep_gemm_e8m0_used() and self.block_quant:
             assert layer.weight_block_size is not None
             # Re-quantise the expert weights so their scales are UE8M0.
@@ -810,11 +804,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
 
             # Ensure column-major TMA alignment expected by DeepGEMM.
-            if _is_col_major(layer.w13_weight_scale):
-                layer.w13_weight_scale = get_col_major_tma_aligned_tensor(
+            if _is_col_major(layer.w13_weight_scale_inv):
+                layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
                     layer.w13_weight_scale)
-            if _is_col_major(layer.w2_weight_scale):
-                layer.w2_weight_scale = get_col_major_tma_aligned_tensor(
+            if _is_col_major(layer.w2_weight_scale_inv):
+                layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
                     layer.w2_weight_scale)
 
     def maybe_make_prepare_finalize(
