@@ -42,8 +42,7 @@ from vllm.v1.engine.output_processor import (OutputProcessor,
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (GlobalStatLoggerFactory,
-                                     StatLoggerFactory, StatLoggerManager)
+from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
@@ -63,7 +62,6 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
-        stat_logger_global: Optional[GlobalStatLoggerFactory] = None,
         client_addresses: Optional[dict[str, str]] = None,
         client_count: int = 1,
         client_index: int = 0,
@@ -103,11 +101,8 @@ class AsyncLLM(EngineClient):
         self.observability_config = vllm_config.observability_config
         self.log_requests = log_requests
 
-        self.log_stats = log_stats or (stat_loggers
-                                       is not None) or (stat_logger_global
-                                                        is not None)
-        if (not log_stats and stat_loggers is not None
-                or stat_logger_global is not None):
+        self.log_stats = log_stats or (stat_loggers is not None)
+        if not log_stats and stat_loggers is not None:
             logger.info(
                 "AsyncLLM created with log_stats=False and non-empty custom "
                 "logger list; enabling logging without default stat loggers")
@@ -152,7 +147,6 @@ class AsyncLLM(EngineClient):
                 vllm_config=vllm_config,
                 engine_idxs=self.engine_core.engine_ranks_managed,
                 custom_stat_loggers=stat_loggers,
-                custom_stat_logger_global=stat_logger_global,
                 enable_default_loggers=log_stats,
                 client_count=client_count,
             )
@@ -195,7 +189,6 @@ class AsyncLLM(EngineClient):
             start_engine_loop: bool = True,
             usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
             stat_loggers: Optional[list[StatLoggerFactory]] = None,
-            stat_logger_global: Optional[GlobalStatLoggerFactory] = None,
             enable_log_requests: bool = False,
             disable_log_stats: bool = False,
             client_addresses: Optional[dict[str, str]] = None,
@@ -216,7 +209,6 @@ class AsyncLLM(EngineClient):
             executor_class=Executor.get_class(vllm_config),
             start_engine_loop=start_engine_loop,
             stat_loggers=stat_loggers,
-            stat_logger_global=stat_logger_global,
             log_requests=enable_log_requests,
             log_stats=not disable_log_stats,
             usage_context=usage_context,
@@ -232,7 +224,6 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
-        stat_logger_global: Optional[GlobalStatLoggerFactory] = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
@@ -249,7 +240,6 @@ class AsyncLLM(EngineClient):
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
-            stat_logger_global=stat_logger_global,
         )
 
     def __del__(self):
