@@ -34,7 +34,7 @@ from transformers import LlamaConfig
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -242,6 +242,7 @@ class LlamaDecoderLayer(nn.Module):
         config: LlamaConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        parallel_config: Optional[ParallelConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -338,6 +339,7 @@ class LlamaModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
+        parallel_config = vllm_config.parallel_config
 
         self.config = config
         self.quant_config = quant_config
@@ -360,6 +362,7 @@ class LlamaModel(nn.Module):
             lambda prefix: layer_type(config=config,
                                       cache_config=cache_config,
                                       quant_config=quant_config,
+                                      parallel_config=parallel_config,
                                       prefix=prefix),
             prefix=f"{prefix}.layers",
         )

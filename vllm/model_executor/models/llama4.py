@@ -27,8 +27,8 @@ from transformers import Llama4TextConfig
 from vllm.attention import Attention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -39,6 +39,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
@@ -62,10 +63,14 @@ class Llama4MoE(nn.Module):
     def __init__(self,
                  config: Llama4TextConfig,
                  quant_config: Optional[QuantizationConfig] = None,
+                 parallel_config: Optional[ParallelConfig] = None,
                  prefix: str = ""):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = config.num_experts_per_tok
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = self.ep_group.rank()
+        self.ep_size = self.ep_group.size()
 
         intermediate_size_moe = config.intermediate_size
         self.router = ReplicatedLinear(config.hidden_size,
@@ -84,6 +89,21 @@ class Llama4MoE(nn.Module):
             reduce_results=False,
         )
 
+        # Load balancing settings.
+        eplb_config = parallel_config.eplb_config if parallel_config else None
+        self.enable_eplb = parallel_config.enable_eplb \
+             if parallel_config else False
+        self.n_redundant_experts = eplb_config.num_redundant_experts \
+            if eplb_config else 0
+
+        self.n_routed_experts: int = config.num_local_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_shared_experts: int = 1
+        self.n_local_experts: int = config.num_local_experts
+        self.n_physical_experts = (self.n_local_experts +
+                                   self.n_redundant_experts)
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_expert,
             num_experts=config.num_local_experts,
@@ -96,6 +116,8 @@ class Llama4MoE(nn.Module):
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
         )
 
     def forward(self, hidden_states):
@@ -262,6 +284,7 @@ class Llama4DecoderLayer(nn.Module):
         config: Llama4TextConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        parallel_config: Optional[ParallelConfig] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -293,6 +316,7 @@ class Llama4DecoderLayer(nn.Module):
             self.feed_forward = Llama4MoE(
                 config=config,
                 quant_config=quant_config,
+                parallel_config=parallel_config,
                 prefix=f"{prefix}.feed_forward",
             )
         else:
@@ -641,7 +665,7 @@ class Llama4Model(LlamaModel):
         return loaded_params
 
 
-class Llama4ForCausalLM(LlamaForCausalLM):
+class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -662,6 +686,66 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
                          layer_type=Llama4DecoderLayer)
+
+        self.expert_weights = []
+
+        self.moe_layers: list[FusedMoE] = []
+        example_moe = None
+        for layer in self.model.layers:
+            assert isinstance(layer, Llama4DecoderLayer)
+            if isinstance(layer.feed_forward, Llama4MoE):
+                # Pick last one layer since the first ones may be dense layers.
+                example_moe = layer.feed_forward
+                self.moe_layers.append(layer.feed_forward.experts)
+
+        if example_moe is None:
+            raise RuntimeError("No Llama4MoE layer found in model.layers.")
+
+        # Set MoE hyperparameters
+        self.num_moe_layers = len(self.moe_layers)
+        print(f"num_moe_layers: {self.num_moe_layers}")
+        self.num_expert_groups = 1
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            print(f"set eplb state layer_idx: {layer_idx}")
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = (num_physical_experts -
+                                      self.num_logical_experts)
+        for layer in self.model.layers:
+            if isinstance(layer.feed_forward, Llama4MoE):
+                moe = layer.feed_forward
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
 
     def _init_model(self,
                     vllm_config: VllmConfig,
