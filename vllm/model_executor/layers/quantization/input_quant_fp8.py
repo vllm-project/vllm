@@ -159,6 +159,6 @@ class QuantFP8(CustomOp):
         scales = scales.reshape(orig_shape[:-1] + (num_groups, ))
 
         if self.column_major_scales:
-            scales = scales.transpose(-2, -1).contiguous()
+            scales = scales.transpose(-2, -1).contiguous().transpose(-1, -2)
 
         return x_quant, scales
