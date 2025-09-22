@@ -5,8 +5,8 @@ import copy
 import pytest
 
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
-from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
 from vllm.v1.metrics.loggers import LoggingStatLogger
+from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
 from vllm.v1.metrics.stats import IterationStats
 
 
@@ -38,6 +38,7 @@ class DummyLoggingStatLogger(LoggingStatLogger):
     A dummy logging stat logger for testing purposes.
     Implemented the record and log APIs
     """
+
     def get_num_preempted_reqs(self) -> int:
         return self.num_preempted_reqs
 
