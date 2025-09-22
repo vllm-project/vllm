@@ -11,6 +11,7 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.layer import Attention
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
@@ -37,6 +38,9 @@ logger = init_logger(__name__)
 _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 16
 
 
+@register_attn_backend(
+    _Backend.FLASH_ATTN_VLLM_V1,
+    "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend")
 class FlashAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True

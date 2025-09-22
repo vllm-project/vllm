@@ -9,71 +9,42 @@ from vllm.utils import resolve_obj_by_qualname
 
 
 class _Backend(enum.Enum):
-    FLASH_ATTN_VLLM_V1 = enum.auto()
-    TRITON_ATTN_VLLM_V1 = enum.auto()
-    ROCM_AITER_MLA_VLLM_V1 = enum.auto()
+    FLASH_ATTN = enum.auto()
+    TRITON_ATTN = enum.auto()
+    ROCM_AITER_MLA = enum.auto()
     ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
-    TORCH_SDPA_VLLM_V1 = enum.auto()
     FLASHINFER = enum.auto()
-    FLASHINFER_VLLM_V1 = enum.auto()
     FLASHINFER_MLA = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
-    TRITON_MLA_VLLM_V1 = enum.auto()
     CUTLASS_MLA = enum.auto()
-    FLASHMLA_VLLM_V1 = enum.auto()
+    FLASHMLA = enum.auto()
     FLASH_ATTN_MLA = enum.auto()  # Supported by V1
     PALLAS = enum.auto()
-    PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
-    XFORMERS_VLLM_V1 = enum.auto()
+    XFORMERS = enum.auto()
 
 
-BACKEND_MAPPING = {
-    _Backend.FLASH_ATTN_VLLM_V1:
-    "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",  # noqa: E501
-    _Backend.TRITON_ATTN_VLLM_V1:
-    "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",  # noqa: E501
-    _Backend.ROCM_AITER_MLA_VLLM_V1:
-    "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend",  # noqa: E501
-    _Backend.ROCM_AITER_FA:
-    "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend",  # noqa: E501
-    _Backend.TORCH_SDPA:
-    "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend",  # noqa: E501
-    _Backend.TORCH_SDPA_VLLM_V1:
-    "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend",  # noqa: E501
-    _Backend.FLASHINFER:
-    "vllm.v1.attention.backends.flashinfer.FlashInferBackend",  # noqa: E501
-    _Backend.FLASHINFER_VLLM_V1:
-    "vllm.v1.attention.backends.flashinfer.FlashInferBackend",  # noqa: E501
-    _Backend.FLASHINFER_MLA:
-    "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",  # noqa: E501
-    _Backend.TRITON_MLA:
-    "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",  # noqa: E501
-    _Backend.TRITON_MLA_VLLM_V1:
-    "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",  # noqa: E501
-    _Backend.CUTLASS_MLA:
-    "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",  # noqa: E501
-    _Backend.FLASHMLA_VLLM_V1:
-    "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",  # noqa: E501
-    _Backend.FLASH_ATTN_MLA:
-    "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",  # noqa: E501
-    _Backend.PALLAS:
-    "vllm.v1.attention.backends.pallas.PallasAttentionBackend",  # noqa: E501
-    _Backend.PALLAS_VLLM_V1:
-    "vllm.v1.attention.backends.pallas.PallasAttentionBackend",  # noqa: E501
-    _Backend.NO_ATTENTION:
-    "vllm.attention.backends.placeholder_attn.PlaceholderAttentionBackend",  # noqa: E501
-    _Backend.FLEX_ATTENTION:
-    "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",  # noqa: E501
-    _Backend.TREE_ATTN:
-    "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",  # noqa: E501
-    _Backend.XFORMERS_VLLM_V1:
-    "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",  # noqa: E501
-}
+BACKEND_MAPPING = {}
+
+
+def register_attn_backend(backend: _Backend, class_path: str):
+    """
+    Decorator: register a custom attention backend into BACKEND_MAPPING.
+    Validation: only checks if 'backend' is a valid _Backend enum member.
+    Overwriting existing mappings is allowed.
+    """
+    if not isinstance(backend, _Backend):
+        raise ValueError(f"{backend} is not a valid _Backend enum value.")
+
+    def decorator(cls):
+        BACKEND_MAPPING[backend] = class_path
+        return cls
+
+    return decorator
 
 
 def backend_to_class_str(backend: _Backend,

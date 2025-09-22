@@ -10,6 +10,7 @@ import torch
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -138,6 +139,9 @@ class TritonAttentionMetadataBuilder(
         return attn_metadata
 
 
+@register_attn_backend(
+    _Backend.TRITON_ATTN_VLLM_V1,
+    "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend")
 class TritonAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True

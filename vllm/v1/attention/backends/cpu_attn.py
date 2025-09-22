@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -33,6 +34,8 @@ from vllm import _custom_ops as ops
 logger = init_logger(__name__)
 
 
+@register_attn_backend(_Backend.TORCH_SDPA,
+                       "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend")
 class TorchSDPABackend(AttentionBackend):
     accept_output_buffer: bool = False
 

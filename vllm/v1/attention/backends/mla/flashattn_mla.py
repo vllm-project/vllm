@@ -8,6 +8,7 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.utils.fa_utils import (flash_attn_supports_mla,
                                            get_flash_attn_version)
 from vllm.config import VllmConfig
@@ -29,6 +30,9 @@ logger = init_logger(__name__)
 _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 16
 
 
+@register_attn_backend(
+    _Backend.FLASH_ATTN_MLA,
+    "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend")
 class FlashAttnMLABackend(MLACommonBackend):
 
     @staticmethod

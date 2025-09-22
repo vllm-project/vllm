@@ -16,6 +16,7 @@ from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, is_torch_equal_or_newer
@@ -59,6 +60,9 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
     return F.pad(x, pad_list, mode="constant", value=0)
 
 
+@register_attn_backend(
+    _Backend.FLEX_ATTENTION,
+    "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend")
 class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 

@@ -8,6 +8,7 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -83,6 +84,9 @@ except ImportError:
         return kv_cache
 
 
+@register_attn_backend(
+    _Backend.PALLAS,
+    "vllm.v1.attention.backends.pallas.PallasAttentionBackend")
 class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
