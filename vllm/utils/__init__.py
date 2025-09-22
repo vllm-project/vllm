@@ -88,64 +88,6 @@ DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
-# Exception strings for non-implemented encoder/decoder scenarios
-
-# Reminder: Please update docs/features/compatibility_matrix.md
-# If the feature combo become valid
-
-STR_NOT_IMPL_ENC_DEC_SWA = \
-    "Sliding window attention for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
-    "Prefix caching for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
-    "Chunked prefill for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
-    "Models with logits_soft_cap "
-    "require FlashInfer backend, which is "
-    "currently not supported for encoder/decoder "
-    "models.")
-
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
-                             "supported with encoder/decoder "
-                             "models.")
-
-STR_NOT_IMPL_ENC_DEC_PP = ("Pipeline parallelism is not "
-                           "currently supported with "
-                           "encoder/decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_MM = ("Multimodal is not currently "
-                           "supported with encoder/decoder "
-                           "models.")
-
-STR_NOT_IMPL_ENC_DEC_SPEC_DEC = ("Speculative decoding is not "
-                                 "currently supported with encoder/"
-                                 "decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
-                                "backends currently supported with encoder/"
-                                "decoder models.")
-
-# Efficiently import all enc/dec error strings
-# rather than having to import all of the above
-STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
-    "STR_NOT_IMPL_ENC_DEC_SWA": STR_NOT_IMPL_ENC_DEC_SWA,
-    "STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE": STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
-    "STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL":
-    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
-    "STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP": STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP,
-    "STR_NOT_IMPL_ENC_DEC_LORA": STR_NOT_IMPL_ENC_DEC_LORA,
-    "STR_NOT_IMPL_ENC_DEC_PP": STR_NOT_IMPL_ENC_DEC_PP,
-    "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
-    "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
-    "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-}
-
 # Constants related to forcing the attention backend selection
 
 # String name of register which may be set in order to
@@ -157,10 +99,8 @@ STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
 # register, corresponding to possible backends
 STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
 STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
-STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
-STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 MB_bytes = 1_000_000
@@ -611,9 +551,10 @@ class AsyncMicrobatchTokenizer:
                 # If every request uses identical kwargs we can run a single
                 # batched tokenizer call for a big speed-up.
                 if can_batch and len(prompts) > 1:
-                    encode_fn = partial(self.tokenizer, prompts, **kwargs)
+                    batch_encode_fn = partial(self.tokenizer, prompts,
+                                              **kwargs)
                     results = await self._loop.run_in_executor(
-                        self._executor, encode_fn)
+                        self._executor, batch_encode_fn)
 
                     for i, fut in enumerate(result_futures):
                         if not fut.done():
@@ -949,7 +890,7 @@ def get_open_port() -> int:
 
 def get_open_ports_list(count: int = 5) -> list[int]:
     """Get a list of open ports."""
-    ports = set()
+    ports = set[int]()
     while len(ports) < count:
         ports.add(get_open_port())
     return list(ports)
@@ -1339,7 +1280,7 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
 
 def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
     if isinstance(obj, str) or not isinstance(obj, Iterable):
-        obj = [obj]
+        return [obj]  # type: ignore[list-item]
     return obj
 
 
@@ -3216,7 +3157,7 @@ def cprofile_context(save_file: Optional[str] = None):
 
     Args:
         save_file: path to save the profile result. "1" or
-          None will result in printing to stdout.
+            None will result in printing to stdout.
     """
     import cProfile
 
@@ -3273,7 +3214,7 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
                       and getattr(cfg.attn_config, "alibi", False)))))
 
 
-def sha256(input) -> bytes:
+def sha256(input: Any) -> bytes:
     """Hash any picklable Python object using SHA-256.
 
     The input is serialized using pickle before hashing, which allows
@@ -3290,7 +3231,7 @@ def sha256(input) -> bytes:
     return hashlib.sha256(input_bytes).digest()
 
 
-def sha256_cbor(input) -> bytes:
+def sha256_cbor(input: Any) -> bytes:
     """
     Hash objects using CBOR serialization and SHA-256.
 
