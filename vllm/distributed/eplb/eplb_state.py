@@ -492,8 +492,11 @@ class EplbState:
         # performing collective communication.
         self.expert_rearrangement_step += 1
 
+        all_ranks_buffer_ready = False
         if self.is_async and self.ep_buffer_ready:
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Buffer ready for layer {self.layer_to_transfer}, calling move_to_workspace")
+            all_ranks_buffer_ready = self._all_ranks_buffer_ready()
+
+        if self.is_async and self.ep_buffer_ready and all_ranks_buffer_ready:
             self.move_to_workspace(model=model,
                                    ep_group=ep_group,
                                    is_profile=is_profile)
@@ -722,6 +725,27 @@ class EplbState:
         self.logical_replica_count[layer].copy_(
             self.new_logical_replica_count[layer].to(replica_device))
 
+    def _all_ranks_buffer_ready(self) -> bool:
+        parallel_state = get_ep_group()
+        cpu_group = getattr(parallel_state, "cpu_group", None)
+        if cpu_group is not None and cpu_group.size() > 1:
+            flag = torch.tensor((int(self.ep_buffer_ready),),
+                                 dtype=torch.int32,
+                                 device="cpu")
+            all_reduce(flag, group=cpu_group)
+            return int(flag.item()) == cpu_group.size()
+
+        device_group = parallel_state.device_group
+        if device_group.size() <= 1:
+            return bool(self.ep_buffer_ready)
+
+        device = getattr(parallel_state, "device", self.physical_to_logical_map.device)
+        flag = torch.tensor((int(self.ep_buffer_ready),),
+                             dtype=torch.int32,
+                             device=device)
+        all_reduce(flag, group=device_group)
+        return int(flag.item()) == device_group.size()
+
     async def transfer_run_periodically(
             self,
             model,
@@ -761,7 +785,6 @@ class EplbState:
                         logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Buffer lock acquired, initializing expert_buffer for layer {self.layer_to_transfer}")
                         for i, w in enumerate(model.expert_weights[0]):
                             self.expert_buffer[i] = torch.empty_like(w)
-                        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting transfer_layer for layer {self.layer_to_transfer}")
                         (self.is_unchanged, self.is_received_locally,
                          self.experts_recv_loc) = await transfer_layer(
                              old_global_expert_indices=self.
@@ -776,32 +799,23 @@ class EplbState:
                              cuda_stream=experts_stream,
                              rank_mapping=rank_mapping,
                          )
-                        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_layer completed for layer {self.layer_to_transfer}")
                         self.ep_buffer_ready = 1
                     finally:
-                        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer}")
                         self.buffer_lock.release()
-                        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock for layer {self.layer_to_transfer} successful")
                 else:
                     await asyncio.sleep(0.001)
 
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: All layers processed for this rearrangement")
             # Reset for next rearrangement cycle
             self.rearrange_event.clear()
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Cleared rearrange_event, ready for next cycle")
 
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: transfer_run_periodically exiting")
 
     def move_to_workspace(self,
                           model: MixtureOfExperts,
                           ep_group: ProcessGroup,
                           is_profile: bool = False):
-        logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: move_to_workspace called, layer_to_transfer={self.layer_to_transfer}")
         if not self.buffer_lock.acquire(blocking=False):
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Failed to acquire buffer lock, returning")
             return
         try:
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Starting move_from_buffer for layer {self.layer_to_transfer}")
             assert self.new_physical_to_logical_map is not None
             move_from_buffer(
                 expert_weights=model.expert_weights[self.layer_to_transfer],
@@ -812,20 +826,16 @@ class EplbState:
                 new_indices=self.new_physical_to_logical_map[
                     self.layer_to_transfer].tolist(),
                 ep_group=ep_group)
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: move_from_buffer completed for layer {self.layer_to_transfer}")
             transferred_layer = self.layer_to_transfer
             self._update_layer_mapping_from_new(transferred_layer)
             # After the main thread consumes, advance layer_to_transfer
             self.layer_to_transfer += 1
             self.ep_buffer_ready = 0
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Updated state - layer_to_transfer={self.layer_to_transfer}, ep_buffer_ready={self.ep_buffer_ready}")
         finally:
-            logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock in move_to_workspace")
             try:
                 self.buffer_lock.release()
-                logger.info(f"[EPLB Debug] Rank {ep_group.rank()}: Releasing buffer lock okkkk in move_to_workspace")
             except Exception as e:
-                logger.error(f"[EPLB Debug] Rank {ep_group.rank()}: buffer_lock release failed in move_to_workspace: {e}")
+                logger.error("Rank %d: buffer_lock release failed in move_to_workspace: %s", ep_group.rank(), str(e))
 
     def post_eplb(self,
                   model: MixtureOfExperts,
