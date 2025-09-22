@@ -11,6 +11,7 @@ from vllm.attention.backends.placeholder_attn import (
     PlaceholderAttentionMetadata)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadata, _query_start_loc_to_chunk_indices_offsets)
 
@@ -45,20 +46,25 @@ class Mamba2Metadata:
     """
     nums_dict: Optional[dict] = None
     cu_seqlen: Optional[int] = None
-    batch_ptr: Optional[torch.tensor] = None
-    token_chunk_offset_ptr: Optional[torch.tensor] = None
+    batch_ptr: Optional[torch.Tensor] = None
+    token_chunk_offset_ptr: Optional[torch.Tensor] = None
 
 
 def get_platform_metadata_classes() -> tuple[type[AttentionMetadata], ...]:
     """Returns the appropriate metadata classes for the current platform."""
     if current_platform.is_rocm():
-        from vllm.attention.backends.rocm_flash_attn import (
-            ROCmFlashAttentionMetadata)
-        return (ROCmFlashAttentionMetadata, PlaceholderAttentionMetadata)
-    elif current_platform.is_cuda():
-        from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-        from vllm.attention.backends.xformers import XFormersMetadata
-        return (FlashAttentionMetadata, XFormersMetadata,
+        from vllm.v1.attention.backends.rocm_aiter_fa import (
+            AiterFlashAttentionMetadata)
+        from vllm.v1.attention.backends.triton_attn import (
+            TritonAttentionMetadata)
+        return (AiterFlashAttentionMetadata, TritonAttentionMetadata,
+                PlaceholderAttentionMetadata)
+    if current_platform.is_cuda():
+        from vllm.v1.attention.backends.flash_attn import (
+            FlashAttentionMetadata)
+        from vllm.v1.attention.backends.xformers import (
+            XFormersAttentionMetadata)
+        return (FlashAttentionMetadata, XFormersAttentionMetadata,
                 PlaceholderAttentionMetadata)
     raise ValueError(
         f"Unsupported platform for Mamba2: {current_platform.device_type}")
@@ -117,7 +123,8 @@ def prepare_mamba2_metadata(
 
 def update_metadata(x: torch.Tensor, query_start_loc: torch.Tensor,
                     mamba2_metadata: Union[Mamba2Metadata,
-                                           Mamba2AttentionMetadata]):
+                                           Mamba2AttentionMetadata,
+                                           GDNAttentionMetadata]):
     """
     this is triggered upon handling a new input at the first layer
     """

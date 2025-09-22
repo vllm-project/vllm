@@ -19,7 +19,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_next import (Qwen3NextDecoderLayer,
                                                    Qwen3NextRMSNorm)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 
@@ -63,7 +62,9 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
                                        self.config.hidden_size,
                                        gather_output=True,
                                        bias=False,
-                                       return_bias=False)
+                                       return_bias=False,
+                                       quant_config=quant_config,
+                                       prefix=f'{prefix}.fc')
 
         self.layers = torch.nn.ModuleList(
             Qwen3NextDecoderLayer(
@@ -72,7 +73,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=f'{prefix}.layers.{self.mtp_start_layer_idx + idx}',
+                prefix=f'{prefix}.layers.{idx}',
             ) for idx in range(self.num_mtp_layers))
 
         self.make_empty_intermediate_tensors = (
@@ -233,7 +234,7 @@ class Qwen3NextMTP(nn.Module, SupportsPP):
         self.config = config
         self.model = Qwen3NextMultiTokenPredictor(vllm_config=vllm_config,
                                                   prefix=maybe_prefix(
-                                                      prefix, "model"))
+                                                      prefix, "mtp"))
         self.unpadded_vocab_size = config.vocab_size
         self.lm_head = ParallelLMHead(self.unpadded_vocab_size,
                                       config.hidden_size,
@@ -264,11 +265,9 @@ class Qwen3NextMTP(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> Optional[torch.Tensor]:
-        return self.logits_processor(self.lm_head, hidden_states,
-                                     sampling_metadata)
+        return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
