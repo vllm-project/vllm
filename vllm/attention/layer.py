@@ -25,14 +25,11 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import GiB_bytes, direct_register_custom_op
+from vllm.utils import (GiB_bytes, direct_register_custom_op,
+                        tag_cudagraph_unsafe)
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
-try:
-    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
-except AttributeError:
-    tag_cudagraph_unsafe = ()  # type: ignore[assignment]
 
 
 def check_xformers_availability():
