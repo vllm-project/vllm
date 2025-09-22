@@ -95,7 +95,9 @@ class Scheduler(SchedulerInterface):
                 "Encoder-decoder models are not currently supported "
                 "with KV connectors")
             self.connector = KVConnectorFactory.create_connector(
-                config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
+                config=self.vllm_config,
+                kv_cache_config=self.kv_cache_config,
+                role=KVConnectorRole.SCHEDULER)
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
