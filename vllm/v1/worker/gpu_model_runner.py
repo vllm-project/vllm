@@ -2106,9 +2106,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"Total number of tokens: {end_idx} > max_model_len + 1: "
                 f"{self.max_model_len + 1}")
 
-            self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = sampled_ids
-            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
+            # Sampled token IDs exceed the max model length by 1. This is
+            # legitimate as we can still sample 1 last token when the context
+            # length equals the max model length. Note that we do not need to
+            # cache this token ID as the sequence finishes after this step.
+            # Additionally, the buffers token_ids_cpu and is_token_ids are of
+            # size max model length only.
+            if end_idx == self.max_model_len + 1:
+                self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx -
+                                               1] = sampled_ids[:-1]
+                self.input_batch.is_token_ids[req_idx,
+                                              start_idx:end_idx - 1] = True
+            else:
+                self.input_batch.token_ids_cpu[req_idx,
+                                               start_idx:end_idx] = sampled_ids
+                self.input_batch.is_token_ids[req_idx,
+                                              start_idx:end_idx] = True
+
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
 
