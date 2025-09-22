@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -33,29 +34,23 @@ from vllm import _custom_ops as ops
 logger = init_logger(__name__)
 
 
+@register_attn_backend(_Backend.TORCH_SDPA,
+                       "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend")
 class TorchSDPABackend(AttentionBackend):
     accept_output_buffer: bool = False
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        attn_impl = _get_paged_attn_impl()
+        return attn_impl.get_supported_head_sizes()
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float32]
 
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        attn_impl = _get_paged_attn_impl()
-        is_valid, supported_head_sizes = attn_impl.validate_head_size(
-            head_size)
-        if not is_valid:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes.")
-
     @staticmethod
     def get_name() -> str:
-        return "TORCH_SDPA_VLLM_V1"
+        return "TORCH_SDPA"
 
     @staticmethod
     def get_impl_cls() -> type["TorchSDPABackendImpl"]:
@@ -735,9 +730,8 @@ def _make_sliding_window_bias(
 class _PagedAttention:
 
     @staticmethod
-    def validate_head_size(head_size: int) -> tuple[bool, list[int]]:
-        SUPPORT_HS = [32, 64, 80, 96, 112, 128, 192, 256]
-        return head_size in SUPPORT_HS, SUPPORT_HS
+    def get_supported_head_sizes() -> list[int]:
+        return [32, 64, 80, 96, 112, 128, 192, 256]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -848,9 +842,9 @@ class _PagedAttention:
 
 class _IPEXPagedAttention(_PagedAttention):
 
-    @staticmethod
-    def validate_head_size(head_size: int) -> tuple[bool, list[int]]:
-        return True, []
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
 
     @staticmethod
     def split_kv_cache(

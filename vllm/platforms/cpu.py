@@ -12,10 +12,11 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import CpuArchEnum, Platform, PlatformEnum, _Backend
+from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
@@ -101,7 +102,7 @@ class CpuPlatform(Platform):
         logger.info("Using Torch SDPA backend.")
         if not use_v1:
             raise ValueError("CPU backend only supports V1.")
-        return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
+        return backend_to_class_str(_Backend.TORCH_SDPA)
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:

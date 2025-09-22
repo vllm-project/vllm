@@ -9,6 +9,7 @@ import torch
 import vllm._custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
@@ -25,6 +26,9 @@ class CutlassMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         AttentionCGSupport] = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
 
+@register_attn_backend(
+    _Backend.CUTLASS_MLA,
+    "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend")
 class CutlassMLABackend(MLACommonBackend):
 
     @staticmethod
@@ -38,6 +42,30 @@ class CutlassMLABackend(MLACommonBackend):
     @staticmethod
     def get_builder_cls() -> type["CutlassMLAMetadataBuilder"]:
         return CutlassMLAMetadataBuilder
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16", "e4m3fn"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return [128]
+
+    @classmethod
+    def is_v1(cls) -> bool:
+        return True
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 100
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 109
 
 
 class SM100Workspace:

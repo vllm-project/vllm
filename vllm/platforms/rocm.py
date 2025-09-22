@@ -11,10 +11,11 @@ from torch.distributed import PrefixStore, ProcessGroup
 from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -207,13 +208,11 @@ class RocmPlatform(Platform):
             if selected_backend == _Backend.TRITON_MLA:
                 if block_size != 1:
                     logger.info_once("Using Triton MLA backend on V1 engine.")
-                    return ("vllm.v1.attention.backends.mla."
-                            "triton_mla.TritonMLABackend")
+                    return backend_to_class_str(_Backend.TRITON_MLA)
                 raise ValueError(
                     f" The selected backend, {selected_backend.name},"
                     f"does not support block size {block_size}.")
-            if selected_backend in (_Backend.ROCM_AITER_MLA,
-                                    _Backend.ROCM_AITER_MLA_VLLM_V1):
+            if selected_backend == _Backend.ROCM_AITER_MLA:
                 if block_size == 1:
                     logger.info("Using AITER MLA backend on V1 engine.")
                     return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
@@ -229,12 +228,10 @@ class RocmPlatform(Platform):
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
                 and on_gfx9():
                 logger.info("Using Flash Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "rocm_aiter_fa.AiterFlashAttentionBackend")
+                return backend_to_class_str(_Backend.ROCM_AITER_FA)
             else:
                 logger.info("Using Triton Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "triton_attn.TritonAttentionBackend")
+                return backend_to_class_str(_Backend.TRITON_ATTN)
         raise RuntimeError(
             "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
             "to select a supported backend.")

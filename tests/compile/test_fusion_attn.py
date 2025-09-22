@@ -8,11 +8,11 @@ import torch._dynamo
 
 from tests.compile.backend import TestBackend
 from tests.models.utils import check_outputs_equal
-from tests.v1.attention.utils import (BatchSpec, _Backend,
-                                      create_common_attn_metadata)
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm import LLM, SamplingParams
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention import Attention
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
@@ -336,7 +336,7 @@ else:
 @pytest.mark.parametrize("model_name, model_class", MODELS)
 @pytest.mark.parametrize("backend",
                          [_Backend.FLASHINFER] if current_platform.is_cuda()
-                         else [_Backend.TRITON_ATTN_VLLM_V1])
+                         else [_Backend.TRITON_ATTN])
 @pytest.mark.parametrize(
     "split_attention",
     [False, True] if current_platform.is_rocm() else [False])

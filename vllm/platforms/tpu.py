@@ -6,12 +6,13 @@ from typing import TYPE_CHECKING, Optional, Union, cast
 import torch
 from tpu_info import device
 
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import Platform, PlatformEnum, _Backend
+from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig
@@ -50,14 +51,13 @@ class TpuPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink) -> str:
-        if (selected_backend != _Backend.PALLAS
-                and selected_backend != _Backend.PALLAS_VLLM_V1):
+        if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if not use_v1:
             raise ValueError("TPU backend only supports V1.")
         logger.info("Using Pallas V1 backend.")
-        return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+        return backend_to_class_str(_Backend.PALLAS)
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:

@@ -10,6 +10,7 @@ import torch
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -138,32 +139,16 @@ class TritonAttentionMetadataBuilder(
         return attn_metadata
 
 
+@register_attn_backend(
+    _Backend.TRITON_ATTN,
+    "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend")
 class TritonAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
 
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes.")
-
     @staticmethod
     def get_name() -> str:
-        return "TRITON_ATTN_VLLM_V1"
+        return "TRITON_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["TritonAttentionImpl"]:
@@ -191,6 +176,38 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
         return TritonAttentionMetadataBuilder
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [32, 64, 96, 128, 160, 192, 224, 256]
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def is_v1(cls) -> bool:
+        return True
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return False
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return None
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return None
 
 
 @cache
@@ -240,8 +257,6 @@ class TritonAttentionImpl(AttentionImpl):
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        TritonAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "

@@ -10,6 +10,7 @@ import torch
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.utils import async_tensor_h2d
 
@@ -17,6 +18,9 @@ from vllm.utils import async_tensor_h2d
 # lack attention.
 
 
+@register_attn_backend(
+    _Backend.NO_ATTENTION,
+    "vllm.attention.backends.placeholder_attn.PlaceholderAttentionBackend")
 class PlaceholderAttentionBackend(AttentionBackend):
     """Placeholder backend for when no attention is needed."""
 

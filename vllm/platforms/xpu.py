@@ -7,10 +7,11 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -40,21 +41,19 @@ class XPUPlatform(Platform):
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
-        TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
-        FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
-        if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+        if selected_backend == _Backend.TRITON_ATTN:
             logger.info_once("Using Triton backend on V1 engine.")
-            return TRITON_ATTN_VLLM_V1
+            return backend_to_class_str(_Backend.TRITON_ATTN)
         elif selected_backend == _Backend.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend on V1 engine.")
-            return FLASH_ATTN_V1
+            return backend_to_class_str(_Backend.FLASH_ATTN)
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
                 f"with use_v1: {use_v1} use_mla: {use_mla}")
 
         logger.info("Using Flash Attention backend on V1 engine.")
-        return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+        return backend_to_class_str(_Backend.FLASH_ATTN)
 
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
@@ -64,7 +63,7 @@ class XPUPlatform(Platform):
         XPU only support fp8 kv cache with triton backend.
         """
         if envs.is_set("VLLM_ATTENTION_BACKEND") and \
-            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN_VLLM_V1":
+            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN":
             return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
 
         return False

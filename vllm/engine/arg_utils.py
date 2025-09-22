@@ -1475,32 +1475,6 @@ class EngineArgs:
                 "Please consider using other speculative decoding methods "
                 "such as ngram, medusa, eagle, or deepseek_mtp.")
 
-        V1_BACKENDS = [
-            "FLASH_ATTN_VLLM_V1",
-            "FLASH_ATTN",
-            "PALLAS",
-            "PALLAS_VLLM_V1",
-            "TRITON_ATTN_VLLM_V1",
-            "TRITON_MLA",
-            "CUTLASS_MLA",
-            "FLASHMLA",
-            "FLASHMLA_VLLM_V1",
-            "FLASH_ATTN_MLA",
-            "FLASHINFER",
-            "FLASHINFER_VLLM_V1",
-            "FLASHINFER_MLA",
-            "ROCM_AITER_MLA",
-            "TORCH_SDPA_VLLM_V1",
-            "FLEX_ATTENTION",
-            "TREE_ATTN",
-            "XFORMERS_VLLM_V1",
-        ]
-        if (envs.is_set("VLLM_ATTENTION_BACKEND")
-                and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
-            name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
-            _raise_or_fallback(feature_name=name, recommend_to_remove=True)
-            return False
-
         # Platforms must decide if they can support v1 for this model
         if not current_platform.supports_v1(model_config=model_config):
             _raise_or_fallback(

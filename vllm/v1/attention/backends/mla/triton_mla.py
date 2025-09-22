@@ -8,6 +8,7 @@ import torch
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention
 from vllm.logger import init_logger
@@ -20,15 +21,42 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
 logger = init_logger(__name__)
 
 
+@register_attn_backend(
+    _Backend.TRITON_MLA,
+    "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend")
 class TritonMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TRITON_MLA_VLLM_V1"
+        return "TRITON_MLA"
 
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def is_v1(cls) -> bool:
+        return True
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return None
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return None
 
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):

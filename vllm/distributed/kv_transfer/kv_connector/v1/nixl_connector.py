@@ -20,6 +20,7 @@ import torch
 import zmq
 
 from vllm import envs
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -32,7 +33,7 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.utils import divide
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import current_platform
 from vllm.utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -555,8 +556,8 @@ class NixlConnectorWorker:
                                    use_mla=self.use_mla)
         self.backend_name = backend.get_name()
         attn_backend = backend_name_to_enum(self.backend_name)
-        self._use_flashinfer = attn_backend == _Backend.FLASHINFER_VLLM_V1
-        self._use_pallas_v1 = attn_backend == _Backend.PALLAS_VLLM_V1
+        self._use_flashinfer = attn_backend == _Backend.FLASHINFER
+        self._use_pallas_v1 = attn_backend == _Backend.PALLAS
         self.kv_cache_layout = get_kv_cache_layout()
         logger.debug("Detected attention backend %s", self.backend_name)
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)

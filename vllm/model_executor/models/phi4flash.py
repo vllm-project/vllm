@@ -10,7 +10,7 @@ from transformers.activations import ACT2FN
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionMetadata, AttentionType
-from vllm.attention.selector import _Backend
+from vllm.attention.backends.registry import _Backend
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
