@@ -46,11 +46,11 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -146,24 +146,6 @@ class Glm4MoE(nn.Module):
         self.physical_expert_end = (self.physical_expert_start +
                                     self.n_local_physical_experts)
 
-        self.experts = FusedMoE(
-            num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=config.n_group,
-            topk_group=config.topk_group,
-            prefix=f"{prefix}.experts",
-            scoring_func="sigmoid",
-            routed_scaling_factor=self.routed_scaling_factor,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-            enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts)
-
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
@@ -172,23 +154,68 @@ class Glm4MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=self.experts.must_reduce_shared_expert_outputs(
-                ),
+                reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
+            self.experts = SharedFusedMoE(
+                shared_experts=self.shared_experts,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
+                renormalize=config.norm_topk_prob,
+                quant_config=quant_config,
+                use_grouped_topk=True,
+                num_expert_group=config.n_group,
+                topk_group=config.topk_group,
+                prefix=f"{prefix}.experts",
+                scoring_func="sigmoid",
+                # we do scaling outside, set factor to 1.0 to avoid double mul
+                routed_scaling_factor=1.0,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts,
+            )
+        else:
+            self.experts = FusedMoE(
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
+                renormalize=config.norm_topk_prob,
+                quant_config=quant_config,
+                use_grouped_topk=True,
+                num_expert_group=config.n_group,
+                topk_group=config.topk_group,
+                prefix=f"{prefix}.experts",
+                scoring_func="sigmoid",
+                # we do scaling outside, set factor to 1.0 to avoid double mul
+                routed_scaling_factor=1.0,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+        # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states.to(dtype=torch.float32))
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits) * self.routed_scaling_factor
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
+
+        fused_moe_out = self.experts(hidden_states=hidden_states,
+                                     router_logits=router_logits)
+
+        if self.shared_experts is not None:
+            shared_output, final_hidden_states = fused_moe_out
+            assert shared_output is not None
+            final_hidden_states = \
+                final_hidden_states * self.routed_scaling_factor\
+                    + shared_output
+        else:
+            final_hidden_states = fused_moe_out * self.routed_scaling_factor
+
         if self.tp_size > 1:
             final_hidden_states = (
                 self.experts.maybe_all_reduce_tensor_model_parallel(
@@ -605,7 +632,9 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -673,10 +702,8 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

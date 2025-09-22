@@ -7,7 +7,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils import direct_register_custom_op
 
 
@@ -142,20 +142,50 @@ direct_register_custom_op(
 )
 
 
-def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype):
+def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     return (torch._C._cpu._is_amx_tile_supported()
             and (dtype in (torch.bfloat16, torch.int8)) and k % 32 == 0
             and n % 16 == 0)
+
+
+def dispatch_cpu_unquantized_gemm(
+    layer: torch.nn.Module,
+    remove_weight: bool,
+) -> None:
+    N, K = layer.weight.size()
+    dtype = layer.weight.dtype
+    if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
+        packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
+        if getattr(layer, "bias", None) is not None:
+            bias_f32 = layer.bias.to(torch.float32)
+        else:
+            bias_f32 = None
+        layer.cpu_linear = (
+            lambda x, weight, bias: torch.ops._C.weight_packed_linear(
+                x, packed_weight, bias_f32
+                if bias is not None else None, True))
+        if remove_weight:
+            layer.weight = torch.nn.Parameter(torch.empty(0),
+                                              requires_grad=False)
+    elif (ops._supports_onednn
+          and current_platform.get_cpu_architecture() == CpuArchEnum.X86):
+        origin_weight = layer.weight
+        if remove_weight:
+            layer.weight = torch.nn.Parameter(torch.empty(0),
+                                              requires_grad=False)
+        handler = ops.create_onednn_mm(origin_weight.t(), 32)
+        layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(
+            handler, x, bias)
+    else:
+        layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
+            x, weight, bias)
 
 
 def cpu_unquantized_gemm(layer: torch.nn.Module,
                          x: torch.Tensor,
                          weight: torch.Tensor,
                          bias: Optional[torch.Tensor] = None):
-    if getattr(layer, "use_cpu_sgl", False):
-        return torch.ops._C.weight_packed_linear(x, weight, bias, True)
-    else:
-        return torch.nn.functional.linear(x, weight, bias)
+    return layer.cpu_linear(x, weight, bias)
 
 
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:

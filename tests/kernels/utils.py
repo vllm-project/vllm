@@ -513,10 +513,6 @@ def make_backend(backend_name: str) -> AttentionBackend:
     Construct the backend instance determined by the backend_name string
     argument.
 
-    "XFORMERS" -> construct xformers backend
-
-    TODO: other backends
-
     Note: at time of writing the Attention wrapper automatically selects
     its own backend for Attention.forward(); so the backend instance which
     you generate with this function is not meant to be used for *running*
@@ -528,16 +524,66 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
     * Backend instance
     '''
-    if backend_name == STR_XFORMERS_ATTN_VAL:
-        # NOTE: xFormers backend cannot be imported for CPU and AMD GPUs.
-        from vllm.attention.backends.xformers import XFormersBackend
-        return XFormersBackend()
-    elif backend_name == STR_FLASH_ATTN_VAL:
-        from vllm.attention.backends.flash_attn import FlashAttentionBackend
+    if backend_name in (STR_XFORMERS_ATTN_VAL, "XFORMERS_VLLM_V1"):
+        from vllm.v1.attention.backends.xformers import (
+            XFormersAttentionBackend)
+        return XFormersAttentionBackend()
+    if backend_name in (STR_FLASH_ATTN_VAL, "FLASH_ATTN_VLLM_V1"):
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
         return FlashAttentionBackend()
+    if backend_name == "TRITON_ATTN_VLLM_V1":
+        from vllm.v1.attention.backends.triton_attn import (
+            TritonAttentionBackend)
+        return TritonAttentionBackend()
+    if backend_name == "FLEX_ATTENTION":
+        from vllm.v1.attention.backends.flex_attention import (
+            FlexAttentionBackend)
+        return FlexAttentionBackend()
+    if backend_name in ("TORCH_SDPA", "TORCH_SDPA_VLLM_V1"):
+        from vllm.v1.attention.backends.cpu_attn import TorchSDPABackend
+        return TorchSDPABackend()
+    if backend_name == "FLASHINFER":
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+        return FlashInferBackend()
 
     raise AssertionError(
         f"Unrecognized backend_name {backend_name} for unit test")
+
+
+def make_alibi_bias(
+    alibi_slopes: torch.Tensor,
+    num_kv_heads: int,
+    dtype: torch.dtype,
+    seq_lens: list[int],
+) -> list[Any]:
+    """Create ALiBi biases compatible with xFormers attention tests."""
+    from xformers.ops.fmha.attn_bias import LowerTriangularMaskWithTensorBias
+
+    if alibi_slopes is None:
+        return [None for _ in seq_lens]
+
+    attn_biases: list[Any] = []
+    num_heads = alibi_slopes.shape[0]
+    assert num_heads >= num_kv_heads, (
+        "ALiBi slopes expect at least as many heads as KV heads")
+
+    for seq_len in seq_lens:
+        bias = torch.arange(seq_len, dtype=dtype, device=alibi_slopes.device)
+        bias = bias[None, :] - bias[:, None]
+
+        padded_len = (seq_len + 7) // 8 * 8
+        bias_tensor = torch.empty(
+            1,
+            num_heads,
+            seq_len,
+            padded_len,
+            device=alibi_slopes.device,
+            dtype=dtype,
+        )[:, :, :, :seq_len].copy_(bias)
+        bias_tensor.mul_(alibi_slopes[:, None, None])
+        attn_biases.append(LowerTriangularMaskWithTensorBias(bias_tensor))
+
+    return attn_biases
 
 
 def _make_metadata_tensors(
@@ -1236,7 +1282,7 @@ def baseline_scaled_mm(a: torch.Tensor,
                        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
     # We treat N-dimensional group scaling as extended numpy-style broadcasting
-    # in numpy simply stretches dimensions with an extent of 1 to match the
+    # in numpy simply stretches dimensions with an extent of 1 to match
     # the target shape by repeating the data along that dimension (broadcasting)
     # , we extend these semantics to say if the extent of a dimension in the
     # source shape is not 1 and does not match the target shape we repeat each
@@ -1247,7 +1293,7 @@ def baseline_scaled_mm(a: torch.Tensor,
     # then we would expand a to:
     #       a = [[1, 1, 2, 2],
     #            [3, 3, 4, 4]]
-    # NOTE this function this function does not explicitly broadcast dimensions
+    # NOTE this function does not explicitly broadcast dimensions
     # with an extent of 1, since this can be done implicitly by pytorch
     def group_broadcast(t, shape):
         for i, s in enumerate(shape):

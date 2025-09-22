@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from itertools import product
 from math import ceil, sqrt
 from typing import Any, Literal, Optional, TypedDict, Union
@@ -16,16 +15,14 @@ from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
-                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -667,39 +664,25 @@ class Step3VisionAttention(nn.Module):
 
         self.q_size = self.num_heads * self.head_dim
 
-        if use_data_parallel:
-            self.qkv_proj = ReplicatedLinear(
-                self.embed_dim,
-                3 * self.q_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.out_proj = ReplicatedLinear(
-                self.total_num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-        else:
-            self.qkv_proj = QKVParallelLinear(
-                self.embed_dim,
-                self.head_dim,
-                self.total_num_heads,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.out_proj = RowParallelLinear(self.embed_dim,
-                                              self.embed_dim,
-                                              bias=True,
-                                              quant_config=quant_config,
-                                              prefix=prefix)
+        self.qkv_proj = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            self.total_num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.out_proj = RowParallelLinear(self.embed_dim,
+                                          self.embed_dim,
+                                          bias=True,
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.out_proj",
+                                          disable_tp=use_data_parallel)
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads,
-                           self.head_dim).transpose(1, 2).contiguous()
+        # Use unified MultiHeadAttention with automatic backend selection
+        self.attn = MultiHeadAttention(self.num_heads, self.head_dim,
+                                       self.scale)
 
     def forward(
         self,
@@ -711,19 +694,9 @@ class Step3VisionAttention(nn.Module):
         # get query proj
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        q = q.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        k = k.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        v = v.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        attn_output = F.scaled_dot_product_attention(q,
-                                                     k,
-                                                     v,
-                                                     scale=self.scale,
-                                                     is_causal=False)
-        attn_output = attn_output.transpose(1, 2).reshape(
-            bsz, tgt_len, self.num_heads * self.head_dim)
+
+        # Use unified MultiHeadAttention with automatic backend selection
+        attn_output = self.attn(q, k, v)
 
         attn_output, _ = self.out_proj(attn_output)
 
@@ -740,20 +713,18 @@ class Step3VisionMLP(nn.Module):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        cls_fc1 = (ReplicatedLinear
-                   if use_data_parallel else ColumnParallelLinear)
-        self.fc1 = cls_fc1(config.hidden_size,
-                           config.intermediate_size,
-                           bias=True,
-                           quant_config=quant_config,
-                           prefix=prefix)
-        cls_fc2 = (ReplicatedLinear
-                   if use_data_parallel else RowParallelLinear)
-        self.fc2 = cls_fc2(config.intermediate_size,
-                           config.hidden_size,
-                           bias=True,
-                           quant_config=quant_config,
-                           prefix=prefix)
+        self.fc1 = ColumnParallelLinear(config.hidden_size,
+                                        config.intermediate_size,
+                                        bias=True,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.fc1",
+                                        disable_tp=use_data_parallel)
+        self.fc2 = RowParallelLinear(config.intermediate_size,
+                                     config.hidden_size,
+                                     bias=True,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.fc2",
+                                     disable_tp=use_data_parallel)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -923,13 +894,6 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     @property
     def device(self):
         return next(self.parameters()).device
@@ -1090,17 +1054,8 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 

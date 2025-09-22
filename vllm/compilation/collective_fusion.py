@@ -513,7 +513,7 @@ if flashinfer_comm is not None:
                         torch.ops._C.static_scaled_fp8_quant(
                             quant_out, norm_out, scale_factor)
             if scale_factor is None or norm_out is not None:
-                # we need to return allreduce outpput
+                # we need to return allreduce output
                 # in cases of non quant fused AR + RMS norm
                 # and fused AR + RMS norm + quant without fused add
                 allreduce_in.copy_(allreduce_out)
@@ -1183,7 +1183,7 @@ class AllReduceFusionPass(VllmInductorPass):
         self.end_and_log()
 
     def __del__(self):
-        if self.disabled:
+        if getattr(self, "disabled", True):
             return
         if flashinfer_comm is not None:
             flashinfer_comm.trtllm_destroy_ipc_workspace_for_all_reduce(

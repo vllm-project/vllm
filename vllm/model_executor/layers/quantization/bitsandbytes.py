@@ -6,8 +6,9 @@ from typing import Any, Callable, Optional, Union
 import torch
 from packaging import version
 
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEConfig,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
@@ -452,6 +453,10 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             **extra_weight_attrs,
         )
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -474,7 +479,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         from vllm.model_executor.layers.fused_moe import fused_experts
         assert self.fused_experts is None
 
@@ -509,6 +514,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
+            quant_config=self.moe_quant_config,
         )
 
     def _create_weights_4bit(

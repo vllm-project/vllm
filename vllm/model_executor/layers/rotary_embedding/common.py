@@ -6,6 +6,7 @@ import math
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
@@ -103,3 +104,48 @@ def yarn_get_mscale(scale: float = 1) -> float:
     if scale <= 1:
         return 1.0
     return 0.1 * math.log(scale) + 1.0
+
+
+def _flashinfer_rotary_embedding(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    """Custom op wrapper for flashinfer's rotary embedding.
+    
+    This is an in-place operation that modifies query and key tensors directly.
+    """
+    from flashinfer.rope import apply_rope_with_cos_sin_cache_inplace
+
+    apply_rope_with_cos_sin_cache_inplace(
+        positions=positions,
+        query=query,
+        key=key,
+        head_size=head_size,
+        cos_sin_cache=cos_sin_cache,
+        is_neox=is_neox,
+    )
+
+
+def _flashinfer_rotary_embedding_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    return
+
+
+# Register flashinfer rotary embedding custom op
+direct_register_custom_op(
+    op_name="flashinfer_rotary_embedding",
+    op_func=_flashinfer_rotary_embedding,
+    mutates_args=["query", "key"],  # These tensors are modified in-place
+    fake_impl=_flashinfer_rotary_embedding_fake,
+    dispatch_key=current_platform.dispatch_key,
+)

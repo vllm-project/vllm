@@ -5,7 +5,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 import torch.distributed
@@ -28,10 +28,11 @@ from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
+                             DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
@@ -231,17 +232,39 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        GiB = lambda b: b / GiB_bytes
+        if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
+            # still need a profile run which compiles the model for
+            # max_num_batched_tokens
+            self.model_runner.profile_run()
+
+            msg = (
+                f"Initial free memory {GiB(self.init_snapshot.free_memory)} "
+                f"GiB, reserved {GiB(kv_cache_memory_bytes):.2f}GiB memory for "
+                "KV Cache as specified by kv_cache_memory_bytes config and "
+                "skipped memory profiling. This does does not respect the "
+                "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
+                "config when you want manual control of KV cache memory "
+                "size. If OOM'ed, check the difference of initial free "
+                "memory between the current run and the previous run "
+                "where kv_cache_memory_bytes is suggested and update it "
+                "correspondingly.")
+            logger.info(msg)
+            return kv_cache_memory_bytes
+
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-        GiB = lambda b: b / GiB_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
                 self.init_snapshot,
-                weights_memory=int(
-                    self.model_runner.model_memory_usage)) as profile_result:
+                weights_memory=int(self.model_runner.model_memory_usage),
+        ) as profile_result:
             self.model_runner.profile_run()
+
+        self.non_torch_memory = profile_result.non_torch_increase
+        self.peak_activation_memory = profile_result.torch_peak_increase
 
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -254,7 +277,7 @@ class Worker(WorkerBase):
             "release GPU memory while vLLM is profiling during initialization. "
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container.")
-        available_kv_cache_memory = self.requested_memory \
+        self.available_kv_cache_memory_bytes = self.requested_memory \
             - profile_result.non_kv_cache_memory
 
         unrequested_memory = self.init_snapshot.free_memory \
@@ -274,10 +297,10 @@ class Worker(WorkerBase):
         )
         logger.debug(profile_result)
         logger.info("Available KV cache memory: %.2f GiB",
-                    GiB(available_kv_cache_memory))
+                    GiB(self.available_kv_cache_memory_bytes))
         gc.collect()
 
-        return int(available_kv_cache_memory)
+        return int(self.available_kv_cache_memory_bytes)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
@@ -317,8 +340,56 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
+        cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            self.model_runner.capture_model()
+            cuda_graph_memory_bytes = self.model_runner.capture_model()
+
+        if (self.cache_config.kv_cache_memory_bytes is None
+                and hasattr(self, "peak_activation_memory")):
+            # Suggests optimal kv cache memory size if we rely on
+            # memory_profiling to guess the kv cache memory size which
+            # provides peak_activation_memory and a few other memory
+            # consumption. `memory_profiling` does not consider
+            # CUDAGraph memory size and may not utilize all gpu memory.
+            # Users may want fine-grained control to specify kv cache
+            # memory size.
+            GiB = lambda b: round(b / GiB_bytes, 2)
+
+            # empirically observed that the memory profiling may
+            # slightly underestimate the memory consumption.
+            # So leave a small buffer (=150MiB) to avoid OOM.
+            redundancy_buffer_memory = 150 * (1 << 20)
+            non_kv_cache_memory = (self.model_runner.model_memory_usage +
+                                   self.peak_activation_memory +
+                                   self.non_torch_memory +
+                                   cuda_graph_memory_bytes)
+            kv_cache_memory_bytes_to_gpu_limit = (
+                self.init_snapshot.free_memory - non_kv_cache_memory -
+                redundancy_buffer_memory)
+            kv_cache_memory_bytes_to_requested_limit = (
+                int(self.requested_memory) - non_kv_cache_memory -
+                redundancy_buffer_memory)
+
+            msg = (
+                f"Free memory on device "
+                f"({GiB(self.init_snapshot.free_memory)}/"
+                f"{GiB(self.init_snapshot.total_memory)} GiB) on startup. "
+                f"Desired GPU memory utilization is "
+                f"({self.cache_config.gpu_memory_utilization}, "
+                f"{GiB(self.requested_memory)} GiB). "
+                f"Actual usage is {GiB(self.model_runner.model_memory_usage)} "
+                f"GiB for weight, {GiB(self.peak_activation_memory)} GiB "
+                f"for peak activation, {GiB(self.non_torch_memory)} GiB "
+                f"for non-torch memory, and {GiB(cuda_graph_memory_bytes)} "
+                f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
+                f"config with `--kv-cache-memory="
+                f"{kv_cache_memory_bytes_to_requested_limit}` to fit into "
+                f"requested memory, or `--kv-cache-memory="
+                f"{kv_cache_memory_bytes_to_gpu_limit}` to fully "
+                f"utilize gpu memory. Current kv cache memory in use is "
+                f"{int(self.available_kv_cache_memory_bytes)} bytes.")
+
+            logger.info(msg)
 
         # Warm up sampler and preallocate memory buffer for logits and other
         # sampling related tensors of max possible shape to avoid memory
@@ -355,17 +426,26 @@ class Worker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
+    ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        num_input_tokens = self.model_runner._get_num_input_tokens(
+            num_scheduled_tokens)
+        all_gather_tensors = {
+            "residual":
+            not is_residual_scattered_for_sp(self.vllm_config,
+                                             num_input_tokens)
+        }
         if forward_pass and not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group()))
+                    all_gather_group=get_tp_group(),
+                    all_gather_tensors=all_gather_tensors))
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-        if isinstance(output, ModelRunnerOutput):
+        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
             return output
 
         assert isinstance(output, IntermediateTensors)
@@ -374,7 +454,8 @@ class Worker(WorkerBase):
             "external_launcher") and not get_pp_group().is_last_rank
 
         get_pp_group().send_tensor_dict(output.tensors,
-                                        all_gather_group=get_tp_group())
+                                        all_gather_group=get_tp_group(),
+                                        all_gather_tensors=all_gather_tensors)
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
@@ -400,8 +481,10 @@ class Worker(WorkerBase):
             self.profiler.start()
         else:
             self.profiler.stop()
-            print(self.profiler.key_averages().table(
-                sort_by="self_cuda_time_total"))
+            # only print profiler results on rank 0
+            if self.local_rank == 0:
+                print(self.profiler.key_averages().table(
+                    sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)
@@ -498,7 +581,8 @@ class Worker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         moe_modules = [
             module for module in self.model_runner.model.modules()
-            if module.__class__.__name__ == "FusedMoE"
+            if (module.__class__.__name__ == "FusedMoE"
+                or module.__class__.__name__ == "SharedFusedMoE")
         ]
         num_local_experts = moe_modules[0].moe_config.num_local_experts
         assert all(module.moe_config.num_local_experts == num_local_experts
@@ -598,6 +682,10 @@ class Worker(WorkerBase):
         self.model_runner.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
+    def shutdown(self) -> None:
+        if runner := getattr(self, "model_runner", None):
+            runner.ensure_kv_transfer_shutdown()
+
 
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,
@@ -613,7 +701,9 @@ def init_worker_distributed_environment(
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank, backend)
 
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+    ensure_model_parallel_initialized(
+        parallel_config.tensor_parallel_size,
+        parallel_config.pipeline_parallel_size,
+        parallel_config.decode_context_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)

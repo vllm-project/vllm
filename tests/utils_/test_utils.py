@@ -501,34 +501,6 @@ def test_bind_kv_cache_non_attention():
     assert ctx['model.layers.28.attn'].kv_cache[0] is kv_cache[1]
 
 
-def test_bind_kv_cache_encoder_decoder(monkeypatch: pytest.MonkeyPatch):
-    # V1 TESTS: ENCODER_DECODER is not supported on V1 yet.
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-
-        from vllm.attention import Attention, AttentionType
-
-        # example from bart
-        ctx = {
-            'encoder.layers.0.self_attn.attn':
-                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
-            'decoder.layers.0.encoder_attn.attn':
-                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
-            'decoder.layers.0.self_attn.attn':
-                Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
-        }
-
-        kv_cache = [
-            torch.zeros((1, )),
-        ]
-        encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
-
-        bind_kv_cache(ctx, [kv_cache])
-        assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
-        assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
-        assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
-
-
 def test_bind_kv_cache_pp():
     with patch("vllm.utils.cuda_device_count_stateless", lambda: 2):
         # this test runs with 1 GPU, but we simulate 2 GPUs
@@ -835,22 +807,20 @@ def test_model_specification(parser_with_config, cli_config_file,
 
 @pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
                                    (None, bool, [1, 2, 3])])
-@pytest.mark.parametrize("output", [0, 1, 2])
-def test_sha256(input: tuple, output: int):
-    hash = sha256(input)
-    assert hash is not None
-    assert isinstance(hash, int)
-    assert hash != 0
+def test_sha256(input: tuple):
+    digest = sha256(input)
+    assert digest is not None
+    assert isinstance(digest, bytes)
+    assert digest != b""
 
-    bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    assert hash == int.from_bytes(hashlib.sha256(bytes).digest(),
-                                  byteorder="big")
+    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    assert digest == hashlib.sha256(input_bytes).digest()
 
     # hashing again, returns the same value
-    assert hash == sha256(input)
+    assert digest == sha256(input)
 
     # hashing different input, returns different value
-    assert hash != sha256(input + (1, ))
+    assert digest != sha256(input + (1, ))
 
 
 @pytest.mark.parametrize(

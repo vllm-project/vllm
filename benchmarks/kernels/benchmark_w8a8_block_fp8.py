@@ -11,13 +11,13 @@ from datetime import datetime
 from typing import Any
 
 import torch
-import triton
 from tqdm import tqdm
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _w8a8_block_fp8_matmul,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils import FlexibleArgumentParser
 
 mp.set_start_method("spawn", force=True)
@@ -56,7 +56,7 @@ def w8a8_block_matmul(
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization.
                     It should be 2-dim, e.g., [128, 128].
-        output_dytpe: The dtype of the returned tensor.
+        output_dtype: The dtype of the returned tensor.
 
     Returns:
         torch.Tensor: The result of matmul.

@@ -26,7 +26,6 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather)
-from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import (MulAndSilu, QuickGELU,
                                                    SiluAndMul)
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -76,20 +75,22 @@ class MolmoImageInputs(TensorSchema):
     """
     Dimensions:
         - bn: Batch size * number of images
-        - nc: Number of crops
+        - nc: Number of crops (dynamic)
         - np: Number of patches
+        - tp: Token sequence positions
         - pd: Patch dimension
     """
     images: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                      TensorShape("bn", "nc", "np", "pd")]
+                      TensorShape("bn", "nc", "np", "pd", dynamic_dims={"nc"})]
+    # Number of crops may vary per batch and image, so pass it as a list.
 
     image_masks: Annotated[Optional[Union[torch.Tensor, list[torch.Tensor]]],
-                           TensorShape("bn", "nc", "np")]
+                           TensorShape("bn", "nc", "np", dynamic_dims={"nc"})]
 
-    feat_is_patch: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                             TensorShape("bn", "nc", "np")]
+    feat_is_patch: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "nc", "tp", dynamic_dims={"nc"})]
     # A boolean mask indicating which image features correspond to patch tokens.
-
     num_crops: Annotated[torch.Tensor, TensorShape("bn")]
 
 
@@ -1401,6 +1402,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
                 config.embedding_size or config.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
 
         self.logits_processor = LogitsProcessor(config.embedding_size
@@ -1524,10 +1526,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

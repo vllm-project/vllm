@@ -11,23 +11,19 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
-from vllm.platforms import current_platform
 
 
 @pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    if not current_platform.is_cpu():
-        monkeypatch.setenv('VLLM_USE_V1', '0')
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 @pytest.mark.skipif(not is_quant_method_supported("modelopt"),
                     reason="ModelOpt FP8 is not supported on this GPU type.")
 def test_modelopt_fp8_checkpoint_setup(vllm_runner):
     """Test ModelOpt FP8 checkpoint loading and structure validation."""
-    # TODO: provide a small publically available test checkpoint
+    # TODO: provide a small publicly available test checkpoint
     model_path = ("/home/scratch.omniml_data_1/zhiyu/ckpts/test_ckpts/"
                   "TinyLlama-1.1B-Chat-v1.0-fp8-0710")
 

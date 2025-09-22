@@ -213,7 +213,7 @@ class MediaConnector:
         image_mode: str = "RGB",
     ) -> Image.Image:
         """
-        Load a PIL image from a HTTP or base64 data URL.
+        Load a PIL image from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
         """
@@ -237,7 +237,7 @@ class MediaConnector:
         image_mode: str = "RGB",
     ) -> Image.Image:
         """
-        Asynchronously load a PIL image from a HTTP or base64 data URL.
+        Asynchronously load a PIL image from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
         """
@@ -261,7 +261,7 @@ class MediaConnector:
         image_mode: str = "RGB",
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
-        Load video from a HTTP or base64 data URL.
+        Load video from an HTTP or base64 data URL.
         """
         image_io = ImageMediaIO(image_mode=image_mode,
                                 **self.media_io_kwargs.get("image", {}))
@@ -281,7 +281,7 @@ class MediaConnector:
         image_mode: str = "RGB",
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
-        Asynchronously load video from a HTTP or base64 data URL.
+        Asynchronously load video from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
         """
@@ -310,7 +310,7 @@ class MediaConnector:
 
 def encode_audio_base64(
     audio: np.ndarray,
-    sampling_rate: float,
+    sampling_rate: int,
 ) -> str:
     """Encode audio as base64."""
     audio_io = AudioMediaIO()
@@ -370,7 +370,7 @@ def group_mm_inputs_by_modality(
 
     def modality_group_func(
             mm_input: MultiModalKwargsItems) -> Union[str, int]:
-        # If the input has multiple modalities, return a id as the unique key
+        # If the input has multiple modalities, return an id as the unique key
         # for the mm_input input.
         if len(mm_input) > 1:
             return id(mm_input)
@@ -378,10 +378,7 @@ def group_mm_inputs_by_modality(
         elif len(mm_input) == 1:
             return next(iter(mm_input.keys()))
 
-        # FIXME(Isotr0py): Modality of mm_input from legacy pipeline is empty,
-        # this is used to make InternVL with legacy pipeline still work with v1.
-        else:
-            return ""
+        raise AssertionError("This line should be unreachable.")
 
     return [
         list(group) for _, group in groupby(mm_inputs, key=modality_group_func)
@@ -398,7 +395,9 @@ def group_mm_kwargs_by_modality(
     modality together into the same `MultiModalKwargs` instance.
 
     Args:
-        mm_inputs: List of `MultiModalKwargsItem`.
+        mm_kwargs: List of `MultiModalKwargsItem`.
+        device: The device to place the grouped tensors on.
+        pin_memory: Whether to pin memory for faster host-to-device transfer.
 
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.

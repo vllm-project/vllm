@@ -76,6 +76,20 @@ async def test_basic_with_reasoning_effort(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_max_tokens(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input="What is the first paragraph of Moby Dick?",
+        reasoning={"effort": "low"},
+        max_output_tokens=30,
+    )
+    assert response is not None
+    assert response.status == "incomplete"
+    assert response.incomplete_details.reason == "max_output_tokens"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -275,7 +289,59 @@ async def test_stateful_multi_turn(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_streaming(client: OpenAI, model_name: str):
+async def test_streaming_types(client: OpenAI, model_name: str):
+    prompts = [
+        "tell me a story about a cat in 20 words",
+    ]
+
+    # this links the "done" type with the "start" type
+    # so every "done" type should have a corresponding "start" type
+    # and every open block should be closed by the end of the stream
+    pairs_of_event_types = {
+        "response.completed": "response.created",
+        "response.output_item.done": "response.output_item.added",
+        "response.content_part.done": "response.content_part.added",
+        "response.output_text.done": "response.output_text.delta",
+        "response.web_search_call.done": "response.web_search_call.added",
+        "response.reasoning_text.done": "response.reasoning_text.delta",
+        "response.reasoning_part.done": "response.reasoning_part.added",
+    }
+
+    for prompt in prompts:
+        response = await client.responses.create(
+            model=model_name,
+            input=prompt,
+            reasoning={"effort": "low"},
+            tools=[],
+            stream=True,
+            background=False,
+        )
+
+        stack_of_event_types = []
+        async for event in response:
+            if event.type == 'response.created':
+                stack_of_event_types.append(event.type)
+            elif event.type == 'response.completed':
+                assert stack_of_event_types[-1] == pairs_of_event_types[
+                    event.type]
+                stack_of_event_types.pop()
+            if event.type.endswith("added"):
+                stack_of_event_types.append(event.type)
+            elif event.type.endswith("delta"):
+                if stack_of_event_types[-1] == event.type:
+                    continue
+                stack_of_event_types.append(event.type)
+            elif event.type.endswith("done"):
+                assert stack_of_event_types[-1] == pairs_of_event_types[
+                    event.type]
+                stack_of_event_types.pop()
+        assert len(stack_of_event_types) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("background", [True, False])
+async def test_streaming(client: OpenAI, model_name: str, background: bool):
     # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
@@ -300,14 +366,45 @@ async def test_streaming(client: OpenAI, model_name: str):
                 # },
             ],
             stream=True,
+            background=background,
         )
+
+        current_item_id = ""
+        current_content_index = -1
 
         events = []
         current_event_mode = None
+        resp_id = None
         async for event in response:
+            if event.type == "response.created":
+                resp_id = event.response.id
+
             if current_event_mode != event.type:
                 current_event_mode = event.type
                 print(f"\n[{event.type}] ", end="", flush=True)
+
+            # verify current_item_id is correct
+            if event.type == "response.output_item.added":
+                assert event.item.id != current_item_id
+                current_item_id = event.item.id
+            elif event.type in [
+                    "response.output_text.delta",
+                    "response.reasoning_text.delta"
+            ]:
+                assert event.item_id == current_item_id
+
+            # verify content_index_id is correct
+            if event.type in [
+                    "response.content_part.added",
+                    "response.reasoning_part.added"
+            ]:
+                assert event.content_index != current_content_index
+                current_content_index = event.content_index
+            elif event.type in [
+                    "response.output_text.delta",
+                    "response.reasoning_text.delta"
+            ]:
+                assert event.content_index == current_content_index
 
             if "text.delta" in event.type:
                 print(event.delta, end="", flush=True)
@@ -321,6 +418,19 @@ async def test_streaming(client: OpenAI, model_name: str):
             events.append(event)
 
         assert len(events) > 0
+        response_completed_event = events[-1]
+        assert len(response_completed_event.response.output) > 0
+
+        if background:
+            starting_after = 5
+            async with await client.responses.retrieve(
+                    response_id=resp_id,
+                    stream=True,
+                    starting_after=starting_after) as stream:
+                counter = starting_after
+                async for event in stream:
+                    counter += 1
+                    assert event == events[counter]
 
 
 @pytest.mark.asyncio
@@ -405,6 +515,7 @@ async def test_function_calling(client: OpenAI, model_name: str):
         model=model_name,
         input="What's the weather like in Paris today?",
         tools=tools,
+        temperature=0.0,
     )
     assert response is not None
     assert response.status == "completed"
@@ -633,3 +744,18 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
     assert response_2 is not None
     assert response_2.status == "completed"
     assert response_2.output_text is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_output_messages_enabled(client: OpenAI, model_name: str,
+                                       server):
+    response = await client.responses.create(
+        model=model_name,
+        input="What is the capital of South Korea?",
+        extra_body={"enable_response_messages": True})
+
+    assert response is not None
+    assert response.status == "completed"
+    assert len(response.input_messages) > 0
+    assert len(response.output_messages) > 0
