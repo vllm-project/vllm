@@ -33,11 +33,9 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
@@ -139,12 +137,10 @@ class ErnieMultiTokenPredictor(nn.Module):
         self,
         hidden_states: torch.Tensor,
         lm_head: ParallelLMHead,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         self.layers[str(self.mtp_start_layer_idx + spec_step_idx)]
-        logits = self.logits_processor(lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(lm_head, hidden_states)
         return logits
 
 
@@ -158,8 +154,8 @@ class ErnieMTP(nn.Module, SupportsPP):
                                               prefix=maybe_prefix(
                                                   prefix, "model"))
         self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                      self.config.hidden_size)
-        self.sampler = get_sampler()
+                                      self.config.hidden_size,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
 
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
@@ -181,19 +177,10 @@ class ErnieMTP(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> Optional[torch.Tensor]:
         return self.model.compute_logits(hidden_states, self.lm_head,
-                                         sampling_metadata, spec_step_idx)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+                                         spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

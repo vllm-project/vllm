@@ -13,12 +13,12 @@ import pytest
 import pytest_asyncio
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.v1.engine.async_llm import AsyncLLM
 
 from ...utils import RemoteOpenAIServer
 
@@ -277,7 +277,7 @@ def test_async_serving_chat_init():
 
 @pytest.mark.asyncio
 async def test_serving_chat_returns_correct_model_name():
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -313,7 +313,7 @@ async def test_serving_chat_returns_correct_model_name():
 
 @pytest.mark.asyncio
 async def test_serving_chat_should_set_correct_max_tokens():
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -334,7 +334,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):
@@ -356,7 +355,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     }
 
     # Reinitialize the engine with new settings
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -379,7 +378,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):
@@ -411,7 +409,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     }
 
     # Reinitialize the engine with new settings
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -434,7 +432,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):
@@ -468,7 +465,7 @@ async def test_serving_chat_could_load_correct_generation_config():
         "repetition_penalty": 1.05
     }
 
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
@@ -490,7 +487,6 @@ async def test_serving_chat_could_load_correct_generation_config():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):
@@ -524,7 +520,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_model_config = MockModelConfig()
     mock_model_config.hf_config.model_type = model_type
 
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
