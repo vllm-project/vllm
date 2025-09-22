@@ -400,14 +400,11 @@ class MultiHeadAttention(nn.Module):
             # currently, only torch_sdpa is supported on rocm/xpu
             self.attn_backend = _Backend.TORCH_SDPA
         else:
-
             self.attn_backend = backend if backend in {
-                _Backend.TORCH_SDPA,
                 _Backend.TORCH_SDPA,
                 _Backend.XFORMERS,
                 _Backend.PALLAS,
                 _Backend.ROCM_AITER_FA,
-                _Backend.FLASH_ATTN,
                 _Backend.FLASH_ATTN,
             } else _Backend.TORCH_SDPA
 
