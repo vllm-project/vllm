@@ -10,7 +10,6 @@ from tokenizers.decoders import DecodeStream
 from transformers import PreTrainedTokenizerFast
 
 from vllm.config import VllmConfig
-from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.transformers_utils.detokenizer_utils import (
