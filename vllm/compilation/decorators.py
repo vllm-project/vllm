@@ -372,6 +372,12 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
 
 @contextlib.contextmanager
 def _torch27_patch_tensor_subclasses():
+    """
+    Add support for using tensor subclasses (ie `BasevLLMParameter`, ect) when
+    using torch 2.7.0. This enables using weight_loader_v2 and the use of
+    `BasevLLMParameters` without having to replace them with regular tensors
+    before `torch.compile`-time.
+    """
     from vllm.model_executor.parameter import (BasevLLMParameter,
                                                ModelWeightParameter,
                                                RowvLLMParameter,
@@ -385,12 +391,10 @@ def _torch27_patch_tensor_subclasses():
         yield
         return
 
-    with (
-            torch._dynamo.config.patch("traceable_tensor_subclasses", [
-                BasevLLMParameter, ModelWeightParameter, _ColumnvLLMParameter,
-                RowvLLMParameter
-            ]),
-            patch(
-                "torch._dynamo.variables.torch.can_dispatch_torch_function",  # noqa: E501
+    with (torch._dynamo.config.patch("traceable_tensor_subclasses", [
+            BasevLLMParameter, ModelWeightParameter, _ColumnvLLMParameter,
+            RowvLLMParameter
+    ]),
+          patch("torch._dynamo.variables.torch.can_dispatch_torch_function",
                 return_false)):
         yield
