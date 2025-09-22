@@ -253,13 +253,29 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # projection of the input hidden states
         self.projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
         self.projection_size_ba = self.num_v_heads * 2
-        self.in_proj = MergedColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_sizes=[self.projection_size_qkvz, self.projection_size_ba],
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.in_proj",
-        )
+        if self.quant_config is None:
+            self.in_proj = MergedColumnParallelLinear(
+                input_size=self.hidden_size,
+                output_sizes=[self.projection_size_qkvz, self.projection_size_ba],
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj",
+            )
+        else:
+            self.in_proj_qkvz = ColumnParallelLinear(
+                input_size=self.hidden_size,
+                output_size=self.projection_size_qkvz,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_qkvz",
+            )
+            self.in_proj_ba = ColumnParallelLinear(
+                input_size=self.hidden_size,
+                output_size=self.projection_size_ba,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_ba",
+            )
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -423,17 +439,22 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
         # 1. Set up dimensions for reshapes later
-        projected_states, _ = self.in_proj(hidden_states[:num_actual_tokens])
+        if self.quant_config is None:
+            projected_states, _ = self.in_proj(hidden_states[:num_actual_tokens])
+        else:
+            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states[:num_actual_tokens])
+            projected_states_ba, _ = self.in_proj_ba(hidden_states[:num_actual_tokens])
         if spec_token_masks is not None:
             spec_token_masks = spec_token_masks[:num_actual_tokens]
-        projected_states_qkvz, projected_states_ba = torch.split(
-            projected_states,
-            [
-                self.projection_size_qkvz // self.tp_size,
-                self.projection_size_ba // self.tp_size
-            ],
-            dim=-1,
-        )
+        if self.quant_config is None:
+            projected_states_qkvz, projected_states_ba = torch.split(
+                projected_states,
+                [
+                    self.projection_size_qkvz // self.tp_size,
+                    self.projection_size_ba // self.tp_size
+                ],
+                dim=-1,
+            )
         query, key, value, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba)
         query, key, value = map(lambda x: rearrange(x, 'l p d -> l (p d)'),
@@ -890,6 +911,7 @@ class Qwen3NextModel(nn.Module):
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
+        self.quant_config = quant_config
         lora_vocab = ((lora_config.lora_extra_vocab_size *
                        (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
@@ -979,9 +1001,11 @@ class Qwen3NextModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            ("in_proj", "in_proj_qkvz", 0),
-            ("in_proj", "in_proj_ba", 1),
         ]
+        if self.quant_config is None:
+            stacked_params_mapping.append(("in_proj", "in_proj_qkvz", 0))
+            stacked_params_mapping.append(("in_proj", "in_proj_ba", 1))
+            
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -1072,6 +1096,8 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             "Qwen3Next currently does not support prefix caching"
         assert envs.VLLM_USE_V1, "Qwen3Next requires VLLM_USE_V1"
         self.quant_config = vllm_config.quant_config
+        if self.quant_config is not None:
+            self.packed_modules_mapping.pop("in_proj", None)
 
         super().__init__()
         self.config = config
