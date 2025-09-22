@@ -237,6 +237,11 @@ try:
 except ImportError:
     flashinfer_available = False
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.backends.mla.flashmla_sparse import MLASparsePrefillMetadata
+
 
 def is_rocm_aiter_fp8bmm_enabled() -> bool:
     return current_platform.is_rocm() \
@@ -398,8 +403,8 @@ class MLACommonMetadata(Generic[D]):
 
     decode: Optional[D] = None
     prefill: Optional[Union[MLACommonPrefillMetadata,
-                            FlashInferPrefillMetadata,
-                            CudnnPrefillMetadata]] = None
+                            FlashInferPrefillMetadata, CudnnPrefillMetadata,
+                            "MLASparsePrefillMetadata"]] = None
 
     def __post_init__(self):
         if self.head_dim is not None:

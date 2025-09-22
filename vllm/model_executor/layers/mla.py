@@ -25,6 +25,7 @@ class MLAModules:
     q_b_proj: Optional[torch.nn.Module]
     q_proj: Optional[torch.nn.Module]
     indexer: Optional[torch.nn.Module]
+    is_sparse: bool
 
 
 @CustomOp.register("multi_head_latent_attention")
@@ -77,6 +78,9 @@ class MultiHeadLatentAttention(CustomOp):
         self.kv_b_proj = mla_modules.kv_b_proj
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
+        self.indexer = mla_modules.indexer
+        self.topk_tokens = mla_modules.indexer.topk_tokens
+        self.use_sparse = mla_modules.is_sparse and False
 
         # In the MLA backend, kv_cache includes both k_c and
         # pe (i.e. decoupled position embeddings). In particular,
@@ -93,6 +97,7 @@ class MultiHeadLatentAttention(CustomOp):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_mla=True,
+            use_sparse=mla_modules.is_sparse,
             # MLA Args
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
@@ -146,6 +151,13 @@ class MultiHeadLatentAttention(CustomOp):
 
         q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
             positions, q[..., self.qk_nope_head_dim:], k_pe)
+
+        if self.use_sparse:
+            topk_indices = torch.zeros(q.shape[0], self.topk_tokens)
+
+            # NOTE(Chen): a bit hacky, but need to modify Attention.forward 
+            # otherwise. Try to refactor this later.
+            self.mla_attn.impl.set_topk_indices(topk_indices)
 
         attn_out = self.mla_attn(
             q,

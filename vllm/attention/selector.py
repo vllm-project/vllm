@@ -145,6 +145,7 @@ def get_attn_backend(
     is_attention_free: bool = False,
     use_mla: bool = False,
     has_sink: bool = False,
+    use_sparse: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     # Accessing envs.* behind an @lru_cache decorator can cause the wrong
@@ -160,6 +161,7 @@ def get_attn_backend(
         use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
         has_sink=has_sink,
+        use_sparse=use_sparse,
     )
 
 
@@ -173,6 +175,7 @@ def _cached_get_attn_backend(
     use_v1: bool = False,
     use_mla: bool = False,
     has_sink: bool = False,
+    use_sparse: bool = False,
 ) -> type[AttentionBackend]:
     # If there are no attention layers (e.g. we are running Mamba),
     # use the placeholder NO_ATTENTION
@@ -204,7 +207,7 @@ def _cached_get_attn_backend(
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
         selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
-        use_mla, has_sink)
+        use_mla, has_sink, use_sparse)
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}")
