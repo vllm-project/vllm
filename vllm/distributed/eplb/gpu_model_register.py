@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import types
-
+import typing
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.models.utils import is_pp_missing_parameter
@@ -52,23 +52,23 @@ def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         num_experts=self.config.n_routed_experts,
         num_redundant_experts=self.num_redundant_experts)
 
-def load_expert_weight(self, mapping, loaded_weight, params_dict):
+def load_expert_weight(self, mapping, name, loaded_weight, params_dict):
     ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale",
                         ".v_scale", "_v_scale", ".weight_scale",
                         "_weight_scale", ".input_scale", "_input_scale")
 
+    expert_matched = False
     is_continue = False
-    is_expert_weight = False
     success = False
-
+    name_mapped = ''
     param_name, weight_name, expert_id, shard_id = mapping
     if weight_name not in name:
         is_continue = True
-        return is_continue, is_expert_weight, success
+        return expert_matched, is_continue, success, name_mapped
 
     # Anyway, this is an expert weight and should not be
     # attempted to load as other weights later
-    is_expert_weight = True
+    expert_matched = True
 
     # Do not modify `name` since the loop may continue here
     # Instead, create a new variable
@@ -76,14 +76,13 @@ def load_expert_weight(self, mapping, loaded_weight, params_dict):
 
     if is_pp_missing_parameter(name_mapped, self):
         is_continue = True
-        return is_continue, is_expert_weight, success
+        return expert_matched, is_continue, success, name_mapped
 
     # Skip loading extra parameters for GPTQ/modelopt models.
-    if name_mapped.endswith(
-            ignore_suffixes
-    ) and name_mapped not in params_dict:
+    if name_mapped.endswith(ignore_suffixes) \
+            and name_mapped not in params_dict:
         is_continue = True
-        return is_continue, is_expert_weight, success
+        return expert_matched, is_continue, success, name_mapped
 
     param = params_dict[name_mapped]
     # We should ask the weight loader to return success or not
@@ -97,9 +96,7 @@ def load_expert_weight(self, mapping, loaded_weight, params_dict):
                             shard_id=shard_id,
                             expert_id=expert_id,
                             return_success=True)
-    if success:
-        name = name_mapped
-        return is_continue, is_expert_weight, success
+    return expert_matched, is_continue, success, name_mapped
 
 def model_register(model):
     """
@@ -116,3 +113,4 @@ def model_register(model):
         types.MethodType(update_physical_experts_metadata, model) 
     model.model.get_expert_mapping = \
         types.MethodType(get_expert_mapping, model.model)
+    print("register complete")

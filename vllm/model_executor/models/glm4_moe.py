@@ -506,10 +506,10 @@ class Glm4MoeModel(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-
+        from vllm.distributed.eplb.gpu_model_register import get_expert_mapping, load_expert_weight
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
+        expert_params_mapping = get_expert_mapping(self)
         for name, loaded_weight in weights:
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
@@ -539,13 +539,19 @@ class Glm4MoeModel(nn.Module):
                 break
             else:
                 is_expert_weight = False
+                is_continue = False
                 for mapping in expert_params_mapping:
-                    is_continue, is_expert_weight, success = \
-                        self.load_expert_weight(
-                            mapping, loaded_weight, params_dict)
+                    expert_matched, is_continue, success, name_mapped = \
+                        load_expert_weight(self, mapping, name,
+                                           loaded_weight, params_dict)
+                    if expert_matched:
+                        is_expert_weight = True
+
                     if is_continue:
                         continue
+
                     if success:
+                        name = name_mapped
                         break
                 else:
                     if is_expert_weight:

@@ -895,10 +895,10 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
-
+        from vllm.distributed.eplb.gpu_model_register import get_expert_mapping, load_expert_weight
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = self.model.get_expert_mapping()
+        expert_params_mapping = get_expert_mapping(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -944,13 +944,19 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
                 break
             else:
                 is_expert_weight = False
+                is_continue = False
                 for mapping in expert_params_mapping:
-                    is_continue, is_expert_weight, success = \
-                        self.load_expert_weight(
-                            mapping, loaded_weight, params_dict)
+                    expert_matched, is_continue, success, name_mapped = \
+                        load_expert_weight(self, mapping, name,
+                                           loaded_weight, params_dict)
+                    if expert_matched:
+                        is_expert_weight = True
+
                     if is_continue:
                         continue
+
                     if success:
+                        name = name_mapped
                         break
                 else:
                     if is_expert_weight:
