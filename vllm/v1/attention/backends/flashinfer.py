@@ -214,6 +214,7 @@ class FlashInferMetadata:
 
     # For flashinfer trtllm batch decode
     max_q_len: int
+    max_q_len_prefill: int
     max_seq_len: int
     seq_lens: torch.Tensor
     block_table_tensor: torch.Tensor
@@ -487,6 +488,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_last_page_len_np,
         )
 
+        uses_spec_reorder = self.reorder_batch_threshold > 1
         prefill_use_trtllm = use_trtllm_attention(self.num_qo_heads,
                                                   self.num_kv_heads,
                                                   num_prefill_tokens,
@@ -494,7 +496,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                   self.cache_dtype,
                                                   self.q_data_type,
                                                   is_prefill=True,
-                                                  has_sinks=self.has_sinks)
+                                                  has_sinks=self.has_sinks,
+                                                  has_spec=uses_spec_reorder)
         decode_use_trtllm = use_trtllm_attention(self.num_qo_heads,
                                                  self.num_kv_heads,
                                                  num_decode_tokens,
@@ -502,7 +505,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                  self.cache_dtype,
                                                  self.q_data_type,
                                                  is_prefill=False,
-                                                 has_sinks=self.has_sinks)
+                                                 has_sinks=self.has_sinks,
+                                                 has_spec=uses_spec_reorder)
         if self.has_sinks and not (prefill_use_trtllm and decode_use_trtllm):
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
@@ -519,6 +523,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             q_data_type=self.q_data_type,
             slot_mapping=common_attn_metadata.slot_mapping,
             max_q_len=max_q_len,
+            max_q_len_prefill=max_q_len,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
             block_table_tensor=block_table_tensor,
@@ -575,6 +580,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 qo_indptr_cpu = qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[
                     prefill_start]
                 paged_kv_indptr_cpu = paged_kv_indptr_cpu[prefill_start:]
+
+                # Recompute max_q_len for the slice of requests we are using
+                # for prefills. This can be different from max_q_len when
+                # we have a non-uniform batch with some short decodes offloaded
+                # to the prefill pathway
+                query_lens_prefill = qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]
+                attn_metadata.max_q_len_prefill = \
+                    int(query_lens_prefill.max().item())
+
                 if not attn_metadata.prefill_use_trtllm:
                     attn_metadata.prefill_wrapper.plan(
                         qo_indptr_cpu,
@@ -919,7 +933,7 @@ class FlashInferImpl(AttentionImpl):
                     workspace_buffer=workspace_buffer,
                     block_tables=mock_block_table,
                     seq_lens=seq_lens_prefill,
-                    max_q_len=attn_metadata.max_q_len,
+                    max_q_len=attn_metadata.max_q_len_prefill,
                     max_kv_len=attn_metadata.max_seq_len,
                     bmm1_scale=self.bmm1_scale,
                     bmm2_scale=self.bmm2_scale,
