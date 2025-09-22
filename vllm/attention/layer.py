@@ -29,6 +29,10 @@ from vllm.utils import GiB_bytes, direct_register_custom_op
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
+try:
+    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
+except AttributeError:
+    tag_cudagraph_unsafe = ()  # type: ignore[assignment]
 
 
 def check_xformers_availability():
@@ -430,9 +434,11 @@ class MultiHeadAttention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> torch.Tensor:
-        """Input shape: batch_size x seq_len x hidden_size"""
-        # TODO(Isotr0py): Use existing backend implementations and support FA3
-        bsz, q_len, _ = query.size()
+        """Input shape: 
+        (batch_size x seq_len x hidden_size) or
+        (batch_size x seq_len x num_heads x head_size)
+        """
+        bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
 
         query = query.view(bsz, q_len, self.num_heads, self.head_size)
@@ -575,6 +581,7 @@ direct_register_custom_op(
     mutates_args=[],
     fake_impl=unified_attention_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
 )
 
 
@@ -625,4 +632,5 @@ direct_register_custom_op(
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
 )
