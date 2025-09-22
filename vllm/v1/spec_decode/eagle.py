@@ -893,11 +893,11 @@ class EagleProposer:
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
-        if not self.vllm_config.parallel_config.enable_eplb:
+        if not self.vllm_config.parallel_config.enable_eplb or \
+            not is_mixture_of_experts(self.model):
             return
 
         assert self.eplb_state is not None
-        assert is_mixture_of_experts(self.model)
         self.eplb_state.step(
             self.model,
             is_dummy,

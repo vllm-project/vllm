@@ -184,6 +184,27 @@ class DeepSeekMTP(nn.Module, SupportsPP, MixtureOfExperts):
                 logical_replica_count=logical_replica_count,
             )
 
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = (num_physical_experts -
+                                      self.num_logical_experts)
+        for layer in self.model.layers.values():
+            assert isinstance(layer, DeepSeekMultiTokenPredictorLayer)
+            layer = layer.mtp_block
+            assert isinstance(layer, DeepseekV2DecoderLayer)
+            if isinstance(layer.mlp, DeepseekV2MoE):
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
+
     def forward(
         self,
         input_ids: torch.Tensor,

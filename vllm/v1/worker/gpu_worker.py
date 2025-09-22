@@ -576,27 +576,47 @@ class Worker(WorkerBase):
         from vllm.distributed.parallel_state import (
             get_dp_group, get_ep_group, prepare_communication_buffer_for_model)
         from vllm.model_executor.layers.fused_moe.layer import (
-            FusedMoEParallelConfig)
-
+            FusedMoE, FusedMoEParallelConfig)
         parallel_config = self.vllm_config.parallel_config
-        moe_modules = [
+
+        def update_moe_modules(moe_modules: list[FusedMoE]):
+            assert all(
+                module.moe_config.num_local_experts == num_local_experts
+                for module in moe_modules), (
+                    "All MoE modules must have the same number of experts")
+            for module in moe_modules:
+                module.moe_config.num_experts = num_local_experts * new_ep_size
+                module.global_num_experts = module.moe_config.num_experts
+                module.moe_parallel_config = FusedMoEParallelConfig.make(
+                    tp_size_=get_tp_group().world_size,
+                    dp_size_=get_dp_group().world_size,
+                    vllm_parallel_config=parallel_config,
+                )
+                module.moe_config.moe_parallel_config = \
+                    module.moe_parallel_config
+
+        model_moe_modules = [
             module for module in self.model_runner.model.modules()
             if (module.__class__.__name__ == "FusedMoE"
                 or module.__class__.__name__ == "SharedFusedMoE")
         ]
-        num_local_experts = moe_modules[0].moe_config.num_local_experts
-        assert all(module.moe_config.num_local_experts == num_local_experts
-                   for module in moe_modules), (
-                       "All MoE modules must have the same number of experts")
-        for module in moe_modules:
-            module.moe_config.num_experts = num_local_experts * new_ep_size
-            module.global_num_experts = module.moe_config.num_experts
-            module.moe_parallel_config = FusedMoEParallelConfig.make(
-                tp_size_=get_tp_group().world_size,
-                dp_size_=get_dp_group().world_size,
-                vllm_parallel_config=parallel_config,
-            )
-            module.moe_config.moe_parallel_config = module.moe_parallel_config
+        num_local_experts = model_moe_modules[0].moe_config.num_local_experts
+
+        update_moe_modules(model_moe_modules)
+        if hasattr(self.model_runner, "drafter") and hasattr(
+                self.model_runner, "drafter_eplb_state") and \
+            hasattr(self.model_runner.drafter, "model"):
+            drafter_moe_modules = [
+                module for module in self.model_runner.drafter.model.modules()
+                if (module.__class__.__name__ == "FusedMoE"
+                    or module.__class__.__name__ == "SharedFusedMoE")
+            ]
+            # Check if drafter and model have matching configs
+            assert drafter_moe_modules[
+                0].moe_config.num_local_experts == num_local_experts, \
+                 "Drafter and model configs should be the same"
+            update_moe_modules(drafter_moe_modules)
+
         if new_ep_size < old_ep_size:
             num_local_physical_experts = num_local_experts
             assert self.model_runner.eplb_state is not None
@@ -621,6 +641,10 @@ class Worker(WorkerBase):
             parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts - global_expert_load.shape[1])
         prepare_communication_buffer_for_model(self.model_runner.model)
+        if hasattr(self.model_runner, "drafter") and \
+            hasattr(self.model_runner.drafter, "model"):
+            prepare_communication_buffer_for_model(
+                self.model_runner.drafter.model)
         self.model_runner.model.update_physical_experts_metadata(
             num_physical_experts=new_physical_experts,
             num_local_physical_experts=num_local_physical_experts)

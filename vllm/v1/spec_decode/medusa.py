@@ -54,51 +54,15 @@ class MedusaProposer:
         draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
         return [list(row) for row in zip(*draft_tokens)]
 
-    def eplb_step(self,
-                  is_dummy: bool = False,
-                  is_profile: bool = False) -> None:
-        """
-        Step for the EPLB (Expert Parallelism Load Balancing) state.
-        """
-        if not self.vllm_config.parallel_config.enable_eplb:
-            return
-
-        assert self.eplb_state is not None
-        assert is_mixture_of_experts(self.model)
-        self.eplb_state.step(
-            self.model,
-            is_dummy,
-            is_profile,
-            log_stats=self.vllm_config.parallel_config.eplb_config.
-            log_balancedness,
-        )
-
     def load_model(self,
                    target_model: nn.Module,
                    eep_scale_up: bool = False) -> None:
-        global_expert_load, old_global_expert_indices, rank_mapping = \
-            EplbState.get_epp_state(self.vllm_config.parallel_config,
-            eep_scale_up)
-
         from vllm.compilation.backends import set_model_tag
         with set_model_tag("medusa_head"):
             self.model = get_model(vllm_config=self.vllm_config,
                                    model_config=self.vllm_config.
                                    speculative_config.draft_model_config)
-        if is_mixture_of_experts(
-                self.model) and self.vllm_config.parallel_config.enable_eplb:
-            logger.info(
-                "EPLB is enabled for Eagle drafter model %s.",
-                self.vllm_config.speculative_config.draft_model_config.model)
-
-            self.eplb_state = EplbState.build(
-                self.model,
-                self.device,
-                self.vllm_config.parallel_config,
-                global_expert_load,
-                old_global_expert_indices,
-                rank_mapping,
-            )
+        assert not is_mixture_of_experts(self.model)
 
     @torch.inference_mode()
     def dummy_run(self,
@@ -111,5 +75,3 @@ class MedusaProposer:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
             self.model(hidden_states)
-        if not skip_eplb:
-            self.eplb_step(is_dummy=True, is_profile=is_profile)

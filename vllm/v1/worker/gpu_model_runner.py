@@ -2542,6 +2542,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model, eep_scale_up=eep_scale_up)
+                if hasattr(self.drafter, "eplb_state"):
+                    assert hasattr(self.drafter, "model") and \
+                        is_mixture_of_experts(self.drafter.model)
+                    self.drafter_eplb_state = self.drafter.eplb_state
             if self.use_aux_hidden_state_outputs:
                 if supports_eagle3(self.model):
                     self.model.set_aux_hidden_state_layers(
@@ -2556,7 +2560,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
-
         if is_mixture_of_experts(
                 self.model) and self.parallel_config.enable_eplb:
             logger.info("EPLB is enabled for model %s.",
