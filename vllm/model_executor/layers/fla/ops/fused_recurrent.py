@@ -16,16 +16,7 @@ from vllm.triton_utils import tl, triton
 from .op import exp
 
 
-@triton.jit(do_not_specialize=[
-    'N',
-    'T',
-    'H',
-    'HV',
-    'stride_init_state_token',
-    'stride_final_state_token',
-    'stride_indices_seq',
-    'stride_indices_tok',
-])
+@triton.jit(do_not_specialize=['N', 'T'])
 def fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
     k,
@@ -67,11 +58,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         bos, eos = tl.load(cu_seqlens + i_n).to(
             tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
-        T = (eos - bos)
+        T = eos - bos
     else:
-        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
-        all = (B * T).to(tl.int64)
-        T = T.to(tl.int64)
+        bos, eos = i_n * T, i_n * T + T
+        all = B * T
 
     if T == 0:
         # no tokens to process for this sequence
@@ -98,9 +88,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             if IS_SPEC_DECODING and num_accepted_tokens is not None:
-                i_t: tl.int64 = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
             else:
-                i_t: tl.int64 = 0
+                i_t = 0
                 i_t = i_t.to(tl.int64)
             p_h0 = h0 + tl.load(ssm_state_indices + i_n * stride_indices_seq +
                                 i_t).to(tl.int64) * stride_init_state_token
