@@ -41,10 +41,11 @@ from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
-from vllm.transformers_utils.config import get_model_path, is_interleaved
+from vllm.transformers_utils.config import (get_model_path, is_interleaved,
+                                            maybe_override_with_speculators)
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
-                        GiB_bytes, get_ip, is_in_ray_actor)
+from vllm.utils import (FlexibleArgumentParser, GiB_bytes, get_ip,
+                        is_in_ray_actor)
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 # yapf: enable
@@ -409,9 +410,7 @@ class EngineArgs:
         get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: Optional[Union[str,
                                     List[str]]] = LoadConfig.ignore_patterns
-    preemption_mode: Optional[str] = SchedulerConfig.preemption_mode
 
-    scheduler_delay_factor: float = SchedulerConfig.delay_factor
     enable_chunked_prefill: Optional[
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
@@ -439,7 +438,6 @@ class EngineArgs:
         ObservabilityConfig.otlp_traces_endpoint
     collect_detailed_traces: Optional[list[DetailedTraceModules]] = \
         ObservabilityConfig.collect_detailed_traces
-    disable_async_output_proc: bool = not ModelConfig.use_async_output_proc
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
 
@@ -561,14 +559,6 @@ class EngineArgs:
                                  **model_kwargs["enable_prompt_embeds"])
         model_group.add_argument("--served-model-name",
                                  **model_kwargs["served_model_name"])
-        # This one is a special case because it is the
-        # opposite of ModelConfig.use_async_output_proc
-        model_group.add_argument(
-            "--disable-async-output-proc",
-            action="store_true",
-            default=EngineArgs.disable_async_output_proc,
-            help="Disable async output processing. This may result in "
-            "lower performance.")
         model_group.add_argument("--config-format",
                                  **model_kwargs["config_format"])
         # This one is a special case because it can bool
@@ -897,10 +887,6 @@ class EngineArgs:
             **scheduler_kwargs["long_prefill_token_threshold"])
         scheduler_group.add_argument("--num-lookahead-slots",
                                      **scheduler_kwargs["num_lookahead_slots"])
-        scheduler_group.add_argument("--scheduler-delay-factor",
-                                     **scheduler_kwargs["delay_factor"])
-        scheduler_group.add_argument("--preemption-mode",
-                                     **scheduler_kwargs["preemption_mode"])
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument("--scheduling-policy",
@@ -1029,7 +1015,6 @@ class EngineArgs:
             interleave_mm_strings=self.interleave_mm_strings,
             media_io_kwargs=self.media_io_kwargs,
             skip_mm_profiling=self.skip_mm_profiling,
-            use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
@@ -1098,29 +1083,8 @@ class EngineArgs:
         provided as a JSON string input via CLI arguments or directly as a
         dictionary from the engine.
         """
-
-        from vllm.transformers_utils.config import get_config
-        from vllm.transformers_utils.configs.speculators.base import (
-            SpeculatorsConfig)
-
         if self.speculative_config is None:
-            hf_config = get_config(
-                self.hf_config_path or target_model_config.model,
-                self.trust_remote_code, self.revision, self.code_revision,
-                self.config_format)
-
-            # if loading a SpeculatorsConfig, load the speculative_config
-            # details from the config directly
-            # no user input required / expected
-            if isinstance(hf_config, SpeculatorsConfig):
-                # We create one since we don't create one
-                self.speculative_config = {}
-                self.speculative_config[
-                    "num_speculative_tokens"] = hf_config.num_lookahead_tokens
-                self.speculative_config["model"] = target_model_config.model
-                self.speculative_config["method"] = hf_config.method
-            else:
-                return None
+            return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
@@ -1155,6 +1119,15 @@ class EngineArgs:
 
         device_config = DeviceConfig(
             device=cast(Device, current_platform.device_type))
+
+        (self.model, self.tokenizer,
+         self.speculative_config) = maybe_override_with_speculators(
+             model=self.model,
+             tokenizer=self.tokenizer,
+             revision=self.revision,
+             trust_remote_code=self.trust_remote_code,
+             vllm_speculative_config=self.speculative_config,
+         )
         model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
@@ -1189,17 +1162,6 @@ class EngineArgs:
         else:
             self._set_default_args_v0(model_config)
         assert self.enable_chunked_prefill is not None
-
-        if envs.VLLM_ATTENTION_BACKEND in [STR_DUAL_CHUNK_FLASH_ATTN_VAL]:
-            assert self.enforce_eager, (
-                "Cuda graph is not supported with DualChunkFlashAttention. "
-                "To run the model in eager mode, set 'enforce_eager=True' "
-                "or use '--enforce-eager' in the CLI.")
-            assert current_platform.is_cuda(), (
-                "DualChunkFlashAttention is only supported on CUDA platform.")
-            assert not use_v1, (
-                "DualChunkFlashAttention is not supported on V1 engine. "
-                "To run the model in V0 engine, try set 'VLLM_USE_V1=0'")
 
         sliding_window: Optional[int] = None
         if not is_interleaved(model_config.hf_text_config):
@@ -1395,11 +1357,9 @@ class EngineArgs:
             max_model_len=model_config.max_model_len,
             cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
-            delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
-            preemption_mode=self.preemption_mode,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
@@ -1486,41 +1446,11 @@ class EngineArgs:
         #############################################################
         # Unsupported Feature Flags on V1.
 
-        if self.load_format == "sharded_state":
-            _raise_or_fallback(
-                feature_name=f"--load_format {self.load_format}",
-                recommend_to_remove=False)
-            return False
-
         if (self.logits_processor_pattern
                 != EngineArgs.logits_processor_pattern):
             _raise_or_fallback(feature_name="--logits-processor-pattern",
                                recommend_to_remove=False)
             return False
-
-        if self.preemption_mode != SchedulerConfig.preemption_mode:
-            _raise_or_fallback(feature_name="--preemption-mode",
-                               recommend_to_remove=True)
-            return False
-
-        if (self.disable_async_output_proc
-                != EngineArgs.disable_async_output_proc):
-            _raise_or_fallback(feature_name="--disable-async-output-proc",
-                               recommend_to_remove=True)
-            return False
-
-        if self.scheduler_delay_factor != SchedulerConfig.delay_factor:
-            _raise_or_fallback(feature_name="--scheduler-delay-factor",
-                               recommend_to_remove=True)
-            return False
-
-        if self.kv_cache_dtype != "auto":
-            supported = current_platform.is_kv_cache_dtype_supported(
-                self.kv_cache_dtype, model_config)
-            if not supported:
-                _raise_or_fallback(feature_name="--kv-cache-dtype",
-                                   recommend_to_remove=False)
-                return False
 
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
@@ -1564,6 +1494,7 @@ class EngineArgs:
             "FLEX_ATTENTION",
             "TREE_ATTN",
             "XFORMERS_VLLM_V1",
+            "ROCM_ATTN_VLLM_V1",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):

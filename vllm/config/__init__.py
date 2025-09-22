@@ -454,9 +454,6 @@ class VllmConfig:
         self.try_verify_and_update_config()
 
         if self.model_config is not None:
-            self.model_config.verify_async_output_proc(self.parallel_config,
-                                                       self.speculative_config,
-                                                       self.device_config)
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(
                 self.load_config)
@@ -506,7 +503,7 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
 
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        if current_platform.support_static_graph_mode():
             # if cudagraph_mode is not explicitly set by users, set default
             # value
             if self.compilation_config.cudagraph_mode is None:
@@ -877,7 +874,6 @@ class VllmConfig:
             f"served_model_name={self.model_config.served_model_name}, "
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
-            f"use_async_output_proc={self.model_config.use_async_output_proc}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")
 
@@ -909,10 +905,9 @@ def set_current_vllm_config(vllm_config: VllmConfig,
     except Exception:
         raise
     else:
-        logger.debug("enabled custom ops: %s",
-                     vllm_config.compilation_config.enabled_custom_ops)
-        logger.debug("disabled custom ops: %s",
-                     vllm_config.compilation_config.disabled_custom_ops)
+        if check_compile:
+            vllm_config.compilation_config.custom_op_log_check()
+
         if check_compile and \
             vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
             and compilation_counter.num_models_seen == num_models_seen:

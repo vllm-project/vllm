@@ -683,7 +683,8 @@ class Worker(WorkerBase):
             tensorizer_config=tensorizer_config, )
 
     def shutdown(self) -> None:
-        self.model_runner.ensure_kv_transfer_shutdown()
+        if runner := getattr(self, "model_runner", None):
+            runner.ensure_kv_transfer_shutdown()
 
 
 def init_worker_distributed_environment(
