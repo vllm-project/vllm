@@ -95,9 +95,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Generation data
         self.output_text = ""
         self.reasoning_parser: Optional[ReasoningParser] = None
-        if vllm_config.decoding_config.reasoning_backend:
+        if vllm_config.structured_outputs_config.reasoning_parser:
             reasoning_parser = ReasoningParserManager.get_reasoning_parser(
-                vllm_config.decoding_config.reasoning_backend)
+                vllm_config.structured_outputs_config.reasoning_parser)
             self.reasoning_parser = reasoning_parser(tokenizer)
 
     def update(self, new_token_ids: list[int], stop_terminated: bool) -> Optional[str]:
