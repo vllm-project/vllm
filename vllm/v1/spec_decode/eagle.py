@@ -123,7 +123,7 @@ class EagleProposer:
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
             # ROCM_AITER_FA is an optional backend
-            if find_spec(backend_to_class_str(_Backend.ROCM_AITER_FA, True)):
+            if find_spec(backend_to_class_str(_Backend.ROCM_AITER_FA)):
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
                     AiterFlashAttentionMetadata)
                 rocm_types.append(AiterFlashAttentionMetadata)

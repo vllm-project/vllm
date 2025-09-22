@@ -102,7 +102,7 @@ class CpuPlatform(Platform):
         logger.info("Using Torch SDPA backend.")
         if not use_v1:
             raise ValueError("CPU backend only supports V1.")
-        return backend_to_class_str(_Backend.TORCH_SDPA, use_v1)
+        return backend_to_class_str(_Backend.TORCH_SDPA)
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:

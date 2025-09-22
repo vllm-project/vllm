@@ -3,7 +3,7 @@
 """Attention backend registry"""
 
 import enum
-from typing import Optional, Type, Union
+from typing import Optional, Type
 
 from vllm.utils import resolve_obj_by_qualname
 
@@ -47,48 +47,28 @@ def register_attn_backend(backend: _Backend, class_path: str):
     return decorator
 
 
-def backend_to_class_str(backend: _Backend,
-                         use_v1: Union[None, bool] = None) -> str:
-    """Get the backend class string, optionally resolving to V1 version.
-    This function DOES NOT validate if the backend supports V1 or not.
+def backend_to_class_str(backend: _Backend) -> str:
+    """Get the backend class string
     
     Args:
         backend: The backend enum value
-        use_v1: If True, return the V1 version of the backend if available
         
     Returns:
         The backend class string
     """
-    if use_v1 is None:
-        return BACKEND_MAPPING[backend]
-
-    backend_name = backend.name
-    if use_v1:
-        v1_backend_name = f"{backend_name}_VLLM_V1"
-        try:
-            v1_backend = _Backend[v1_backend_name]
-            return BACKEND_MAPPING[v1_backend]
-        except KeyError:
-            return BACKEND_MAPPING[backend]
-    else:
-        if backend_name.endswith('_VLLM_V1'):
-            raise ValueError(f"{backend_name} is a V1-only backend.")
-        return BACKEND_MAPPING[backend]
+    return BACKEND_MAPPING[backend]
 
 
-def backend_to_class(backend: _Backend,
-                     use_v1: Union[None, bool] = None) -> Type:
-    """Get the backend class, optionally resolving to V1 version.
-    This function DOES NOT validate if the backend supports V1 or not.
+def backend_to_class(backend: _Backend) -> Type:
+    """Get the backend class.
 
     Args:
         backend: The backend enum value
-        use_v1: If True, return the V1 version of the backend if available
 
     Returns:
         The backend class
     """
-    backend_class_name = backend_to_class_str(backend, use_v1)
+    backend_class_name = backend_to_class_str(backend)
     return resolve_obj_by_qualname(backend_class_name)
 
 

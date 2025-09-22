@@ -43,17 +43,17 @@ class XPUPlatform(Platform):
             raise ValueError("XPU backend only supports V1.")
         if selected_backend == _Backend.TRITON_ATTN:
             logger.info_once("Using Triton backend on V1 engine.")
-            return backend_to_class_str(_Backend.TRITON_ATTN, use_v1)
+            return backend_to_class_str(_Backend.TRITON_ATTN)
         elif selected_backend == _Backend.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend on V1 engine.")
-            return backend_to_class_str(_Backend.FLASH_ATTN, use_v1)
+            return backend_to_class_str(_Backend.FLASH_ATTN)
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
                 f"with use_v1: {use_v1} use_mla: {use_mla}")
 
         logger.info("Using Flash Attention backend on V1 engine.")
-        return backend_to_class_str(_Backend.FLASH_ATTN, use_v1)
+        return backend_to_class_str(_Backend.FLASH_ATTN)
 
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,

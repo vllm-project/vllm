@@ -273,7 +273,7 @@ class CudaPlatformBase(Platform):
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
-            backend_class_str = backend_to_class_str(selected_backend, use_v1)
+            backend_class_str = backend_to_class_str(selected_backend)
             try:
                 backend_class = resolve_obj_by_qualname(backend_class_str)
                 invalid_reasons = backend_class.validate_configuration(
@@ -314,8 +314,7 @@ class CudaPlatformBase(Platform):
                     [b[0].name for b in valid_backends_priorities])
 
         valid_backends_classes_str = [
-            backend_to_class_str(b[0], use_v1)
-            for b in valid_backends_priorities
+            backend_to_class_str(b[0]) for b in valid_backends_priorities
         ]
         sorted_indices = sorted(range(len(valid_backends_priorities)),
                                 key=lambda i: valid_backends_priorities[i][1])

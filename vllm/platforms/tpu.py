@@ -57,7 +57,7 @@ class TpuPlatform(Platform):
         if not use_v1:
             raise ValueError("TPU backend only supports V1.")
         logger.info("Using Pallas V1 backend.")
-        return backend_to_class_str(_Backend.PALLAS, use_v1)
+        return backend_to_class_str(_Backend.PALLAS)
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:

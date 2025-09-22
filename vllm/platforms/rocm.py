@@ -208,8 +208,7 @@ class RocmPlatform(Platform):
             if selected_backend == _Backend.TRITON_MLA:
                 if block_size != 1:
                     logger.info_once("Using Triton MLA backend on V1 engine.")
-                    return backend_to_class_str(_Backend.TRITON_MLA,
-                                                envs.VLLM_USE_V1)
+                    return backend_to_class_str(_Backend.TRITON_MLA)
                 raise ValueError(
                     f" The selected backend, {selected_backend.name},"
                     f"does not support block size {block_size}.")
@@ -229,12 +228,10 @@ class RocmPlatform(Platform):
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
                 and on_gfx9():
                 logger.info("Using Flash Attention backend on V1 engine.")
-                return backend_to_class_str(_Backend.ROCM_AITER_FA,
-                                            envs.VLLM_USE_V1)
+                return backend_to_class_str(_Backend.ROCM_AITER_FA)
             else:
                 logger.info("Using Triton Attention backend on V1 engine.")
-                return backend_to_class_str(_Backend.TRITON_ATTN,
-                                            envs.VLLM_USE_V1)
+                return backend_to_class_str(_Backend.TRITON_ATTN)
         raise RuntimeError(
             "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
             "to select a supported backend.")
