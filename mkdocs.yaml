@@ -79,6 +79,7 @@ plugins:
         - "re:vllm\\._.*"  # Internal modules
         - "vllm.third_party"
         - "vllm.vllm_flash_attn"
+        - !ENV [API_AUTONAV_EXCLUDE, "re:^$"]  # Match nothing by default
   - mkdocstrings:
       handlers:
         python:
@@ -101,6 +102,7 @@ plugins:
           - https://numpy.org/doc/stable/objects.inv
           - https://pytorch.org/docs/stable/objects.inv
           - https://psutil.readthedocs.io/en/stable/objects.inv
+          - https://huggingface.co/docs/transformers/main/en/objects.inv
 
 markdown_extensions:
   - attr_list

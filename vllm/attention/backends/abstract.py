@@ -4,18 +4,13 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
-                    Protocol, Set, Tuple, Type, TypeVar, Union)
+from typing import (Any, Dict, Generic, List, Optional, Protocol, Set, Tuple,
+                    Type, TypeVar, Union)
 
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.multimodal import MultiModalPlaceholderMap
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import (ModelRunnerBase,
-                                               ModelRunnerInputBase,
-                                               ModelRunnerInputBuilderBase)
 
 
 class AttentionType:
@@ -23,14 +18,14 @@ class AttentionType:
     Attention type.
     Use string to be compatible with `torch.compile`.
     """
-    # Decoder attention between previous layer Q/K/V
     DECODER = "decoder"
-    # Encoder attention between previous layer Q/K/V for encoder-decoder
+    """Decoder attention between previous layer Q/K/V."""
     ENCODER = "encoder"
-    # Encoder attention between previous layer Q/K/V
+    """Encoder attention between previous layer Q/K/V for encoder-decoder."""
     ENCODER_ONLY = "encoder_only"
-    # Attention between dec. Q and enc. K/V for encoder-decoder
+    """Encoder attention between previous layer Q/K/V."""
     ENCODER_DECODER = "encoder_decoder"
+    """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
 class MultipleOf:
@@ -181,7 +176,7 @@ class AttentionState(ABC, Generic[T]):
     lifetime of the model runner."""
 
     @abstractmethod
-    def __init__(self, runner: "ModelRunnerBase"):
+    def __init__(self, runner: Any):
         ...
 
     @abstractmethod
@@ -221,7 +216,7 @@ class AttentionState(ABC, Generic[T]):
         ...
 
     @abstractmethod
-    def begin_forward(self, model_input: "ModelRunnerInputBase") -> None:
+    def begin_forward(self, model_input) -> None:
         """Prepare state for forward pass."""
         ...
 
@@ -230,7 +225,7 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
     """Abstract class for attention metadata builders."""
 
     @abstractmethod
-    def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
+    def __init__(self, input_builder) -> None:
         """Create the builder, remember some configuration and parameters."""
         raise NotImplementedError
 
@@ -314,7 +309,7 @@ class AttentionImpl(ABC, Generic[T]):
     @staticmethod
     def get_supported_block_size() -> list[Union[int, MultipleOf]]:
         # TODO: implement this function for all backends.
-        return [MultipleOf(16)]
+        return [MultipleOf(1)]
 
     @abstractmethod
     def forward(

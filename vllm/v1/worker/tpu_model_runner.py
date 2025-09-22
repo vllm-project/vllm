@@ -388,6 +388,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt_embeds=new_req_data.prompt_embeds,
                 mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=None,
@@ -1178,9 +1179,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "or sharding the weights on more chips. "
                     f"See the detailed error: {e}") from e
         if self.lora_config is not None:
-            model = self.load_lora_model(model, self.model_config,
-                                         self.scheduler_config,
-                                         self.lora_config, self.device)
+            model = self.load_lora_model(model, self.vllm_config, self.device)
             replace_set_lora(model)
 
         # Sync all pending XLA execution during model initialization and weight
@@ -1697,7 +1696,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def compute_logits(self,
                        sample_hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.model.compute_logits(sample_hidden_states, None)
+        return self.model.compute_logits(sample_hidden_states)
 
     # TODO: Under SPMD mode, sample_from_logits has correctness issue.
     #       Re-enable the torch.compile once the issue is fixed in torchxla.

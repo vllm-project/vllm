@@ -49,7 +49,7 @@ repos:
   rev: 0.6.17
   hooks:
     - id: pip-compile
-      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128]
+      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128, --python-platform, x86_64-manylinux_2_28]
       files: ^requirements/test\.(in|txt)$
 - repo: local
   hooks:
@@ -164,9 +164,7 @@ repos:
     name: Validate configuration has default values and that each field has a docstring
     entry: python tools/validate_config.py
     language: python
-    types: [python]
-    pass_filenames: true
-    files: vllm/config.py|tests/test_config.py|vllm/entrypoints/openai/cli_args.py
+    additional_dependencies: [regex]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

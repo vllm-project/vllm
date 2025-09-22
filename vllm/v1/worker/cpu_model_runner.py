@@ -107,9 +107,8 @@ class CPUModelRunner(GPUModelRunner):
         self.model = get_model(vllm_config=self.vllm_config)
 
         if self.lora_config:
-            self.model = self.load_lora_model(self.model, self.model_config,
-                                              self.scheduler_config,
-                                              self.lora_config, self.device)
+            self.model = self.load_lora_model(self.model, self.vllm_config,
+                                              self.device)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -145,12 +144,20 @@ def _torch_cuda_wrapper():
             self.record = lambda: None
             self.synchronize = lambda: None
 
+    class _StreamPlaceholder:
+
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
     cuda_event = torch.cuda.Event
+    cuda_stream = torch.cuda.Stream
     try:
         torch.cuda.Event = _EventPlaceholder
+        torch.cuda.Stream = _StreamPlaceholder
         yield
     finally:
         torch.cuda.Event = cuda_event
+        torch.cuda.Stream = cuda_stream
 
 
 @contextmanager
