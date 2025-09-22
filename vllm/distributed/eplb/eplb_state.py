@@ -663,10 +663,6 @@ class EplbState:
         ep_group = get_ep_group().device_group
         rank = ep_group.rank()
         device_index = self.cuda_device_index
-        device_description = (f"cuda:{device_index}"
-                              if device_index is not None else
-                              "default CUDA device")
-
 
         def thread_target():
             if device_index is not None:
@@ -705,7 +701,8 @@ class EplbState:
                 new_physical[layer].to(target_device))
 
         logical_device = self.logical_to_physical_map.device
-        new_logical = self.new_logical_to_physical_map[layer].to(logical_device)
+        new_logical = self.new_logical_to_physical_map[layer].to(
+            logical_device)
         max_slots = self.logical_to_physical_map.shape[-1]
         slot_delta = max_slots - new_logical.shape[-1]
         if slot_delta > 0:
@@ -721,9 +718,9 @@ class EplbState:
         parallel_state = get_ep_group()
         cpu_group = getattr(parallel_state, "cpu_group", None)
         if cpu_group is not None and cpu_group.size() > 1:
-            flag = torch.tensor((int(self.ep_buffer_ready),),
-                                 dtype=torch.int32,
-                                 device="cpu")
+            flag = torch.tensor((int(self.ep_buffer_ready), ),
+                                dtype=torch.int32,
+                                device="cpu")
             all_reduce(flag, group=cpu_group)
             return int(flag.item()) == cpu_group.size()
 
@@ -731,10 +728,11 @@ class EplbState:
         if device_group.size() <= 1:
             return bool(self.ep_buffer_ready)
 
-        device = getattr(parallel_state, "device", self.physical_to_logical_map.device)
-        flag = torch.tensor((int(self.ep_buffer_ready),),
-                             dtype=torch.int32,
-                             device=device)
+        device = getattr(parallel_state, "device",
+                         self.physical_to_logical_map.device)
+        flag = torch.tensor((int(self.ep_buffer_ready), ),
+                            dtype=torch.int32,
+                            device=device)
         all_reduce(flag, group=device_group)
         return int(flag.item()) == device_group.size()
 
@@ -754,7 +752,6 @@ class EplbState:
 
             if self.shutdown_event.is_set():
                 break
-
 
             # Process all layers for this rearrangement
             current_num_layers = model.num_moe_layers
@@ -792,7 +789,6 @@ class EplbState:
             # Reset for next rearrangement cycle
             self.rearrange_event.clear()
 
-
     def move_to_workspace(self,
                           model: MixtureOfExperts,
                           ep_group: ProcessGroup,
@@ -819,7 +815,9 @@ class EplbState:
             try:
                 self.buffer_lock.release()
             except Exception as e:
-                logger.error("Rank %d: buffer_lock release failed in move_to_workspace: %s", ep_group.rank(), str(e))
+                logger.error(
+                    "Rank %d: buffer_lock release failed in m_t_w: %s",
+                    ep_group.rank(), str(e))
 
     def post_eplb(self,
                   model: MixtureOfExperts,
