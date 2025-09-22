@@ -24,28 +24,6 @@ def has_kv_transfer_group() -> bool:
     return _KV_CONNECTOR_AGENT is not None
 
 
-def is_v1_kv_transfer_group(
-        connector: Optional[KVConnectorBase] = None) -> bool:
-    """Check if the KV connector is the v1 connector.
-    If the argument is None, it will check the global KV connector
-
-    Args:
-        connector: The KV connector to check. If None, it will check the
-            global KV connector.
-
-    Note:
-        This function will no-longer be needed after the v1 KV connector
-        becomes the default.
-    """
-    if connector is None:
-        connector = _KV_CONNECTOR_AGENT
-
-    if connector is None:
-        return False
-
-    return isinstance(connector, KVConnectorBase)
-
-
 def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
     """
     Initialize KV cache transfer parallel group.
