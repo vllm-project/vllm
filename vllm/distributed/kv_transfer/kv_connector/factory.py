@@ -5,7 +5,6 @@ import importlib
 from typing import TYPE_CHECKING, Callable
 
 # yapf: disable
-import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.logger import init_logger
@@ -41,15 +40,11 @@ class KVConnectorFactory:
         config: "VllmConfig",
         role: KVConnectorRole,
     ) -> KVConnectorBase:
-        if not envs.VLLM_USE_V1:
-            raise ValueError("Attempting to initialize a V1 Connector, "
-                             f"but found {envs.VLLM_USE_V1=}")
-
         kv_transfer_config = config.kv_transfer_config
         connector_cls = cls.get_connector_class(kv_transfer_config)
-        logger.info("Creating v1 connector with name: %s and engine_id: %s",
+        logger.info("Creating KV connector with name: %s and engine_id: %s",
                     connector_cls.__name__, kv_transfer_config.engine_id)
-        # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
+        # NOTE(Kuntai): KV connector is explicitly separated into two roles.
         # Scheduler connector:
         # - Co-locate with scheduler process
         # - Should only be used inside the Scheduler class
