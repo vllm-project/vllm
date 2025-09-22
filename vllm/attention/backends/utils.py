@@ -18,11 +18,6 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 logger = init_logger(__name__)
 
-# Error string(s) for encoder/decoder
-# unsupported attention scenarios
-STR_NOT_IMPL_ENC_DEC_ROCM_HIP = ("ROCm/HIP is not currently supported "
-                                 "with encoder/decoder models.")
-
 PAD_SLOT_ID = -1
 
 # Switch to numpy implementation of compute_slot_mapping
