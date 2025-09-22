@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampling parameters for text generation."""
 import copy
+import warnings
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -63,10 +64,12 @@ class StructuredOutputsParams:
 class GuidedDecodingParams(StructuredOutputsParams):
 
     def __post_init__(self):
-        logger.warning(
+        warnings.warn(
             "GuidedDecodingParams is deprecated. This will be removed in "
             "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-            "StructuredOutputsParams instead.")
+            "StructuredOutputsParams instead.",
+            DeprecationWarning,
+            stacklevel=2)
         return super().__post_init__()
 
 
@@ -253,10 +256,12 @@ class SamplingParams(
                 for token, bias in logit_bias.items()
             }
         if guided_decoding is not None:
-            logger.warning(
-                "GuidedDecodingParams is deprecated. This will be removed in "
+            warnings.warn(
+                "guided_decoding is deprecated. This will be removed in "
                 "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-                "StructuredOutputsParams instead.")
+                "structured_outputs instead.",
+                DeprecationWarning,
+                stacklevel=2)
             structured_outputs = guided_decoding
             guided_decoding = None
 
@@ -356,10 +361,12 @@ class SamplingParams(
         self._all_stop_token_ids.update(self.stop_token_ids)
 
         if self.guided_decoding is not None:
-            logger.warning(
-                "GuidedDecodingParams is deprecated. This will be removed in "
+            warnings.warn(
+                "guided_decoding is deprecated. This will be removed in "
                 "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-                "StructuredOutputsParams instead.")
+                "structured_outputs instead.",
+                DeprecationWarning,
+                stacklevel=2)
             self.structured_outputs = self.guided_decoding
             self.guided_decoding = None
 
