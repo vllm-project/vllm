@@ -140,7 +140,8 @@ class EngineCore:
         # memory can be allocated for kv cache.
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
-            available_gpu_memory = self.model_executor.determine_available_memory()
+            available_gpu_memory = (
+                self.model_executor.determine_available_memory())
         else:
             # Attention free models don't need memory for kv cache
             available_gpu_memory = [0] * len(kv_cache_specs)
