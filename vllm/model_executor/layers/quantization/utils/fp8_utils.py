@@ -104,59 +104,6 @@ if current_platform.is_rocm():
         aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
 
-# TODO: ideally, we would like to wrap only the padding computation
-# and unwrap the rest. This should be possible after solving
-# https://github.com/vllm-project/vllm/issues/25080
-def _padded_cutlass_scaled_mm(
-    qx: torch.Tensor,
-    weight: torch.Tensor,
-    x_scale: torch.Tensor,
-    weight_scale: torch.Tensor,
-    block_size: list[int],
-    output_dtype: torch.dtype,
-) -> torch.Tensor:
-    pad_multiple = 4
-    dim = qx.shape[0]
-    padded = dim if dim % pad_multiple == 0 else dim + pad_multiple - (
-        dim % pad_multiple)
-
-    padded_shape = [padded, *qx.shape[1:]]
-    padded_qx = torch.zeros(padded_shape, device=qx.device, dtype=qx.dtype)
-    padded_qx[0:qx.shape[0], ...].copy_(qx)
-
-    padded_x_scale_shape = [*x_scale.shape[1:], padded]
-    padded_x_scale = torch.ones(padded_x_scale_shape,
-                                device=x_scale.device,
-                                dtype=x_scale.dtype).permute(-1, -2)
-    padded_x_scale[0:x_scale.shape[0], ...].copy_(x_scale)
-
-    output = cutlass_scaled_mm(padded_qx, weight, padded_x_scale, weight_scale,
-                               block_size, output_dtype, True)
-    return output[0:qx.shape[0], ...]
-
-
-def _padded_cutlass_scaled_mm_fake(
-    qx: torch.Tensor,
-    weight: torch.Tensor,
-    x_scale: torch.Tensor,
-    weight_scale: torch.Tensor,
-    block_size: list[int],
-    output_dtype: torch.dtype,
-) -> torch.Tensor:
-    return torch.empty((qx.size(0), weight.size(0)),
-                       dtype=output_dtype,
-                       device=qx.device)
-
-
-direct_register_custom_op(
-    "padded_cutlass_scaled_mm",
-    _padded_cutlass_scaled_mm,
-    mutates_args=[],
-    fake_impl=_padded_cutlass_scaled_mm_fake,
-    dispatch_key="CUDA",
-)
-
-
 def _w8a8_block_fp8_matmul_func(
     qx: torch.Tensor,
     weight: torch.Tensor,
@@ -277,12 +224,16 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.input_quant_op is not None
-        q_input, x_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
-            output = torch.ops.vllm.padded_cutlass_scaled_mm(
-                q_input, weight, x_scale, weight_scale,
-                list(self.weight_group_shape), input_2d.dtype)
+            padded_x = torch.nn.functional.pad(
+                input_2d, (0, 0, 0, -input_2d.shape[0] % 4))
+            q_input, x_scale = self.input_quant_op(padded_x)
+            output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
+                                       list(self.weight_group_shape),
+                                       input_2d.dtype, True)
+            output = output[0:input_2d.shape[0], ...]
         else:
+            q_input, x_scale = self.input_quant_op(input_2d)
             output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
                                        list(self.weight_group_shape),
                                        input_2d.dtype, False)
