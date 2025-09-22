@@ -294,6 +294,8 @@ def async_tp_pass_on_test_model(local_rank: int, world_size: int,
     compiled_model = torch.compile(model, backend=backend)
     compiled_model(hidden_states)
 
+    assert async_tp_pass.matched_count == 1
+
     # In pre-nodes, all gather or reduce scatter should exist,
     # fused_matmul_reduce_scatter or fused_all_gather_matmul should not
     backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)

@@ -8,9 +8,10 @@ import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.compilation.fusion import FUSED_OPS, FusionPass
+from vllm.compilation.fusion import FUSED_OPS, RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
+from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import CompilationConfig, PassConfig, VllmConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey, kFp8DynamicTokenSym, kFp8StaticTensorSym)
@@ -58,11 +59,12 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
     vllm_config.compilation_config = CompilationConfig(
         pass_config=PassConfig(enable_fusion=do_fusion, enable_noop=True))
     noop_pass = NoOpEliminationPass(vllm_config)
-    fusion_pass = FusionPass.instance(vllm_config)
+    fusion_pass = RMSNormQuantFusionPass(vllm_config)
+    cleanup_pass = PostCleanupPass(vllm_config)
     act_quant_fusion_pass = ActivationQuantFusionPass(vllm_config)
 
-    passes = [noop_pass, fusion_pass, act_quant_fusion_pass
-              ] if do_fusion else [noop_pass]
+    passes = [noop_pass, fusion_pass, act_quant_fusion_pass, cleanup_pass
+              ] if do_fusion else [noop_pass, cleanup_pass]
     func_pass = FixFunctionalizationPass(vllm_config)
     backend_func = TestBackend(*passes, func_pass)
     backend_no_func = TestBackend(*passes)

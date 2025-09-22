@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 
 from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 from .inductor_pass import enable_fake_mode
-from .vllm_inductor_pass import VllmInductorPass
+from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 
@@ -152,7 +152,7 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
 
 
-class ActivationQuantFusionPass(VllmInductorPass):
+class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
     It uses the torch pattern matcher to find the patterns and replace them.
@@ -176,16 +176,12 @@ class ActivationQuantFusionPass(VllmInductorPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
+        self.dump_patterns(config, self.patterns)
+
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph):
-        self.begin()
-        self.dump_graph(graph, "before_act_quant_fusion")
-
-        count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns in ActivationQuantFusionPass",
-                     count)
-
-        self.dump_graph(graph, "after_act_quant_fusion")
-        self.end_and_log()
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self):
         return VllmInductorPass.hash_source(self, ActivationQuantPattern,
