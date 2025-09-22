@@ -102,9 +102,9 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             offset = lora_b.shape[0] // 2
 
             left_weight = lora_b[tp_rank * shard_size:(tp_rank + 1) *
-                                 shard_size,:]
+                                 shard_size, :]
             right_weight = lora_b[offset + tp_rank * shard_size:offset +
-                                  (tp_rank + 1) * shard_size,:]
+                                  (tp_rank + 1) * shard_size, :]
             lora_b = torch.cat([left_weight, right_weight], dim=0)
         # Applicable to cases where the base_layer is
         # ColumnParallelLinear.
@@ -113,7 +113,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             shard_size = self.output_size
             start_idx = tensor_model_parallel_rank * shard_size
             end_idx = (tensor_model_parallel_rank + 1) * shard_size
-            lora_b = lora_b[start_idx:end_idx,:]
+            lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
@@ -252,7 +252,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 zip(self.output_ids, self.output_slices)):
             if (lora_b_i := lora_b[i]) is not None:
                 sliced_lora_b[i] = lora_b_i[shard_size * shard_id:shard_size *
-                                            (shard_id + 1),:]
+                                            (shard_id + 1), :]
         return sliced_lora_b
 
     def slice_bias(
@@ -346,15 +346,15 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.kv_shard_id = tp_rank // self.base_layer.num_kv_head_replicas
         lora_b_q = lora_b[self.q_proj_shard_size *
                           self.q_shard_id:self.q_proj_shard_size *
-                          (self.q_shard_id + 1),:]
+                          (self.q_shard_id + 1), :]
         k_offset = self.q_proj_total_size
         lora_b_k = lora_b[k_offset +
                           self.kv_proj_shard_size * self.kv_shard_id:k_offset +
-                          self.kv_proj_shard_size * (self.kv_shard_id + 1),:]
+                          self.kv_proj_shard_size * (self.kv_shard_id + 1), :]
         v_offset = k_offset + self.kv_proj_total_size
-        lora_b_v = lora_b[ v_offset +
+        lora_b_v = lora_b[v_offset +
                           self.kv_proj_shard_size * self.kv_shard_id:v_offset +
-                          self.kv_proj_shard_size * (self.kv_shard_id + 1),:]
+                          self.kv_proj_shard_size * (self.kv_shard_id + 1), :]
         lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=0)
         return lora_b
 
@@ -464,7 +464,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         tp_rank = get_tensor_model_parallel_rank()
         shard_size = self.lora_a_stacked[0].shape[2]
         start_idx = tp_rank * shard_size
-        lora_a = lora_a[start_idx:start_idx + shard_size,:]
+        lora_a = lora_a[start_idx:start_idx + shard_size, :]
         return lora_a
 
     def apply(self,
@@ -507,10 +507,10 @@ class MergedColumnParallelLinearWithShardedLoRA(
         output_shard_size = self.lora_a_stacked[0].shape[2]
         output_start_idx = self.tp_rank * output_shard_size
         lora_a = [
-            lora_a[0][ output_start_idx:output_start_idx +
-                      output_shard_size,:] if lora_a[0] is not None else None,
+            lora_a[0][output_start_idx:output_start_idx +
+                      output_shard_size, :] if lora_a[0] is not None else None,
             lora_a[1][output_start_idx:output_start_idx +
-                      output_shard_size,:] if lora_a[1] is not None else None,
+                      output_shard_size, :] if lora_a[1] is not None else None,
         ]
         return lora_a
 
@@ -550,7 +550,7 @@ class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
         tp_rank = get_tensor_model_parallel_rank()
         shard_size = self.lora_a_stacked[0].shape[2]
         start_idx = tp_rank * shard_size
-        lora_a = lora_a[start_idx:start_idx + shard_size,:]
+        lora_a = lora_a[start_idx:start_idx + shard_size, :]
         return lora_a
 
     def apply(self,
@@ -589,11 +589,11 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
         start_idx = [self.tp_rank * shard_size[i] for i in range(3)]
         lora_a = [
             lora_a[0][start_idx[0]:start_idx[0] +
-                      shard_size[0],:] if lora_a[0] is not None else None,
+                      shard_size[0], :] if lora_a[0] is not None else None,
             lora_a[1][start_idx[1]:start_idx[1] +
-                      shard_size[1],:] if lora_a[1] is not None else None,
+                      shard_size[1], :] if lora_a[1] is not None else None,
             lora_a[2][start_idx[2]:start_idx[2] +
-                      shard_size[2],:] if lora_a[2] is not None else None,
+                      shard_size[2], :] if lora_a[2] is not None else None,
         ]
         return lora_a
 
