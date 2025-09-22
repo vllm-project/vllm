@@ -32,13 +32,10 @@ from ..utils import check_logprobs_close
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-# Due to low-precision numerical divergence, this test is too sensitive for
-# the async postprocessor
-@pytest.mark.parametrize("disable_async_output_proc", [True])
 def test_models(
     vllm_runner,
     example_prompts,
@@ -49,7 +46,6 @@ def test_models(
     enforce_eager: bool,
     backend: str,
     tensor_parallel_size: int,
-    disable_async_output_proc: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
@@ -60,6 +56,9 @@ def test_models(
     if kv_cache_dtype == "fp8_e5m2" and current_platform.is_rocm():
         pytest.skip(
             f"{kv_cache_dtype} is currently not supported on ROCm/HIP.")
+
+    if not current_platform.is_kv_cache_dtype_supported(kv_cache_dtype, None):
+        pytest.skip(f"{kv_cache_dtype} is not supported on this platform.")
 
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", 'true')
@@ -74,7 +73,6 @@ def test_models(
                 tensor_parallel_size=tensor_parallel_size,
                 enforce_eager=enforce_eager,
                 kv_cache_dtype="auto",
-                disable_async_output_proc=disable_async_output_proc,
         ) as vllm_model:
             baseline_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, NUM_LOG_PROBS)
@@ -85,7 +83,6 @@ def test_models(
                 tensor_parallel_size=tensor_parallel_size,
                 enforce_eager=enforce_eager,
                 kv_cache_dtype=kv_cache_dtype,
-                disable_async_output_proc=disable_async_output_proc,
         ) as vllm_model:
             test_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, NUM_LOG_PROBS)
@@ -110,9 +107,6 @@ def test_models(
     ])
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
-# Due to low-precision numerical divergence, this test is too sensitive for
-# the async postprocessor
-@pytest.mark.parametrize("disable_async_output_proc", [True])
 def test_cpu_models(
     vllm_runner,
     example_prompts,
@@ -120,7 +114,6 @@ def test_cpu_models(
     base_model: str,
     test_model: str,
     max_tokens: int,
-    disable_async_output_proc: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
@@ -138,7 +131,6 @@ def test_cpu_models(
                 max_model_len=MAX_MODEL_LEN,
                 dtype="bfloat16",
                 kv_cache_dtype="auto",
-                disable_async_output_proc=disable_async_output_proc,
         ) as vllm_model:
             baseline_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, NUM_LOG_PROBS)
@@ -148,7 +140,6 @@ def test_cpu_models(
                 max_model_len=MAX_MODEL_LEN,
                 dtype="bfloat16",
                 kv_cache_dtype=kv_cache_dtype,
-                disable_async_output_proc=disable_async_output_proc,
         ) as vllm_model:
             test_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, NUM_LOG_PROBS)
