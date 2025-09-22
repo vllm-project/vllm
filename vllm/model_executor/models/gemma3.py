@@ -41,7 +41,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from ...attention.layers.encoder_only_attention import EncoderOnlyAttention
@@ -446,6 +445,22 @@ class Gemma3Model(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
+
+            # Check if this is a scale parameter that needs remapping first
+            if name.endswith(
+                (".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
+                # Try to remap the scale name first
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is not None and remapped_name in params_dict:
+                    # Successfully remapped, use the remapped name
+                    param = params_dict[remapped_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(remapped_name)
+                    continue
+                # If remapping failed, continue with normal processing
+
             for (param_name, shard_name, shard_id) in stacked_params_mapping:
                 if shard_name not in name:
                     continue
@@ -526,10 +541,8 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.model.embed_tokens, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.model.embed_tokens, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

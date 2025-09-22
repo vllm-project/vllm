@@ -22,9 +22,8 @@ class TensorShape:
         self.dims = dims
         self.dynamic_dims = dynamic_dims if dynamic_dims else set()
 
-    def resolve(self, **bindings: dict[str,
-                                       int]) -> tuple[Union[int, str], ...]:
-        resolved = []
+    def resolve(self, **bindings: int) -> tuple[Union[int, str], ...]:
+        resolved = list[Union[int, str]]()
         for dim in self.dims:
             if isinstance(dim, str) and dim in bindings:
                 resolved.append(bindings[dim])
@@ -159,7 +158,7 @@ class TensorSchema:
 
     def validate(self) -> None:
         type_hints = get_type_hints(self.__class__, include_extras=True)
-        shape_env = {}
+        shape_env = dict[str, int]()
 
         for field_name, field_type in type_hints.items():
             # Check if field is missing
