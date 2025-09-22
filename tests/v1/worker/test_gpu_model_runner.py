@@ -844,11 +844,12 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
 
 
 def test_hybrid_block_table_initialization():
-    """Test hybrid block table with different kernel and physical block
+    """Test hybrid block table with different kernel and kvcache_manager block
     sizes."""
     from vllm.v1.worker.block_table import BlockTable
 
-    # Test configuration: physical block size = 32, kernel block size = 16
+    # Test configuration: kvcache_manager block size = 32,
+    # kernel block size = 16
     block_size = 32
     kernel_block_sizes = [16]
     max_num_reqs = 10
@@ -870,22 +871,22 @@ def test_hybrid_block_table_initialization():
         block_size // kernel_block_sizes[0])  # Changed to use first element
 
     # Test block table conversion logic
-    # One physical block should map to multiple logical blocks
-    physical_blocks = [0, 1, 2]
+    # One kvcache_manager block should map to multiple kernel blocks
+    kvcache_manager_blocks = [0, 1, 2]
 
-    # Verify that physical blocks can be converted to logical blocks
+    # Verify that kvcache_manager blocks can be converted to kernel blocks
     # and that block table operations work correctly.
     req_index = 0
-    block_table.append_row(physical_blocks, req_index)
-    # Get expected logical blocks from the implementation for verification.
-    expected_logical_blocks = block_table._convert_physical_to_logical_blocks(
-        np.array(physical_blocks))
+    block_table.append_row(kvcache_manager_blocks, req_index)
+    # Get expected kernel blocks from the implementation for verification.
+    expected_kernel_blocks = block_table._map_to_kernel_blocks(
+        np.array(kvcache_manager_blocks))
     # Verify block table state
     assert block_table.num_blocks_per_row[req_index] == len(
-        expected_logical_blocks)
+        expected_kernel_blocks)
     assert np.array_equal(
-        block_table.block_table.np[req_index, :len(expected_logical_blocks)],
-        expected_logical_blocks)
+        block_table.block_table.np[req_index, :len(expected_kernel_blocks)],
+        expected_kernel_blocks)
 
 
 def test_input_batch_with_kernel_block_sizes():
@@ -929,7 +930,7 @@ def test_hybrid_cache_integration(model_runner, dist_init):
     # Create a new model runner with hybrid cache configuration
     vllm_config = get_vllm_config()
 
-    # Configure hybrid cache with different physical block size
+    # Configure hybrid cache with different kvcache_manager block size
     vllm_config.cache_config.block_size = 32
 
     model_config = vllm_config.model_config
@@ -942,7 +943,7 @@ def test_hybrid_cache_integration(model_runner, dist_init):
 
     # Initialize KV cache with configuration
     attn_spec = FullAttentionSpec(
-        block_size=16,  # Use logical block size directly
+        block_size=16,  # Use kernel block size directly
         num_kv_heads=runner.model_config.get_num_kv_heads(
             runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
@@ -972,7 +973,7 @@ def test_hybrid_cache_integration(model_runner, dist_init):
         block_sizes=[
             kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
         ],
-        kernel_block_sizes=[16])  # Use logical block size
+        kernel_block_sizes=[16])  # Use kernel block size
 
     runner.initialize_attn_backend(kv_cache_config)
 
