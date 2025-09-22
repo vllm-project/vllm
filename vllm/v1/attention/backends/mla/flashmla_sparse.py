@@ -132,7 +132,7 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          logits_soft_cap, attn_type,
-                         kv_sharing_target_layer_name, use_sparse=True, **mla_args)
+                         kv_sharing_target_layer_name, **mla_args)
         # self.sm_scale = 
         self.topk_indices = None
 
@@ -147,15 +147,12 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
         k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-        k_scale: torch.Tensor,
-        topk_indices: Optional[torch.Tensor] = None, # sparse attn
+        k_scale: torch.Tensor
     ) -> torch.Tensor:
-        assert topk_indices is not None
-
         # # assume indice of shape [num_prefill_tokens, topk]
         # block_id_in_req = topk_indices // self.block_size
-
-        logger.info(f"called _forward_prefill")
+        topk_indices = self.topk_indices[attn_metadata.num_decodes:]
+        logger.info(f"called _forward_prefill with topk_indices shape {topk_indices.shape}")
         # NOTE(Chen): shape is unsure
 
         return torch.zeros((q.shape[0], 2048), dtype=q.dtype, device=q.device)
@@ -169,11 +166,11 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
         topk_indices: Optional[torch.Tensor] = None, # sparse attn
     ) -> torch.Tensor:
 
-        assert topk_indices is not None
+        topk_indices = self.topk_indices[:attn_metadata.num_decodes]
 
         # # assume indice of shape [num_decode_tokens, topk]
         # block_id_in_req = topk_indices // self.block_size
 
-        logger.info(f"called _forward_decode")
+        logger.info(f"called _forward_decode with topk_indices shape {topk_indices.shape}")
         # NOTE(Chen): shape is unsure
         return torch.zeros((q[0].shape[0], 16*512), dtype=q[0].dtype, device=q[0].device), torch.zeros((q[0].shape[0], 128), dtype=q[0].dtype, device=q[0].device)

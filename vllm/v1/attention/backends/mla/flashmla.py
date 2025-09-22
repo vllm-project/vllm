@@ -176,7 +176,6 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
         layer: AttentionLayer,
-        topk_indices: Optional[torch.Tensor] = None, # sparse attn
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None

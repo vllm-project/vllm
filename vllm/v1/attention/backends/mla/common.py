@@ -946,8 +946,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
-        kv_b_proj: ColumnParallelLinear,
-        use_sparse: bool = False
+        kv_b_proj: ColumnParallelLinear
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -1002,7 +1001,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 and current_platform.get_device_capability()[0] == 9)
 
         self.dcp_world_size: Optional[int] = None
-        self.use_sparse = use_sparse
 
     def _flash_attn_varlen_diff_headdims(self,
                                          q,
@@ -1430,7 +1428,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
-        topk_indices: Optional[torch.Tensor] = None, # sparse attn
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size is not None
@@ -1485,7 +1482,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: M,
         layer: AttentionLayer,
-        topk_indices: Optional[torch.Tensor] = None, # sparse attn
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         raise NotImplementedError
 
@@ -1552,14 +1548,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 kv_cache_dtype=self.kv_cache_dtype,
                 scale=layer._k_scale,
             )
-        
-        if self.use_sparse:
-            topk_indices = self.topk_indices
-            decode_topk_indices = topk_indices[:num_decode_tokens]
-            prefill_topk_indices = topk_indices[num_decode_tokens:]
-        else:
-            decode_topk_indices = None
-            prefill_topk_indices = None
 
         if fp8_attention:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
@@ -1567,7 +1555,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if has_prefill:
             output[num_decode_tokens:] = self._forward_prefill(
                 prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
-                attn_metadata, layer._k_scale, prefill_topk_indices)
+                attn_metadata, layer._k_scale)
 
         if has_decode:
             assert attn_metadata.decode is not None
@@ -1613,8 +1601,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
             # call decode attn
             attn_out, lse = self._forward_decode(decode_q, kv_cache,
-                                                 attn_metadata, layer,
-                                                decode_topk_indices)
+                                                 attn_metadata, layer)
 
             # recorect dcp attn_out with lse.
             if self.dcp_world_size > 1:
