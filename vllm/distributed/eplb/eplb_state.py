@@ -587,7 +587,8 @@ class EplbState:
         cls,
         parallel_config: ParallelConfig,
         eep_scale_up: bool = False
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[int, int]]:
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[dict[
+            int, int]]]:
         if not eep_scale_up:
             return None, None, None
         num_local_physical_experts = torch.empty(1,
