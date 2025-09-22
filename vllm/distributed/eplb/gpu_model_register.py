@@ -3,10 +3,12 @@
 
 import types
 import typing
+from typing import Callable
+
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.models.utils import is_pp_missing_parameter
-from typing import Callable
+
 
 def set_eplb_state(
     self,
@@ -24,6 +26,7 @@ def set_eplb_state(
             logical_replica_count=logical_replica_count,
         )
 
+
 def update_physical_experts_metadata(
     self,
     num_physical_experts: int,
@@ -33,7 +36,7 @@ def update_physical_experts_metadata(
     self.num_physical_experts = num_physical_experts
     self.num_local_physical_experts = num_local_physical_experts
     self.num_redundant_experts = (num_physical_experts -
-                                    self.num_logical_experts)
+                                  self.num_logical_experts)
     for layer in self.model.layers:
         if isinstance(layer.mlp, self.example_moe):
             moe = layer.mlp
@@ -41,6 +44,7 @@ def update_physical_experts_metadata(
             moe.n_physical_experts = num_physical_experts
             moe.n_redundant_experts = self.num_redundant_experts
             moe.experts.update_expert_map()
+
 
 def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
     # Params for weights, fp8 weight scales, fp8 activation scales
@@ -52,10 +56,11 @@ def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         num_experts=self.config.n_routed_experts,
         num_redundant_experts=self.num_redundant_experts)
 
+
 def load_expert_weight(self, mapping, name, loaded_weight, params_dict):
-    ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale",
-                        ".v_scale", "_v_scale", ".weight_scale",
-                        "_weight_scale", ".input_scale", "_input_scale")
+    ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale", ".v_scale",
+                       "_v_scale", ".weight_scale", "_weight_scale",
+                       ".input_scale", "_input_scale")
 
     expert_matched = False
     is_continue = False
@@ -88,8 +93,7 @@ def load_expert_weight(self, mapping, name, loaded_weight, params_dict):
     # We should ask the weight loader to return success or not
     # here since otherwise we may skip experts with other
     # available replicas.
-    weight_loader = typing.cast(Callable[..., bool],
-                                param.weight_loader)
+    weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
     success = weight_loader(param,
                             loaded_weight,
                             name_mapped,
@@ -97,6 +101,7 @@ def load_expert_weight(self, mapping, name, loaded_weight, params_dict):
                             expert_id=expert_id,
                             return_success=True)
     return expert_matched, is_continue, success, name_mapped
+
 
 def model_register(model):
     """
@@ -110,7 +115,7 @@ def model_register(model):
     model.set_eplb_state = types.MethodType(set_eplb_state, model)
     model.load_expert_weight = types.MethodType(load_expert_weight, model)
     model.update_physical_experts_metadata = \
-        types.MethodType(update_physical_experts_metadata, model) 
+        types.MethodType(update_physical_experts_metadata, model)
     model.model.get_expert_mapping = \
         types.MethodType(get_expert_mapping, model.model)
     print("register complete")

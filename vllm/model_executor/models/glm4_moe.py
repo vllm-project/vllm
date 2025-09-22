@@ -22,8 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GLM-4.5 model compatible with HuggingFace weights."""
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from itertools import islice
 from typing import Any, Optional, Union
 
@@ -505,7 +504,8 @@ class Glm4MoeModel(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-        from vllm.distributed.eplb.gpu_model_register import get_expert_mapping, load_expert_weight
+        from vllm.distributed.eplb.gpu_model_register import (
+            get_expert_mapping, load_expert_weight)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         expert_params_mapping = get_expert_mapping(self)
@@ -638,7 +638,8 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
         self.num_logical_experts = self.example_moe.n_logical_experts
         self.num_physical_experts = self.example_moe.n_physical_experts
-        self.num_local_physical_experts = self.example_moe.n_local_physical_experts
+        self.num_local_physical_experts = \
+            self.example_moe.n_local_physical_experts
         self.num_routed_experts = self.example_moe.n_routed_experts
         self.num_shared_experts = self.example_moe.n_shared_experts
         self.num_redundant_experts = self.example_moe.n_redundant_experts
