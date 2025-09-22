@@ -76,9 +76,11 @@ class Pooler(nn.Module, ABC):
         return AllPooler(head=head)
 
     @staticmethod
-    def for_classify_encode(pooler_config: PoolerConfig,
+    def for_classify_encode(
+        pooler_config: PoolerConfig,
         classifier: Optional[ClassifierFn] = None,
-        act_fn: Optional["PoolerActivation"] = None,):
+        act_fn: Optional["PoolerActivation"] = None,
+    ):
         head = TokenClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
 
         if pooler_config.pooling_type == "STEP":
@@ -494,8 +496,6 @@ class EmbeddingPoolerHead(PoolerHead):
         return pooled_data
 
 
-
-
 class SimplePooler(Pooler):
     """A layer that pools specific information from hidden states.
 
@@ -601,13 +601,9 @@ class ClassifierPooler(Pooler):
 class EmbeddingMultiVectorPoolerHead(EmbeddingPoolerHead):
 
     def forward(self, pooled_data: torch.Tensor,
-                pooling_param: PoolingParams)->torch.Tensor:
-
-        if isinstance(pooled_data, list):
-            pooled_data = torch.stack(pooled_data)
-        # pooled_data shape: [n_tokens, hidden_dimension]
-
+                pooling_param: PoolingParams) -> torch.Tensor:
         pooled_data = pooled_data.to(self.head_dtype)
+        # pooled_data shape: [n_tokens, hidden_dimension]
 
         # Apply ST projector
         if self.projector is not None:
@@ -615,16 +611,18 @@ class EmbeddingMultiVectorPoolerHead(EmbeddingPoolerHead):
         # pooled_data shape: [n_tokens, embedding_dimension]
 
         # for matryoshka representation
-        pooled_data = pooled_data[..., : pooling_param.dimensions]
+        pooled_data = pooled_data[..., :pooling_param.dimensions]
 
         # for normalize
-        if pooling_param.normalize:
+        if pooling_param.normalize or pooling_param.normalize is None:
             pooled_data = self.activation(pooled_data)
 
         # pooled_data shape: [n_tokens, embedding_dimension]
         return pooled_data
 
+
 class TokenClassifierPoolerHead(nn.Module):
+
     def __init__(
         self,
         classifier: Optional[ClassifierFn],
@@ -660,10 +658,7 @@ class TokenClassifierPoolerHead(nn.Module):
         if self.logit_bias is not None:
             scores -= self.logit_bias
 
-        if pooling_param.activation is None:
-            pooling_param.activation = True
-
-        if pooling_param.activation:
+        if pooling_param.activation or pooling_param.activation is None:
             scores = self.act_fn(scores)
 
         # scores shape: [n_token, num_labels]
@@ -671,6 +666,7 @@ class TokenClassifierPoolerHead(nn.Module):
 
 
 class AllPooler(Pooler):
+
     def __init__(self, head: Union[nn.Module, PoolerHead]) -> None:
         super().__init__()
 
@@ -681,9 +677,9 @@ class AllPooler(Pooler):
         return {"encode"}
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            pooling_metadata: PoolingMetadata,
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
 
@@ -696,18 +692,18 @@ class AllPooler(Pooler):
         return build_output(pooled_data)
 
 
-
 class StepPooler(Pooler):
 
-    def __init__(self, ) -> None:
+    def __init__(self, head: Union[nn.Module, PoolerHead]) -> None:
         super().__init__()
 
         self.pooling = AllPool()
+        self.head = head
 
     def extract_states(
-            self,
-            hidden_states: Union[torch.Tensor, list[torch.Tensor]],
-            pooling_metadata: PoolingMetadata,
+        self,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         pooled_data_lst = self.pooling(hidden_states, pooling_metadata)
         prompt_token_ids = get_prompt_token_ids(pooling_metadata)
@@ -738,9 +734,9 @@ class StepPooler(Pooler):
         return PoolingParamsUpdate(requires_token_ids=True)
 
     def forward(
-            self,
-            hidden_states: Union[torch.Tensor, list[torch.Tensor]],
-            pooling_metadata: PoolingMetadata,
+        self,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.extract_states(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
