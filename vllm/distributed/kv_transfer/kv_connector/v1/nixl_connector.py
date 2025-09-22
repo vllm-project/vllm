@@ -36,6 +36,7 @@ from vllm.platforms import _Backend, current_platform
 from vllm.utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -125,7 +126,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
 class NixlConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig,
+                 role: KVConnectorRole):
+        if len(kv_cache_config.kv_cache_groups) > 1:
+            raise NotImplementedError(
+                "NixlConnector does not support hybrid allocator for now."
+                "Please set `--disable-hybrid-kv-cache-manager`.")
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
@@ -186,10 +192,10 @@ class NixlConnector(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        blocks: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request, block_ids)
+        return self.connector_scheduler.request_finished(request, blocks)
 
     ############################################################
     # Worker Side Methods
@@ -385,12 +391,19 @@ class NixlConnectorScheduler:
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        blocks: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        if len(blocks) > 1:
+            raise NotImplementedError(
+                "NixlConnector does not support hybrid allocator for now."
+                "Please set `--disable-hybrid-kv-cache-manager`.")
+        logger.warning_once("Only use kv cache group 0 in `request_finished`. "
+                            "This won't work for hybrid allocator.")
+        block_ids = blocks[0]
         from vllm.v1.request import RequestStatus
 
         params = request.kv_transfer_params

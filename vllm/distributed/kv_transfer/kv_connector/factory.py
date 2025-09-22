@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase, KVConnectorBaseType)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 # yapf: enable
 
@@ -41,6 +42,7 @@ class KVConnectorFactory:
         cls,
         config: "VllmConfig",
         role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig,
     ) -> KVConnectorBase:
         if not envs.VLLM_USE_V1:
             raise ValueError("Attempting to initialize a V1 Connector, "
@@ -58,7 +60,7 @@ class KVConnectorFactory:
         # - Co-locate with worker process
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
-        return connector_cls(config, role)
+        return connector_cls(config, role, kv_cache_config)
 
     @classmethod
     def get_connector_class(

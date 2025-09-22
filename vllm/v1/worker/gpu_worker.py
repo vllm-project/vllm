@@ -318,6 +318,11 @@ class Worker(WorkerBase):
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
+        # Initialize the worker kv cache connector here.
+        # This is because the worker connector needs `kv_cache_config`
+        # to know how to map the layer to its corresponding KV cache group.
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
     def compile_or_warm_up_model(self) -> None:
         # warm up sizes that are not in cudagraph capture sizes,
         # but users still want to compile for better performance,
@@ -705,5 +710,3 @@ def init_worker_distributed_environment(
         parallel_config.tensor_parallel_size,
         parallel_config.pipeline_parallel_size,
         parallel_config.decode_context_parallel_size)
-
-    ensure_kv_transfer_initialized(vllm_config)

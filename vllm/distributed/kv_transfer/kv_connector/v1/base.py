@@ -43,6 +43,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -82,12 +83,18 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 
 class KVConnectorBase_V1(ABC):
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        kv_cache_config: KVCacheConfig,
+        role: KVConnectorRole,
+    ):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design.")
         self._connector_metadata: Optional[KVConnectorMetadata] = None
         self._vllm_config = vllm_config
+        self._kv_cache_config = kv_cache_config
         self._role = role
 
     @property
@@ -323,7 +330,7 @@ class KVConnectorBase_V1(ABC):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        blocks: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
