@@ -630,7 +630,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # then use it to update actual num_computed_tokens of each request.
         if self.valid_sampled_token_count_event is not None:
             self.valid_sampled_token_count_event.synchronize()
-        valid_sampled_token_count = self.valid_sampled_token_count_cpu.tolist()
+        valid_sampled_token_count = []
+        if (self.input_batch.prev_sampled_token_ids is not None
+                and self.num_spec_tokens > 0):
+            valid_sampled_token_count = self.valid_sampled_token_count_cpu[  # noqa
+                :self.input_batch.prev_sampled_token_ids.shape[0]].tolist()
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = self._update_computed_tokens(
@@ -709,7 +713,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # in the async scheduling mode, token_ids_cpu assigned from
             # spec_token_ids are placeholders and will be overwritten in
             # _prepare_input_ids.
-            if spec_token_ids:
+            if spec_token_ids and not self.use_async_scheduling:
                 num_spec_tokens = len(spec_token_ids)
                 start_index = self.input_batch.num_tokens_no_spec[req_index]
                 end_token_index = start_index + num_spec_tokens
