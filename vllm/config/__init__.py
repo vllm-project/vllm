@@ -692,6 +692,7 @@ class VllmConfig:
         # Also, on H100 since it's faster than native implementation
         # https://github.com/vllm-project/vllm/issues/25094
         if (self.quant_config is not None
+                and hasattr(self.quant_config, "weight_block_size")
                 and self.quant_config.weight_block_size is not None):
             custom_ops = self.compilation_config.custom_ops
             if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
