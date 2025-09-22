@@ -53,7 +53,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, sharded_weight_loader)
 from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -148,9 +147,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
         # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid gate quantization.
-        # See: https://huggingface.co/Qwen/Qwen3-30B-A3B-GPTQ-Int4
-        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
+        # seems to avoid gate quantization while AutoRound does.
+        if isinstance(
+                quant_config,
+            (GPTQConfig,
+             GPTQMarlinConfig)) and not quant_config.autoround_version:
             return None
         return quant_config
 
@@ -306,7 +307,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             eps=self.layer_norm_epsilon,
             group_size=None,
             norm_before_gate=True,
-            device=torch.cuda.current_device(),
+            device=current_platform.current_device(),
             dtype=config.torch_dtype,
         )
 
@@ -1206,10 +1207,8 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.logits_processor(self.lm_head, hidden_states,
-                                     sampling_metadata)
+        return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
