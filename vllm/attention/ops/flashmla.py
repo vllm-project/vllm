@@ -110,7 +110,9 @@ def flash_mla_with_kvcache(
     # Note(hc): need revisit when we support DCP with decode query_len > 1.
     return out.squeeze(1), softmax_lse.squeeze(-1)
 
+
 # ------------------------ Sparse FlashMLA bindings -------------------------
+
 
 def get_sparse_mla_metadata(
     cache_seqlens: torch.Tensor,
@@ -133,8 +135,9 @@ def get_sparse_mla_metadata(
             dtype torch.int32.
         num_splits: (batch_size + 1), dtype torch.int32.
     """
-    return torch.ops._flashmla_sparse_C.get_mla_metadata(cache_seqlens, q_seq_per_hk,
-                                           num_heads_k, topk, q_heads_per_hk)
+    return torch.ops._flashmla_sparse_C.get_mla_metadata(
+        cache_seqlens, q_seq_per_hk, num_heads_k, topk, q_heads_per_hk)
+
 
 def flash_mla_sparse_with_kvcache(
     q: torch.Tensor,
@@ -212,7 +215,6 @@ def flash_mla_sparse_prefill(
 
     Returns:
         Returns (output, max_logits, lse)
-        For definitions of output, max_logits, and lse, please refer to README.md
         - output: [s_q, h_q, d_v], bfloat16, the result of attention
         - max_logits: [s_q, h_q], float
         - lse: [s_q, h_q], float, base-2
@@ -220,6 +222,7 @@ def flash_mla_sparse_prefill(
     results = torch.ops._flashmla_sparse_C.sparse_topk_attn_fwd(
         q, kv, indices, sm_scale, d_v)
     return results
+
 
 #
 # TODO: Add fake functions
