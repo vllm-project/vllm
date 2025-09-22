@@ -110,27 +110,6 @@ ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
 
-# After fixing type errors resulting from follow_imports: "skip" -> "silent",
-# move the directory here and remove it from tools/mypy.sh
-files = [
-    "vllm/*.py",
-    "vllm/assets",
-    "vllm/entrypoints",
-    "vllm/inputs",
-    "vllm/logging_utils",
-    "vllm/multimodal",
-    "vllm/platforms",
-    "vllm/transformers_utils",
-    "vllm/triton_utils",
-    "vllm/usage",
-]
-# TODO(woosuk): Include the code from Megatron and HuggingFace.
-exclude = [
-    "vllm/model_executor/parallel_utils/|vllm/model_executor/models/",
-    # Ignore triton kernels in ops.
-    'vllm/attention/ops/.*\.py$'
-]
-
 [tool.isort]
 skip_glob = [
     ".buildkite/*",

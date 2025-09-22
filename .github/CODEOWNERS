@@ -72,6 +72,7 @@ mkdocs.yaml @hmellor
 # Linting
 .markdownlint.yaml @hmellor
 .pre-commit-config.yaml @hmellor
+/tools/pre_commit @hmellor
 
 # CPU
 /vllm/v1/worker/cpu* @bigPYJ1151
