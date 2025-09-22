@@ -285,12 +285,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
                 self.lora_a_stacked[i][
-                    index, 0, :lora_a_i.shape[1], :lora_a_i.shape[0]].copy_(
-                        lora_a_i.T, non_blocking=True)
+                    index, 0, :lora_a_i.shape[0], :lora_a_i.shape[1]].copy_(
+                        lora_a_i, non_blocking=True)
             if (lora_b_i := lora_b[i]) is not None:
                 self.lora_b_stacked[i][
-                    index, 0, :lora_b_i.shape[1], :lora_b_i.shape[0]].copy_(
-                        lora_b_i.T, non_blocking=True)
+                    index, 0, :lora_b_i.shape[0], :lora_b_i.shape[1]].copy_(
+                        lora_b_i, non_blocking=True)
 
         if lora_bias is not None:
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
@@ -299,7 +299,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 if (lora_bias_i := lora_bias[i]) is not None:
                     self.lora_bias_stacked[i][index,
                                               0, :lora_bias_i.shape[0]].copy_(
-                                                  lora_bias_i.T,
+                                                  lora_bias_i,
                                                   non_blocking=True)
 
     @classmethod
