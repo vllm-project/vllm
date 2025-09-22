@@ -946,7 +946,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
-        kv_b_proj: ColumnParallelLinear
+        kv_b_proj: ColumnParallelLinear,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
