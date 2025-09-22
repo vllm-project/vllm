@@ -77,10 +77,11 @@ def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
     Convert a string backend name to a _Backend enum value.
 
     Returns:
-    * _Backend: enum value if backend_name is a valid in-tree type
-    * None: otherwise it's an invalid in-tree type or an out-of-tree platform is
-            loaded.
+        _Backend: enum value if backend_name is a valid in-tree type
+        None: otherwise it's an invalid in-tree type or an out-of-tree platform
+              is loaded.
     """
     assert backend_name is not None
+    backend_name = backend_name.removesuffix("_VLLM_V1")
     return _Backend[backend_name] if backend_name in _Backend.__members__ else \
           None
