@@ -7,5 +7,4 @@ setup(
     name='vllm_test_utils',
     version='0.1',
     packages=['vllm_test_utils'],
-    install_requires=['tblib'],
 )
