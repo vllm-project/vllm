@@ -119,7 +119,7 @@ class SupportsMultiModal(Protocol):
         is_multimodal: Optional[Tensor],
         handle_oov_mm_token: bool,
     ) -> Tensor:
-        if not handle_oov_mm_token and is_multimodal is not None:
+        if handle_oov_mm_token and is_multimodal is not None:
             is_text = ~is_multimodal
             text_embeds = get_input_embeddings(input_ids[is_text])
 
