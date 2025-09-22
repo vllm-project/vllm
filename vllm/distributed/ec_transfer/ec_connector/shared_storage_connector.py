@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Optional, Union
 
 import safetensors
 
@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 @dataclass
 class MMMeta:
     request_id: str = ""
-    input_ids: list[int] = None
+    input_ids: list[int] = field(default_factory=list)
 
     @staticmethod
     def make_mm_meta(request_id: str, input_ids: list[int]) -> "MMMeta":
@@ -129,7 +129,7 @@ class ECSharedStorageConnector(ECConnectorBase):
         self,
         request: "Request",
         index: Optional[int] = None,
-    ) -> list[bool]:
+    ) -> Union[bool, list[bool]]:
         """
         Check if cache exist externally for each mm_data of request
         
