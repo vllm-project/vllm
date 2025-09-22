@@ -545,6 +545,8 @@ async def benchmark(
                 f"are correctly specified. Error: {test_output.error}")
         else:
             print("Initial test run completed. Starting main benchmark run...")
+    else:
+        print("Skipping ready check as requested.")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
