@@ -104,9 +104,9 @@ class BenchmarkDataset(ABC):
 
         Args:
             dataset_path (Optional[str]): Path to the dataset. If None, it
-            indicates that a default or random dataset might be used.
+                indicates that a default or random dataset might be used.
             random_seed (int): Seed value for reproducible shuffling or
-            sampling. Defaults to DEFAULT_SEED.
+                sampling. Defaults to DEFAULT_SEED.
         """
         self.dataset_path = dataset_path
         # Set the random seed, ensuring that a None value is replaced with the
@@ -171,7 +171,8 @@ class BenchmarkDataset(ABC):
                 If `None`, LoRA is not used.
 
         Returns:
-            A new [LoRARequest][] (or `None` if not applicable).
+            A new [`LoRARequest`][vllm.lora.request.LoRARequest]
+            (or `None` if not applicable).
         """
         if max_loras is None or lora_path is None:
             return None
@@ -200,8 +201,7 @@ class BenchmarkDataset(ABC):
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
                 for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
-            request_id_prefix (str) The prefix of request_id.
-
+            request_id_prefix (str): The prefix of request_id.
 
         Returns:
             list[SampleRequest]: A list of sample requests generated from the
@@ -224,7 +224,8 @@ class BenchmarkDataset(ABC):
             requests (List[SampleRequest]): The current list of sampled
                 requests.
             num_requests (int): The target number of requests.
-            request_id_prefix (str) The prefix of the request ids.
+            request_id_prefix (str): The prefix applied to generated request
+                identifiers.
 
         """
         if no_oversample:
@@ -1357,7 +1358,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
     elif args.dataset_name == "sonnet":
         dataset = SonnetDataset(dataset_path=args.dataset_path)
         # For the "sonnet" dataset, formatting depends on the backend.
-        if args.endpoint_type == "openai-chat":
+        if args.backend == "openai-chat":
             input_requests = dataset.sample(
                 num_requests=args.num_prompts,
                 input_len=args.sonnet_input_len,
@@ -1461,7 +1462,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 "Please consider contributing if you would "
                 "like to add support for additional dataset formats.")
 
-        if dataset_class.IS_MULTIMODAL and args.endpoint_type not in [
+        if dataset_class.IS_MULTIMODAL and args.backend not in [
                 "openai-chat",
                 "openai-audio",
         ]:
@@ -1469,7 +1470,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             # endpoint-type.
             raise ValueError(
                 "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' endpoint-type.")
+                "'openai-audio' backends.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -1562,7 +1563,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
 
         try:
             # Enforce endpoint compatibility for multimodal datasets.
-            if args.dataset_name == "random-mm" and args.endpoint_type not in [
+            if args.dataset_name == "random-mm" and args.backend not in [
                     "openai-chat"]:
                 raise ValueError(
                     "Multi-modal content (images) is only supported on "
