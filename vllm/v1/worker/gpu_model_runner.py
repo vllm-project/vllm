@@ -1038,8 +1038,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.input_ids.gpu.scatter_(
             dim=0,
             index=sampled_tokens_index_tensor,
-            src=self.input_batch.prev_sampled_token_ids[
-                prev_common_req_indices_tensor, 0])
+            src=prev_sampled_token_ids[prev_common_req_indices_tensor, 0])
 
         # scatter the draft tokens after the sampled tokens are scattered.
         if self._draft_token_ids is None or not spec_flattened_indices:
