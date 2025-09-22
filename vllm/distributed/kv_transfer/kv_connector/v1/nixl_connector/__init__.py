@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import copy
 import logging
 import math
@@ -1277,25 +1276,6 @@ class NixlConnectorWorker:
         if not self.xfer_stats.is_empty():
             return self.xfer_stats.clone_and_reset()
         return None
-
-
-@contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
-
-    if socket_type not in (zmq.ROUTER, zmq.REQ):
-        raise ValueError(f"Unexpected socket type: {socket_type}")
-
-    ctx: Optional[zmq.Context] = None
-    try:
-        ctx = zmq.Context()  # type: ignore[attr-defined]
-        yield make_zmq_socket(ctx=ctx,
-                              path=addr,
-                              socket_type=socket_type,
-                              bind=socket_type == zmq.ROUTER)
-    finally:
-        if ctx is not None:
-            ctx.destroy(linger=0)
 
 
 @dataclass
