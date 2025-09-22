@@ -856,13 +856,15 @@ class EagleProposer:
                 "The EAGLE head's vocab embedding will be loaded separately"
                 " from the target model.")
 
-        # share lm_head with the target model if needed
-        # some model definition do not define lm_head explicitly
-        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3" and \
-                hasattr(target_language_model, "lm_head"):
-            logger.info("Loading EAGLE LM head weights from the target model.")
+        if (get_pp_group().world_size == 1 and self.model.lm_head.weight.shape
+                == target_language_model.lm_head.weight.shape):
+            logger.info("Assuming the EAGLE head shares the same lm_head"
+                        " with the target model.")
+            del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
+        else:
+            logger.info("The EAGLE head's lm_head will be loaded separately"
+                        " from the target model.")
 
     @torch.inference_mode()
     def dummy_run(
