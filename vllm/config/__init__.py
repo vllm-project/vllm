@@ -2826,6 +2826,7 @@ class VllmConfig:
 
         # Enable quant_fp8 CUDA ops when we do block-wise quantization
         # due to an incorrect group shape issue when compiling native
+        # https://github.com/vllm-project/vllm/issues/25382
         #
         # Also, on H100 since it's faster than native implementation
         # https://github.com/vllm-project/vllm/issues/25094
