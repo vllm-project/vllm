@@ -319,7 +319,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
     "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",
-                                        trust_remote_code=True),
+                                         max_transformers_version="4.55.4",
+                                         transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers",  # noqa: E501
+                                         trust_remote_code=True),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-7B-Chat",
                                        max_transformers_version="4.53",
                                        transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers",  # noqa: E501
