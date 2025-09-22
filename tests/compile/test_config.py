@@ -50,6 +50,14 @@ def test_use_cudagraphs_dynamic(monkeypatch):
     assert config4.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
 
 
+def test_custom_op():
+    # proper syntax
+    _ = CompilationConfig(custom_ops=["+quant_fp8", "-silu_and_mul"])
+
+    with pytest.raises(ValueError, match="Invalid syntax '"):
+        _ = CompilationConfig(custom_ops=["quant_fp8"])
+
+
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
 # NB: We don't test VLLM_DISABLE_COMPILE_CACHE=0 because that depends

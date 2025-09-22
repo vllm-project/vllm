@@ -15,7 +15,8 @@ from ...utils import check_logprobs_close
 # have a clean way to fall back, so we fail with
 # a clear msg when it happens.
 # https://github.com/vllm-project/vllm/issues/14524
-REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
+# NOTE(woosuk): Skipping these tests until V1 supports them.
+# REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
 
 # This list contains the model that are using AITER kernel.
 # Skip model that are not using AITER tests.
@@ -113,9 +114,6 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    if model in REQUIRES_V0:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
-
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     elif use_rocm_aiter and model not in AITER_MODEL_LIST:
@@ -124,12 +122,6 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
         # needed as all the models will be calling AITER kernels
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
-
-    # Note: can be removed when
-    # https://github.com/vllm-project/vllm/pull/24278 finished
-    if current_platform.is_cpu() and use_prompt_embeds:
-        pytest.skip("Skipping use_prompt_embeds=True with "
-                    "V1-only CPU backend.")
 
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(

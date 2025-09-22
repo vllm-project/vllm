@@ -3,9 +3,13 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVConnectorStats)
 
 
 class LogprobsLists(NamedTuple):
@@ -77,6 +81,11 @@ class KVConnectorOutput:
     # [req_ids]
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
+    kv_connector_stats: Optional["KVConnectorStats"] = None
+
+    def is_empty(self):
+        return (not self.finished_sending and not self.finished_recving
+                and not self.kv_connector_stats)
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.

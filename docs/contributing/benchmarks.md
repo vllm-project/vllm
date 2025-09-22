@@ -37,6 +37,7 @@ th {
 | RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |
 | Prefix Repetition | ✅ | ✅ | `synthetic` |
 | HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
+| HuggingFace-MMVU | ✅ | ✅ | `yale-nlp/MMVU` |
 | HuggingFace-InstructCoder | ✅ | ✅ | `likaixin/InstructCoder` |
 | HuggingFace-AIMO | ✅ | ✅ | `AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-CoT` |
 | HuggingFace-Other | ✅ | ✅ | `lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered` |
@@ -155,7 +156,6 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```bash
 vllm bench serve \
   --backend openai-chat \
-  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -229,7 +229,6 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```bash
 vllm bench serve \
   --backend openai-chat \
-  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -244,7 +243,6 @@ vllm bench serve \
 ```bash
 vllm bench serve \
   --backend openai-chat \
-  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \

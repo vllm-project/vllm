@@ -5,10 +5,7 @@
 Run `pytest tests/quantization/test_bitsandbytes.py`.
 '''
 
-import gc
-
 import pytest
-import torch
 from transformers import BitsAndBytesConfig
 
 from tests.quantization.utils import is_quant_method_supported
@@ -131,12 +128,15 @@ def test_4bit_bnb_moe_model(hf_runner, vllm_runner, example_prompts,
     ))
     with vllm_runner(model_name,
                      quantization='bitsandbytes',
-                     enforce_eager=False) as llm:
+                     enforce_eager=False,
+                     default_torch_num_threads=1) as llm:
         vllm_outputs = llm.generate_greedy_logprobs(example_prompts,
                                                     max_tokens=32,
                                                     num_logprobs=5)
 
-    with hf_runner(model_name, model_kwargs=hf_model_kwargs) as llm:
+    with hf_runner(model_name,
+                   model_kwargs=hf_model_kwargs,
+                   default_torch_num_threads=1) as llm:
         transformers_outputs = llm.generate_greedy_logprobs_limit(
             example_prompts, max_tokens=32, num_logprobs=5)
     check_logprobs_close(
@@ -174,7 +174,8 @@ def test_4bit_bnb_embedding_model(
                      runner="pooling",
                      dtype=dtype,
                      gpu_memory_utilization=0.5,
-                     quantization="bitsandbytes") as vllm_model:
+                     quantization="bitsandbytes",
+                     default_torch_num_threads=1) as vllm_model:
         vllm_outputs = vllm_model.embed(example_prompts)
 
     hf_model_kwargs = dict(quantization_config=BitsAndBytesConfig(
@@ -184,6 +185,7 @@ def test_4bit_bnb_embedding_model(
             dtype=dtype,
             model_kwargs=hf_model_kwargs,
             is_sentence_transformer=True,
+            default_torch_num_threads=1,
     ) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
@@ -222,26 +224,22 @@ def validate_generated_texts(hf_runner,
     with vllm_runner(model_name,
                      quantization=None if pre_quant else 'bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
-                     enforce_eager=False) as llm:
+                     enforce_eager=False,
+                     default_torch_num_threads=1) as llm:
 
         vllm_outputs = llm.generate_greedy(prompts, max_tokens)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
-
-    # Clean up the GPU memory for the next test
-    gc.collect()
-    torch.cuda.empty_cache()
 
     if hf_model_kwargs is None:
         hf_model_kwargs = {}
 
     # Run with HF runner
-    with hf_runner(model_name, model_kwargs=hf_model_kwargs) as llm:
+    with hf_runner(model_name,
+                   model_kwargs=hf_model_kwargs,
+                   default_torch_num_threads=1) as llm:
         hf_outputs = llm.generate_greedy(prompts, max_tokens)
         hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
 
-    # Clean up the GPU memory for the next test
-    gc.collect()
-    torch.cuda.empty_cache()
     # Compare the generated strings
     for hf_log, vllm_log in zip(hf_logs, vllm_logs):
         hf_str = hf_log["generated_text"]
