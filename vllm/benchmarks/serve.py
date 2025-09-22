@@ -476,7 +476,6 @@ async def benchmark(
     ramp_up_start_rps: Optional[int] = None,
     ramp_up_end_rps: Optional[int] = None,
     ready_check_timeout_sec: int = 600,
-    skip_ready_check: bool = False,
 ):
     task_type = (TaskType.EMBEDDING if api_url.endswith("/v1/embeddings") else
                  TaskType.GENERATION)
@@ -532,7 +531,7 @@ async def benchmark(
         extra_body=extra_body,
     )
 
-    if not skip_ready_check:
+    if ready_check_timeout_sec > 0:
         test_output = await wait_for_endpoint(
             request_func,
             test_input,
@@ -541,12 +540,13 @@ async def benchmark(
         )
         if not test_output.success:
             raise ValueError(
-                "Initial test run failed - Please make sure benchmark arguments "
-                f"are correctly specified. Error: {test_output.error}")
+                "Initial test run failed - Please make sure benchmark "
+                "arguments are correctly specified. "
+                f"Error: {test_output.error}")
         else:
             print("Initial test run completed. Starting main benchmark run...")
     else:
-        print("Skipping ready check as requested.")
+        print("Skipping endpoint ready check.")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
@@ -1155,13 +1155,8 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=int,
         default=600,
         help="Maximum time to wait for the endpoint to become ready "
-        "in seconds (default: 600 seconds / 10 minutes).",
-    )
-    parser.add_argument(
-        "--skip-ready-check",
-        action="store_true",
-        help="Skip the ready check. This is useful when the endpoint "
-        "is already ready and the ready check is not needed.",
+        "in seconds (default: 600 seconds / 10 minutes). If set to 0, "
+        "the ready check will be skipped."
     )
 
 
@@ -1282,7 +1277,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
-        skip_ready_check=args.skip_ready_check,
     )
 
     # Save config and results to json
