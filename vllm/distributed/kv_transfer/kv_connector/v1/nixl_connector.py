@@ -53,11 +53,16 @@ logger = init_logger(__name__)
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
     from nixl._api import nixl_agent as NixlWrapper
-    from nixl._api import nixl_agent_config
     logger.info("NIXL is available")
 except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
+
+try:
+    from nixl._api import nixl_agent_config
+except ImportError:
+    nixl_agent_config = None
+    logger.warning("NIXL agent config is not available")
 
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
@@ -455,7 +460,10 @@ class NixlConnectorWorker:
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "backends", ["UCX"])
         # Agent.
-        config = nixl_agent_config(backends=self.nixl_backends)
+        non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
+        config = nixl_agent_config(backends=self.nixl_backends) if len(
+            non_ucx_backends) > 0 and nixl_agent_config is not None else None
+
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
