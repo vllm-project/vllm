@@ -654,7 +654,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             handle_oov_mm_token=handle_oov_mm_token,
         )
 
-        if multimodal_embeddings is None:
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
         if is_multimodal is None:
