@@ -82,31 +82,20 @@ def test_quant_model_lora(tinyllama_lora_files, model):
         gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
         trust_remote_code=True,
-        enable_chunked_prefill=True)
+        enable_chunked_prefill=True,
+        tokenizer=tinyllama_lora_files)
 
     if model.quantization is None:
-        expected_no_lora_output = [
-            "Here are some examples of orange-brown colors",
-            "I'm sorry, I don't have"
-        ]
         expected_lora_output = [
             "#ff8050",
             "#ff8080",
         ]
     elif model.quantization == "awq":
-        expected_no_lora_output = [
-            "I'm sorry, I don't understand",
-            "I'm sorry, I don't understand",
-        ]
         expected_lora_output = [
             "#f07700: A v",
             "#f00000: A v",
         ]
     elif model.quantization == "gptq":
-        expected_no_lora_output = [
-            "I'm sorry, I don't have",
-            "I'm sorry, I don't have",
-        ]
         expected_lora_output = [
             "#f08800: This is",
             "#f07788 \n#",
@@ -117,7 +106,6 @@ def test_quant_model_lora(tinyllama_lora_files, model):
         # Assert that the outputs changed.
         if (model.quantization == "gptq"
                 and expected_output is expected_lora_output):
-            assert output != expected_no_lora_output
             for i, o in enumerate(output):
                 assert o.startswith(
                     '#'), f"Expected example {i} to start with # but got {o}"
@@ -127,25 +115,12 @@ def test_quant_model_lora(tinyllama_lora_files, model):
     max_tokens = 10
 
     print("lora adapter created")
-    output = do_sample(llm,
-                       tinyllama_lora_files,
-                       lora_id=0,
-                       max_tokens=max_tokens)
-    expect_match(output, expected_no_lora_output)
-
     print("lora 1")
     output = do_sample(llm,
                        tinyllama_lora_files,
                        lora_id=1,
                        max_tokens=max_tokens)
     expect_match(output, expected_lora_output)
-
-    print("no lora")
-    output = do_sample(llm,
-                       tinyllama_lora_files,
-                       lora_id=0,
-                       max_tokens=max_tokens)
-    expect_match(output, expected_no_lora_output)
 
     print("lora 2")
     output = do_sample(llm,

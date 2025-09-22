@@ -91,7 +91,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
     # ==============================
 
     def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+                      **kwargs: Any) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
@@ -178,6 +178,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         # Load the KV for each request each layer
         for request in metadata.requests:
+            request_id = request.request_id
+            ip, port = self.parse_request_id(request_id, False)
+            remote_address = ip + ":" + str(port + self._rank)
             for layer_name in forward_context.no_compile_layers:
                 layer = forward_context.no_compile_layers[layer_name]
 
@@ -191,7 +194,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 layer = kv_cache[forward_context.virtual_engine]
 
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "#" + layer_name)
+                    request.request_id + "#" + layer_name, remote_address)
 
                 if kv_cache is None:
                     logger.warning("🚧kv_cache is None, %s", request.request_id)
@@ -212,7 +215,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
         return
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+                      attn_metadata: "AttentionMetadata",
+                      **kwargs: Any) -> None:
         """Start saving the KV cache of the layer from vLLM's paged buffer
         to the connector.
 
@@ -278,7 +282,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     def get_finished(
             self, finished_req_ids: set[str],
-            **kwargs) -> tuple[Optional[set[str]], Optional[set[str]]]:
+            **kwargs: Any) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.

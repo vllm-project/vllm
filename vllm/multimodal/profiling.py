@@ -209,7 +209,7 @@ class MultiModalProfiler(Generic[_I]):
         if processor.pad_dummy_encoder_prompt:
             num_tokens_to_pad = max(total_len, seq_len) - total_len
             encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
-        # NOTE: Whisper and Donut allows total_len > seq_len.
+        # NOTE: Whisper allows total_len > seq_len.
         elif total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
             logger.warning_once(
@@ -234,19 +234,6 @@ class MultiModalProfiler(Generic[_I]):
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
 
-        # V0 does not support chunked prefill.
-        if total_len > seq_len and not envs.VLLM_USE_V1:
-            # `max_num_batched_tokens` is defined by `SchedulerConfig`
-            logger.warning_once(
-                "The sequence length used for profiling (max_num_batched_tokens / max_num_seqs = %d) "  # noqa: E501
-                "is too short to hold the multi-modal embeddings in the worst case (%d tokens in total, out of which %s are reserved for multi-modal embeddings). "  # noqa: E501
-                "This may cause certain multi-modal inputs to fail during inference, even when the input text is short. "  # noqa: E501
-                "To avoid this, you should increase `max_model_len`, reduce `max_num_seqs`, and/or reduce `mm_counts`.",  # noqa: E501
-                seq_len,
-                total_len,
-                str(self._get_mm_num_tokens(mm_inputs)),
-            )
-
         if total_len < seq_len:
             prompt_token_ids.extend([0] * (seq_len - total_len))
 
@@ -270,22 +257,6 @@ class MultiModalProfiler(Generic[_I]):
             mm_counts=mm_counts,
         )
         if max_tokens_per_item is not None:
-            if mm_counts is None:
-                total_mm_tokens = sum(max_tokens_per_item.values())
-            else:
-                total_mm_tokens = sum(max_tokens_per_item[k] * mm_counts[k]
-                                      for k in max_tokens_per_item.keys()
-                                      & mm_counts.keys())
-            if total_mm_tokens > seq_len:
-                logger.warning_once(
-                    "The sequence length (%d) is smaller than the pre-defined"
-                    " worst-case total number of multimodal tokens (%d). "
-                    "This may cause certain multi-modal inputs to fail during "
-                    "inference. To avoid this, you should increase "
-                    "`max_model_len` or reduce `mm_counts`.",
-                    seq_len,
-                    total_mm_tokens,
-                )
             return max_tokens_per_item
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
@@ -301,7 +272,7 @@ class MultiModalProfiler(Generic[_I]):
         Returns the maximum length of the multimodal (image placeholders+text)
         tokens, including any break/text tokens in-between image embeddings.
 
-        <im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>
+        `<im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>`
         Returns 9, even when the number of image embeddings is 6.
         
         This is important to take into account when profiling and
