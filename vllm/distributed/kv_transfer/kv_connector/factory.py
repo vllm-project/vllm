@@ -41,8 +41,8 @@ class KVConnectorFactory:
     def create_connector(
         cls,
         config: "VllmConfig",
-        role: KVConnectorRole,
         kv_cache_config: KVCacheConfig,
+        role: KVConnectorRole,
     ) -> KVConnectorBase:
         if not envs.VLLM_USE_V1:
             raise ValueError("Attempting to initialize a V1 Connector, "
@@ -60,7 +60,7 @@ class KVConnectorFactory:
         # - Co-locate with worker process
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
-        return connector_cls(config, role, kv_cache_config)
+        return connector_cls(config, kv_cache_config, role)
 
     @classmethod
     def get_connector_class(
