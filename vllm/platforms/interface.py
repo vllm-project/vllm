@@ -276,13 +276,6 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        """
-        Check if the current platform supports async output.
-        """
-        raise NotImplementedError
-
-    @classmethod
     def inference_mode(cls):
         """A device-specific wrapper of `torch.inference_mode`.
 
@@ -591,6 +584,13 @@ class Platform:
     def support_hybrid_kv_cache(cls) -> bool:
         """
         Returns if the hybrid kv cache is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        """
+        Returns if the graph mode is supported by the current platform.
         """
         return False
 

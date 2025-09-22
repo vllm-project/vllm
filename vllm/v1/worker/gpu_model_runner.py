@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -74,7 +74,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         EncoderOnlyAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
-                                        MambaSpec, SlidingWindowSpec)
+                                        MambaSpec, SlidingWindowSpec,
+                                        UniformTypeKVCacheSpecs)
 # yapf: enable
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, LogprobsLists, LogprobsTensors,
@@ -1187,7 +1188,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     common_prefix_len = self._compute_cascade_attn_prefix_len(
                         num_scheduled_tokens,
                         num_common_prefix_blocks,
-                        kv_cache_group_spec.kv_cache_spec,
+                        attn_group.kv_cache_spec,
                         builder,
                     )
 
@@ -1478,7 +1479,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         Args:
             scheduler_output: The scheduler output containing scheduled encoder
-              inputs.
+                inputs.
 
         Returns:
             A tuple of (mm_kwargs, req_ids_pos) where:
@@ -2239,7 +2240,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     return output
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states, None)
+                logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -2257,8 +2258,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     logits = None
                 else:
                     sample_hidden_states = hidden_states[logits_indices]
-                    logits = self.model.compute_logits(sample_hidden_states,
-                                                       None)
+                    logits = self.model.compute_logits(sample_hidden_states)
 
                 model_output_broadcast_data = {}
                 if logits is not None:
@@ -2705,7 +2705,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc.np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
-            logits = self.model.compute_logits(prompt_hidden_states, None)
+            logits = self.model.compute_logits(prompt_hidden_states)
 
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want
@@ -3104,7 +3104,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # To avoid breaking the sampler, we use a random tensor here instead.
         hidden_states = torch.rand_like(hidden_states)
 
-        logits = self.model.compute_logits(hidden_states, None)
+        logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)
 
         dummy_tensors = lambda v: torch.full(
@@ -3453,12 +3453,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert len(self.attn_groups) == 0, \
             "Attention backends are already initialized"
 
-        def get_attn_backends_for_layers(
-                layer_names: list[str]
-        ) -> dict[type[AttentionBackend], list[str]]:
-            layers = get_layers_from_vllm_config(self.vllm_config,
-                                                 AttentionLayerBase,
-                                                 layer_names)
+        class AttentionGroupKey(NamedTuple):
+            attn_backend: type[AttentionBackend]
+            kv_cache_spec: KVCacheSpec
+
+        def get_attn_backends_for_group(
+            kv_cache_group_spec: KVCacheGroupSpec,
+        ) -> dict[AttentionGroupKey, list[str]]:
+            layers = get_layers_from_vllm_config(
+                self.vllm_config, AttentionLayerBase,
+                kv_cache_group_spec.layer_names)
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
             # Dedupe based on full class name; this is a bit safer than
@@ -3466,7 +3470,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
             # they are cached correctly, there will be different objects per
             # layer.
-            for layer_name in layer_names:
+            for layer_name in kv_cache_group_spec.layer_names:
                 attn_backend = layers[layer_name].get_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
@@ -3475,8 +3479,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         attn_backend,
                     )
 
-                key = attn_backend.full_cls_name()
-                attn_backends[key] = attn_backend
+                full_cls_name = attn_backend.full_cls_name()
+                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+                if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
+                        layer_name]
+                key = (full_cls_name, layer_kv_cache_spec)
+                attn_backends[key] = AttentionGroupKey(attn_backend,
+                                                       layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
             return {
                 attn_backends[k]: v
@@ -3484,11 +3494,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             }
 
         def create_attn_groups(
-            attn_backends_map: dict[AttentionBackend, list[str]],
-            kv_cache_spec: KVCacheSpec,
+            attn_backends_map: dict[AttentionGroupKey, list[str]],
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
-            for attn_backend, layer_names in attn_backends_map.items():
+            for (attn_backend,
+                 kv_cache_spec), layer_names in attn_backends_map.items():
                 attn_metadata_builders = []
                 attn_metadata_builders.append(attn_backend.get_builder_cls()(
                     kv_cache_spec,
@@ -3506,16 +3516,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         ))
                 attn_group = AttentionGroup(attn_backend,
                                             attn_metadata_builders,
-                                            layer_names)
+                                            layer_names, kv_cache_spec)
                 attn_groups.append(attn_group)
             return attn_groups
 
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            attn_backends = get_attn_backends_for_layers(
-                kv_cache_group_spec.layer_names)
-            self.attn_groups.append(
-                create_attn_groups(attn_backends, kv_cache_spec))
+            attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
+            self.attn_groups.append(create_attn_groups(attn_backends))
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
@@ -3680,14 +3687,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
         return itertools.chain.from_iterable(self.attn_groups)
 
-    def _kv_cache_spec_attn_group_iterator(
-            self) -> Iterator[tuple[KVCacheSpec, AttentionGroup]]:
+    def _kv_cache_spec_attn_group_iterator(self) -> Iterator[AttentionGroup]:
         if not self.kv_cache_config.kv_cache_groups:
             return
-        for kv_cache_spec_id, attn_groups in enumerate(self.attn_groups):
-            for attn_group in attn_groups:
-                yield self.kv_cache_config.kv_cache_groups[
-                    kv_cache_spec_id].kv_cache_spec, attn_group
+        for attn_groups in self.attn_groups:
+            yield from attn_groups
 
     def _reshape_kv_cache_tensors(
         self,
@@ -3707,7 +3711,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
-        for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
@@ -3787,7 +3792,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_caches: The KV cache buffer of each layer.
         """
 
-        for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
             for layer_name in group.layer_names:
                 kv_cache = kv_caches[layer_name]
                 if (isinstance(kv_cache_spec, AttentionSpec)
