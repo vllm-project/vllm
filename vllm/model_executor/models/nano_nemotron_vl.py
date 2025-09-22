@@ -36,7 +36,6 @@ from vllm.model_executor.models.radio import RadioModel
 from vllm.model_executor.models.utils import (flatten_bn,
                                               init_vllm_registered_model,
                                               isin_list, maybe_prefix)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, MultiModalKwargsItems,
@@ -1175,10 +1174,8 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         adapter_dict = dict(self.mlp1.named_parameters())

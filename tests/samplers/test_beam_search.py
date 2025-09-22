@@ -10,13 +10,6 @@ from transformers import AutoModelForSeq2SeqLM
 
 from vllm.assets.audio import AudioAsset
 
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
-
-
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
 #   2. Increase beam_width to 8.
