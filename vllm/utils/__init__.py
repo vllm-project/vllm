@@ -551,9 +551,10 @@ class AsyncMicrobatchTokenizer:
                 # If every request uses identical kwargs we can run a single
                 # batched tokenizer call for a big speed-up.
                 if can_batch and len(prompts) > 1:
-                    encode_fn = partial(self.tokenizer, prompts, **kwargs)
+                    batch_encode_fn = partial(self.tokenizer, prompts,
+                                              **kwargs)
                     results = await self._loop.run_in_executor(
-                        self._executor, encode_fn)
+                        self._executor, batch_encode_fn)
 
                     for i, fut in enumerate(result_futures):
                         if not fut.done():
@@ -889,7 +890,7 @@ def get_open_port() -> int:
 
 def get_open_ports_list(count: int = 5) -> list[int]:
     """Get a list of open ports."""
-    ports = set()
+    ports = set[int]()
     while len(ports) < count:
         ports.add(get_open_port())
     return list(ports)
@@ -1279,7 +1280,7 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
 
 def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
     if isinstance(obj, str) or not isinstance(obj, Iterable):
-        obj = [obj]
+        return [obj]  # type: ignore[list-item]
     return obj
 
 
