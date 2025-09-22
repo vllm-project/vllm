@@ -425,7 +425,6 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
                                                     num_prompt_req],  # prefill
             query_start_loc=query_start_loc_cpu[:num_reqs +
                                                 1],  # for logits index
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
         )
 
