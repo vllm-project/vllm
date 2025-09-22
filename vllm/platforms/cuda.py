@@ -217,7 +217,7 @@ class CudaPlatformBase(Platform):
             return _Backend.XFORMERS
 
         if cls.has_device_capability(80):
-            backend_class = backend_to_class(_Backend.FLASH_ATTN_VLLM_V1)
+            backend_class = backend_to_class(_Backend.FLASH_ATTN)
             if (backend_class.supports_head_size(head_size)
                     and backend_class.supports_dtype(dtype)):
                 return _Backend.FLASH_ATTN

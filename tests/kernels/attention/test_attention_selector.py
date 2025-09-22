@@ -88,7 +88,7 @@ def test_env(
                        CpuPlatform()):
                 backend = get_attn_backend(16, torch.float16, None, block_size,
                                            False)
-            assert backend.get_name() == "TORCH_SDPA_VLLM_V1"
+            assert backend.get_name() == "TORCH_SDPA"
 
         elif device == "hip":
             with patch("vllm.attention.selector.current_platform",
@@ -130,7 +130,7 @@ def test_env(
                                                    block_size,
                                                    False,
                                                    use_mla=use_mla)
-                        expected = f"{name}_VLLM_V1"
+                        expected = f"{name}"
                         assert backend.get_name() == expected
                 else:
                     backend = get_attn_backend(16,
@@ -139,7 +139,7 @@ def test_env(
                                                block_size,
                                                False,
                                                use_mla=use_mla)
-                    expected = "TRITON_ATTN_VLLM_V1"
+                    expected = "TRITON_ATTN"
                     assert backend.get_name() == expected
 
         elif device == "cuda":
@@ -167,7 +167,7 @@ def test_env(
                                                        block_size,
                                                        False,
                                                        use_mla=use_mla)
-                            expected = "CUTLASS_MLA_VLLM_V1"
+                            expected = "CUTLASS_MLA"
                             assert backend.get_name() == expected
                     elif name == "FLASHINFER_MLA":
                         if block_size not in [32, 64]:
@@ -202,7 +202,7 @@ def test_env(
                                                            block_size,
                                                            False,
                                                            use_mla=use_mla)
-                                expected = f"{name}_VLLM_V1"
+                                expected = f"{name}"
                                 assert backend.get_name() == expected
                     elif name == "FLASH_ATTN_MLA":
                         backend = get_attn_backend(16,
@@ -221,7 +221,7 @@ def test_env(
                                                    block_size,
                                                    False,
                                                    use_mla=use_mla)
-                        expected = "TRITON_MLA_VLLM_V1"
+                        expected = "TRITON_MLA"
                         assert backend.get_name() == expected
                 elif name == "FLASHINFER":
                     backend = get_attn_backend(16,
@@ -230,7 +230,7 @@ def test_env(
                                                block_size,
                                                False,
                                                use_mla=use_mla)
-                    expected = "FLASHINFER_VLLM_V1"
+                    expected = "FLASHINFER"
                     assert backend.get_name() == expected
                 else:
                     backend = get_attn_backend(32,
@@ -239,7 +239,7 @@ def test_env(
                                                block_size,
                                                False,
                                                use_mla=use_mla)
-                    expected = "FLASH_ATTN_VLLM_V1"
+                    expected = "FLASH_ATTN"
                     assert backend.get_name() == expected
 
                     backend = get_attn_backend(16,
@@ -266,7 +266,7 @@ def test_fp32_fallback(
             with patch("vllm.attention.selector.current_platform",
                        CpuPlatform()):
                 backend = get_attn_backend(16, torch.float32, None, 16, False)
-            assert backend.get_name() == "TORCH_SDPA_VLLM_V1"
+            assert backend.get_name() == "TORCH_SDPA"
 
         elif device == "cuda":
             with patch("vllm.attention.selector.current_platform",

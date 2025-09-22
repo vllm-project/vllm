@@ -41,9 +41,9 @@ class XPUPlatform(Platform):
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
-        if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+        if selected_backend == _Backend.TRITON_ATTN:
             logger.info_once("Using Triton backend on V1 engine.")
-            return backend_to_class_str(_Backend.TRITON_ATTN_VLLM_V1, use_v1)
+            return backend_to_class_str(_Backend.TRITON_ATTN, use_v1)
         elif selected_backend == _Backend.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend on V1 engine.")
             return backend_to_class_str(_Backend.FLASH_ATTN, use_v1)
@@ -63,7 +63,7 @@ class XPUPlatform(Platform):
         XPU only support fp8 kv cache with triton backend.
         """
         if envs.is_set("VLLM_ATTENTION_BACKEND") and \
-            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN_VLLM_V1":
+            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN":
             return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
 
         return False

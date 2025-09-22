@@ -140,7 +140,7 @@ class TritonAttentionMetadataBuilder(
 
 
 @register_attn_backend(
-    _Backend.TRITON_ATTN_VLLM_V1,
+    _Backend.TRITON_ATTN,
     "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend")
 class TritonAttentionBackend(AttentionBackend):
 
@@ -148,7 +148,7 @@ class TritonAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TRITON_ATTN_VLLM_V1"
+        return "TRITON_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["TritonAttentionImpl"]:

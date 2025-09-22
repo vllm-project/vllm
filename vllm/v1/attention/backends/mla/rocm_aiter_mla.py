@@ -31,13 +31,13 @@ def is_aiter_mla_enabled() -> bool:
 
 
 @register_attn_backend(
-    _Backend.ROCM_AITER_MLA_VLLM_V1,
+    _Backend.ROCM_AITER_MLA,
     "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend")
 class AiterMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ROCM_AITER_MLA_VLLM_V1"
+        return "ROCM_AITER_MLA"
 
     @staticmethod
     def get_impl_cls() -> type["AiterMLAImpl"]:

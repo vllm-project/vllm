@@ -39,7 +39,7 @@ _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 16
 
 
 @register_attn_backend(
-    _Backend.FLASH_ATTN_VLLM_V1,
+    _Backend.FLASH_ATTN,
     "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend")
 class FlashAttentionBackend(AttentionBackend):
 
@@ -47,7 +47,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN_VLLM_V1"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
