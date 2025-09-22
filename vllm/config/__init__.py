@@ -905,10 +905,9 @@ def set_current_vllm_config(vllm_config: VllmConfig,
     except Exception:
         raise
     else:
-        logger.debug("enabled custom ops: %s",
-                     vllm_config.compilation_config.enabled_custom_ops)
-        logger.debug("disabled custom ops: %s",
-                     vllm_config.compilation_config.disabled_custom_ops)
+        if check_compile:
+            vllm_config.compilation_config.custom_op_log_check()
+
         if check_compile and \
             vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
             and compilation_counter.num_models_seen == num_models_seen:
