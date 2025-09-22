@@ -479,5 +479,5 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def support_graph_mode(cls) -> bool:
+    def support_static_graph_mode(cls) -> bool:
         return True
