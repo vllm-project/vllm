@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
@@ -41,8 +42,13 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
 
 class OffloadingConnector(KVConnectorBase_V1):
 
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
-        super().__init__(vllm_config, role)
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig,
+                 role: KVConnectorRole):
+        if len(kv_cache_config.kv_cache_groups) > 1:
+            raise NotImplementedError(
+                "OffloadingConnector does not support hybrid allocator for now."
+                "Please set `--disable-hybrid-kv-cache-manager`.")
+        super().__init__(vllm_config, kv_cache_config, role)
 
         spec = OffloadingSpecFactory.create_spec(vllm_config)
 
@@ -344,7 +350,7 @@ class OffloadingConnectorScheduler:
     def request_finished(
         self,
         request: Request,
-        block_ids: list[int],
+        blocks: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
