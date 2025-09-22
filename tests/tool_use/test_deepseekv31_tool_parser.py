@@ -21,10 +21,9 @@ def parser(deepseekv31_tokenizer):
 
 def test_extract_tool_calls_with_tool(parser):
     model_output = (
-        "normal text"
-        + "<｜tool▁calls▁begin｜>"
-        + "<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{\"x\":1}<｜tool▁call▁end｜>"
-        + "<｜tool▁calls▁end｜>"
+        "normal text" + "<｜tool▁calls▁begin｜>" +
+        "<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{\"x\":1}<｜tool▁call▁end｜>" +
+        "<｜tool▁calls▁end｜>"
     )
     result = parser.extract_tool_calls(model_output, None)
     assert result.tools_called
@@ -36,12 +35,10 @@ def test_extract_tool_calls_with_tool(parser):
 
 def test_extract_tool_calls_with_multiple_tools(parser):
     model_output = (
-        "some prefix text"
-        + "<｜tool▁calls▁begin｜>"
-        + "<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{\"x\":1}<｜tool▁call▁end｜>"
-        + "<｜tool▁call▁begin｜>bar<｜tool▁sep｜>{\"y\":2}<｜tool▁call▁end｜>"
-        + "<｜tool▁calls▁end｜>"
-        + " some suffix text"
+        "some prefix text" + "<｜tool▁calls▁begin｜>" +
+        "<｜tool▁call▁begin｜>foo<｜tool▁sep｜>{\"x\":1}<｜tool▁call▁end｜>" +
+        "<｜tool▁call▁begin｜>bar<｜tool▁sep｜>{\"y\":2}<｜tool▁call▁end｜>" +
+        "<｜tool▁calls▁end｜>" + " some suffix text"
     )
 
     result = parser.extract_tool_calls(model_output, None)
