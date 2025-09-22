@@ -1357,7 +1357,7 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
 
-        if multimodal_embeddings is None:
+        if not multimodal_embeddings:
             return inputs_embeds
 
         if is_multimodal is None:
