@@ -10,6 +10,8 @@ import torch
 from vllm.config import QuantizationConfig
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod)
 
@@ -80,12 +82,15 @@ def get_linear_quant_method(
     parallel_lm_head_quantized = isinstance(
         layer, ParallelLMHead) and cloned_config.lm_head_quantized
     if isinstance(layer, LinearBase) or parallel_lm_head_quantized:
+        is_layer_quantized = is_layer_skipped(
+            prefix=prefix,
+            ignored_layers=cloned_config.modules_in_block_to_quantize,
+            fused_mapping=cloned_config.packed_modules_mapping)
         # False = skip module, None = no override, else = Positive match
         if get_dynamic_override(  # noqa: E712
                 cloned_config,  # noqa: E712
                 layer_name=prefix) == False or (
-                    prefix not in cloned_config.modules_in_block_to_quantize
-                ):  # noqa: E712
+                    not is_layer_quantized):  # noqa: E712
             if parallel_lm_head_quantized:
                 return UnquantizedEmbeddingMethod()
             return UnquantizedLinearMethod()
