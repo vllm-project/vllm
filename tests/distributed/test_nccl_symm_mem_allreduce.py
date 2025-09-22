@@ -53,7 +53,7 @@ def nccl_symm_mem_allreduce_worker(local_rank: int, world_size: int):
                                         get_tp_group().device_communicator)
         pynccl_comm = cuda_communicator.pynccl_comm
         if get_nccl_mem_pool() is None:
-            pytest.skip("NCCL allocator compilation failed ",
+            pytest.skip("NCCL allocator compilation failed "
                         "(probably missing NCCL headers).")
         if not is_symmetric_memory_enabled():
             pytest.skip("NCCL symmetric memory allreduce is disabled.")
