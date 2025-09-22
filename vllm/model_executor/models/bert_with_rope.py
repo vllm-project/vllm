@@ -649,23 +649,19 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
+        act_fn = ClassifierPooler.act_fn_for_seq_cls(vllm_config.model_config)
+        classifie_pooler = ClassifierPooler(pooling=self.new.pooler,
+                                            classifier=self.classifier,
+                                            act_fn=act_fn)
         self.pooler = DispatchPooler({
             "encode":
-            Pooler.for_encode(pooler_config),
+            Pooler.for_classify_encode(pooler_config=pooler_config,
+                                       classifier=self.classifier,
+                                       act_fn=act_fn),
             "classify":
-            ClassifierPooler(
-                pooling=self.new.pooler,
-                classifier=self.classifier,
-                act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                    vllm_config.model_config),
-            ),
+            classifie_pooler,
             "score":
-            ClassifierPooler(
-                pooling=self.new.pooler,
-                classifier=self.classifier,
-                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                    vllm_config.model_config),
-            ),
+            classifie_pooler
         })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

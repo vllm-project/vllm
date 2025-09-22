@@ -259,7 +259,7 @@ def as_embedding_model(cls: _T) -> _T:
 
             self.pooler = DispatchPooler(
                 {
-                    "encode": Pooler.for_encode(pooler_config),
+                    "encode": Pooler.for_embed_encode(pooler_config),
                     "embed": Pooler.for_embed(pooler_config),
                 }, )
 
@@ -307,8 +307,9 @@ def as_seq_cls_model(cls: _T) -> _T:
                 hidden_size,
                 config.num_labels,
                 bias=False,
-                params_dtype=torch.float32,
+                params_dtype=vllm_config.model_config.head_dtype,
                 quant_config=quant_config,
+                return_bias=False,
                 prefix=maybe_prefix(prefix, "score"),
             )
 
@@ -319,28 +320,23 @@ def as_seq_cls_model(cls: _T) -> _T:
             assert pooling_type_str is not None
             pooling_type = PoolingType[pooling_type_str]
 
+            act_fn = ClassifierPooler.act_fn_for_seq_cls(
+                vllm_config.model_config)
+            classifie_pooler = ClassifierPooler(
+                pooling=PoolingMethod.from_pooling_type(pooling_type),
+                classifier=self.score,
+                act_fn=act_fn)
+
             self.pooler = DispatchPooler({
                 "encode":
-                Pooler.for_encode(pooler_config),
+                Pooler.for_classify_encode(pooler_config=pooler_config,
+                                           classifier=self.score,
+                                           act_fn=act_fn),
                 "classify":
-                ClassifierPooler(
-                    pooling=PoolingMethod.from_pooling_type(pooling_type),
-                    classifier=self._classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config),
-                ),
+                classifie_pooler,
                 "score":
-                ClassifierPooler(
-                    pooling=PoolingMethod.from_pooling_type(pooling_type),
-                    classifier=self._classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config),
-                ),
+                classifie_pooler
             })
-
-        def _classifier(self, x: torch.Tensor):
-            x, _ = self.score(x.float())
-            return x
 
         def forward(
             self,
@@ -393,8 +389,10 @@ def as_reward_model(cls: _T) -> _T:
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            self.pooler = DispatchPooler(
-                {"encode": Pooler.for_encode(pooler_config)}, )
+            self.pooler = DispatchPooler({
+                "encode":
+                Pooler.for_classify_encode(pooler_config=pooler_config)
+            })
 
     ModelForReward.__name__ = \
         _get_pooling_model_name(cls.__name__, "ForReward")

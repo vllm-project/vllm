@@ -67,14 +67,24 @@ class Pooler(nn.Module, ABC):
     """The interface required for all poolers used in pooling models in vLLM."""
 
     @staticmethod
-    def for_encode(pooler_config: PoolerConfig):
+    def for_embed_encode(pooler_config: PoolerConfig):
+        head = EmbeddingMultiVectorPoolerHead()
+
         if pooler_config.pooling_type == "STEP":
-            return StepPooler()
+            return StepPooler(head=head)
 
-        resolved_config = ResolvedPoolingConfig(task="encode",
-                                                pooling_type=PoolingType.ALL)
+        return AllPooler(head=head)
 
-        return SimplePooler.from_config(resolved_config)
+    @staticmethod
+    def for_classify_encode(pooler_config: PoolerConfig,
+        classifier: Optional[ClassifierFn] = None,
+        act_fn: Optional["PoolerActivation"] = None,):
+        head = TokenClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
+
+        if pooler_config.pooling_type == "STEP":
+            return StepPooler(head=head)
+
+        return AllPooler(head=head)
 
     @staticmethod
     def for_embed(pooler_config: PoolerConfig):
@@ -83,7 +93,10 @@ class Pooler(nn.Module, ABC):
             pooler_config=pooler_config,
         )
 
-        return SimplePooler.from_config(resolved_config)
+        pooling = PoolingMethod.from_pooling_type(resolved_config.pooling_type)
+        head = EmbeddingPoolerHead()
+
+        return SimplePooler(pooling=pooling, head=head)
 
     @staticmethod
     def for_classify(
@@ -427,7 +440,6 @@ class EmbeddingPoolerHead(PoolerHead):
         super().__init__(activation=PoolerNormalize())
 
         # Load ST projector if available
-
         vllm_config = get_current_vllm_config()
         self.projector: Optional[nn.Module] = _load_st_projector(
             vllm_config.model_config) if vllm_config else None
@@ -482,36 +494,6 @@ class EmbeddingPoolerHead(PoolerHead):
         return pooled_data
 
 
-class RewardPoolerHead(PoolerHead):
-
-    def __init__(self) -> None:
-        super().__init__(activation=PoolerClassify(static_num_labels=False))
-
-        vllm_config = get_current_vllm_config()
-        self.head_dtype = vllm_config.model_config.head_dtype
-
-    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
-                pooling_metadata: PoolingMetadata):
-
-        if isinstance(pooled_data, list):
-            pooled_data = [p.to(self.head_dtype) for p in pooled_data]
-        else:
-            pooled_data = pooled_data.to(self.head_dtype)
-
-        pooling_params = get_pooling_params(pooling_metadata)
-
-        # for softmax
-        flags = [p.softmax for p in pooling_params]
-        if len(set(flags)) == 1:
-            if flags[0]:
-                pooled_data = self.activation(pooled_data)
-        else:
-            pooled_data = [
-                self.activation(vecs) if f else vecs
-                for vecs, f in zip(pooled_data, flags)
-            ]
-
-        return pooled_data
 
 
 class SimplePooler(Pooler):
@@ -522,20 +504,6 @@ class SimplePooler(Pooler):
     2. Normalizes output if specified.
     3. Returns structured results as `PoolerOutput`.
     """
-
-    @classmethod
-    def from_config(
-        cls,
-        pooler_config: ResolvedPoolingConfig,
-    ) -> "SimplePooler":
-        pooling = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
-        if pooler_config.task == "embed":
-            head = EmbeddingPoolerHead()
-        elif pooler_config.task == "encode":
-            head = RewardPoolerHead()
-        else:
-            raise NotImplementedError(f"Unknown task: {pooler_config.task}")
-        return cls(pooling, head)
 
     def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
         super().__init__()
@@ -555,57 +523,6 @@ class SimplePooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
-        return build_output(pooled_data)
-
-
-class StepPooler(Pooler):
-
-    def __init__(self, ) -> None:
-        super().__init__()
-
-        self.pooling = AllPool()
-        self.head = RewardPoolerHead()
-
-    def extract_states(
-        self,
-        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
-        pooling_metadata: PoolingMetadata,
-    ) -> Union[list[torch.Tensor], torch.Tensor]:
-        pooled_data_lst = self.pooling(hidden_states, pooling_metadata)
-        prompt_token_ids = get_prompt_token_ids(pooling_metadata)
-
-        pooled_data = list[torch.Tensor]()
-
-        pooling_params = get_pooling_params(pooling_metadata)
-
-        for data, token_id, pooling_param in zip(pooled_data_lst,
-                                                 prompt_token_ids,
-                                                 pooling_params):
-            step_tag_id = pooling_param.step_tag_id
-            returned_token_ids = pooling_param.returned_token_ids
-
-            if returned_token_ids is not None and len(returned_token_ids) > 0:
-                data = data[:, returned_token_ids]
-
-            if step_tag_id is not None:
-                data = data[token_id == step_tag_id]
-            pooled_data.append(data)
-
-        return pooled_data
-
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode"}
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return PoolingParamsUpdate(requires_token_ids=True)
-
-    def forward(
-        self,
-        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
-        pooling_metadata: PoolingMetadata,
-    ) -> PoolerOutput:
-        pooled_data = self.extract_states(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return build_output(pooled_data)
 
@@ -679,6 +596,155 @@ class ClassifierPooler(Pooler):
 
         # scores shape: [batchsize, num_labels]
         return build_output(scores)
+
+
+class EmbeddingMultiVectorPoolerHead(EmbeddingPoolerHead):
+
+    def forward(self, pooled_data: torch.Tensor,
+                pooling_param: PoolingParams)->torch.Tensor:
+
+        if isinstance(pooled_data, list):
+            pooled_data = torch.stack(pooled_data)
+        # pooled_data shape: [n_tokens, hidden_dimension]
+
+        pooled_data = pooled_data.to(self.head_dtype)
+
+        # Apply ST projector
+        if self.projector is not None:
+            pooled_data = self.projector(pooled_data)
+        # pooled_data shape: [n_tokens, embedding_dimension]
+
+        # for matryoshka representation
+        pooled_data = pooled_data[..., : pooling_param.dimensions]
+
+        # for normalize
+        if pooling_param.normalize:
+            pooled_data = self.activation(pooled_data)
+
+        # pooled_data shape: [n_tokens, embedding_dimension]
+        return pooled_data
+
+class TokenClassifierPoolerHead(nn.Module):
+    def __init__(
+        self,
+        classifier: Optional[ClassifierFn],
+        act_fn: Optional[PoolerActivation] = None,
+    ) -> None:
+        super().__init__()
+        vllm_config = get_current_vllm_config()
+
+        self.classifier = classifier
+        self.act_fn = act_fn or PoolerClassify()
+        self.logit_bias: Optional[
+            float] = vllm_config.model_config.pooler_config.logit_bias
+        self.head_dtype = vllm_config.model_config.head_dtype
+        self.act_fn = act_fn or PoolerClassify(static_num_labels=False)
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"encode"}
+
+    def forward(
+        self,
+        hidden_size: torch.Tensor,
+        pooling_param: PoolingParams,
+    ) -> torch.Tensor:
+        hidden_size = hidden_size.to(self.head_dtype)
+        # hidden_size shape: [n_token, hidden_size]
+
+        if self.classifier is not None:
+            scores = self.classifier(hidden_size)
+        else:
+            scores = hidden_size
+        # scores shape: [n_token, num_labels]
+
+        if self.logit_bias is not None:
+            scores -= self.logit_bias
+
+        if pooling_param.activation is None:
+            pooling_param.activation = True
+
+        if pooling_param.activation:
+            scores = self.act_fn(scores)
+
+        # scores shape: [n_token, num_labels]
+        return scores
+
+
+class AllPooler(Pooler):
+    def __init__(self, head: Union[nn.Module, PoolerHead]) -> None:
+        super().__init__()
+
+        self.pooling = AllPool()
+        self.head = head
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"encode"}
+
+    def forward(
+            self,
+            hidden_states: torch.Tensor,
+            pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+        pooled_data = self.pooling(hidden_states, pooling_metadata)
+
+        pooling_params = get_pooling_params(pooling_metadata)
+        assert len(pooling_params) == len(pooling_params)
+
+        pooled_data = [
+            self.head(d, p) for d, p in zip(pooled_data, pooling_params)
+        ]
+        return build_output(pooled_data)
+
+
+
+class StepPooler(Pooler):
+
+    def __init__(self, ) -> None:
+        super().__init__()
+
+        self.pooling = AllPool()
+
+    def extract_states(
+            self,
+            hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+            pooling_metadata: PoolingMetadata,
+    ) -> Union[list[torch.Tensor], torch.Tensor]:
+        pooled_data_lst = self.pooling(hidden_states, pooling_metadata)
+        prompt_token_ids = get_prompt_token_ids(pooling_metadata)
+
+        pooled_data = list[torch.Tensor]()
+
+        pooling_params = get_pooling_params(pooling_metadata)
+
+        for data, token_id, pooling_param in zip(pooled_data_lst,
+                                                 prompt_token_ids,
+                                                 pooling_params):
+            step_tag_id = pooling_param.step_tag_id
+            returned_token_ids = pooling_param.returned_token_ids
+
+            if returned_token_ids is not None and len(returned_token_ids) > 0:
+                data = data[:, returned_token_ids]
+
+            if step_tag_id is not None:
+                data = data[token_id == step_tag_id]
+            pooled_data.append(data)
+
+        return pooled_data
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"encode"}
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
+
+    def forward(
+            self,
+            hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+            pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+        pooled_data = self.extract_states(hidden_states, pooling_metadata)
+        pooled_data = self.head(pooled_data, pooling_metadata)
+        return build_output(pooled_data)
 
 
 class DispatchPooler(Pooler):

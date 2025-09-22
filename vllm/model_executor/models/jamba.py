@@ -619,8 +619,16 @@ class JambaForSequenceClassification(JambaForCausalLM):
 
         self.pooler = DispatchPooler({
             "encode":
-            Pooler.for_encode(pooler_config),
+            Pooler.for_classify_encode(
+                pooler_config,
+                classifier=self.score,
+            ),
             "classify":
+            Pooler.for_classify(
+                pooler_config,
+                classifier=self.score,
+            ),
+            "score":
             Pooler.for_classify(
                 pooler_config,
                 classifier=self.score,

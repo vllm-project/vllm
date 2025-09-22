@@ -98,7 +98,7 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
         self.score = JinaVLScorer(vllm_config.model_config)
         self.pooler = DispatchPooler({
             "encode":
-            Pooler.for_encode(pooler_config),
+            Pooler.for_classify_encode(pooler_config, classifier=self.score),
             "classify":
             Pooler.for_classify(pooler_config, classifier=self.score),
             "score":
