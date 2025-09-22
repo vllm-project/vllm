@@ -59,6 +59,17 @@ class StructuredOutputsParams:
                 f"but multiple are specified: {self.__dict__}")
 
 
+@dataclass
+class GuidedDecodingParams(StructuredOutputsParams):
+
+    def __post_init__(self):
+        logger.warning(
+            "GuidedDecodingParams is deprecated. This will be removed in "
+            "v0.12.0 or v1.0.0, which ever is soonest. Please use "
+            "StructuredOutputsParams instead.")
+        return super().__post_init__()
+
+
 class RequestOutputKind(Enum):
     # Return entire output so far in every RequestOutput
     CUMULATIVE = 0
@@ -179,6 +190,8 @@ class SamplingParams(
     # Fields used to construct logits processors
     structured_outputs: Optional[StructuredOutputsParams] = None
     """Parameters for configuring structured outputs."""
+    guided_decoding: Optional[GuidedDecodingParams] = None
+    """Deprecated alias for structured_outputs."""
     logit_bias: Optional[dict[int, float]] = None
     """If provided, the engine will construct a logits processor that applies
     these logit biases."""
@@ -227,6 +240,7 @@ class SamplingParams(
                                                        ge=-1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         structured_outputs: Optional[StructuredOutputsParams] = None,
+        guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
         extra_args: Optional[dict[str, Any]] = None,
@@ -238,6 +252,13 @@ class SamplingParams(
                 int(token): min(100.0, max(-100.0, bias))
                 for token, bias in logit_bias.items()
             }
+        if guided_decoding is not None:
+            logger.warning(
+                "GuidedDecodingParams is deprecated. This will be removed in "
+                "v0.12.0 or v1.0.0, which ever is soonest. Please use "
+                "StructuredOutputsParams instead.")
+            structured_outputs = guided_decoding
+            guided_decoding = None
 
         return SamplingParams(
             n=1 if n is None else n,
@@ -333,6 +354,14 @@ class SamplingParams(
 
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
+
+        if self.guided_decoding is not None:
+            logger.warning(
+                "GuidedDecodingParams is deprecated. This will be removed in "
+                "v0.12.0 or v1.0.0, which ever is soonest. Please use "
+                "StructuredOutputsParams instead.")
+            self.structured_outputs = self.guided_decoding
+            self.guided_decoding = None
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
