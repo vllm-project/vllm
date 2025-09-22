@@ -170,33 +170,45 @@ class AttentionBackend(ABC):
     def supports_combination(cls, head_size: int, dtype: torch.dtype,
                              kv_cache_dtype: Optional[str], block_size: int,
                              use_v1: bool, use_mla: bool, has_sink: bool,
-                             device_capability: int) -> bool:
-        return True
+                             device_capability: int) -> Optional[str]:
+        return None
 
     @classmethod
     def validate_configuration(cls, head_size: int, dtype: torch.dtype,
                                kv_cache_dtype: Optional[str], block_size: int,
                                use_v1: bool, use_mla: bool, has_sink: bool,
-                               device_capability: int) -> bool:
+                               device_capability: int) -> list[str]:
+        invalid_reasons = []
         if not cls.supports_head_size(head_size):
-            return False
+            invalid_reasons.append("head_size not supported")
         if not cls.supports_dtype(dtype):
-            return False
+            invalid_reasons.append("dtype not supported")
         if not cls.supports_kv_cache_dtype(kv_cache_dtype):
-            return False
+            invalid_reasons.append("kv_cache_dtype not supported")
         if not cls.supports_block_size(block_size):
-            return False
+            invalid_reasons.append("block_size not supported")
         if (use_v1 != cls.is_v1()):
-            return False
+            if use_v1:
+                invalid_reasons.append("V1 not supported")
+            else:
+                invalid_reasons.append("V0 not supported")
         if (use_mla != cls.is_mla()):
-            return False
+            if use_mla:
+                invalid_reasons.append("MLA not supported")
+            else:
+                invalid_reasons.append("non-MLA not supported")
         if (has_sink and not cls.supports_sink()):
-            return False
+            invalid_reasons.append("sink setting not supported")
         if not cls.supports_compute_capability(device_capability):
-            return False
-        return cls.supports_combination(head_size, dtype, kv_cache_dtype,
-                                        block_size, use_v1, use_mla, has_sink,
-                                        device_capability)
+            invalid_reasons.append("compute capability not supported")
+        combination_reason = cls.supports_combination(head_size, dtype,
+                                                      kv_cache_dtype,
+                                                      block_size, use_v1,
+                                                      use_mla, has_sink,
+                                                      device_capability)
+        if combination_reason is not None:
+            invalid_reasons.append(combination_reason)
+        return invalid_reasons
 
 
 @dataclass

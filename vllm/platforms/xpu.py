@@ -7,11 +7,11 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.utils import backend_to_class_str
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
