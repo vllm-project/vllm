@@ -11,7 +11,7 @@ from openai import BadRequestError, NotFoundError, OpenAI
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "/home/jovyan/gpt-oss-20b"
+MODEL_NAME = "openai/gpt-oss-20b"
 GET_WEATHER_SCHEMA = {
     "type": "function",
     "name": "get_weather",
