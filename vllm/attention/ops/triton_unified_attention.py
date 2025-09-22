@@ -523,7 +523,8 @@ def kernel_unified_attention_3d(
         # K : (HEAD_SIZE, TILE_SIZE)
         K_load = tl.load(key_cache_ptr + k_offset,
                          mask=dim_mask[:, None] & tile_mask[None, :],
-                         other=0.0)
+                         other=0.0,
+                         cache_modifier=KV_cache_modifier)
 
         if K_load.dtype.is_fp8():
             if Q.dtype.is_fp8():
@@ -536,7 +537,8 @@ def kernel_unified_attention_3d(
         # V : (TILE_SIZE, HEAD_SIZE)
         V_load = tl.load(value_cache_ptr + v_offset,
                          mask=dim_mask[None, :] & tile_mask[:, None],
-                         other=0.0)
+                         other=0.0,
+                         cache_modifier=KV_cache_modifier)
 
         if V_load.dtype.is_fp8():
             if Q.dtype.is_fp8():
