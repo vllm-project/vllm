@@ -1178,11 +1178,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
             if (self.speculative_config
-                    and spec_decode_common_attn_metadata is None
-                    and isinstance(self.drafter, EagleProposer)
-                    and self.drafter.attn_layer_names[0]
-                    in kv_cache_group_spec.layer_names):
-                spec_decode_common_attn_metadata = common_attn_metadata
+                    and spec_decode_common_attn_metadata is None):
+                if isinstance(self.drafter, EagleProposer):
+                    if (self.drafter.attn_layer_names[0]
+                            in kv_cache_group_spec.layer_names):
+                        spec_decode_common_attn_metadata = common_attn_metadata
+                else:
+                    spec_decode_common_attn_metadata = common_attn_metadata
 
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 # Prepare for cascade attention if enabled & beneficial.
