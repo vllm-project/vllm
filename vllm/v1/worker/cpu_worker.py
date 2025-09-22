@@ -205,9 +205,8 @@ class CPUWorker(Worker):
             max_cpus = int(envs.VLLM_RAY_PER_WORKER_CPUS)
             if max_cpus is not None:
                 if max_cpus <= 0:
-                    raise ValueError(
-                        "VLLM_RAY_PER_WORKER_CPUS must be positive,"
-                        "got %s", max_cpus)
+                    raise ValueError(f"VLLM_RAY_PER_WORKER_CPUS"
+                                     f"must be positive, got {max_cpus}")
                 if max_cpus < len(logical_cpu_list):
                     logical_cpu_list = logical_cpu_list[:max_cpus]
                     logger.info(
