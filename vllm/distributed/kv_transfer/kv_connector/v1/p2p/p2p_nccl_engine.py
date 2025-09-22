@@ -12,14 +12,20 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import msgpack
+import regex
 import torch
 import zmq
 
+from vllm.config import ModelConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool)
+from vllm.distributed.parallel_state import (
+    get_pp_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size)
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils import current_stream, get_ip
 
 logger = logging.getLogger(__name__)
@@ -67,23 +73,35 @@ class SendQueueItem:
 class P2pNcclEngine:
 
     def __init__(self,
+                 rank: int,
                  local_rank: int,
                  config: KVTransferConfig,
-                 hostname: str = "",
-                 port_offset: int = 0,
+                 model_config: ModelConfig,
                  library_path: Optional[str] = None) -> None:
         self.config = config
-        self.rank = port_offset
+        self.model_config = model_config
+
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_world_size = get_tensor_model_parallel_world_size()
+        self.pp_rank = get_pp_group().rank_in_group
+
+        # TODO(zhongsjie): Support heterogeneous TP size between D nodes.
+        self.remote_tp_size = self.config.get_from_extra_config(
+            "remote_tp_size", 1)
+        self.remote_pp_size = self.config.get_from_extra_config(
+            "remote_pp_size", 1)
+        self.enable_asymmetric_p2p = self.config.get_from_extra_config(
+            "enable_asymmetric_p2p", False)
+
+        self.rank = rank
         self.local_rank = local_rank
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.nccl = NCCLLibrary(library_path)
 
-        if not hostname:
-            hostname = get_ip()
-        port = int(self.config.kv_port) + port_offset
+        self._hostname = get_ip()
+        port = int(self.config.kv_port) + self.rank
         if port == 0:
             raise ValueError("Port cannot be 0")
-        self._hostname = hostname
         self._port = port
 
         # Each card corresponds to a ZMQ address.
@@ -134,7 +152,6 @@ class P2pNcclEngine:
             # PUT or PUT_ASYNC
             # tensor_id: torch.Tensor
             self.send_queue: deque[SendQueueItem] = deque()
-            self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
             if self.send_type == "PUT_ASYNC":
                 self._send_thread = threading.Thread(target=self.send_async,
                                                      daemon=True)
@@ -143,6 +160,7 @@ class P2pNcclEngine:
         # tensor_id: torch.Tensor/(addr, dtype, shape)
         self.recv_store: dict[str, Any] = {}
         self.recv_request_id_to_tensor_ids: dict[str, set[str]] = {}
+        self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
         self.socks: dict[str, Any] = {}  # remote_address: client socket
         self.comms: dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
 
@@ -157,7 +175,7 @@ class P2pNcclEngine:
         self._listener_thread.start()
 
         self._ping_thread = None
-        if port_offset == 0 and self.proxy_address != "":
+        if self.rank == 0 and self.proxy_address != "":
             self._ping_thread = threading.Thread(target=self.ping, daemon=True)
             self._ping_thread.start()
 
@@ -197,60 +215,143 @@ class P2pNcclEngine:
 
     def send_tensor(
         self,
-        tensor_id: str,
+        request_id: str,
+        layer_name: str,
         tensor: torch.Tensor,
-        remote_address: typing.Optional[str] = None,
+        is_mla: bool = False,
     ) -> bool:
-        if remote_address is None:
-            with self.recv_store_cv:
-                self.recv_store[tensor_id] = tensor
-                self.recv_store_cv.notify()
-            return True
-
-        item = SendQueueItem(tensor_id=tensor_id,
-                             remote_address=remote_address,
-                             tensor=tensor)
+        tensor_id = self.get_tensor_id(request_id, layer_name)
 
         if self.send_type == "PUT":
-            return self.send_sync(item)
+            return all(
+                self.send_sync(item) for item in self.get_send_queue_items(
+                    request_id, layer_name, tensor, is_mla))
 
         if self.send_type == "PUT_ASYNC":
             with self.send_queue_cv:
-                self.send_queue.append(item)
+                for item in self.get_send_queue_items(request_id, layer_name,
+                                                      tensor, is_mla):
+                    self.send_queue.append(item)
                 self.send_queue_cv.notify()
             return True
 
         # GET
         with self.send_store_cv:
             tensor_size = tensor.element_size() * tensor.numel()
+            if tensor_size > self.buffer_size_threshold:
+                logger.warning(
+                    "❗[GET]Save to send_store, Out Of Threshold(%d),"
+                    "tensor_id:%s, tensor_size:%d, rank:%d.",
+                    self.buffer_size_threshold, tensor_id, tensor_size,
+                    self.rank)
+                return False
             while (self.buffer_size + tensor_size
                    > self.buffer_size_threshold):
-                oldest_tenser_id = next(iter(self.send_store))
-                oldest_tenser = self.send_store.pop(oldest_tenser_id)
-                oldest_tenser_size = oldest_tenser.element_size(
-                ) * oldest_tenser.numel()
-                self.buffer_size -= oldest_tenser_size
+                oldest_tensor_id = next(iter(self.send_store))
+                oldest_tensor = self.send_store.pop(oldest_tensor_id)
+                oldest_tensor_size = oldest_tensor.element_size(
+                ) * oldest_tensor.numel()
+                self.buffer_size -= oldest_tensor_size
                 logger.info(
-                    "⛔[GET]Send to %s, tensor_id:%s, tensor_size:%d,"
-                    " buffer_size:%d, oldest_tenser_size:%d, rank:%d",
-                    remote_address, tensor_id, tensor_size, self.buffer_size,
-                    oldest_tenser_size, self.rank)
+                    "⛔[GET]Evict the oldest tensor buffer, "
+                    "tensor_id:%s, tensor_size:%d, buffer_size:%d, "
+                    "oldest_tensor_size:%d, rank:%d", tensor_id, tensor_size,
+                    self.buffer_size, oldest_tensor_size, self.rank)
 
             self.send_store[tensor_id] = tensor
             self.buffer_size += tensor_size
             logger.debug(
-                "🔵[GET]Send to %s, tensor_id:%s, tensor_size:%d, "
-                "shape:%s, rank:%d, buffer_size:%d(%.2f%%)", remote_address,
-                tensor_id, tensor_size, tensor.shape, self.rank,
-                self.buffer_size,
+                "🔵[GET]Save to send_store, tensor_id:%s, tensor_size:%d, "
+                "shape:%s, rank:%d, buffer_size:%d(%.2f%%)", tensor_id,
+                tensor_size, tensor.shape, self.rank, self.buffer_size,
                 self.buffer_size / self.buffer_size_threshold * 100)
         return True
 
+    def get_send_queue_items(self, request_id: str, layer_name: str,
+                             tensor: torch.Tensor,
+                             is_mla: bool) -> list[SendQueueItem]:
+        """
+        Split the tensor and compute destination addresses under asymmetric
+        TP/PP settings, then assemble a list of send queue items.
+
+        Returns:
+            list[SendQueueItem]: Items ready to be enqueued for sending.
+        """
+        tensor_id = self.get_tensor_id(request_id, layer_name)
+        remote_ip, remote_port = self.parse_request_id(request_id, True)
+
+        if not self.enable_asymmetric_p2p:
+            remote_address = remote_ip + ":" + str(remote_port + self.rank)
+            return [
+                SendQueueItem(tensor_id=tensor_id,
+                              remote_address=remote_address,
+                              tensor=tensor)
+            ]
+
+        # For MLA, the kv_cache shape is (num_blocks, block_size, head_size),
+        # i.e., there is no explicit KV heads dimension. Therefore no split
+        # along KV heads is required.
+        if not is_mla:
+            # Require D TP to be an integer multiple of P TP to split heads
+            # evenly across remote ranks.
+            assert self.remote_tp_size % self.tp_world_size == 0, (
+                "Decode TP size must be an integer multiple of the Prefill TP."
+            )
+            # Locate the KV heads dimension. In non-MLA layouts the kv_cache
+            # shape ends with (..., num_kv_heads, head_size).
+            kv_heads_dim = tensor.dim() - 2
+            num_kv_heads = tensor.size()[kv_heads_dim]
+            tp_ratio = self.remote_tp_size // self.tp_world_size
+            # KV heads must be divisible by tp_ratio to evenly
+            # shard across remote ranks.
+            assert num_kv_heads % tp_ratio == 0, (
+                "KV heads must be an integer multiple of the TP ratio.")
+
+            kv_heads_split_size = num_kv_heads // tp_ratio
+            tensor_list = torch.split(tensor,
+                                      kv_heads_split_size,
+                                      dim=kv_heads_dim)
+        else:
+            tp_ratio = 1
+            tensor_list = (tensor, )
+
+        remote_pp_rank = self.compute_remote_pp_rank(layer_name)
+
+        items: list[SendQueueItem] = []
+        for split_idx, tensor in enumerate(tensor_list):
+            # Map the local (P) TP rank and split index to a destination (D)
+            # TP rank. Destination rank = local_tp_rank * tp_ratio + split_idx.
+            # e.g. prefill:(tp=1), decode:(tp=2)
+            # rank：0 split_idx: 0 -> remote_rank：0
+            # rank：0 split_idx: 1 -> remote_rank：1
+            remote_tp_rank = self.tp_rank * tp_ratio + split_idx
+            # Encode the (remote_pp_rank, remote_tp_rank) pair into a linear
+            # port offset so that each PP×TP worker listens on a unique port.
+            remote_port_offset = remote_pp_rank * self.remote_tp_size + \
+            remote_tp_rank
+
+            remote_address = remote_ip + ":" + str(remote_port +
+                                                   remote_port_offset)
+            logger.debug(
+                "📥 [PUT] Wait to send: tensor_id:%s, tensor_shape:%s, "
+                "(pp=%d, tp=%d) -> remote_address=%s(pp=%d, tp=%d)", tensor_id,
+                tensor.shape, self.pp_rank, self.tp_rank, remote_address,
+                remote_pp_rank, remote_tp_rank)
+            # Ensure contiguous memory for transport to avoid unexpected stride
+            # issues when sending view tensors produced by split.
+            items.append(
+                SendQueueItem(tensor_id=tensor_id,
+                              remote_address=remote_address,
+                              tensor=tensor.contiguous()))
+        return items
+
     def recv_tensor(
         self,
-        tensor_id: str,
-        remote_address: typing.Optional[str] = None,
+        request_id: str,
+        layer_name: str,
     ) -> torch.Tensor:
+
+        tensor_id = self.get_tensor_id(request_id, layer_name)
         if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
             start_time = time.time()
             with self.recv_store_cv:
@@ -269,14 +370,26 @@ class P2pNcclEngine:
             else:
                 duration = time.time() - start_time
                 logger.warning(
-                    "🔴[PUT]Recv From %s, tensor_id:%s, duration:%.3fms, "
-                    "rank:%d", remote_address, tensor_id, duration * 1000,
-                    self.rank)
+                    "🔴[PUT]Recv Tensor, tensor_id:%s, duration:%.3fms, "
+                    "rank:%d", tensor_id, duration * 1000, self.rank)
             return tensor
 
         # GET
-        if remote_address is None:
-            return None
+        remote_ip, remote_port = self.parse_request_id(request_id, False)
+        if not self.enable_asymmetric_p2p:
+            remote_address = remote_ip + ":" + str(remote_port + self.rank)
+        else:
+            # TODO(zhongsjie): Support asymmetric TP size
+            if self.remote_tp_size != self.tp_world_size:
+                raise NotImplementedError(
+                    "[Get] Not supported yet for asymmetric TP size")
+
+            remote_pp_rank = self.compute_remote_pp_rank(layer_name)
+            remote_port_offset = remote_pp_rank * self.remote_tp_size + \
+                self.tp_rank
+
+            remote_address = remote_ip + ":" + str(remote_port +
+                                                   remote_port_offset)
 
         if remote_address not in self.socks:
             self.create_connect(remote_address)
@@ -474,7 +587,7 @@ class P2pNcclEngine:
         # Clear the buffer upon request completion.
         for request_id in finished_req_ids:
             for layer_name in no_compile_layers:
-                tensor_id = request_id + "#" + layer_name
+                tensor_id = self.get_tensor_id(request_id, layer_name)
                 if tensor_id in self.recv_store:
                     with self.recv_store_cv:
                         tensor = self.recv_store.pop(tensor_id, None)
@@ -540,3 +653,47 @@ class P2pNcclEngine:
             self._send_thread.join()
         if self._ping_thread is not None:
             self._ping_thread.join()
+
+    def compute_remote_pp_rank(self, layer_name: str) -> int:
+        """
+        Compute the destination PP rank on the remote side for the current
+        layer. A simple round-robin partition is used: layers are divided
+        evenly into `remote_pp_size` stages.
+
+        Returns:
+            int: The destination PP rank on the remote side for 
+            the current layer.
+        """
+        current_layer_idx = extract_layer_index(layer_name)
+        num_hidden_layers = self.model_config.hf_config.num_hidden_layers
+        assert num_hidden_layers % self.remote_pp_size == 0, (
+            f"num_hidden_layers {num_hidden_layers} must be divisible by "
+            f"remote_pp_size {self.remote_pp_size}")
+        return current_layer_idx // (num_hidden_layers // self.remote_pp_size)
+
+    # ==============================
+    # Static methods
+    # ==============================
+
+    @staticmethod
+    def get_tensor_id(request_id: str, layer_name: str) -> str:
+        return request_id + "#" + layer_name
+
+    @staticmethod
+    def parse_request_id(request_id: str, is_prefill=True) -> tuple[str, int]:
+        # Regular expression to match the string hostname and integer port
+        if is_prefill:
+            pattern = r"___decode_addr_(.*):(\d+)"
+        else:
+            pattern = r"___prefill_addr_(.*):(\d+)___"
+
+        # Use re.search to find the pattern in the request_id
+        match = regex.search(pattern, request_id)
+        if match:
+            # Extract the ranks
+            ip = match.group(1)
+            port = int(match.group(2))
+
+            return ip, port
+        raise ValueError(
+            f"Request id {request_id} does not contain hostname and port")
