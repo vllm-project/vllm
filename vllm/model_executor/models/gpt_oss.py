@@ -253,9 +253,6 @@ class GptOssModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
-            # self.unpadded_vocab_Size = config.vocab_size
-            # if lora_config:
-            #     self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             if inputs_embeds is not None:
                 x = inputs_embeds
             else:
