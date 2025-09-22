@@ -192,6 +192,8 @@ class AggregatedStatLogger(LoggingStatLogger, AggregatedStatLoggerBase):
                 self.last_scheduler_stats_dict[idx].num_waiting_reqs
             self.last_scheduler_stats.num_running_reqs += \
                 self.last_scheduler_stats_dict[idx].num_running_reqs
+            self.last_scheduler_stats.num_corrupted_reqs += \
+                self.last_scheduler_stats_dict[idx].num_corrupted_reqs
             self.last_scheduler_stats.kv_cache_usage += \
                 self.last_scheduler_stats_dict[idx].kv_cache_usage
         self.last_scheduler_stats.kv_cache_usage /= len(self.engine_idxs)
