@@ -44,7 +44,8 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, flatten_bn, greedy_plan,
                     init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    merge_multimodal_embeddings,
+                    merge_multimodal_embeddings_static)
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -1389,6 +1390,21 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                 multimodal_embeddings += video_embeddings
 
         return multimodal_embeddings
+
+    def get_input_embeddings_hpu(
+        self,
+        input_ids: torch.Tensor,
+        image_index_tensor: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings_static(
+                image_index_tensor,
+                inputs_embeds,
+                multimodal_embeddings,
+            )
+        return inputs_embeds
 
     def get_input_embeddings(
         self,

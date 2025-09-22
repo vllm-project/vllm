@@ -433,6 +433,22 @@ def merge_multimodal_embeddings_from_map(
     return inputs_embeds
 
 
+def merge_multimodal_embeddings_static(
+    is_multimodal_index: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    multimodal_embeddings: NestedTensors,
+) -> torch.Tensor:
+    assert current_platform.is_hpu(), ("Support HPU only")
+    flattened = _flatten_embeddings(multimodal_embeddings)
+
+    inputs_embeds_s = inputs_embeds.shape
+    inputs_embeds = inputs_embeds.view(inputs_embeds_s[0] * inputs_embeds_s[1],
+                                       inputs_embeds_s[2])
+    inputs_embeds = inputs_embeds.index_copy_(0, is_multimodal_index,
+                                              flattened).view(inputs_embeds_s)
+    return inputs_embeds
+
+
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
     is_multimodal: torch.Tensor,

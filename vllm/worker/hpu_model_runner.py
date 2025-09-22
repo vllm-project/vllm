@@ -637,8 +637,14 @@ class HpuModelAdapter(torch.nn.Module):
     def compute_input_embeddings_for_mm_optimized(self, warmup_mode, **kwargs):
         input_ids = kwargs['input_ids']
         vision_embeddings = self.model.get_multimodal_embeddings(**kwargs)
-        inputs_embeds = self.model.get_input_embeddings(
-            input_ids, vision_embeddings)
+        if 'image_index' in kwargs:
+            inputs_embeds = self.model.get_input_embeddings_hpu(
+                input_ids, kwargs['image_index'], vision_embeddings)
+            kwargs.pop("image_index", None)
+        else:
+            inputs_embeds = self.model.get_input_embeddings(
+                input_ids, vision_embeddings)
+
         # TODO: In warmup, we need to warmup the model with dummy image data for
         # multimodal model for prompt, here instead of generating a dummy image,
         # we are just generating attn_mask for the images and pass with
@@ -1772,6 +1778,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                               pad=0,
                                               dtype=torch.long,
                                               flat=self.use_merged_prefill)
+        image_index_tensor = None
         if self.model_is_mrope:
             input_positions = \
                 make_mrope_positions_tensor_with_pad(input_positions=input_positions,
@@ -1785,6 +1792,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                               dtype=torch.long,
                                               flat=self.use_merged_prefill)
 
+        if seq_group_metadata.multi_modal_data and self.is_mm_optimized and \
+            'InternVLChatModel' in str(type(self.model.model)):
+            is_image_flatten = (
+                input_tokens_tensor == self.image_token_id).flatten()
+            image_index_tensor = is_image_flatten.nonzero().squeeze(-1)
         slot_mapping = make_cpu_tensor(slot_mapping,
                                        max_len=max_prompt_len,
                                        pad=_PAD_SLOT_ID,
@@ -1872,6 +1884,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             input_positions=input_positions,
         )
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
+        if image_index_tensor is not None:
+            multi_modal_kwargs['image_index'] = image_index_tensor
         multi_modal_kwargs = MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                         device=self.device)
 
@@ -3871,6 +3885,12 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         bool(model_input.multi_modal_kwargs and \
                        ('pixel_values')in model_input.multi_modal_kwargs))
                     execute_model_kwargs['attn_metadata'] = attn_metadata
+
+                    if 'image_index' in model_input.multi_modal_kwargs:
+                        execute_model_kwargs[
+                            'image_index'] = model_input.multi_modal_kwargs[
+                                'image_index']
+                        model_input.multi_modal_kwargs.pop('image_index', None)
 
                 if not bypass_model_exec:
                     if self.model_is_mrope or self.is_mm_optimized:
