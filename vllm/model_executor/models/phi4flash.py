@@ -29,7 +29,6 @@ from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
                                                    SupportsV0Only)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .utils import make_layers, maybe_prefix
@@ -695,18 +694,12 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        # If the shape is the same, it means that we have already
-        # prune hidden states manually.
-        prune_hidden_states = hidden_states.size(
-            0) != sampling_metadata.selected_token_indices.size(0)
         processed_logits = self.logits_processor(
             self.lm_head,
             hidden_states,
-            sampling_metadata,
             self.embedding_bias,
-            prune_hidden_states=prune_hidden_states)
+        )
         return processed_logits
 
     def load_weights(

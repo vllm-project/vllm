@@ -6,18 +6,19 @@ from typing import Optional
 import pytest
 import torch._dynamo
 
-from tests.compile.backend import TestBackend
+from tests.compile.backend import LazyInitPass, TestBackend
 from tests.models.utils import check_outputs_equal
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata)
 from vllm import LLM, SamplingParams
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
+from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (CacheConfig, CompilationConfig, CompilationLevel,
                          ModelConfig, PassConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
@@ -104,7 +105,7 @@ def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
 
     # AttnFusionPass needs attention layers to be registered in config upon init
     # so we initialize it during compilation.
-    attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw)
+    attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
     backend = TestBackend(NoOpEliminationPass(vllm_config), attn_pass)
     llm2 = LLM(model,
                enforce_eager=True,
@@ -197,7 +198,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-    def build_attn_metadata(self, batch_size: int, use_hnd: bool):
+    def build_attn_metadata(self, batch_size: int, use_hnd: bool) \
+            -> AttentionMetadata:
         """Initialize attention metadata."""
 
         # Create common attn metadata
@@ -334,8 +336,9 @@ else:
                          [7, 256, 533] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("model_name, model_class", MODELS)
-@pytest.mark.parametrize("backend", [_Backend.FLASHINFER] if
-                         current_platform.is_cuda() else [_Backend.ROCM_FLASH])
+@pytest.mark.parametrize("backend",
+                         [_Backend.FLASHINFER] if current_platform.is_cuda()
+                         else [_Backend.TRITON_ATTN_VLLM_V1])
 @pytest.mark.parametrize(
     "split_attention",
     [False, True] if current_platform.is_rocm() else [False])
@@ -446,9 +449,10 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
         # Create test backend with fusion passes enabled
         noop_pass = NoOpEliminationPass(vllm_config)
-        attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw
-                                                                    )
-        test_backend = TestBackend(noop_pass, attn_pass)
+        attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
 
         # Compile model with fusion enabled
         model_compiled = torch.compile(model_fused,
@@ -483,6 +487,9 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         # Check quantization ops in the graph before and after fusion
         test_backend.check_before_ops([QUANT_OPS[quant_key]],
                                       fully_replaced=True)
+
+    # access the underlying `AttnFusionPass` on the `LazyInitPass`
+    assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 
     # Check attention ops in the graph before and after fusion
     attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))

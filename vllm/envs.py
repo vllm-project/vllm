@@ -118,12 +118,14 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
+    VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH: int = 16
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
+    VLLM_USE_STANDALONE_COMPILE: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
@@ -187,6 +189,7 @@ if TYPE_CHECKING:
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+    VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -435,9 +438,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
-    # enabled by default.
+    # disabled by default.
     "VLLM_USE_STANDALONE_COMPILE":
-    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
+    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "0") == "1",
+
+    # Debug pattern matching inside custom passes.
+    # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
+    "VLLM_PATTERN_MATCH_DEBUG":
+    lambda: os.environ.get("VLLM_PATTERN_MATCH_DEBUG", None),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -528,7 +536,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "TORCH_SDPA": use torch.nn.MultiheadAttention
     # - "FLASH_ATTN": use FlashAttention
     # - "XFORMERS": use XFormers
-    # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA
@@ -945,6 +952,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE":
     lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+
+    # If set, vLLM will pick up the provided Flash Attention MLA
+    # max number splits for cuda graph decode
+    "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH":
+    lambda: int(os.getenv("VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH",
+                          "16")),
 
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
