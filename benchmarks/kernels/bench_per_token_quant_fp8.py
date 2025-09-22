@@ -51,7 +51,7 @@ def calculate_diff(
 ):
     """Calculate the difference between Inductor and CUDA implementations."""
     device = torch.device("cuda")
-    x = torch.rand((batch_size * hidden_size, 4096), dtype=dtype, device=device)
+    x = torch.rand((batch_size, hidden_size), dtype=dtype, device=device)
 
     quant_fp8 = QuantFP8(False, group_shape, column_major_scales=False)
 
@@ -91,7 +91,7 @@ def benchmark_quantization(
 ):
     device = torch.device("cuda")
 
-    x = torch.randn(batch_size * hidden_size, 4096, device=device, dtype=dtype)
+    x = torch.randn(batch_size, hidden_size, device=device, dtype=dtype)
 
     quantiles = [0.5, 0.2, 0.8]
     quant_fp8 = QuantFP8(False, group_shape, column_major_scales=col_major)
