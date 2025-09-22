@@ -437,16 +437,6 @@ class Qwen3MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-            num_redundant_experts=self.num_redundant_experts)
-
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -462,10 +452,10 @@ class Qwen3MoeModel(nn.Module):
         ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale",
                            ".v_scale", "_v_scale", ".weight_scale",
                            "_weight_scale", ".input_scale", "_input_scale")
-
+        from vllm.distributed.eplb.gpu_model_register import get_expert_mapping, load_expert_weight
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
+        expert_params_mapping = get_expert_mapping(self)
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -506,40 +496,17 @@ class Qwen3MoeModel(nn.Module):
                 break
             else:
                 is_expert_weight = False
+                is_continue = False
                 for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
+                    expert_matched, is_continue, success, name_mapped = \
+                        load_expert_weight(self, mapping, name,
+                                           loaded_weight, params_dict)
+                    if expert_matched:
+                        is_expert_weight = True
+
+                    if is_continue:
                         continue
 
-                    # Anyway, this is an expert weight and should not be
-                    # attempted to load as other weights later
-                    is_expert_weight = True
-
-                    # Do not modify `name` since the loop may continue here
-                    # Instead, create a new variable
-                    name_mapped = name.replace(weight_name, param_name)
-
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-
-                    # Skip loading extra parameters for GPTQ/modelopt models.
-                    if name_mapped.endswith(
-                            ignore_suffixes
-                    ) and name_mapped not in params_dict:
-                        continue
-
-                    param = params_dict[name_mapped]
-                    # We should ask the weight loader to return success or not
-                    # here since otherwise we may skip experts with other
-                    # available replicas.
-                    weight_loader = typing.cast(Callable[..., bool],
-                                                param.weight_loader)
-                    success = weight_loader(param,
-                                            loaded_weight,
-                                            name_mapped,
-                                            shard_id=shard_id,
-                                            expert_id=expert_id,
-                                            return_success=True)
                     if success:
                         name = name_mapped
                         break
@@ -616,61 +583,27 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
         self.expert_weights = []
 
         self.moe_layers: list[FusedMoE] = []
-        example_layer = None
+        self.example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
 
             assert isinstance(layer, Qwen3MoeDecoderLayer)
             if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
-                example_layer = layer.mlp
+                self.example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        if example_layer is None:
+        if self.example_moe is None:
             raise RuntimeError("No Qwen3MoE layer found in the model.layers.")
 
         self.num_moe_layers = len(self.moe_layers)
         self.num_expert_groups = 1
         self.num_shared_experts = 0
-        self.num_logical_experts = example_layer.n_logical_experts
-        self.num_physical_experts = example_layer.n_physical_experts
-        self.num_local_physical_experts = example_layer.n_local_physical_experts
-        self.num_routed_experts = example_layer.n_routed_experts
-        self.num_redundant_experts = example_layer.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
-    def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
-    ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = (num_physical_experts -
-                                      self.num_logical_experts)
-        for layer in self.model.layers:
-            if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
-                moe = layer.mlp
-                moe.n_local_physical_experts = num_local_physical_experts
-                moe.n_physical_experts = num_physical_experts
-                moe.n_redundant_experts = self.num_redundant_experts
-                moe.experts.update_expert_map()
+        self.num_logical_experts = self.example_moe.n_logical_experts
+        self.num_physical_experts = self.example_moe.n_physical_experts
+        self.num_local_physical_experts = self.example_moe.n_local_physical_experts
+        self.num_routed_experts = self.example_moe.n_routed_experts
+        self.num_redundant_experts = self.example_moe.n_redundant_experts
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
