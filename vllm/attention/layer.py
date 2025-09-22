@@ -14,8 +14,7 @@ from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group,
-                                          is_v1_kv_transfer_group)
+                                          has_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -514,7 +513,7 @@ class MultiHeadAttention(nn.Module):
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):
-    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+    if not has_kv_transfer_group():
         return
 
     connector = get_kv_transfer_group()
@@ -531,7 +530,7 @@ def maybe_save_kv_layer_to_connector(
     layer_name: str,
     kv_cache_layer: List[torch.Tensor],
 ):
-    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+    if not has_kv_transfer_group():
         return
 
     connector = get_kv_transfer_group()

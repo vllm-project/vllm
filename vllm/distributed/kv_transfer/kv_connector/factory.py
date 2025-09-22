@@ -5,10 +5,8 @@ import importlib
 from typing import TYPE_CHECKING, Callable
 
 # yapf: disable
-import vllm.envs as envs
-from vllm.distributed.kv_transfer.kv_connector.base import (
-    KVConnectorBase, KVConnectorBaseType)
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.logger import init_logger
 
 # yapf: enable
@@ -42,15 +40,11 @@ class KVConnectorFactory:
         config: "VllmConfig",
         role: KVConnectorRole,
     ) -> KVConnectorBase:
-        if not envs.VLLM_USE_V1:
-            raise ValueError("Attempting to initialize a V1 Connector, "
-                             f"but found {envs.VLLM_USE_V1=}")
-
         kv_transfer_config = config.kv_transfer_config
         connector_cls = cls.get_connector_class(kv_transfer_config)
-        logger.info("Creating v1 connector with name: %s and engine_id: %s",
+        logger.info("Creating KV connector with name: %s and engine_id: %s",
                     connector_cls.__name__, kv_transfer_config.engine_id)
-        # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
+        # NOTE(Kuntai): KV connector is explicitly separated into two roles.
         # Scheduler connector:
         # - Co-locate with scheduler process
         # - Should only be used inside the Scheduler class
@@ -62,8 +56,8 @@ class KVConnectorFactory:
 
     @classmethod
     def get_connector_class(
-            cls, kv_transfer_config: "KVTransferConfig"
-    ) -> type[KVConnectorBaseType]:
+            cls,
+            kv_transfer_config: "KVTransferConfig") -> type[KVConnectorBase]:
         """Get the connector class by name."""
         connector_name = kv_transfer_config.kv_connector
         if connector_name in cls._registry:
@@ -84,30 +78,30 @@ class KVConnectorFactory:
 
 KVConnectorFactory.register_connector(
     "SharedStorageConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector",
+    "vllm.distributed.kv_transfer.kv_connector.shared_storage_connector",
     "SharedStorageConnector")
 
 KVConnectorFactory.register_connector(
     "P2pNcclConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_connector",
+    "vllm.distributed.kv_transfer.kv_connector.p2p.p2p_nccl_connector",
     "P2pNcclConnector")
 
 KVConnectorFactory.register_connector(
     "LMCacheConnectorV1",
-    "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector",
+    "vllm.distributed.kv_transfer.kv_connector.lmcache_connector",
     "LMCacheConnectorV1")
 
 KVConnectorFactory.register_connector(
     "NixlConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
+    "vllm.distributed.kv_transfer.kv_connector.nixl_connector",
     "NixlConnector")
 
 KVConnectorFactory.register_connector(
     "MultiConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector",
+    "vllm.distributed.kv_transfer.kv_connector.multi_connector",
     "MultiConnector")
 
 KVConnectorFactory.register_connector(
     "OffloadingConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector",
+    "vllm.distributed.kv_transfer.kv_connector.offloading_connector",
     "OffloadingConnector")

@@ -11,10 +11,9 @@ import torch
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole)
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata)
+from vllm.distributed.kv_transfer.kv_connector import (KVConnectorBase,
+                                                       KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorMetadata
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -39,7 +38,7 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
     reqs_to_store: dict[ReqId, TransferSpec]
 
 
-class OffloadingConnector(KVConnectorBase_V1):
+class OffloadingConnector(KVConnectorBase):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         super().__init__(vllm_config, role)

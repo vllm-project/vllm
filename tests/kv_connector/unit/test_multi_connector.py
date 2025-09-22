@@ -62,7 +62,7 @@ def test_multi_shared_storage_connector_consistency():
                     "name": "storage1",
                 },
                 "kv_connector_module_path":
-                "tests.v1.kv_connector.unit.utils",
+                "tests.kv_connector.unit.utils",
             }, {
                 "kv_connector":
                 "TestSharedStorageConnector",
@@ -73,7 +73,7 @@ def test_multi_shared_storage_connector_consistency():
                     "name": "storage2",
                 },
                 "kv_connector_module_path":
-                "tests.v1.kv_connector.unit.utils",
+                "tests.kv_connector.unit.utils",
             }]
         },
     )

@@ -11,7 +11,7 @@ from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
+from vllm.distributed.kv_transfer.kv_connector.shared_storage_connector import (  # noqa
     SharedStorageConnector)
 from vllm.utils import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks

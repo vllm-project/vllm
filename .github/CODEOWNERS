@@ -54,8 +54,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep
-/tests/v1/kv_connector/nixl_integration @NickLucche 
-/tests/v1/kv_connector @ApostaC
+/tests/kv_connector @NickLucche @ApostaC
 /tests/v1/offloading @ApostaC
 
 # Transformers backend

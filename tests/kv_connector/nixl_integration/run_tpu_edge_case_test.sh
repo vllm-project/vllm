@@ -21,7 +21,7 @@ BLOCK_SIZE=${BLOCK_SIZE:-32}
 
 # execution env
 GIT_ROOT=$(git rev-parse --show-toplevel)
-EXP_ROOT="${GIT_ROOT}/tests/v1/kv_connector/nixl_integration"
+EXP_ROOT="${GIT_ROOT}/tests/kv_connector/nixl_integration"
 CONDA_PATH=${CONDA_PATH:-"/home/${USER}/anaconda3"}
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-"nixl"}
 
@@ -123,4 +123,4 @@ PREFILL_PORT=${PREFILL_PORT} \
 DECODE_HOST=${DECODE_HOST} \
 DECODE_PORT=${DECODE_PORT} \
 PROXY_HOST=${PROXY_HOST} \
-PROXY_PORT=${PROXY_PORT} python -m pytest -s -v ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_edge_cases.py
+PROXY_PORT=${PROXY_PORT} python -m pytest -s -v ${GIT_ROOT}/tests/kv_connector/nixl_integration/test_edge_cases.py
