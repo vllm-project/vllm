@@ -283,14 +283,14 @@ def test_full_cuda_graph(
             example_prompts, max_tokens, num_logprobs)
 
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_v1_outputs,
+        outputs_1_lst=vllm_outputs,
         name_0="hf",
-        name_1="vllm-v1",
+        name_1="vllm",
     )
 
 
@@ -324,12 +324,12 @@ def test_fp32_cache_state(
     with vllm_runner(model,
                      max_num_seqs=MAX_NUM_SEQS,
                      **{cache_dtype_param: "float32"}) as vllm_model:
-        vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_v1_outputs,
+        outputs_1_lst=vllm_outputs,
         name_0="hf",
-        name_1="vllm-v1",
+        name_1="vllm",
     )
