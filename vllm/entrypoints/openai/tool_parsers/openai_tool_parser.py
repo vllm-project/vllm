@@ -13,9 +13,12 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer import AnyTokenizer
+
+logger = init_logger(__name__)
 
 
 @ToolParserManager.register_module("openai")
@@ -41,13 +44,23 @@ class OpenAIToolParser(ToolParser):
 
         if len(parser.messages) > 0:
             for msg in parser.messages:
+                if len(msg.content) < 1:
+                    continue
+                msg_text = msg.content[0].text
                 if msg.recipient and msg.recipient.startswith("functions."):
-                    if "json" in msg.content_type:
-                        # round-trip JSON text to ensure valid JSON and remove
-                        # any extra newlines
-                        tool_args = json.dumps(json.loads(msg.content[0].text))
+                    # If no content-type is given assume JSON, as that's the
+                    # most common case with gpt-oss models.
+                    if not msg.content_type or "json" in msg.content_type:
+                        # load and dump the JSON text to check validity and
+                        # remove any extra newlines or other odd formatting
+                        try:
+                            tool_args = json.dumps(json.loads(msg_text))
+                        except json.JSONDecodeError:
+                            logger.exception(
+                                "Error decoding JSON tool call from response.")
+                            tool_args = msg_text
                     else:
-                        tool_args = msg.content[0].text
+                        tool_args = msg_text
                     tool_calls.append(
                         ToolCall(
                             type="function",
@@ -57,7 +70,7 @@ class OpenAIToolParser(ToolParser):
                             ),
                         ))
                 elif msg.channel == "final":
-                    final_content = msg.content[0].text
+                    final_content = msg_text
 
         return ExtractedToolCallInformation(
             tools_called=len(tool_calls) > 0,
