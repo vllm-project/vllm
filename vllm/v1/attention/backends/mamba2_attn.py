@@ -327,34 +327,41 @@ class Mamba2AttentionMetadataBuilder(
             state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
-            self.current_last_token_block_idx[:num_decodes].copy_(
-                current_last_token_block_idx, non_blocking=True)
-            current_last_token_block_idx = \
-                self.current_last_token_block_idx[:num_input_tokens]
-            current_last_token_block_idx[num_decodes:] = 0
+            if self.kv_cache_spec.cache_strategy != 'disabled':
+                self.current_last_token_block_idx[:num_decodes].copy_(
+                    current_last_token_block_idx, non_blocking=True)
+                current_last_token_block_idx = \
+                    self.current_last_token_block_idx[:num_input_tokens]
+                current_last_token_block_idx[num_decodes:] = 0
 
-            self.current_first_token_block_idx[:num_decodes].copy_(
-                current_first_token_block_idx, non_blocking=True)
-            current_first_token_block_idx = \
-                self.current_first_token_block_idx[:num_input_tokens]
-            current_first_token_block_idx[num_decodes:] = 0
+                self.current_first_token_block_idx[:num_decodes].copy_(
+                    current_first_token_block_idx, non_blocking=True)
+                current_first_token_block_idx = \
+                    self.current_first_token_block_idx[:num_input_tokens]
+                current_first_token_block_idx[num_decodes:] = 0
 
-            self.last_computed_token_block_idx[:num_decodes].copy_(
-                last_computed_token_block_idx, non_blocking=True)
-            last_computed_token_block_idx = \
-                self.last_computed_token_block_idx[:num_input_tokens]
-            last_computed_token_block_idx[num_decodes:] = 0
+                self.last_computed_token_block_idx[:num_decodes].copy_(
+                    last_computed_token_block_idx, non_blocking=True)
+                last_computed_token_block_idx = \
+                    self.last_computed_token_block_idx[:num_input_tokens]
+                last_computed_token_block_idx[num_decodes:] = 0
 
-            self.seq_lens_completed[:num_decodes].copy_(seq_lens_completed,
-                                                        non_blocking=True)
-            seq_lens_completed = self.seq_lens_completed[:num_input_tokens]
-            seq_lens_completed[num_decodes:] = 0
+                self.seq_lens_completed[:num_decodes].copy_(seq_lens_completed,
+                                                            non_blocking=True)
+                seq_lens_completed = self.seq_lens_completed[:num_input_tokens]
+                seq_lens_completed[num_decodes:] = 0
 
-            self.last_computed_token_block_offset[:num_decodes].copy_(
-                last_computed_token_block_offset, non_blocking=True)
-            last_computed_token_block_offset = \
-                self.last_computed_token_block_offset[:num_input_tokens]
-            last_computed_token_block_offset[num_decodes:] = 0
+                self.last_computed_token_block_offset[:num_decodes].copy_(
+                    last_computed_token_block_offset, non_blocking=True)
+                last_computed_token_block_offset = \
+                    self.last_computed_token_block_offset[:num_input_tokens]
+                last_computed_token_block_offset[num_decodes:] = 0
+            else:
+                current_last_token_block_idx = None
+                current_first_token_block_idx = None
+                last_computed_token_block_idx = None
+                last_computed_token_block_offset = None
+                seq_lens_completed = None
 
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,
