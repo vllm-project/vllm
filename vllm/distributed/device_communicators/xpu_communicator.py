@@ -27,14 +27,14 @@ class XpuCommunicator(DeviceCommunicatorBase):
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
             if all2all_backend != "naive":
                 logger.warning(
-                    "%s all2all manager is not supported on XPU."
+                    "`%s` all2all manager is not supported on XPU."
                     "Falling back to `naive` all2all manager for XPU.",
                     all2all_backend)
                 all2all_backend = "naive"
             if all2all_backend == "naive":
                 from .all2all import NaiveAll2AllManager
                 self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-                logger.info("Using naive all2all manager")
+                logger.info("Using naive all2all manager.")
 
     def all_reduce(self, input_) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
