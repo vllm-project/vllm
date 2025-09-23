@@ -481,7 +481,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # which would result in up-projected context being
             #   2*(192*128)*(64*1024) = 3gb
             # (assuming 192 QK head dim, 128 heads, and fp16)
-            128 * 1024)
+            64 * 1024)
         assert self.chunked_prefill_workspace_size >= \
             scheduler_config.max_num_seqs * cache_config.block_size
         if self.dcp_world_size > 1:
