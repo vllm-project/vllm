@@ -102,11 +102,7 @@ def _lazy_init() -> None:
 
 
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
-    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor.
-
-    Ensures the input tensor is returned in column-major layout with the
-    M-axis padded to 16-byte TMA alignment when required by DeepGEMM.
-    """
+    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor"""
     _lazy_init()
     if _get_mn_major_tma_aligned_tensor_impl is None:
         return _missing()
