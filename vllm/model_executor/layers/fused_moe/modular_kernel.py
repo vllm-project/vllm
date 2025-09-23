@@ -12,6 +12,8 @@ import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (  # yapf: disable
     _resize_cache, count_expert_num_tokens)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_moe_intermediate_size)
 from vllm.utils import cdiv
 from vllm.v1.worker.ubatching import (dbo_current_ubatch_id, dbo_enabled,
                                       dbo_maybe_run_recv_hook,
@@ -55,11 +57,18 @@ from vllm.v1.worker.ubatching import (dbo_current_ubatch_id, dbo_enabled,
 #
 
 
+def _is_marlin_mxfp4_w4an(quant_config: Optional[FusedMoEQuantConfig] = None):
+    is_mxfp4 = (quant_config is not None and
+                (quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16))
+    return envs.VLLM_MXFP4_USE_MARLIN and is_mxfp4
+
+
 def _moe_problem_size(
     a1: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_ids: torch.Tensor,
+    quant_config: Optional[FusedMoEQuantConfig] = None
 ) -> tuple[int, int, int, int, int]:
     """
     Extract the MoE problem size from the given tensor arguments:
@@ -76,8 +85,13 @@ def _moe_problem_size(
     to be kept in mind.
     """
     assert w1.dim() == 3 and w2.dim() == 3
-    E, N, _ = w1.size()
+
+    E = w1.size(0)
     K = a1.size(-1)
+    if _is_marlin_mxfp4_w4an(quant_config):
+        N = marlin_moe_intermediate_size(w1, w2)
+    else:
+        N = w1.size(1)
 
     if a1.dim() == 2:
         # Make sure we are using the correct a1 (pre-permute).
@@ -674,7 +688,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
 
-        _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
+        _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids,
+                                              self.fused_experts.quant_config)
 
         (workspace13_shape, workspace2_shape, fused_out_shape,
          workspace_dtype) = self.fused_experts.workspace_shapes(
@@ -737,7 +752,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
 
-        _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
+        _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids,
+                                              self.fused_experts.quant_config)
 
         CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
         num_chunks = cdiv(M, CHUNK_SIZE)
