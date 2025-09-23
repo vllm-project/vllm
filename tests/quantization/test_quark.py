@@ -133,7 +133,7 @@ class GSM8KAccuracyTestConfig:
 
 ACCURACY_CONFIGS = [
     # Private model.
-    GSM8KAccuracyTestConfig(model_name="/data/amd/DeepSeek-R1-MXFP4-Preview",
+    GSM8KAccuracyTestConfig(model_name="amd/DeepSeek-R1-MXFP4-Preview",
                             excepted_value=0.96),
 ]
 
