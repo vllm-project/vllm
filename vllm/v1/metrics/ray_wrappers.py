@@ -58,6 +58,7 @@ class RayGaugeWrapper(RayPrometheusMetric):
         # implemented at the observability layer (Prometheus/Grafana).
         del multiprocess_mode
         labelnames_tuple = tuple(labelnames) if labelnames else None
+        name = name.replace(":", "_")
         self.metric = ray_metrics.Gauge(name=name,
                                         description=documentation,
                                         tag_keys=labelnames_tuple)
@@ -79,6 +80,7 @@ class RayCounterWrapper(RayPrometheusMetric):
                  documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
+        name = name.replace(":", "_")
         self.metric = ray_metrics.Counter(name=name,
                                           description=documentation,
                                           tag_keys=labelnames_tuple)
@@ -99,6 +101,7 @@ class RayHistogramWrapper(RayPrometheusMetric):
                  labelnames: Optional[list[str]] = None,
                  buckets: Optional[list[float]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
+        name = name.replace(":", "_")
         boundaries = buckets if buckets else []
         self.metric = ray_metrics.Histogram(name=name,
                                             description=documentation,
