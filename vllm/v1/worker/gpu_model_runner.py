@@ -55,7 +55,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, check_use_alibi, get_dtype_size,
+                        GiB_bytes, cdiv, check_use_alibi, get_dtype_size,
                         is_pin_memory_available,
                         length_from_prompt_token_ids_or_embeds, round_up,
                         supports_dynamo)
@@ -2242,7 +2242,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     return output
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states, None)
+                logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -2260,8 +2260,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     logits = None
                 else:
                     sample_hidden_states = hidden_states[logits_indices]
-                    logits = self.model.compute_logits(sample_hidden_states,
-                                                       None)
+                    logits = self.model.compute_logits(sample_hidden_states)
 
                 model_output_broadcast_data = {}
                 if logits is not None:
@@ -2708,7 +2707,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc.np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
-            logits = self.model.compute_logits(prompt_hidden_states, None)
+            logits = self.model.compute_logits(prompt_hidden_states)
 
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want
@@ -2890,12 +2889,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Note: Overriding max_query_len to be the prefill tokens
             max_query_len = num_prefill_tokens
         elif uniform_decode:
-            num_reqs = num_tokens // max_query_len
+            assert not create_mixed_batch
+            num_reqs = cdiv(num_tokens, max_query_len)
             assert num_reqs <= max_num_reqs, \
                 "Do not capture num_reqs > max_num_reqs for uniform batch"
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
-                num_scheduled_tokens_list[-1] += num_tokens % max_query_len
+                num_scheduled_tokens_list[-1] = num_tokens % max_query_len
         else:
             num_reqs = min(num_tokens, max_num_reqs)
             min_tokens_per_req = num_tokens // num_reqs
@@ -3097,7 +3097,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # To avoid breaking the sampler, we use a random tensor here instead.
         hidden_states = torch.rand_like(hidden_states)
 
-        logits = self.model.compute_logits(hidden_states, None)
+        logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)
 
         dummy_tensors = lambda v: torch.full(

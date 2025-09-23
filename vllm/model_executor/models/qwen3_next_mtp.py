@@ -19,7 +19,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_next import (Qwen3NextDecoderLayer,
                                                    Qwen3NextRMSNorm)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 
@@ -266,11 +265,9 @@ class Qwen3NextMTP(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> Optional[torch.Tensor]:
-        return self.logits_processor(self.lm_head, hidden_states,
-                                     sampling_metadata)
+        return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

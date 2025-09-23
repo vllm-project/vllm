@@ -237,7 +237,7 @@ class EagleProposer:
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+        logits = self.model.compute_logits(sample_hidden_states)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
@@ -365,8 +365,7 @@ class EagleProposer:
                 else:
                     last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
-            logits = self.model.compute_logits(last_hidden_states[:batch_size],
-                                               None)
+            logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
@@ -675,9 +674,7 @@ class EagleProposer:
             # Get the output logits for the draft tokens.
             logits = self.model.compute_logits(
                 draft_last_hidden_states.reshape(batch_size * level_num_drafts,
-                                                 -1),
-                None,
-            )
+                                                 -1))
 
             # Sample a draft token for each child at the next tree level.
             num_children = self.child_drafts_per_level[level + 1]
@@ -823,15 +820,29 @@ class EagleProposer:
         else:
             target_language_model = target_model
         # share embed_tokens with the target model if needed
-        if get_pp_group().world_size == 1 \
-                and self.model.model.embed_tokens.weight.shape \
-            == target_language_model.model.embed_tokens.weight.shape:
-            logger.info(
-                "Assuming the EAGLE head shares the same vocab embedding"
-                " with the target model.")
-            del self.model.model.embed_tokens
-            self.model.model.embed_tokens = (
-                target_language_model.model.embed_tokens)
+        if get_pp_group().world_size == 1:
+            if hasattr(target_language_model.model, 'embed_tokens'):
+                target_embed_tokens = target_language_model.model.embed_tokens
+            elif hasattr(target_language_model.model, 'embedding'):
+                target_embed_tokens = target_language_model.model.embedding
+            else:
+                raise AttributeError(
+                    "Target model does not have 'embed_tokens' or 'embedding' "
+                    "attribute")
+
+            # Check if shapes match and we found the embedding
+            eagle_shape = self.model.model.embed_tokens.weight.shape
+            target_shape = target_embed_tokens.weight.shape
+            if eagle_shape == target_shape:
+                logger.info(
+                    "Assuming the EAGLE head shares the same vocab embedding"
+                    " with the target model.")
+                del self.model.model.embed_tokens
+                self.model.model.embed_tokens = target_embed_tokens
+            else:
+                logger.info(
+                    "The EAGLE head's vocab embedding will be loaded separately"
+                    " from the target model.")
         else:
             logger.info(
                 "The EAGLE head's vocab embedding will be loaded separately"

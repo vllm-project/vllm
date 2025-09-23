@@ -67,6 +67,7 @@ class _Backend(enum.Enum):
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
     XFORMERS_VLLM_V1 = enum.auto()
+    ROCM_ATTN_VLLM_V1 = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
@@ -276,13 +277,6 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        """
-        Check if the current platform supports async output.
-        """
-        raise NotImplementedError
-
-    @classmethod
     def inference_mode(cls):
         """A device-specific wrapper of `torch.inference_mode`.
 
@@ -489,20 +483,6 @@ class Platform:
                 == "external_launcher")
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
-        return False
-
-    @classmethod
-    def default_v1(cls, model_config: ModelConfig) -> bool:
-        """
-        Returns whether the current platform supports v1 by default.
-        """
-        return cls.supports_v1(model_config)
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         """
         Returns if custom allreduce is supported on the current platform
@@ -591,6 +571,13 @@ class Platform:
     def support_hybrid_kv_cache(cls) -> bool:
         """
         Returns if the hybrid kv cache is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        """
+        Returns if the graph mode is supported by the current platform.
         """
         return False
 
