@@ -1091,8 +1091,7 @@ def init_distributed_environment(
     global _WORLD, _NODE_COUNT
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        world_pg_options = pg_options_dict.get(
-            "world") if pg_options_dict else None
+        world_pg_options = (pg_options_dict or {}).get("world")
         _WORLD = init_world_group(ranks, local_rank, backend, world_pg_options)
         _NODE_COUNT = _node_count(_WORLD.cpu_group)
         logger.debug("Detected %d nodes in the distributed environment",
@@ -1165,7 +1164,7 @@ def initialize_model_parallel(
     group_ranks = [x.tolist() for x in group_ranks]
 
     # message queue broadcaster is only used in tensor model parallel group
-    tp_pg_options = pg_options_dict.get("tp") if pg_options_dict else None
+    tp_pg_options = (pg_options_dict or {}).get("tp")
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
@@ -1184,7 +1183,7 @@ def initialize_model_parallel(
     group_ranks = all_ranks.reshape(
         -1, decode_context_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
-    dcp_pg_options = pg_options_dict.get("dcp") if pg_options_dict else None
+    dcp_pg_options = (pg_options_dict or {}).get("dcp")
     _DCP = init_model_parallel_group(group_ranks,
                                      get_world_group().local_rank,
                                      backend,
@@ -1199,7 +1198,7 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(2, 3).reshape(
         -1, pipeline_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
-    pp_pg_options = pg_options_dict.get("pp") if pg_options_dict else None
+    pp_pg_options = (pg_options_dict or {}).get("pp")
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
@@ -1211,7 +1210,7 @@ def initialize_model_parallel(
                                       3).reshape(-1,
                                                  data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
-    dp_pg_options = pg_options_dict.get("dp") if pg_options_dict else None
+    dp_pg_options = (pg_options_dict or {}).get("dp")
     _DP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
@@ -1223,7 +1222,7 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(1, 2).reshape(
         -1, data_parallel_size * tensor_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
-    ep_pg_options = pg_options_dict.get("ep") if pg_options_dict else None
+    ep_pg_options = (pg_options_dict or {}).get("ep")
     _EP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
