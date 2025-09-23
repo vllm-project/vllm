@@ -95,7 +95,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
-        # NOTE self.lora_a_stacked is row-major, and lora_a is row-major,
+        # NOTE self.lora_a_stacked is row-major, and lora_a is col-major,
         # so we need transpose here
         self.lora_a_stacked[index, :lora_a.shape[1], :lora_a.shape[0]].copy_(
             lora_a.T, non_blocking=True)
