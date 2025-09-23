@@ -333,7 +333,7 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.n_slices = 1
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
-    
+
         self.q_shard_id = self.tp_rank
         self.kv_shard_id = self.tp_rank // self.base_layer.num_kv_head_replicas
         lora_b_q = lora_b[self.q_proj_shard_size *
