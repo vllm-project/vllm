@@ -759,7 +759,13 @@ class StepPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.extract_states(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
+
+        pooling_params = get_pooling_params(pooling_metadata)
+        assert len(pooling_params) == len(pooling_params)
+
+        pooled_data = [
+            self.head(d, p) for d, p in zip(pooled_data, pooling_params)
+        ]
         return build_output(pooled_data)
 
 
