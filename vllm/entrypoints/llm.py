@@ -3,7 +3,7 @@
 
 import itertools
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union, cast
 
 import cloudpickle
 import torch.nn as nn
@@ -944,6 +944,22 @@ class LLM:
             instead pass them via the `inputs` parameter.
         """
 
+        warning_str = (
+            "`LLM.encode` is currently using `pooling_task = %s`.\n"
+            "Please use one of the more specific methods or set the "
+            "task directly when using `LLM.encode`:\n"
+            "  - For embeddings, use `LLM.embed(...)` "
+            "or `pooling_task=\"embed\"`.\n"
+            "  - For classification logits, use `LLM.classify(...)` "
+            "or `pooling_task=\"classify\"`.\n"
+            "  - For similarity scores, use `LLM.score(...)`.\n"
+            "  - For rewards, use `LLM.reward(...)` "
+            "or `pooling_task=\"token_classify\"`\n"
+            "  - For token classification, "
+            "use `pooling_task=\"token_classify\"`\n"
+            "  - For multi-vector retrieval, use `pooling_task=\"token_embed\"`"
+        )
+
         if pooling_task is None and len(self.supported_tasks) == 1:
             pooling_task = self.supported_tasks[0]
 
@@ -955,21 +971,7 @@ class LLM:
                 pooling_task = "embed"
             else:
                 pooling_task = encode2pooling_task(self.supported_tasks)
-
-            logger.warning_once(
-                "`LLM.encode` is currently using `pooling_task = %s`.\n"
-                "Please use one of the more specific methods or set the "
-                "task directly when using `LLM.encode`:\n"
-                "  - For embeddings, use `LLM.embed(...)` "
-                "or `pooling_task=\"embed\"`.\n"
-                "  - For classification logits, use `LLM.classify(...)` "
-                "or `pooling_task=\"classify\"`.\n"
-                "  - For similarity scores, use `LLM.score(...)`."
-                "  - For rewards, use `LLM.reward(...)` "
-                "or `pooling_task=\"token_classify\"`\n"
-                "  - For token classification, use `pooling_task=\"token_classify\"`\n"
-                "  - For multi-vector retrieval, use `pooling_task=\"token_embed\"`\n",
-                pooling_task)
+            logger.warning_once(warning_str, pooling_task)
 
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type

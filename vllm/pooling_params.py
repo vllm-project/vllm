@@ -59,9 +59,7 @@ class PoolingParams(
 
     @property
     def all_parameters(self) -> list[str]:
-        return [
-            "dimensions", "normalize", "activation"
-        ]
+        return ["dimensions", "normalize", "activation"]
 
     @property
     def valid_parameters(self):
@@ -117,9 +115,10 @@ class PoolingParams(
 
         self._verify_step_pooling(pooler_config, valid_parameters)
 
-    def _verify_step_pooling(self, pooler_config: "PoolerConfig", valid_parameters: list[str]):
+    def _verify_step_pooling(self, pooler_config: "PoolerConfig",
+                             valid_parameters: list[str]):
         step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
-        if pooler_config.pooling_type is not "STEP":
+        if pooler_config.pooling_type != "STEP":
             invalid_parameters = []
             for k in step_pooling_parameters:
                 if getattr(self, k, None) is not None:
