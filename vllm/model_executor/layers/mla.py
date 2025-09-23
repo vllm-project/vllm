@@ -82,7 +82,7 @@ class MultiHeadLatentAttention(CustomOp):
         self.indexer = mla_modules.indexer
         self.topk_tokens = mla_modules.indexer.topk_tokens
         self.use_sparse = mla_modules.is_sparse and os.getenv(
-            "VLLM_MLA_SPARSE_ENABLED") == "1"
+            "VLLM_MLA_SPARSE_DISABLED") != "1"
 
         # In the MLA backend, kv_cache includes both k_c and
         # pe (i.e. decoupled position embeddings). In particular,
