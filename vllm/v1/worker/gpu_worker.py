@@ -392,7 +392,7 @@ class Worker(WorkerBase):
                 f"utilize gpu memory. Current kv cache memory in use is "
                 f"{int(self.available_kv_cache_memory_bytes)} bytes.")
 
-            logger.info(msg)
+            logger.debug(msg)
 
         # Warm up sampler and preallocate memory buffer for logits and other
         # sampling related tensors of max possible shape to avoid memory
@@ -491,7 +491,7 @@ class Worker(WorkerBase):
                     sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        self.model_runner._dummy_run(1, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
