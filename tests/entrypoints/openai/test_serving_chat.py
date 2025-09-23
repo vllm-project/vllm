@@ -488,7 +488,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 
 @pytest.mark.asyncio
 async def test_serving_chat_data_parallel_rank_extraction():
-    """Test that data_parallel_rank is properly extracted from request and passed to engine."""
+    """Test that data_parallel_rank is properly extracted from header and passed to engine."""
     mock_engine = MagicMock(spec=MQLLMEngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
@@ -504,7 +504,7 @@ async def test_serving_chat_data_parallel_rank_extraction():
                                      chat_template_content_format="auto",
                                      request_logger=None)
 
-    # Test when data_parallel_rank is present
+    # Test when data_parallel_rank is present in header
     req = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{
@@ -512,11 +512,14 @@ async def test_serving_chat_data_parallel_rank_extraction():
             "content": "what is 1+1?"
         }],
     )
-    # Simulate router injecting data_parallel_rank
-    setattr(req, 'data_parallel_rank', 2)
+
+    # Mock request with X-data-parallel-rank header
+    mock_raw_request = MagicMock()
+    mock_raw_request.headers = {"X-data-parallel-rank": "2"}
+    mock_raw_request.state = MagicMock()
 
     with suppress(Exception):
-        await serving_chat.create_chat_completion(req)
+        await serving_chat.create_chat_completion(req, mock_raw_request)
 
     # Verify that data_parallel_rank was passed to engine.generate
     assert 'data_parallel_rank' in mock_engine.generate.call_args.kwargs
@@ -531,8 +534,13 @@ async def test_serving_chat_data_parallel_rank_extraction():
         }],
     )
 
+    # Mock request with no header
+    mock_raw_request_no_dp = MagicMock()
+    mock_raw_request_no_dp.headers = {}
+    mock_raw_request_no_dp.state = MagicMock()
+
     with suppress(Exception):
-        await serving_chat.create_chat_completion(req_no_dp)
+        await serving_chat.create_chat_completion(req_no_dp, mock_raw_request_no_dp)
 
     # Verify that data_parallel_rank defaults to None
     assert 'data_parallel_rank' in mock_engine.generate.call_args.kwargs
