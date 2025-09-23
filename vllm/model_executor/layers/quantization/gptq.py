@@ -7,6 +7,7 @@ from fractions import Fraction
 from typing import Any, Optional, Union
 
 import torch
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
@@ -22,7 +23,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
-from vllm.transformers_utils.config import try_get_safetensors_metadata
+from vllm.transformers_utils.config import get_safetensors_params_metadata
 
 
 class GPTQConfig(QuantizationConfig):
@@ -150,42 +151,22 @@ class GPTQConfig(QuantizationConfig):
             self.modules_in_block_to_quantize = hf_to_vllm_mapper.apply_list(
                 self.modules_in_block_to_quantize)
 
-    def maybe_update_config(self, model_name: str):
-        import json
-        import struct
-        from pathlib import Path
-
-        from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-
+    def maybe_update_config(self,
+                            model_name: str,
+                            revision: Optional[str] = None):
         if self.modules_in_block_to_quantize:
             return
 
         unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
-        if (model_path := Path(model_name)).exists():
-            safetensors_to_check = model_path.glob("*.safetensors")
-            quant_layers: set[str] = set()
-            for safetensor in safetensors_to_check:
-                with open(safetensor, "rb") as f:
-                    length_of_metadata = struct.unpack('<Q', f.read(8))[0]
-                    metadata = json.loads(
-                        f.read(length_of_metadata).decode('utf-8'))
-                    for param_name, info in metadata.items():
-                        dtype = info.get('dtype', None)
-                        if dtype and _SAFETENSORS_TO_TORCH_DTYPE[
-                                dtype] not in unquant_dtypes:
-                            quant_layers.add(param_name.rsplit(".", 1)[0])
-            self.modules_in_block_to_quantize = list(quant_layers)
-        else:
-            repo_mt = try_get_safetensors_metadata(model_name)
-            if repo_mt and (files_mt := repo_mt.files_metadata):
-                quant_layers: set[str] = {
-                    param_name.rsplit(".", 1)[0]
-                    for file_mt in files_mt.values()
-                    for param_name, info in file_mt.tensors.items()
-                    if _SAFETENSORS_TO_TORCH_DTYPE[info.dtype] not in
-                    unquant_dtypes
-                }
-                self.modules_in_block_to_quantize = list(quant_layers)
+        metadata = get_safetensors_params_metadata(model_name,
+                                                   revision=revision)
+        quant_layers: set[str] = {
+            param_name.rsplit(".", 1)[0]
+            for param_name, info in metadata.items()
+            if (dtype := info.get('dtype', None))
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
+        }
+        self.modules_in_block_to_quantize = list(quant_layers)
 
 
 class ExllamaState(Enum):
