@@ -30,8 +30,8 @@ class MyGemma2Embedding(nn.Module):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_embed_encode(pooler_config),
+            "token_embed":
+            Pooler.for_token_embed(pooler_config),
             "embed":
             Pooler.for_embed(pooler_config),
         })

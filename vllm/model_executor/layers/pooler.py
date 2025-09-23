@@ -67,8 +67,8 @@ class Pooler(nn.Module, ABC):
     """The interface required for all poolers used in pooling models in vLLM."""
 
     @staticmethod
-    def for_embed_encode(pooler_config: PoolerConfig):
-        head = EmbeddingMultiVectorPoolerHead()
+    def for_token_embed(pooler_config: PoolerConfig):
+        head = TokenEmbeddingPoolerHead()
 
         if pooler_config.pooling_type == "STEP":
             return StepPooler(head=head)
@@ -76,7 +76,7 @@ class Pooler(nn.Module, ABC):
         return AllPooler(head=head)
 
     @staticmethod
-    def for_classify_encode(
+    def for_token_classify(
         pooler_config: PoolerConfig,
         classifier: Optional[ClassifierFn] = None,
         act_fn: Optional["PoolerActivation"] = None,
@@ -260,7 +260,7 @@ class PoolingMethod(nn.Module, ABC):
 class CLSPool(PoolingMethod):
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode", "embed", "classify", "score"}
+        return {"token_embed", "token_classify", "embed", "classify", "score"}
 
     def forward_all(
         self,
@@ -276,7 +276,7 @@ class CLSPool(PoolingMethod):
 class LastPool(PoolingMethod):
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode", "embed", "classify", "score"}
+        return {"token_embed", "token_classify", "embed", "classify", "score"}
 
     def forward_all(
         self,
@@ -289,7 +289,7 @@ class LastPool(PoolingMethod):
 class AllPool(PoolingMethod):
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode"}
+        return {"token_embed", "token_classify"}
 
     def forward_all(
         self,
@@ -309,7 +309,7 @@ class AllPool(PoolingMethod):
 class MeanPool(PoolingMethod):
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode", "embed", "classify", "score"}
+        return {"token_embed", "token_classify", "embed", "classify", "score"}
 
     def forward_all(
         self,
@@ -598,7 +598,7 @@ class ClassifierPooler(Pooler):
         return build_output(scores)
 
 
-class EmbeddingMultiVectorPoolerHead(EmbeddingPoolerHead):
+class TokenEmbeddingPoolerHead(EmbeddingPoolerHead):
 
     def forward(self, pooled_data: torch.Tensor,
                 pooling_param: PoolingParams) -> torch.Tensor:
@@ -639,7 +639,7 @@ class TokenClassifierPoolerHead(nn.Module):
         self.act_fn = act_fn or PoolerClassify(static_num_labels=False)
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode"}
+        return {"token_classify"}
 
     def forward(
         self,
@@ -674,7 +674,7 @@ class AllPooler(Pooler):
         self.head = head
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode"}
+        return {"token_embed", "token_classify"}
 
     def forward(
         self,
@@ -728,7 +728,7 @@ class StepPooler(Pooler):
         return pooled_data
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode"}
+        return {"token_embed", "token_classify"}
 
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return PoolingParamsUpdate(requires_token_ids=True)

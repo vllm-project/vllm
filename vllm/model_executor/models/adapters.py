@@ -259,7 +259,7 @@ def as_embedding_model(cls: _T) -> _T:
 
             self.pooler = DispatchPooler(
                 {
-                    "encode": Pooler.for_embed_encode(pooler_config),
+                    "token_embed": Pooler.for_token_embed(pooler_config),
                     "embed": Pooler.for_embed(pooler_config),
                 }, )
 
@@ -328,10 +328,10 @@ def as_seq_cls_model(cls: _T) -> _T:
                 act_fn=act_fn)
 
             self.pooler = DispatchPooler({
-                "encode":
-                Pooler.for_classify_encode(pooler_config=pooler_config,
-                                           classifier=self.score,
-                                           act_fn=act_fn),
+                "token_classify":
+                Pooler.for_token_classify(pooler_config=pooler_config,
+                                          classifier=self.score,
+                                          act_fn=act_fn),
                 "classify":
                 classifie_pooler,
                 "score":
@@ -390,8 +390,8 @@ def as_reward_model(cls: _T) -> _T:
             assert pooler_config is not None
 
             self.pooler = DispatchPooler({
-                "encode":
-                Pooler.for_classify_encode(pooler_config=pooler_config)
+                "token_classify":
+                Pooler.for_token_classify(pooler_config=pooler_config)
             })
 
     ModelForReward.__name__ = \

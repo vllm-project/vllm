@@ -345,8 +345,8 @@ class GPT2ForSequenceClassification(nn.Module):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_classify_encode(pooler_config, classifier=self.score),
+            "token_classify":
+            Pooler.for_token_classify(pooler_config, classifier=self.score),
             "classify":
             Pooler.for_classify(pooler_config, classifier=self.score),
         })

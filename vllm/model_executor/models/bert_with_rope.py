@@ -654,10 +654,10 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
                                             classifier=self.classifier,
                                             act_fn=act_fn)
         self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_classify_encode(pooler_config=pooler_config,
-                                       classifier=self.classifier,
-                                       act_fn=act_fn),
+            "token_classify":
+            Pooler.for_token_classify(pooler_config=pooler_config,
+                                      classifier=self.classifier,
+                                      act_fn=act_fn),
             "classify":
             classifie_pooler,
             "score":

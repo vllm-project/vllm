@@ -618,8 +618,8 @@ class JambaForSequenceClassification(JambaForCausalLM):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_classify_encode(
+            "token_classify":
+            Pooler.for_token_classify(
                 pooler_config,
                 classifier=self.score,
             ),

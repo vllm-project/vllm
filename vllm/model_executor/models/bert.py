@@ -489,8 +489,10 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
         return DispatchPooler({
-            "encode": Pooler.for_embed_encode(pooler_config),
-            "embed": Pooler.for_embed(pooler_config),
+            "token_embed":
+            Pooler.for_token_embed(pooler_config),
+            "embed":
+            Pooler.for_embed(pooler_config),
         })
 
 
@@ -575,10 +577,10 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                                             act_fn=act_fn)
 
         self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_classify_encode(pooler_config=pooler_config,
-                                       classifier=self.classifier,
-                                       act_fn=act_fn),
+            "token_classify":
+            Pooler.for_token_classify(pooler_config=pooler_config,
+                                      classifier=self.classifier,
+                                      act_fn=act_fn),
             "classify":
             classifie_pooler,
             "score":
@@ -629,9 +631,9 @@ class BertForTokenClassification(nn.Module):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_classify_encode(pooler_config=pooler_config,
-                                       classifier=self.classifier),
+            "token_classify":
+            Pooler.for_token_classify(pooler_config=pooler_config,
+                                      classifier=self.classifier),
         })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
