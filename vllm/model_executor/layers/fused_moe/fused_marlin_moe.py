@@ -44,6 +44,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
                      intermediate_cache13: Optional[torch.Tensor] = None,
                      intermediate_cache2: Optional[torch.Tensor] = None,
                      is_k_full: bool = True,
+                     output: Optional[torch.Tensor] = None,
                      inplace: bool = False) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -221,7 +222,8 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         use_fp32_reduce=True,
         is_zp_float=False).view(-1, topk, K)
 
-    output = hidden_states if inplace else torch.empty_like(hidden_states)
+    if output is None:
+        output = hidden_states if inplace else torch.empty_like(hidden_states)
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1,
                      out=output)
@@ -299,6 +301,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO (varun) : Pass in workspaces
         #workspace1 = (M * topk * max(2 * N, K),)
         #workspace2 = (M * topk, N)
+
         workspace1 = (M, K)
         workspace2 = (0, 0)
         output = (M, K)
@@ -323,6 +326,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
+
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
         topk_ids = torch.where(topk_ids == -1, 0, topk_ids)
@@ -330,8 +334,6 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts = w1.size(0)
         if global_num_experts == -1:
             global_num_experts = local_num_experts
-
-        print(f"activation : {activation} ...")
 
         return torch.ops.vllm.fused_marlin_moe(
             hidden_states=hidden_states,
@@ -348,7 +350,8 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
-            expert_map=None)
+            expert_map=None,
+            output=output)
         #expert_map = expert_map)
         #intermediate_cache13 = workspace13,
         #intermediate_cache2 = workspace2)
