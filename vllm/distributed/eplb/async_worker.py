@@ -5,7 +5,7 @@ The async worker that transfers experts in the background.
 """
 import asyncio
 import threading
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 from torch.distributed import ProcessGroup
