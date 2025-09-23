@@ -18,7 +18,9 @@ from flashinfer.utils import FP4Tensor
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
+from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey, kFp8StaticTensorSym, kNvfp4Quant)
@@ -40,8 +42,6 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               split_decodes_and_prefills)
 # yapf: enable
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.attention.ops.common import cp_lse_ag_out_rs
-from vllm.distributed.parallel_state import get_dcp_group
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
@@ -301,14 +301,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             self.q_data_type = self.model_config.dtype
 
-        try:
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
-            self.dcp_world_size = 1
-            self.dcp_rank = 0
-
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
@@ -515,10 +507,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                  self.cache_dtype,
                                                  self.q_data_type,
                                                  has_sinks=self.has_sinks)
-        if self.dcp_world_size > 1 and (prefill_use_trtllm or decode_use_trtllm):
+        if self.dcp_world_size > 1 and (prefill_use_trtllm
+                                        or decode_use_trtllm):
             raise NotImplementedError(
-                "Trtllm not support lse, please use flash attention or FlashInfer backend."
-            )
+                "Trtllm not support lse, please use flash attention "
+                "or FlashInfer backend.")
         if self.has_sinks and not (prefill_use_trtllm and decode_use_trtllm):
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
@@ -595,8 +588,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 if self.dcp_world_size > 1:
                     # init custom mask for interleave kv cache
                     mask_arr = []
-                    q_lens = (qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).cpu().tolist()
-                    total_lens = seq_lens_cpu[prefill_start: prefill_start + num_prefills].to(torch.int64).tolist()
+                    q_lens = (qo_indptr_cpu[1:] -
+                              qo_indptr_cpu[:-1]).cpu().tolist()
+                    total_lens = seq_lens_cpu[prefill_start:prefill_start +
+                                              num_prefills].to(
+                                                  torch.int64).tolist()
                     r = self.dcp_rank
                     p = self.dcp_world_size
                     for i in range(num_prefills):
@@ -615,7 +611,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         t = torch.arange(Q)
                         upper = (L + t - r) // p
                         upper = torch.clamp(upper, min=-1)
-                        mask_i = (j.unsqueeze(0) <= upper.unsqueeze(1)) & (upper.unsqueeze(1) >= 0)
+                        mask_i = (j.unsqueeze(0) <= upper.unsqueeze(1)) & (
+                            upper.unsqueeze(1) >= 0)
                         mask_arr.append(mask_i.flatten())
                     custom_mask = torch.cat(mask_arr, dim=0).to(self.device)
                 else:
@@ -626,7 +623,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         qo_indptr_cpu.to(self.device),
                         paged_kv_indptr_cpu.to(self.device),
                         paged_kv_indices,
-                        paged_kv_last_page_len_cpu[prefill_start:].to(self.device),
+                        paged_kv_last_page_len_cpu[prefill_start:].to(
+                            self.device),
                         self.num_qo_heads,
                         self.num_kv_heads,
                         self.head_dim,
@@ -917,30 +915,24 @@ class FlashInferImpl(AttentionImpl):
                     lse = torch.empty(
                         (prefill_query.size(0), prefill_query.size(1)),
                         dtype=torch.float32,
-                        device=prefill_query.device
-                    )
+                        device=prefill_query.device)
 
-                    prefill_wrapper.run(
-                        prefill_query,
-                        kv_cache_permute,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
-                        out=output_tmp,
-                        lse=lse,
-                        return_lse=True
-                    )
-                    output[num_decode_tokens:] = cp_lse_ag_out_rs(output_tmp, lse,
-                                                                get_dcp_group()
-                                                                )
+                    prefill_wrapper.run(prefill_query,
+                                        kv_cache_permute,
+                                        k_scale=layer._k_scale_float,
+                                        v_scale=layer._v_scale_float,
+                                        out=output_tmp,
+                                        lse=lse,
+                                        return_lse=True)
+                    output[num_decode_tokens:] = cp_lse_ag_out_rs(
+                        output_tmp, lse, get_dcp_group())
                 else:
                     assert prefill_wrapper._causal
-                    prefill_wrapper.run(
-                        prefill_query,
-                        kv_cache_permute,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
-                        out=output[num_decode_tokens:]
-                    )
+                    prefill_wrapper.run(prefill_query,
+                                        kv_cache_permute,
+                                        k_scale=layer._k_scale_float,
+                                        v_scale=layer._v_scale_float,
+                                        out=output[num_decode_tokens:])
             else:
                 # prefill_query may be non-contiguous
                 prefill_query = prefill_query.contiguous()
@@ -1016,15 +1008,14 @@ class FlashInferImpl(AttentionImpl):
                                                            or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
 
-                if self.dcp_world_size > 1: 
+                if self.dcp_world_size > 1:
                     decode_query = get_dcp_group().all_gather(
                         decode_query.contiguous(), dim=-2)
                     output_tmp = torch.empty_like(decode_query)
                     lse = torch.empty(
                         (decode_query.size(0), decode_query.size(1)),
                         dtype=torch.float32,
-                        device=decode_query.device
-                    )
+                        device=decode_query.device)
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_permute,
@@ -1035,10 +1026,7 @@ class FlashInferImpl(AttentionImpl):
                         return_lse=True,
                     )
                     output[:num_decode_tokens] = cp_lse_ag_out_rs(
-                        output_tmp,
-                        lse,
-                        get_dcp_group()
-                    )
+                        output_tmp, lse, get_dcp_group())
                 else:
                     decode_wrapper.run(
                         decode_query,

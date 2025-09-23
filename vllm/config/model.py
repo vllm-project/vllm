@@ -1131,13 +1131,22 @@ class ModelConfig:
             raise NotImplementedError(
                 "Pipeline parallelism is not supported for this model. "
                 "Supported models implement the `SupportsPP` interface.")
-        
-        num_key_value_heads = self.get_total_num_kv_heads()
-        self.num_q_per_kv = total_num_attention_heads // num_key_value_heads
-        if self.num_q_per_kv % parallel_config.decode_context_parallel_size != 0:
-            raise ValueError(
-                f"Total number of q per kv attention heads ({self.num_q_per_kv})"
-                " must be divisible by dcp world size when enable decode context parallel for GQA "
+
+        dcp_size = parallel_config.decode_context_parallel_size
+        if dcp_size > 1:
+            total_num_kv_heads = self.get_total_num_kv_heads()
+            max_dcp_size = tensor_parallel_size // total_num_kv_heads
+            assert dcp_size <= max_dcp_size, (
+                f"decode context parallel size must less than or equal to "
+                f"(tensor parallel size {tensor_parallel_size} // total "
+                f"num kv heads {total_num_kv_heads}) = {max_dcp_size}, "
+                f"but got {dcp_size}")
+
+            num_q_per_kv = total_num_attention_heads // total_num_kv_heads
+            assert num_q_per_kv % dcp_size == 0, (
+                f"Total number of q per kv attn heads ({num_q_per_kv})"
+                " must be divisible by dcp world size when enable "
+                "decode context parallel for GQA "
                 f"({parallel_config.decode_context_parallel_size}).")
 
     def get_sliding_window(self) -> Optional[int]:
