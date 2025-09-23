@@ -113,11 +113,11 @@ class CpuGpuBuffer:
         pin_memory: bool,
         with_numpy: bool = True,
     ) -> None:
-        self.cpu = torch.zeros(*size,
+        self.cpu = torch.empty(*size,
                                dtype=dtype,
                                device="cpu",
                                pin_memory=pin_memory)
-        self.gpu = self.cpu.to(device)
+        self.gpu = torch.empty_like(self.cpu, device=device)
         self.np: np.ndarray
         # To keep type hints simple (avoiding generics and subclasses), we
         # only conditionally create the numpy array attribute. This can cause
