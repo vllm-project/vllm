@@ -1358,7 +1358,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
     elif args.dataset_name == "sonnet":
         dataset = SonnetDataset(dataset_path=args.dataset_path)
         # For the "sonnet" dataset, formatting depends on the backend.
-        if args.endpoint_type == "openai-chat":
+        if args.backend == "openai-chat":
             input_requests = dataset.sample(
                 num_requests=args.num_prompts,
                 input_len=args.sonnet_input_len,
@@ -1462,7 +1462,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 "Please consider contributing if you would "
                 "like to add support for additional dataset formats.")
 
-        if dataset_class.IS_MULTIMODAL and args.endpoint_type not in [
+        if dataset_class.IS_MULTIMODAL and args.backend not in [
                 "openai-chat",
                 "openai-audio",
         ]:
@@ -1470,7 +1470,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             # endpoint-type.
             raise ValueError(
                 "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' endpoint-type.")
+                "'openai-audio' backends.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -1563,7 +1563,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
 
         try:
             # Enforce endpoint compatibility for multimodal datasets.
-            if args.dataset_name == "random-mm" and args.endpoint_type not in [
+            if args.dataset_name == "random-mm" and args.backend not in [
                     "openai-chat"]:
                 raise ValueError(
                     "Multi-modal content (images) is only supported on "

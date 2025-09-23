@@ -4,7 +4,7 @@
 
 // _dyn_quant_matmul_4bit is only available on AArch64.
 #if defined(__aarch64__)
-#include <ATen/ops/_dyn_quant_matmul_4bit.h>
+  #include <ATen/ops/_dyn_quant_matmul_4bit.h>
 #endif
 
 inline torch::Tensor mm(const torch::Tensor& a, const torch::Tensor& packed_w,
