@@ -391,7 +391,7 @@ class Worker(WorkerBase):
                 f"utilize gpu memory. Current kv cache memory in use is "
                 f"{GiB(self.available_kv_cache_memory_bytes)} GiB.")
 
-            logger.info(msg)
+            logger.debug(msg)
 
         # Warm up sampler and preallocate memory buffer for logits and other
         # sampling related tensors of max possible shape to avoid memory
