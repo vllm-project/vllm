@@ -110,7 +110,8 @@ class CPUWorker(Worker):
         intermediate_tensors = None
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         num_reqs = len(scheduler_output.num_scheduled_tokens)
-        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+        max_query_len = max(scheduler_output.num_scheduled_tokens.values())\
+                            if num_scheduled_tokens > 0 else 0
         num_input_tokens = self.model_runner._get_num_input_tokens(
             num_scheduled_tokens, num_reqs, max_query_len)
         all_gather_tensors = {
