@@ -196,8 +196,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: Optional[int] = None
-    # Does this backend/builder support issuing decodes with (uniform) qlen > 1?
-    supports_spec_as_decode: bool = False
 
     @abstractmethod
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
@@ -212,9 +210,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
             reorder_batch_threshold: int = 1,
             supports_spec_as_decode: bool = False) -> None:
         self.reorder_batch_threshold = reorder_batch_threshold
-        self.supports_spec_as_decode = supports_spec_as_decode
         if self.reorder_batch_threshold is not None \
-            and self.supports_spec_as_decode:
+            and supports_spec_as_decode:
             # If the backend supports spec-as-decode kernels, then we can set
             # the reorder_batch_threshold based on the number of speculative
             # tokens from the config.
