@@ -33,10 +33,10 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     apply_fp8_block_linear, check_aiter_fp8_linear_support,
     create_fp8_input_scale, create_fp8_scale_parameter,
-    create_fp8_weight_parameter, get_col_major_tma_aligned_tensor,
-    maybe_post_process_fp8_weight_block, process_fp8_weight_block_strategy,
-    process_fp8_weight_tensor_strategy, requant_weight_ue8m0_inplace,
-    validate_fp8_block_shape)
+    create_fp8_weight_parameter, expert_weight_is_col_major,
+    get_col_major_tma_aligned_tensor, maybe_post_process_fp8_weight_block,
+    process_fp8_weight_block_strategy, process_fp8_weight_tensor_strategy,
+    requant_weight_ue8m0_inplace, validate_fp8_block_shape)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin)
@@ -62,12 +62,6 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
-
-
-def _is_col_major(x: torch.Tensor) -> bool:
-    assert x.dim() == 3
-    b, m, n = x.shape
-    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
 
 
 class Fp8Config(QuantizationConfig):
@@ -660,10 +654,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # DeepGemm scales need to be transposed and aligned. We try to do
             # it ahead of time for performance reasons.
             if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
-                if _is_col_major(layer.w13_weight_scale_inv):
+                if expert_weight_is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
                         get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv)
-                if _is_col_major(layer.w2_weight_scale_inv):
+                if expert_weight_is_col_major(layer.w2_weight_scale_inv):
                     layer.w2_weight_scale_inv = \
                         get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
 
@@ -811,10 +805,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
             # Ensure column-major TMA alignment expected by DeepGEMM.
-            if _is_col_major(layer.w13_weight_scale_inv):
+            if expert_weight_is_col_major(layer.w13_weight_scale_inv):
                 layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
                     layer.w13_weight_scale_inv)
-            if _is_col_major(layer.w2_weight_scale_inv):
+            if expert_weight_is_col_major(layer.w2_weight_scale_inv):
                 layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
                     layer.w2_weight_scale_inv)
 
