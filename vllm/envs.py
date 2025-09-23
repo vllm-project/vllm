@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
     VLLM_NO_USAGE_STATS: bool = False
+    VLLM_DISABLE_FLASHINFER_PREFILL: bool = False
     VLLM_DO_NOT_TRACK: bool = False
     VLLM_USAGE_SOURCE: str = ""
     VLLM_CONFIGURE_LOGGING: int = 1
@@ -135,7 +136,7 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_TPU_USING_PATHWAYS: bool = False
-    VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_E8M0_HOPPER: bool = False
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
@@ -149,8 +150,11 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
-    VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx", "deepep_high_throughput",
-                                  "deepep_low_latency"] = "naive"
+    VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx",
+                                  "deepep_high_throughput",
+                                  "deepep_low_latency",
+                                  "allgather_reducescatter"] = \
+                                  "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
@@ -430,11 +434,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASH_ATTN_VERSION":
     lambda: maybe_convert_int(os.environ.get("VLLM_FLASH_ATTN_VERSION", None)),
 
-    # Internal flag to enable Dynamo fullgraph capture
-    "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
-    lambda: bool(
-        os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
-
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
     # enabled by default.
@@ -476,6 +475,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_USAGE_STATS_SERVER", "https://stats.vllm.ai"),
     "VLLM_NO_USAGE_STATS":
     lambda: os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1",
+    "VLLM_DISABLE_FLASHINFER_PREFILL":
+    lambda: os.environ.get("VLLM_DISABLE_FLASHINFER_PREFILL", "0") == "1",
     "VLLM_DO_NOT_TRACK":
     lambda: (os.environ.get("VLLM_DO_NOT_TRACK", None) or os.environ.get(
         "DO_NOT_TRACK", None) or "0") == "1",
@@ -528,7 +529,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "TORCH_SDPA": use torch.nn.MultiheadAttention
     # - "FLASH_ATTN": use FlashAttention
     # - "XFORMERS": use XFormers
-    # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA
@@ -1044,7 +1044,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
-    lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+    lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
 
     # Whether to use E8M0 scaling when DeepGEMM is used on Blackwell GPUs.
     "VLLM_USE_DEEP_GEMM_E8M0":
@@ -1124,14 +1124,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # all2all backend for vllm's expert parallel communication
     # Available options:
-    # - "naive": naive all2all implementation using all-reduce
+    # - "naive": naive all2all implementation using broadcasts
+    # - "allgather_reducescatter": all2all implementation based on allgather and
+    #  reducescatter
     # - "pplx": use pplx kernels
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
-    env_with_choices("VLLM_ALL2ALL_BACKEND", "naive",
+    env_with_choices("VLLM_ALL2ALL_BACKEND", "allgather_reducescatter",
                      ["naive", "pplx",
-                     "deepep_high_throughput", "deepep_low_latency"]),
+                     "deepep_high_throughput",
+                     "deepep_low_latency",
+                     "allgather_reducescatter"]),
 
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
@@ -1223,9 +1227,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL":
     lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
 
-    # If set to 1, use the TRTLLM attention backend in flashinfer.
+    # If set to 1/True, use the TRTLLM attention backend in flashinfer.
+    # If set to 0/False, use the default attention backend in flashinfer.
+    # If not set, auto-detect the attention backend in flashinfer.
     "VLLM_USE_TRTLLM_ATTENTION":
-    lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
+    lambda: (None if "VLLM_USE_TRTLLM_ATTENTION" not in os.environ else
+             os.environ["VLLM_USE_TRTLLM_ATTENTION"].lower() in ("1", "true")),
 
     # If set to 1, when we use fp8 kv, we do not quantize Q to fp8
     "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION":

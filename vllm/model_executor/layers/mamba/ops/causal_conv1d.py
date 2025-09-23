@@ -566,6 +566,9 @@ def causal_conv1d_fn(
         activation = "silu"
 
     args = None
+    # Store original dtype to cast back at the end
+    original_x_dtype = x.dtype
+    x = x.to(conv_states.dtype)
     out = torch.empty_like(x)
     if metadata is not None:
         cu_seqlen = metadata.cu_seqlen
@@ -772,7 +775,7 @@ def causal_conv1d_fn(
         BLOCK_N=256,
         num_stages=2,
     )
-    return out
+    return out.to(original_x_dtype)
 
 
 @triton.jit()
@@ -785,6 +788,7 @@ def _causal_conv1d_update_kernel(
     cache_seqlens_ptr,  # circular buffer
     conv_state_indices_ptr,
     num_accepted_tokens_ptr,
+    query_start_loc_ptr,  # (batch + 1)
     current_last_idx,
     last_state_idx,
     o_ptr,  # (batch, dim, seqlen)
@@ -813,6 +817,7 @@ def _causal_conv1d_update_kernel(
     HAS_BIAS: tl.constexpr,
     KERNEL_WIDTH: tl.constexpr,
     SILU_ACTIVATION: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_CACHE_ENABLED: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
@@ -850,6 +855,25 @@ def _causal_conv1d_update_kernel(
             # not processing as this is not the actual sequence
             return
 
+    if IS_VARLEN:
+        query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
+        query_end_index = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(
+            tl.int64)
+        # revise state_len and seqlen
+        state_len = state_len - (seqlen -
+                                 (query_end_index - query_start_index))
+        seqlen = query_end_index - query_start_index
+        x_offset = query_start_index * stride_x_token
+        o_offset = query_start_index * stride_o_token
+    else:
+        query_start_index = idx_seq * seqlen
+        query_end_index = query_start_index + seqlen
+        x_offset = idx_seq * stride_x_seq
+        o_offset = idx_seq * stride_o_seq
+
+    if query_start_index == query_end_index:
+        return
+
     if IS_SPEC_DECODING:
         # The rolling of conv state:
         #
@@ -864,8 +888,8 @@ def _causal_conv1d_update_kernel(
         # - accept 1 tokens: [history2, ..., historyM, draft1]
         # - accept 2 tokens: [history3, ..., historyM, draft1, draft2]
         # - and so on.
-        conv_state_token_offset = (tl.load(num_accepted_tokens_ptr + idx_seq) -
-                                   1)
+        conv_state_token_offset = (
+            tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1)
     else:
         conv_state_token_offset = 0
 
@@ -885,9 +909,12 @@ def _causal_conv1d_update_kernel(
     if KERNEL_WIDTH >= 4:
         conv_states_ptrs = prior_tokens + 2 * stride_conv_state_tok  # [BLOCK_N]
         col2 = tl.load(conv_states_ptrs, mask_w, 0.0)
-    if KERNEL_WIDTH == 5:
+    if KERNEL_WIDTH >= 5:
         conv_states_ptrs = prior_tokens + 3 * stride_conv_state_tok  # [BLOCK_N]
         col3 = tl.load(conv_states_ptrs, mask_w, 0.0)
+    if KERNEL_WIDTH >= 6:
+        conv_states_ptrs = prior_tokens + 4 * stride_conv_state_tok  # [BLOCK_N]
+        col4 = tl.load(conv_states_ptrs, mask_w, 0.0)
 
     # STEP 2: assume state_len > seqlen
     idx_tokens = tl.arange(0, NP2_STATELEN)  # [BLOCK_M]
@@ -907,8 +934,7 @@ def _causal_conv1d_update_kernel(
     conv_state = tl.load(conv_state_ptrs_source, mask, other=0.0)
 
     VAL = state_len - seqlen
-    x_base = x_ptr + (idx_seq * stride_x_seq) + (idx_feats * stride_x_dim
-                                                 )  # [BLOCK_N]
+    x_base = x_ptr + x_offset + (idx_feats * stride_x_dim)  # [BLOCK_N]
 
     x_ptrs = x_base[None, :] + (
         (idx_tokens - VAL) * stride_x_token)[:, None]  # [BLOCK_M, BLOCK_N]
@@ -963,12 +989,18 @@ def _causal_conv1d_update_kernel(
     if KERNEL_WIDTH >= 4:
         w_ptrs = w_base + (3 * stride_w_width)  # [BLOCK_N] tensor
         w_col3 = tl.load(w_ptrs, mask_w, other=0.0)
+    if KERNEL_WIDTH >= 5:
+        w_ptrs = w_base + (4 * stride_w_width)  # [BLOCK_N] tensor
+        w_col4 = tl.load(w_ptrs, mask_w, other=0.0)
+    if KERNEL_WIDTH >= 6:
+        w_ptrs = w_base + (5 * stride_w_width)  # [BLOCK_N] tensor
+        w_col5 = tl.load(w_ptrs, mask_w, other=0.0)
 
     x_base_1d = x_base  # starting of chunk [BLOCK_N]
     mask_x_1d = idx_feats < dim
 
     # STEP 5: compute each token
-    for idx_token in tl.static_range(seqlen):
+    for idx_token in tl.range(seqlen):
         acc = acc_preload
 
         matrix_w = w_col0
@@ -998,6 +1030,37 @@ def _causal_conv1d_update_kernel(
                     matrix_w = w_col3
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+            elif KERNEL_WIDTH == 5:
+                if j == 1:
+                    matrix_w = w_col1
+                    matrix_x = col1
+                elif j == 2:
+                    matrix_w = w_col2
+                    matrix_x = col2
+                elif j == 3:
+                    matrix_w = w_col3
+                    matrix_x = col3
+                elif j == 4:
+                    matrix_w = w_col4
+                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+            elif KERNEL_WIDTH == 6:
+                if j == 1:
+                    matrix_w = w_col1
+                    matrix_x = col1
+                elif j == 2:
+                    matrix_w = w_col2
+                    matrix_x = col2
+                elif j == 3:
+                    matrix_w = w_col3
+                    matrix_x = col3
+                elif j == 4:
+                    matrix_w = w_col4
+                    matrix_x = col4
+                elif j == 5:
+                    matrix_w = w_col5
+                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
 
             acc += matrix_x * matrix_w  # [BLOCK_N]
 
@@ -1010,14 +1073,24 @@ def _causal_conv1d_update_kernel(
             col0 = col1
             col1 = col2
             col2 = matrix_x
+        elif KERNEL_WIDTH == 5:
+            col0 = col1
+            col1 = col2
+            col2 = col3
+            col3 = matrix_x
+        elif KERNEL_WIDTH == 6:
+            col0 = col1
+            col1 = col2
+            col2 = col3
+            col3 = col4
+            col4 = matrix_x
 
         if SILU_ACTIVATION:
             acc = acc / (1 + tl.exp(-acc))
         mask_1d = (idx_token < seqlen) & (idx_feats < dim
                                           )  # token-index  # feature-index
-        o_ptrs = o_ptr + (
-            idx_seq) * stride_o_seq + idx_token * stride_o_token + (
-                idx_feats * stride_o_dim)
+        o_ptrs = o_ptr + o_offset + idx_token * stride_o_token + (idx_feats *
+                                                                  stride_o_dim)
 
         tl.store(o_ptrs, acc, mask=mask_1d)
 
@@ -1031,6 +1104,8 @@ def causal_conv1d_update(
     cache_seqlens: Optional[torch.Tensor] = None,
     conv_state_indices: Optional[torch.Tensor] = None,
     num_accepted_tokens: Optional[torch.Tensor] = None,
+    query_start_loc: Optional[torch.Tensor] = None,
+    max_query_len: int = -1,
     pad_slot_id: int = PAD_SLOT_ID,
     current_last_idx: Optional[torch.Tensor] = None,
     last_state_idx: Optional[torch.Tensor] = None,
@@ -1038,9 +1113,13 @@ def causal_conv1d_update(
     validate_data=False,
 ):
     """
-    x: (batch, dim) or (batch, dim, seqlen)
-        [shape=2: single token prediction]
-        [shape=3: single or multiple tokens prediction]
+    x: Input tensor which can take the following shapes:
+
+    - `[batch, dim]` - single token prediction
+    - `[batch, dim, seqlen]` - single or multiple tokens prediction
+    - `[num_tokens, dim]` - continuous batching, where num_tokens is
+        the total tokens of all sequences in that batch
+
     conv_state: (..., dim, state_len), where state_len >= width - 1
     weight: (dim, width)
     bias: (dim,)
@@ -1057,13 +1136,24 @@ def causal_conv1d_update(
         The last cache block to be filled. This tensor indexes into cache_indices
     last_state_idx: (batch) int32
         The cache block for the init values. This tensor indexes into cache_indices
+    num_accepted_tokens: (batch,), dtype int32
+        If not None, it indicates the number of accepted tokens for each
+        sequence in the batch.
+        This is used in speculative decoding, where the conv_state is updated
+        in a sliding window manner.
+    query_start_loc: (batch + 1,) int32
+        If not None, the inputs is given in a varlen fashion and this indicates
+        the starting index of each sequence in the batch.
+    max_query_len: int
+        If query_start_loc is not None, this indicates the maximum query
+        length in the batch.
     pad_slot_id: int
             if cache_indices is passed, lets the kernel identify padded
             entries that will not be processed,
             for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
             in this case, the kernel will not process entries at
             indices 0 and 3
-    out: (batch, dim) or (batch, dim, seqlen)
+    out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
     """
     if validate_data:
         assert cache_seqlens is None  # not implemented yet - ok for vLLM
@@ -1073,11 +1163,20 @@ def causal_conv1d_update(
         activation = "silu" if activation is True else None
     elif activation is not None:
         assert activation in ["silu", "swish"]
-    unsqueeze = x.dim() == 2
+
+    original_x_dtype = x.dtype
+    x = x.to(conv_state.dtype)
+    unsqueeze = query_start_loc is None and x.dim() == 2
     if unsqueeze:
         # make it (batch, dim, seqlen) with seqlen == 1
         x = x.unsqueeze(-1)
-    batch, dim, seqlen = x.shape
+    if query_start_loc is None:
+        batch, dim, seqlen = x.shape
+    else:
+        assert conv_state_indices is not None
+        batch = conv_state_indices.size(0)
+        dim = x.size(1)
+        seqlen = max_query_len
     _, width = weight.shape
     # conv_state: (..., dim, state_len), where state_len >= width - 1
     num_cache_lines, _, state_len = conv_state.size()
@@ -1103,10 +1202,17 @@ def causal_conv1d_update(
     out = x
     stride_w_dim, stride_w_width = weight.stride()
 
-    stride_x_seq, stride_x_dim, stride_x_token = x.stride(
-    )  # X (batch, dim, seqlen)
+    if query_start_loc is None:
+        # X (batch, dim, seqlen)
+        stride_x_seq, stride_x_dim, stride_x_token = x.stride()
+        stride_o_seq, stride_o_dim, stride_o_token = out.stride()
+    else:
+        # X (dim, cu_seqlen)
+        stride_x_token, stride_x_dim = x.stride()
+        stride_x_seq = 0
+        stride_o_token, stride_o_dim = out.stride()
+        stride_o_seq = 0
 
-    stride_o_seq, stride_o_dim, stride_o_token = out.stride()
     stride_istate_seq, stride_istate_dim, stride_istate_token = conv_state.stride(
     )
     stride_state_indices = conv_state_indices.stride(
@@ -1132,6 +1238,7 @@ def causal_conv1d_update(
         cache_seqlens,
         conv_state_indices,
         num_accepted_tokens,
+        query_start_loc,
         current_last_idx,
         last_state_idx,
         out,
@@ -1160,6 +1267,7 @@ def causal_conv1d_update(
         HAS_BIAS=bias is not None,
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
+        IS_VARLEN=query_start_loc is not None,
         IS_CONTINUOUS_BATCHING=conv_state_indices is not None,
         IS_CACHE_ENABLED=current_last_idx is not None,
         IS_SPEC_DECODING=num_accepted_tokens is not None,
@@ -1169,4 +1277,4 @@ def causal_conv1d_update(
     )
     if unsqueeze:
         out = out.squeeze(-1)
-    return out
+    return out.to(original_x_dtype)

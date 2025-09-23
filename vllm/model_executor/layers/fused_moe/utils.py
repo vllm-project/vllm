@@ -268,3 +268,7 @@ def _validate_scale_shape(
         assert block_shape is not None
         expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
         assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
+
+
+def activation_without_mul(activation: str) -> str:
+    return activation + "_no_mul"

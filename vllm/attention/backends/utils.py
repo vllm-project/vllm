@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention backend utils"""
-from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
-                    TypeVar, Union)
+from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import numpy as np
 import torch
@@ -16,27 +14,15 @@ from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
 from vllm.attention.backends.abstract import AttentionType
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import ModelRunnerBase
-
-# Error string(s) for encoder/decoder
-# unsupported attention scenarios
-STR_NOT_IMPL_ENC_DEC_ROCM_HIP = ("ROCm/HIP is not currently supported "
-                                 "with encoder/decoder models.")
 
 PAD_SLOT_ID = -1
 
 # Switch to numpy implementation of compute_slot_mapping
 # if we have at least this many elements. Could be tuned further.
 _COMPUTE_SLOT_MAPPING_NUMPY_NUMEL = 256
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 def is_block_tables_empty(block_tables: Union[None, Dict]):
@@ -129,7 +115,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
     _metadata_cls: Type[TAttentionMetadata]
 
-    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+    def __init__(self, input_builder):
         self.input_builder = input_builder
         self.runner = input_builder.runner
 
@@ -142,16 +128,11 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
         self.curr_seq_lens: List[int] = []
-        self.multimodal_placeholder_maps: Dict[
-            str,
-            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
 
-    def _add_seq_group(
-            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool):
+    def _add_seq_group(self, inter_data, chunked_prefill_enabled: bool):
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
 
@@ -163,12 +144,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                  inter_data.curr_sliding_window_blocks):
             self.context_lens.append(context_len)
             if is_prompt:
-                mm_maps = inter_data.multi_modal_placeholder_maps
-                if mm_maps:
-                    for modality, placeholders in mm_maps.items():
-                        self.multimodal_placeholder_maps[modality].extend(
-                            placeholders)
-
                 self.num_prefills += 1
                 self.num_prefill_tokens += token_len
                 self.prefill_seq_lens.append(seq_len)
@@ -263,16 +238,10 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                                   self.runner.pin_memory)
         seq_start_loc_tensor = async_tensor_h2d(seq_start_loc, torch.int32,
                                                 device, self.runner.pin_memory)
-        placeholder_index_maps = {
-            modality: placeholder_map.index_map()
-            for modality, placeholder_map in
-            self.multimodal_placeholder_maps.items()
-        }
 
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
-            multi_modal_placeholder_index_maps=placeholder_index_maps,
             enable_kv_scales_calculation=True,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -291,7 +260,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
 class CommonAttentionState(AttentionState):
 
-    def __init__(self, runner: "ModelRunnerBase"):
+    def __init__(self, runner):
         self.runner = runner
         self._is_graph_capturing = False
 
@@ -329,7 +298,6 @@ class CommonAttentionState(AttentionState):
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             slot_mapping=self._graph_slot_mapping[:batch_size],
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             seq_lens=None,
             seq_lens_tensor=self._graph_seq_lens[:batch_size],
@@ -347,10 +315,9 @@ class CommonAttentionState(AttentionState):
             # The encoder decoder model works only with XFormers and
             # Flash Attention backend. Assert the same.
             assert self.runner.attn_backend.get_name() in \
-                   ["XFORMERS", "FLASH_ATTN", "ROCM_FLASH"], \
-                f"Expected attn_backend name to be either 'XFORMERS'," \
-                f"'ROCM_FLASH', or 'FLASH_ATTN', but " \
-                f"got '{self.runner.attn_backend.get_name()}'"
+                   ["XFORMERS", "FLASH_ATTN"], \
+                f"Expected attn_backend name to be either 'XFORMERS' or " \
+                f"'FLASH_ATTN', but got '{self.runner.attn_backend.get_name()}'"
             self._update_captured_metadata_for_enc_dec_model(
                 batch_size=batch_size, attn_metadata=attn_metadata)
 
@@ -369,10 +336,9 @@ class CommonAttentionState(AttentionState):
             # The encoder decoder model works only with XFormers and
             # Flash Attention backend. Assert the same.
             assert self.runner.attn_backend.get_name() in \
-                   ["XFORMERS", "FLASH_ATTN", "ROCM_FLASH"], \
-                f"Expected attn_backend name to be either 'XFORMERS'," \
-                f"'ROCM_FLASH', or 'FLASH_ATTN', but " \
-                f"got '{self.runner.attn_backend.get_name()}'"
+                   ["XFORMERS", "FLASH_ATTN"], \
+                f"Expected attn_backend name to be either 'XFORMERS' or " \
+                f"'FLASH_ATTN', but got '{self.runner.attn_backend.get_name()}'"
             self._add_additional_input_buffers_for_enc_dec_model(
                 attn_metadata=attn_metadata, input_buffers=input_buffers)
         return input_buffers
