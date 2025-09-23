@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
+from vllm.config import ECProducer
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import (KVConnectorOutput, ECConnectorOutput)

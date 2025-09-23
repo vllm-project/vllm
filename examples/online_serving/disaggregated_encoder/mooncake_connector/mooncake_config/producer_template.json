@@ -1,0 +1,10 @@
+{
+    "local_hostname": "localhost",
+    "metadata_server": "http://localhost:${MOONCAKE_METADATA_PORT}/metadata",
+    "global_segment_size": 32212254720,
+    "local_buffer_size": 1073741824,
+    "protocol": "tcp",
+    "device_name": "",
+    "master_server_address": "localhost:${MOONCAKE_MASTER_PORT}",
+    "zero_copy": ${MOONCAKE_ZEROCOPY}
+}

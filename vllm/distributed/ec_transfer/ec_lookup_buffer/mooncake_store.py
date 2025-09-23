@@ -1,0 +1,448 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+This file contains a new class `MooncakeStore` that allows developers to
+think of EC cache transfer operations as putting new EC cache entries
+into a remote ECStore-based lookup buffer and getting existing EC caches
+from this remote lookup buffer.
+"""
+from collections import deque
+import json
+import os
+from dataclasses import dataclass
+import time
+from typing import List, Optional
+import torch
+import numpy as np
+import asyncio
+import math
+import threading
+
+from vllm.distributed.ec_transfer.utils.tensor_memory_pool import (
+    TensorMemoryPool)
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
+
+DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
+DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
+DEFAULT_TENSOR_POOL_SIZE = int(1073741824 * 3)  # 1.0 GiB
+
+# View map for unsupported dtypes (add more as needed, e.g., for future types)
+VIEW_MAP = {
+    torch.bfloat16: torch.uint16,
+    # Example: if complex32 unsupported, map to uint32 or similar
+}
+
+logger = init_logger(__name__)
+
+
+@dataclass
+class MooncakeStoreConfig:
+    local_hostname: str
+    metadata_server: str
+    global_segment_size: int
+    local_buffer_size: int
+    protocol: str
+    device_name: str
+    master_server_address: str
+    storage_root_dir: str
+    transfer_timeout: int
+    zero_copy: bool
+
+    @staticmethod
+    def from_file(file_path: str) -> 'MooncakeStoreConfig':
+        """Load the config from a JSON file."""
+        with open(file_path) as fin:
+            config = json.load(fin)
+        return MooncakeStoreConfig(
+            local_hostname=config.get("local_hostname"),
+            metadata_server=config.get("metadata_server"),
+            global_segment_size=config.get("global_segment_size",
+                                           DEFAULT_GLOBAL_SEGMENT_SIZE),
+            local_buffer_size=config.get("local_buffer_size",
+                                         DEFAULT_LOCAL_BUFFER_SIZE),
+            protocol=config.get("protocol", "tcp"),
+            device_name=config.get("device_name", ""),
+            master_server_address=config.get("master_server_address"),
+            storage_root_dir=config.get("storage_root_dir", ""),
+            transfer_timeout=int(config.get("transfer_timeout", 1)),
+            zero_copy=bool(config.get("zero_copy", True))
+        )
+
+
+@dataclass
+class ECMooncakeTensorPoolMetadata:
+    key: str
+    addr: str
+
+
+class ECMooncakeStore:
+    """
+    Currently, it only supports zero-copy get/put with
+    following data path gpu->cpu->cpu->gpu
+    TODO: remove by keys, non-blocking
+    """
+
+    def __init__(self, vllm_config: "VllmConfig"):
+        try:
+            from mooncake.store import MooncakeDistributedStore, ReplicateConfig
+        except ImportError as e:
+            raise ImportError(
+                "Please install mooncake by following the instructions at "
+                "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
+                "to run vLLM with MooncakeConnector.") from e
+
+        try:
+            self.store = MooncakeDistributedStore()
+            self.config = MooncakeStoreConfig.from_file(
+                vllm_config
+                    .ec_transfer_config
+                    .ec_connector_extra_config["ec_mooncake_config_file_path"]
+            )
+            logger.debug("Mooncake Configuration loaded successfully.")
+
+            # Check if storage_root_dir exists and set environment variable
+            if (
+                self.config.storage_root_dir is not None
+                and self.config.storage_root_dir != ""
+            ):
+                os.environ["MOONCAKE_STORAGE_ROOT_DIR"] = self.config.storage_root_dir
+                logger.info(
+                    "Set MOONCAKE_STORAGE_ROOT_DIR to: %s", self.config.storage_root_dir
+                )
+            
+            logger.info("Setting up Mooncake store with parameters:")
+            logger.info(f"  local_hostname: {self.config.local_hostname}")
+            logger.info(f"  metadata_server: {self.config.metadata_server}")
+            logger.info(f"  global_segment_size: {self.config.global_segment_size}")
+            logger.info(f"  local_buffer_size: {self.config.local_buffer_size}")
+            logger.info(f"  protocol: {self.config.protocol}")
+            logger.info(f"  device_name: {self.config.device_name}")
+            logger.info(f"  master_server_address: {self.config.master_server_address}")
+            logger.info(f"  transfer_timeout: {self.config.transfer_timeout}")
+            logger.info(f"  zero_copy: {self.config.zero_copy}")
+
+            self.store.setup(self.config.local_hostname,
+                             self.config.metadata_server,
+                             self.config.global_segment_size,
+                             self.config.local_buffer_size,
+                             self.config.protocol, self.config.device_name,
+                             self.config.master_server_address)
+
+        except ValueError as e:
+            logger.error("Configuration loading failed: %s", e)
+            raise
+        except Exception as exc:
+            logger.error(
+                "An error occurred while loading the configuration: %s", exc)
+            raise
+
+        # Initialize ReplicateConfig
+        self.replica_config = ReplicateConfig()
+        self.replica_config.replica_num = 1
+
+        logger.info("MooncakeConnector initialized successfully.")
+
+        # Zero copy init
+        if self.config.zero_copy:
+            self.tensor_pool = TensorMemoryPool(
+                max_block_size=DEFAULT_TENSOR_POOL_SIZE)
+            self.store.register_buffer(
+                self.tensor_pool.base_address, DEFAULT_TENSOR_POOL_SIZE)
+            self.fifo_pool_queue = deque()
+        
+        # Put async init
+        self.put_queue = set()
+        self.put_queue_cv = threading.Condition()
+
+    def close(self):
+        if self.config.zero_copy:
+            self.store.unregister_buffer(
+                self.tensor_pool.base_address, DEFAULT_TENSOR_POOL_SIZE)
+            self.tensor_pool.cleanup()
+
+        self.store.close()
+        logger.info("Closed the mooncake store connection")
+
+    def batch_exists(self, keys: List[str]) -> List[bool]:
+        if not keys:
+            return []
+        return self.store.batch_is_exist(keys)
+
+    def metadata_key(self, key: str) -> str:
+        #TODO: no guarantee that there is no (k,v) with this key
+        return key + "_metadata"
+    
+    def get(self, key: str) -> Optional[torch.Tensor]:
+        logger.error("Single get operation is not supported. Use batch_get instead.")
+        raise NotImplementedError(
+            "Single get is not supported. Use batch_get([key]) instead."
+        )
+    
+    def batch_get(self, keys: List[str]) -> List[Optional[torch.Tensor]]:
+        if self.config.zero_copy:
+            return self._zero_copy_batch_get(keys)
+        
+        return self._batch_get(keys)
+    
+    def _zero_copy_batch_get(self, keys: List[str]) -> List[Optional[torch.Tensor]]:
+        if not keys:
+            return []
+
+        # Retrieve metadata
+        try:
+            meta_keys = [self.metadata_key(k) for k in keys]
+            meta_bytes = self.store.get_batch(meta_keys)
+        except Exception as e:
+            logger.error(f"get_batch for metadata failed: {str(e)}")
+            return [None] * len(keys)
+
+        buffer_shapes = []
+        buffer_addrs = []
+        buffer_dtypes = []
+        sizes = []
+        exist_ids = []
+        for id, meta_byte in enumerate(meta_bytes):
+            # non-exist object
+            if not meta_byte:
+                continue
+
+            exist_ids.append(id)
+            meta_out = json.loads(meta_byte.decode('utf-8'))
+
+            # Retrieve metadata (dtype, shape)
+            buffer_dtype = getattr(torch, meta_out['dtype'].split(".")[1])
+            buffer_shape = tuple(meta_out['shape'])
+            element_size = torch.tensor([], dtype=buffer_dtype).element_size()
+            num_elem = math.prod(buffer_shape)
+            buffer_size = num_elem * element_size
+
+            buffer_addr = self._pool_allocate(buffer_size)
+            buffer_addrs.append(buffer_addr)
+            buffer_dtypes.append(buffer_dtype)
+            sizes.append(buffer_size)
+            buffer_shapes.append(buffer_shape)
+
+        # Fill None first and
+        # replace valid keys with corresponding buffers
+        results = [None] * len(keys)
+        try:
+            valid_keys = [keys[id] for id in exist_ids]
+            read_bytes = self.store.batch_get_into(valid_keys, buffer_addrs, sizes)
+        except Exception as e:
+            logger.error(f"batch_get_into failed: {str(e)}")
+
+        # NOTE: should I delay free buffer
+        for id, addr, dtype, shape, read_byte in \
+            zip(exist_ids, buffer_addrs, buffer_dtypes, buffer_shapes, read_bytes):
+            if read_byte > 0:
+                results[id] = self.tensor_pool.load_tensor(addr, dtype, shape, 'cuda')
+
+            self.tensor_pool.free(addr)
+
+        return results
+    
+    def _batch_get(self, keys: List[str]) -> List[Optional[torch.Tensor]]:
+        try:
+            bytes_list = self.store.get_batch(keys)
+        except Exception as e:
+            logger.error(f"batch_get_into failed: {str(e)}")
+            return [None] * len(keys)
+
+        tensors = []
+        for bytes_data in bytes_list:
+            if not bytes_data:
+                tensors.append(None)
+                continue
+
+            len_meta = int.from_bytes(bytes_data[:4], 'big')
+            meta = json.loads(bytes_data[4:4 + len_meta].decode('utf-8'))
+            data = bytes_data[4 + len_meta:]
+            arr_loaded = np\
+                .frombuffer(data, dtype=meta['serialized_dtype'])\
+                .reshape(meta['shape'])
+            tensor_loaded = torch.from_numpy(arr_loaded)
+
+            if meta['original_dtype'] != meta['serialized_dtype']:
+                tensor_loaded = tensor_loaded.view(
+                    getattr(torch, meta['original_dtype'].split('.')[-1])
+                )  # e.g., 'torch.bfloat16' -> torch.bfloat16
+            tensors.append(tensor_loaded.cuda())
+
+        return tensors
+    
+    def put(self, key: str, tensor: torch.Tensor) -> None:
+        logger.error("Single put operation is not supported. Use batch_put instead.")
+        raise NotImplementedError(
+            "Single put is not supported. Use batch_put([key], [tensor]) instead."
+        )
+    
+    def wait_for_put(self):
+        with self.put_queue_cv:
+            while self.put_queue:
+                self.put_queue_cv.wait()
+
+    async def batch_put(self, keys: List[str], tensors: List[torch.Tensor]) -> None:
+        with self.put_queue_cv:
+            self.put_queue.update(keys)
+
+        if self.config.zero_copy:
+            return await self._zero_copy_batch_put(keys, tensors)
+        return await self._batch_put(keys, tensors)
+
+    async def _zero_copy_batch_put(self, keys: List[str], tensors: List[torch.Tensor]) -> None:
+        if not keys:
+            return
+
+        # Prepair metadata
+        meta_keys = []
+        meta_values = []
+        buffer_addrs = []
+        buffer_sizes = []
+        for key, tensor in zip(keys, tensors):
+            buffer_addr = self._pool_store_tensor(tensor)
+            self.fifo_pool_queue.append(
+                ECMooncakeTensorPoolMetadata(key, buffer_addr)
+            )
+            buffer_size = tensor.numel() * tensor.element_size()
+            buffer_addrs.append(buffer_addr)
+            buffer_sizes.append(buffer_size)
+
+            meta = {
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype)
+            }
+            meta_str = json.dumps(meta)
+            meta_bytes = meta_str.encode('utf-8')
+            key_meta = self.metadata_key(key)
+            meta_keys.append(key_meta)
+            meta_values.append(meta_bytes)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.store.put_batch,
+                    meta_keys,
+                    meta_values,
+                    self.replica_config
+                ),
+                timeout=self.config.transfer_timeout,
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to put metadata for keys {",".join(keys)} using put_batch: "
+                f"{type(e).__name__}: {str(e)}"
+            )
+
+        try:
+            # Zero-copy put
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.store.batch_put_from,
+                    keys,
+                    buffer_addrs,
+                    buffer_sizes,
+                    self.replica_config
+                ),
+                timeout=self.config.transfer_timeout,
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to put keys {",".join(keys)} using batch_put_from: "
+                f"{type(e).__name__}: {str(e)}"
+            )
+        
+        with self.put_queue_cv:
+            self.put_queue.difference_update(keys)
+            if not self.put_queue:
+                self.put_queue_cv.notify()
+
+    async def _batch_put(self, keys: List[str], tensors: List[torch.Tensor]) -> None:
+        bytes_list = []
+        for tensor in tensors:
+            if tensor.get_device() != -1:
+                tensor = tensor.cpu()
+
+            original_dtype_str = str(tensor.dtype)
+            if tensor.dtype in VIEW_MAP:
+                view_tensor = tensor.view(VIEW_MAP[tensor.dtype])
+                arr = view_tensor.numpy()
+                serialized_dtype_str = str(arr.dtype)
+            else:
+                arr = tensor.numpy()
+                serialized_dtype_str = original_dtype_str
+
+            data_bytes = arr.tobytes()
+            meta = {
+                'shape': list(arr.shape),
+                'original_dtype': original_dtype_str,
+                'serialized_dtype': serialized_dtype_str
+            }
+            meta_bytes = json.dumps(meta).encode('utf-8')
+            len_bytes = len(meta_bytes).to_bytes(4, 'big')  # Prefix metadata length
+            bytes_list.append(len_bytes + meta_bytes + data_bytes)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.store.put_batch,
+                    keys,
+                    bytes_list,
+                    self.replica_config
+                ),
+                timeout=self.config.transfer_timeout,
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to put keys {",".join(keys)} using put_batch: "
+                f"{type(e).__name__}: {str(e)}"
+            )
+        
+        with self.put_queue_cv:
+            self.put_queue.difference_update(keys)
+            if not self.put_queue:
+                self.put_queue_cv.notify()
+    
+    # ==============================
+    # Tensor pool helper functions
+    # ==============================
+
+    def _pool_eviction(self) -> None:
+        evicted_buffer = self.fifo_pool_queue.popleft()
+        self.tensor_pool.free(evicted_buffer.addr)
+        self.store.remove(evicted_buffer.key)
+        # Currently stall the process with mooncake 0.3.6
+        # count = self.store.remove_by_regex(
+        #     f"^(?:{evicted_buffer.key}|{self.metadata_key(evicted_buffer.key)})$"
+        # )
+        # assert count == 2
+
+    def _pool_allocate(self, size: int) -> int:
+        assert size <= DEFAULT_TENSOR_POOL_SIZE
+
+        while True:
+            try:
+                addr = self.tensor_pool.allocate(size)
+                return addr
+            except ValueError as e:
+                if str(e) != "Insufficient memory":
+                    raise ValueError(e)
+
+                if not self.fifo_pool_queue:
+                    raise ValueError("Insufficient memory")
+
+                self._pool_eviction()
+    
+    def _pool_store_tensor(self, tensor: torch.Tensor) -> int:
+        while True:
+            try:
+                addr = self.tensor_pool.store_tensor(tensor)
+                return addr
+            except ValueError as e:
+                if str(e) != "Insufficient memory":
+                    raise ValueError(e)
+
+                if not self.fifo_pool_queue:
+                    raise ValueError("Insufficient memory")
+
+                self._pool_eviction()
