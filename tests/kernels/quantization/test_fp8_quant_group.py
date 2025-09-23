@@ -56,6 +56,9 @@ def test_quantfp8_group_functionality(batch_size: int, hidden_dim: int,
     _, scales_col = quant_op_col.forward_native(x.clone())
     assert scales_col.shape == (batch_size, expected_num_groups)
 
+    # Test column-major scales consistency
+    assert torch.allclose(scales_col, scales_native, rtol=1e-9, atol=1e-8)
+
     # 3. Test CUDA implementation (only for divisible dimensions)
     if is_divisible:
         x_quant_cuda, scales_cuda = quant_op.forward_cuda(x.clone())
