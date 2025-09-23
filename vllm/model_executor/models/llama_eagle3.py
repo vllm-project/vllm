@@ -120,6 +120,7 @@ class LlamaModel(nn.Module):
             LlamaDecoderLayer(
                 current_vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
+                config=self.config,
             )
         ])
         if hasattr(self.config, "target_hidden_size"):
