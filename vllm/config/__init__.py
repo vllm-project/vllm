@@ -693,11 +693,11 @@ class VllmConfig:
                     return self.quant_config.has_blocked_weights()
             return False
 
-        # Enable quant_fp8 CUDA ops on H100 since it's faster than
+        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
+        # On H100 the CUDA kernel is faster than
         # native implementation
         # https://github.com/vllm-project/vllm/issues/25094
-        if current_platform.has_device_capability(
-                90) and has_blocked_weights():
+        if has_blocked_weights():
             custom_ops = self.compilation_config.custom_ops
             if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
