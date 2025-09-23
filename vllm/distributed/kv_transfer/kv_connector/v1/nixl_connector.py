@@ -550,6 +550,7 @@ class NixlConnectorWorker:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
         # Background thread for initializing new NIXL handshakes.
+        self._handshake_initiation_executor: Optional[ThreadPoolExecutor] = None
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # NIXL is not guaranteed to be thread-safe, limit 1 worker.
             max_workers=1,
@@ -1347,20 +1348,27 @@ class NixlConnectorWorker:
         """Shutdown the connector worker."""
         if executor := getattr(self, "_handshake_initiation_executor", None):
             executor.shutdown(wait=False)
+            self._handshake_initiation_executor = None
         if listener_t := getattr(self, "_nixl_handshake_listener_t", None):
             listener_t.join(timeout=0)
+            self._nixl_handshake_listener_t = None
         for handles in self._recving_transfers.values():
             for handle, _ in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
+        self._recving_transfers.clear()
         if self.src_xfer_side_handle:
             self.nixl_wrapper.release_dlist_handle(self.src_xfer_side_handle)
+            self.src_xfer_side_handle = 0
         for dst_xfer_side_handle in self.dst_xfer_side_handles.values():
             self.nixl_wrapper.release_dlist_handle(dst_xfer_side_handle)
+        self.dst_xfer_side_handles.clear()
         for remote_agents in self._remote_agents.values():
             for agent_name in remote_agents.values():
                 self.nixl_wrapper.remove_remote_agent(agent_name)
+        self._remote_agents.clear()
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
+        self._registered_descs.clear()
 
 
 @contextlib.contextmanager
