@@ -58,6 +58,12 @@ except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
 
+try:
+    from nixl._api import nixl_agent_config
+except ImportError:
+    nixl_agent_config = None
+    logger.warning("NIXL agent config is not available")
+
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
 _NIXL_SUPPORTED_DEVICE = {
@@ -65,6 +71,8 @@ _NIXL_SUPPORTED_DEVICE = {
     "tpu": ("cpu", ),
     "xpu": ("cpu", ),
 }
+# support for oot platform by providing mapping in current_platform
+_NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 
 class NixlAgentMetadata(
@@ -448,8 +456,15 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
+        self.nixl_backends = \
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "backends", ["UCX"])
         # Agent.
-        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
+        non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
+        config = nixl_agent_config(backends=self.nixl_backends) if len(
+            non_ucx_backends) > 0 and nixl_agent_config is not None else None
+
+        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
@@ -486,11 +501,15 @@ class NixlConnectorWorker:
         # used when device memory can not be registered under nixl
         self.host_xfer_buffers: dict[str, torch.Tensor] = {}
         self.use_host_buffer = self.kv_buffer_device == "cpu"
-        if self.kv_buffer_device == "cuda":
-            self.nixl_memory_type = "VRAM"
-        elif self.kv_buffer_device == "cpu":
-            self.nixl_memory_type = "DRAM"
-        else:
+        # support for oot platform which can't register nixl memory
+        # type based on kv_buffer_device
+        self.nixl_memory_type = current_platform.get_nixl_memory_type()
+        if self.nixl_memory_type is None:
+            if self.kv_buffer_device == "cuda":
+                self.nixl_memory_type = "VRAM"
+            elif self.kv_buffer_device == "cpu":
+                self.nixl_memory_type = "DRAM"
+        if self.nixl_memory_type is None:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported.")
@@ -766,7 +785,7 @@ class NixlConnectorWorker:
         descs = self.nixl_wrapper.get_reg_descs(caches_data,
                                                 self.nixl_memory_type)
         logger.debug("Registering descs: %s", caches_data)
-        self.nixl_wrapper.register_memory(descs)
+        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
 
