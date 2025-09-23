@@ -8,6 +8,7 @@ import torch
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              BatchOrderSpec,
                                               CommonAttentionMetadata,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -35,7 +36,9 @@ class LinearAttentionMetadata:
 class LinearAttentionMetadataBuilder(
         AttentionMetadataBuilder[LinearAttentionMetadata]):
 
-    reorder_batch_threshold: ClassVar[int] = 1
+    batch_order_spec: ClassVar[BatchOrderSpec] = \
+        BatchOrderSpec(reorder_required=True, decode_threshold=1,
+                       decode_first=True)
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -51,10 +54,10 @@ class LinearAttentionMetadataBuilder(
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold))
+                batch_order_spec=self.batch_order_spec)
 
         attn_metadata = LinearAttentionMetadata(
             num_prefills=num_prefills,

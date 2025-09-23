@@ -12,9 +12,10 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
-    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              BatchOrderSpec,
+                                              CommonAttentionMetadata,
+                                              split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
@@ -27,8 +28,7 @@ except ImportError:
     XFORMERS_AVAILABLE = False
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
+    pass
 
 from vllm import _custom_ops as ops
 
@@ -197,7 +197,9 @@ class XFormersAttentionMetadata:
 class XFormersAttentionMetadataBuilder(
         AttentionMetadataBuilder[XFormersAttentionMetadata]):
 
-    reorder_batch_threshold: ClassVar[int] = 1
+    batch_order_spec: ClassVar[BatchOrderSpec] = \
+        BatchOrderSpec(reorder_required=True, decode_threshold=1,
+                       decode_first=True)
 
     def __init__(
         self,
@@ -213,23 +215,16 @@ class XFormersAttentionMetadataBuilder(
         self._num_decodes = 0
         self._num_decode_tokens = 0
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(
-            input_batch,
-            scheduler_output,
-            decode_threshold=self.reorder_batch_threshold)
-
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> XFormersAttentionMetadata:
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold))
+                batch_order_spec=self.batch_order_spec)
 
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         q_start_loc = common_attn_metadata.query_start_loc

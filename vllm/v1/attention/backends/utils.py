@@ -188,6 +188,14 @@ class AttentionCGSupport(enum.Enum):
     """NO cudagraph support"""
 
 
+@dataclass
+class BatchOrderSpec:
+    """Specification for a batch ordering requirement for a given backend."""
+    reorder_required: bool
+    decode_threshold: int
+    decode_first: bool
+
+
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     cudagraph_support: ClassVar[AttentionCGSupport] = \
@@ -195,7 +203,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: ClassVar[Optional[int]] = None
+    batch_order_spec: ClassVar[BatchOrderSpec] = \
+        BatchOrderSpec(reorder_required=False, decode_threshold=0,
+                       decode_first=False)
 
     @abstractmethod
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
@@ -212,7 +222,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
               fast_build: bool = False) -> M:
         """
         Central method that builds attention metadata.
-        Some builders (MLA) require reorder_batch to be called prior to build.
         
         Args:
             common_prefix_len: The length of the common prefix of the batch.
@@ -220,23 +229,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
             fast_build: The meta-data will prioritize speed of building over
                 then speed at execution. Can be used for spec-decode where the
                 result of a build call may only be used for few layers/iters.
-        """
-        raise NotImplementedError
-
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        """
-        Update the order of requests in the batch based on the attention
-        backend's needs. For example, some attention backends (namely MLA) may
-        want to separate requests based on if the attention computation will be
-        compute-bound or memory-bound.
-
-        Args:
-            input_batch: input batch
-            scheduler_output: scheduler output.
-
-        Returns:
-            True if the batch was modified, False otherwise.
         """
         raise NotImplementedError
 
@@ -663,7 +655,7 @@ def subclass_attention_backend(
 
 def split_decodes_and_prefills(
     common_attn_metadata: CommonAttentionMetadata,
-    decode_threshold: int = 1,
+    batch_order_spec: BatchOrderSpec,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -680,34 +672,47 @@ def split_decodes_and_prefills(
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
+    assert batch_order_spec.reorder_required, \
+        "Batch must be reordered to split decodes and prefills"
     max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
 
-    if max_query_len <= decode_threshold:
+    if max_query_len <= batch_order_spec.decode_threshold:
         return num_reqs, 0, num_tokens, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    is_prefill = query_lens > decode_threshold
+    is_prefill = query_lens > batch_order_spec.decode_threshold
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
 
-    first_prefill = is_prefill.int().argmax(dim=-1).item()
-    assert torch.all(query_lens[first_prefill:] > decode_threshold)
-    assert torch.all(query_lens[:first_prefill] <= decode_threshold)
-    num_decodes = first_prefill
-    num_prefills = num_reqs - num_decodes
-    num_decode_tokens = query_start_loc[first_prefill].item()
-    num_prefill_tokens = num_tokens - num_decode_tokens
+    if batch_order_spec.decode_first:
+        first_prefill = is_prefill.int().argmax(dim=-1).item()
+        assert torch.all(
+            query_lens[first_prefill:] > batch_order_spec.decode_threshold)
+        assert torch.all(
+            query_lens[:first_prefill] <= batch_order_spec.decode_threshold)
+        num_decodes = first_prefill
+        num_prefills = num_reqs - num_decodes
+        num_decode_tokens = query_start_loc[first_prefill].item()
+        num_prefill_tokens = num_tokens - num_decode_tokens
+    else:
+        first_decode = (~is_prefill).int().argmax(dim=-1).item()
+        assert torch.all(
+            query_lens[:first_decode] > batch_order_spec.decode_threshold)
+        assert torch.all(
+            query_lens[first_decode:] <= batch_order_spec.decode_threshold)
+        num_prefills = first_decode
+        num_decodes = num_reqs - num_prefills
+        num_prefill_tokens = query_start_loc[first_decode].item()
+        num_decode_tokens = num_tokens - num_prefill_tokens
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
 def reorder_batch_to_split_decodes_and_prefills(
-    input_batch: "InputBatch",
-    scheduler_output: "SchedulerOutput",
-    decode_threshold: int = 1,
-) -> bool:
+        input_batch: "InputBatch", scheduler_output: "SchedulerOutput",
+        batch_order_spec: BatchOrderSpec) -> bool:
     """
     Reorders the batch to split into prefill and decode requests; places all
     requests with <= decode_threshold tokens at the front of the batch.
@@ -715,12 +720,16 @@ def reorder_batch_to_split_decodes_and_prefills(
     Returns:
         True if the batch was modified, False otherwise.
     """
+    if not batch_order_spec.reorder_required:
+        return False
+
     # We now want to reorder the batch so that the "decode" requests are at
     # the front and the "prefill" requests are at the back using the least
     # amount of swaps possible. (NOTE for now we loosely use "decode" to mean
     # requests where attention is likely memory-bound and "prefill" to mean
     # requests where attention is likely compute-bound, TODO(lucas): figure out
     # a better naming here)
+    # Categorize requests into "decode" and "prefill"
     decodes = []
     prefills = []
     num_decode_tokens = 0
@@ -728,11 +737,7 @@ def reorder_batch_to_split_decodes_and_prefills(
 
     for i, req_id in enumerate(input_batch.req_ids):
         num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        # for now treat 1 scheduled token as "decode" even if it's not,
-        # we should update this to something like < 8 in the future but
-        # currently the TritonMLA._forward_decode only supports
-        # num_tokens = 1
-        if num_tokens <= decode_threshold:
+        if num_tokens <= batch_order_spec.decode_threshold:
             decodes.append(i)
             num_decode_tokens += num_tokens
         else:
@@ -753,15 +758,26 @@ def reorder_batch_to_split_decodes_and_prefills(
     num_prefills = len(prefills)
     modified_batch = False
 
+    # Reorder the batch in place
     for i in range(1, min(num_decodes, num_prefills) + 1):
-        # If the decode is at the "back" of the batch, i, we can swap it
-        # with the prefill closest to the front of the batch
-        decode_idx = decodes[num_decodes - i]
-        if decode_idx < num_decodes:
-            break
+        if batch_order_spec.decode_first:
+            # If the decode is at the "back" of the batch, i, we can swap it
+            # with the prefill closest to the front of the batch
+            decode_idx = decodes[num_decodes - i]
+            if decode_idx < num_decodes:
+                break
 
-        input_batch.swap_states(prefills[i - 1], decode_idx)
-        modified_batch = True
+            input_batch.swap_states(prefills[i - 1], decode_idx)
+            modified_batch = True
+        else:
+            # If the prefill is at the "back" of the batch, i, we can swap it
+            # with the decode closest to the front of the batch
+            prefill_idx = prefills[num_prefills - i]
+            if prefill_idx >= num_prefills:
+                break
+
+            input_batch.swap_states(decodes[i - 1], prefill_idx)
+            modified_batch = True
 
     return modified_batch
 

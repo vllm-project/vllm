@@ -62,8 +62,8 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
-    AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
-    create_fast_prefill_custom_backend,
+    AttentionCGSupport, AttentionMetadataBuilder, BatchOrderSpec,
+    CommonAttentionMetadata, create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills, split_attn_metadata)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 # yapf conflicts with isort for this block
@@ -414,7 +414,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.mm_registry,
         ) if self.supports_mm_inputs else None
 
-        self.reorder_batch_threshold: Optional[int] = None
+        self.batch_order_spec: BatchOrderSpec = \
+            BatchOrderSpec(reorder_required=False, decode_threshold=1,
+                           decode_first=False)
 
         # Attention layers that are only in the KVCacheConfig of the runner
         # (e.g., KV sharing, encoder-only attention), but not in the
@@ -490,17 +492,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
 
-        if self.reorder_batch_threshold is not None:
-            # NOTE(lucas): currently no backend supports the custom masking
-            #  required for DCP with q_len > 1, so we assert here. Remove this
-            #  assert once the custom mask is support is added to FA3.
-            if self.dcp_world_size > 1:
-                assert self.reorder_batch_threshold == 1, \
-                    "DCP not support reorder_batch_threshold > 1 now."
-            reorder_batch_to_split_decodes_and_prefills(
-                self.input_batch,
-                scheduler_output,
-                decode_threshold=self.reorder_batch_threshold)
+        # NOTE(lucas): currently no backend supports the custom masking
+        #  required for DCP with q_len > 1, so we assert here. Remove this
+        #  assert once the custom mask is support is added to FA3.
+        if self.batch_order_spec.reorder_required and self.dcp_world_size > 1:
+            assert self.batch_order_spec.decode_threshold == 1, \
+                "DCP not support decode_threshold > 1 now."
+
+        # Reorder the batch in place and update the input batch.
+        # If the batch order spec indicates no reordering is needed,
+        # this function is a no-op.
+        reorder_batch_to_split_decodes_and_prefills(
+            self.input_batch,
+            scheduler_output,
+            batch_order_spec=self.batch_order_spec)
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -3525,8 +3530,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
             self.attn_groups.append(create_attn_groups(attn_backends))
 
-        # Calculate reorder batch threshold (if needed)
-        self.calculate_reorder_batch_threshold()
+        # Calculate reorder batch spec (if needed)
+        self.calculate_batch_order_spec()
 
     def initialize_cudagraph_capture(self) -> None:
         min_cg_support = AttentionCGSupport.ALWAYS
@@ -3596,29 +3601,39 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.compilation_config.cudagraph_mode,
             self.uniform_decode_query_len)
 
-    def calculate_reorder_batch_threshold(self) -> None:
+    def calculate_batch_order_spec(self) -> None:
         """
         Check that if any backends reorder batches; that the reordering
-        is compatible (e.g., decode threshold is the same)
+        spec is compatible (e.g., decode threshold is the same and
+        decode_first is the same).
         """
         for group in self._attn_group_iterator():
             attn_metadata_builder_i = group.get_metadata_builder()
 
             # check that if any backends reorder batches; that the reordering
-            # is compatible (e.g., decode threshold is the same)
-            reorder_batch_threshold_i = (
-                attn_metadata_builder_i.reorder_batch_threshold)
-            if reorder_batch_threshold_i is not None:
-                if self.reorder_batch_threshold is not None:
-                    if reorder_batch_threshold_i != \
-                        self.reorder_batch_threshold:
+            # is compatible (e.g., decode threshold is the same and
+            # decode_first is the same).
+            batch_order_spec_i = (attn_metadata_builder_i.batch_order_spec)
+            if batch_order_spec_i.reorder_required:
+                if self.batch_order_spec.reorder_required:
+                    if batch_order_spec_i.decode_threshold != \
+                        self.batch_order_spec.decode_threshold:
                         raise ValueError(
                             f"Attention backend reorders decodes with "
-                            f"threshold {reorder_batch_threshold_i} but other "
-                            f"backend uses threshold "
-                            f"{self.reorder_batch_threshold}")
+                            f"threshold {batch_order_spec_i.decode_threshold} "
+                            f"but other backend uses threshold "
+                            f"{self.batch_order_spec.decode_threshold}. ")
+                    if batch_order_spec_i.decode_first != \
+                        self.batch_order_spec.decode_first:
+                        raise ValueError(
+                            f"Attention backend reorders decodes with "
+                            f"decode_first={batch_order_spec_i.decode_first} "
+                            f"but other backend uses decode_first="
+                            f"{self.batch_order_spec.decode_first}. "
+                            "Please set all attention backends to use the same "
+                            "reordering policy.")
                 else:
-                    self.reorder_batch_threshold = reorder_batch_threshold_i
+                    self.batch_order_spec = batch_order_spec_i
 
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:
