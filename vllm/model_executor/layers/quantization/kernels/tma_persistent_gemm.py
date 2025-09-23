@@ -30,34 +30,37 @@ class TMADescriptorCache:
     def __init__(self):
         self.cache: Dict[Tuple, Tuple[TensorDescriptor, TensorDescriptor, TensorDescriptor]] = {}
         
-    def get_descriptors(self, M: int, N: int, K: int, 
+    def get_descriptors(self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor,
+                       M: int, N: int, K: int, 
                        BLOCK_SIZE_M: int, BLOCK_SIZE_N: int, BLOCK_SIZE_K: int,
-                       EPILOGUE_SUBTILE: bool,
-                       a_device: torch.device, b_device: torch.device, c_device: torch.device) -> Tuple[TensorDescriptor, TensorDescriptor, TensorDescriptor]:
-        """Get cached descriptors or create new ones."""
-        key = (M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, EPILOGUE_SUBTILE, str(a_device), str(b_device), str(c_device))
+                       EPILOGUE_SUBTILE: bool) -> Tuple[TensorDescriptor, TensorDescriptor, TensorDescriptor]:
+        """Get cached descriptors and update them with actual tensors."""
+        key = (M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, EPILOGUE_SUBTILE, 
+               str(a.device), str(b.device), str(c.device), 
+               a.dtype, b.dtype, c.dtype)  # Include dtypes for safety
         
         if key not in self.cache:
-            # Create template tensors for descriptor creation
-            a_template = torch.empty((M, K), dtype=torch.float8_e4m3fn, device=a_device)
-            b_template = torch.empty((N, K), dtype=torch.float8_e4m3fn, device=b_device)
-            c_template = torch.empty((M, N), dtype=torch.bfloat16, device=c_device)
-            
-            # Pre-compute shapes, strides, and block shapes
-            a_shape, a_stride = a_template.shape, a_template.stride()
-            b_shape, b_stride = b_template.shape, b_template.stride()
-            c_shape, c_stride = c_template.shape, c_template.stride()
+            # Create descriptors with the actual tensors for proper initialization
+            a_shape, a_stride = a.shape, a.stride()
+            b_shape, b_stride = b.shape, b.stride()
+            c_shape, c_stride = c.shape, c.stride()
             
             a_block_shape = [BLOCK_SIZE_M, BLOCK_SIZE_K]
             b_block_shape = [BLOCK_SIZE_N, BLOCK_SIZE_K]
             c_block_shape = [BLOCK_SIZE_M, BLOCK_SIZE_N // 2] if EPILOGUE_SUBTILE else [BLOCK_SIZE_M, BLOCK_SIZE_N]
             
-            # Create TensorDescriptors
-            a_desc = TensorDescriptor(a_template, a_shape, a_stride, a_block_shape)
-            b_desc = TensorDescriptor(b_template, b_shape, b_stride, b_block_shape)
-            c_desc = TensorDescriptor(c_template, c_shape, c_stride, c_block_shape)
+            # Create and cache the descriptors
+            a_desc = TensorDescriptor(a, a_shape, a_stride, a_block_shape)
+            b_desc = TensorDescriptor(b, b_shape, b_stride, b_block_shape)
+            c_desc = TensorDescriptor(c, c_shape, c_stride, c_block_shape)
             
             self.cache[key] = (a_desc, b_desc, c_desc)
+        else:
+            # Reuse cached descriptors but update with current tensors
+            a_desc, b_desc, c_desc = self.cache[key]
+            a_desc.tensor = a
+            b_desc.tensor = b
+            c_desc.tensor = c
             
         return self.cache[key]
 
@@ -184,7 +187,7 @@ def _get_config(M):
 #     key=["M", "N", "K", "WARP_SPECIALIZE"],
 # )
 # @triton.jit(launch_metadata=_matmul_launch_metadata)
-@triton.jit(do_not_specialize=['M','N','K'])
+@triton.jit
 def matmul_kernel_tma_persistent(a_desc, b_desc, c_desc,  #
                                  M, N, K,  #
                                  BLOCK_SIZE_M: tl.constexpr,  #
@@ -220,6 +223,7 @@ def matmul_kernel_tma_persistent(a_desc, b_desc, c_desc,  #
         for ki in range(k_tiles):
             offs_k = ki * BLOCK_SIZE_K
             a = a_desc.load([offs_am, offs_k]).to(tl.float8e4nv)  # Changed here to load as FP8
+            # a = a_desc.load([offs_am, offs_k])
             b = b_desc.load([offs_bn, offs_k])
             accumulator = tl.dot(a, b.T, accumulator)
 
@@ -265,15 +269,6 @@ def matmul_tma_persistent(a, b, bias=None, warp_specialize=False):
     M, K = a.shape
     N, K_b = b.shape
 
-    # # Static configuration for optimal performance
-    # BLOCK_SIZE_M = 16
-    # BLOCK_SIZE_N = 512
-    # BLOCK_SIZE_K = 64
-    # GROUP_SIZE_M = 1
-    # EPILOGUE_SUBTILE = True
-    # num_stages = 4
-    # num_warps = 4
-
     optimal_config = _get_config(M)
     BLOCK_SIZE_M = optimal_config.get("BLOCK_SIZE_M", 16)
     BLOCK_SIZE_N = optimal_config.get("BLOCK_SIZE_N", 512)
@@ -283,21 +278,15 @@ def matmul_tma_persistent(a, b, bias=None, warp_specialize=False):
     num_stages = optimal_config.get("num_stages", 4) 
     num_warps = optimal_config.get("num_warps", 4)
 
-    # Use tensor pool for output allocation (enables graph capture)
+    # # Use tensor pool for output allocation (enables graph capture)
     c = _tensor_pool.get_tensor((M, N), torch.bfloat16, a.device)
 
     NUM_SMS = get_num_sms(a.device)
 
-    # Get cached descriptors (enables graph capture)
+    # Get cached descriptors (enables graph capture) - now fixed to work correctly
     a_desc, b_desc, c_desc = _descriptor_cache.get_descriptors(
-        M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
-        EPILOGUE_SUBTILE, a.device, b.device, a.device
+        a, b, c, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, EPILOGUE_SUBTILE
     )
-
-    # Update descriptors with actual tensors (minimal overhead)
-    a_desc.tensor = a
-    b_desc.tensor = b
-    c_desc.tensor = c
 
     # Use static grid function (enables graph capture)
     grid_size = _get_static_grid(M, N, BLOCK_SIZE_M, BLOCK_SIZE_N, NUM_SMS)
@@ -328,7 +317,7 @@ def matmul_tma_persistent_original(a, b, warp_specialize=False):
     """Original implementation for comparison."""
     # Check constraints.
     assert a.shape[1] == b.shape[1], "Incompatible dimensions"  # b is transposed
-    assert a.dtype == b.dtype, "Incompatible dtypes"
+    # assert a.dtype == b.dtype, "Incompatible dtypes"
 
     if a.dtype != torch.float8_e4m3fn:
         a = a.to(torch.float8_e4m3fn)
@@ -339,13 +328,14 @@ def matmul_tma_persistent_original(a, b, warp_specialize=False):
     M, K = a.shape
     N, K = b.shape
 
-    BLOCK_SIZE_M = 16
-    BLOCK_SIZE_N = 128
-    BLOCK_SIZE_K = 128
-    GROUP_SIZE_M = 4
-    EPILOGUE_SUBTILE = True
-    num_stages = 4
-    num_warps = 8
+    optimal_config = _get_config(M)
+    BLOCK_SIZE_M = optimal_config.get("BLOCK_SIZE_M", 16)
+    BLOCK_SIZE_N = optimal_config.get("BLOCK_SIZE_N", 512)
+    BLOCK_SIZE_K = optimal_config.get("BLOCK_SIZE_K", 64)
+    GROUP_SIZE_M = optimal_config.get("GROUP_SIZE_M", 1)
+    EPILOGUE_SUBTILE = optimal_config.get("EPILOGUE_SUBTILE", True)
+    num_stages = optimal_config.get("num_stages", 4) 
+    num_warps = optimal_config.get("num_warps", 4)
 
     c = torch.empty((M, N), device=a.device, dtype=torch.bfloat16)
 
@@ -413,16 +403,34 @@ if __name__ == "__main__":
 
     M, N, K = 8, 201088, 2880
     dtype = torch.bfloat16
-    a = torch.randn((M, K), device="cuda", dtype=dtype).to(torch.float8_e4m3fn)
+    a = torch.randn((M, K), device="cuda", dtype=dtype)
     b = torch.randn((N, K), device="cuda", dtype=dtype).to(torch.float8_e4m3fn)
 
     # warmup
     c = matmul_tma_persistent(a, b, warp_specialize=False)
     torch.cuda.synchronize()
 
-    # benchmark
+    # benchmark original
     start = time.time()
-    c = matmul_tma_persistent(a, b, warp_specialize=False)
+    c_original = matmul_tma_persistent_original(a, b, warp_specialize=False)
     torch.cuda.synchronize()
     end = time.time()
     print(f"TMA persistent matmul time: {end - start:.6f}s")
+    print(f"The original output is {c_original}")
+
+    # benchmark optimized
+    start = time.time()
+    c_optimized = matmul_tma_persistent(a, b, warp_specialize=False)
+    torch.cuda.synchronize()
+    end = time.time()
+    print(f"Optimized TMA persistent matmul time: {end - start:.6f}s")
+    print(f"The optimized output is {c_optimized}")
+
+    ## check the result
+    a_fp32 = a.to(torch.float32)
+    b_fp32 = b.to(torch.float32)
+    c_ref = torch.matmul(a_fp32, b_fp32.t()).to(torch.bfloat16)
+    print(f"the reference output is {c_ref}")
+    print("Max absolute difference:", (c_optimized - c_ref).abs().max().item())
+    print("Max absolute difference (original):", (c_original - c_ref).abs().max().item())
+    print("All cache info:", get_cache_info())
