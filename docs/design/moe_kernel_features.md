@@ -99,8 +99,11 @@ To be used with a particular `FusedMoEPrepareAndFinalize` sub-class, MoE kernels
 
 ## Modular Kernel "families"
 
+The following table shows "families" of modular kernels that are intended to work together. There are some combinations which may work but have not yet been tested, e.g. flashinfer with other fp8 experts. Note that the "naive" backend will work with any non-modular experts.
+
 | backend                      | `FusedMoEPrepareAndFinalize` subclasses                | `FusedMoEPermuteExpertsUnpermute` subclasses                                                                   |
 |------------------------------|--------------------------------------------------------|----------------------------------------------------------------------------------------------------------------|
 | deepep_high_throughput, pplx | `DeepEPHTPrepareAndFinalize`, `PplxPrepareAndFinalize` | `BatchedDeepGemmExperts`, `BatchedTritonExperts`, `BatchedTritonOrDeepGemmExperts`, `CutlassBatchedExpertsFp8` |
 | deepep_low_latency           | `DeepEPLLPrepareAndFinalize`                           | `DeepGemmExperts`, `TritonExperts`, `TritonOrDeepGemmExperts`, `CutlassExpertsFp8`                             |
 | flashinfer                   | `FlashInferCutlassMoEPrepareAndFinalize`               | `FlashInferExperts`                                                                                            |
+
