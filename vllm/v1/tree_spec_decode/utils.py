@@ -235,3 +235,16 @@ def _kv_copy_chunked(
         copy_mask = mask_tile & should_copy
         vals = tl.load(src_addr, mask=copy_mask, other=0)
         tl.store(dst_addr, vals, mask=copy_mask)
+
+
+def to_bitmask(tree_attn_mask: torch.Tensor):
+    size = tree_attn_mask.shape[-1]
+    # Create decreasing powers of 2 (bit positions).
+    # Example: [4, 2, 1, 0].
+    bit_weights = 2**torch.arange(size - 1,
+                                  -1,
+                                  -1,
+                                  device=tree_attn_mask.device)
+    # Multiply and sum along the rows.
+    bitmask = (tree_attn_mask * bit_weights).sum(dim=-1).to(torch.uint64)
+    return bitmask

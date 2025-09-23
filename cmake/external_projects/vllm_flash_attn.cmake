@@ -30,15 +30,15 @@ endif()
 
 if(VLLM_FLASH_ATTN_SRC_DIR)
   FetchContent_Declare(
-          vllm-flash-attn SOURCE_DIR 
+          vllm-flash-attn SOURCE_DIR
           ${VLLM_FLASH_ATTN_SRC_DIR}
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
   )
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG ee4d25bd84e0cbc7e0b9b9685085fd5db2dcb62a
+          GIT_REPOSITORY https://github.com/samsung-cnct/flash-attention.git
+          GIT_TAG feaab457d8d58243f19bf234a42a498647de0e6f
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

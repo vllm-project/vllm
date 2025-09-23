@@ -71,6 +71,7 @@ def forward_attention(
             method="eagle",
             num_speculative_tokens=num_spec_tokens,
             speculative_token_tree=spec_token_tree)
+        assert vllm_config.speculative_config.tree_drafter_params is not None
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
     builder = builder_cls(kv_cache_spec, [], vllm_config, q.device)
     common_attn_metadata = CommonAttentionMetadata(

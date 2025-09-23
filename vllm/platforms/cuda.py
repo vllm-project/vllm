@@ -308,7 +308,6 @@ class CudaPlatformBase(Platform):
             FLEX_ATTENTION_V1 = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
             TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
             FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
-            TREE_ATTN_V1 = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"  # noqa: E501
             XFORMERS_V1 = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"  # noqa: E501
 
             if selected_backend == _Backend.FLASHINFER:
@@ -329,7 +328,7 @@ class CudaPlatformBase(Platform):
                 return FLASH_ATTN_V1
             elif selected_backend == _Backend.TREE_ATTN:
                 logger.info_once("Using Tree Attention backend on V1 engine.")
-                return TREE_ATTN_V1
+                return FLASH_ATTN_V1
             elif selected_backend == _Backend.XFORMERS_VLLM_V1:
                 logger.info_once("Using XFormers backend on V1 engine.")
                 return XFORMERS_V1
