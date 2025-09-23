@@ -189,6 +189,8 @@ if TYPE_CHECKING:
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+    VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
+    VLLM_DBO_COMM_SMS: int = 20
     GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
 
@@ -1391,6 +1393,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME":
     lambda: os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
                       "VLLM_OBJECT_STORAGE_SHM_BUFFER"),
+
+    # The size in MB of the buffers (NVL and RDMA) used by DeepEP
+    "VLLM_DEEPEP_BUFFER_SIZE_MB":
+    lambda: int(os.getenv("VLLM_DEEPEP_BUFFER_SIZE_MB", "1024")),
+
+    # The number of SMs to allocate for communication kernels when running DBO
+    # the rest of the SMs on the device will be allocated to compute
+    "VLLM_DBO_COMM_SMS":
+    lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
 
     # Valid values are container,code_interpreter,web_search_preview
     # ex GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
