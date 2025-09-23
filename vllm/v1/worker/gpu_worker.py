@@ -390,13 +390,15 @@ class Worker(WorkerBase):
                 f"for non-torch memory, and {GiB(cuda_graph_memory_bytes)} "
                 f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
-                f"{kv_cache_memory_bytes_to_requested_limit}` to fit into "
-                f"requested memory, or `--kv-cache-memory="
-                f"{kv_cache_memory_bytes_to_gpu_limit}` to fully "
+                f"{kv_cache_memory_bytes_to_requested_limit}` "
+                f"({GiB(kv_cache_memory_bytes_to_requested_limit)} GiB) to fit "
+                f"into requested memory, or `--kv-cache-memory="
+                f"{kv_cache_memory_bytes_to_gpu_limit}` "
+                f"({GiB(kv_cache_memory_bytes_to_gpu_limit)} GiB) to fully "
                 f"utilize gpu memory. Current kv cache memory in use is "
-                f"{int(self.available_kv_cache_memory_bytes)} bytes.")
+                f"{GiB(self.available_kv_cache_memory_bytes)} GiB.")
 
-            logger.info(msg)
+            logger.debug(msg)
 
         # Warm up sampler and preallocate memory buffer for logits and other
         # sampling related tensors of max possible shape to avoid memory
@@ -494,7 +496,7 @@ class Worker(WorkerBase):
                     sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        self.model_runner._dummy_run(1, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

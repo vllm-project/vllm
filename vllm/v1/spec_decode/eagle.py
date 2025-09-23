@@ -30,7 +30,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -192,9 +191,8 @@ class EagleProposer:
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        ubatch_id = dbo_current_ubatch_id()
         attn_metadata_builder = \
-            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+            self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0)
 
@@ -330,7 +328,7 @@ class EagleProposer:
 
             # Rebuild attention metadata
             attn_metadata_builder = \
-                self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+                self.runner.attn_groups[0][0].get_metadata_builder()
             attn_metadata = attn_metadata_builder\
                 .build_for_drafting(common_attn_metadata=common_attn_metadata,
                                 draft_index=token_index + 1)
@@ -538,9 +536,8 @@ class EagleProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
-        ubatch_id = dbo_current_ubatch_id()
         tree_attn_metadata_builder = \
-            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+            self.runner.attn_groups[0][0].get_metadata_builder()
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 
@@ -823,15 +820,29 @@ class EagleProposer:
         else:
             target_language_model = target_model
         # share embed_tokens with the target model if needed
-        if get_pp_group().world_size == 1 \
-                and self.model.model.embed_tokens.weight.shape \
-            == target_language_model.model.embed_tokens.weight.shape:
-            logger.info(
-                "Assuming the EAGLE head shares the same vocab embedding"
-                " with the target model.")
-            del self.model.model.embed_tokens
-            self.model.model.embed_tokens = (
-                target_language_model.model.embed_tokens)
+        if get_pp_group().world_size == 1:
+            if hasattr(target_language_model.model, 'embed_tokens'):
+                target_embed_tokens = target_language_model.model.embed_tokens
+            elif hasattr(target_language_model.model, 'embedding'):
+                target_embed_tokens = target_language_model.model.embedding
+            else:
+                raise AttributeError(
+                    "Target model does not have 'embed_tokens' or 'embedding' "
+                    "attribute")
+
+            # Check if shapes match and we found the embedding
+            eagle_shape = self.model.model.embed_tokens.weight.shape
+            target_shape = target_embed_tokens.weight.shape
+            if eagle_shape == target_shape:
+                logger.info(
+                    "Assuming the EAGLE head shares the same vocab embedding"
+                    " with the target model.")
+                del self.model.model.embed_tokens
+                self.model.model.embed_tokens = target_embed_tokens
+            else:
+                logger.info(
+                    "The EAGLE head's vocab embedding will be loaded separately"
+                    " from the target model.")
         else:
             logger.info(
                 "The EAGLE head's vocab embedding will be loaded separately"

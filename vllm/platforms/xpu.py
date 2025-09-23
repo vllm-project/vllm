@@ -113,12 +113,11 @@ class XPUPlatform(Platform):
         # lazy import to avoid circular import
         from vllm.config import CompilationLevel, CUDAGraphMode
         compilation_config = vllm_config.compilation_config
-        if compilation_config.cudagraph_mode is None or \
-                compilation_config.cudagraph_mode.max_cudagraph_mode() \
-                    != CUDAGraphMode.NONE:
-            logger.info("[XPU] CUDA graph is not supported on XPU, disabling "
-                        "cudagraphs. Fallback to cudagraph_mode=NONE")
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        if compilation_config.compile_sizes is None:
+            compilation_config.compile_sizes = []
+
+        assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE, \
+            "CUDA graph mode should be NONE on XPU"
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -170,6 +169,10 @@ class XPUPlatform(Platform):
         return True
 
     @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        return False
+
+    @classmethod
     def is_pin_memory_available(cls):
         return True
 
@@ -192,10 +195,6 @@ class XPUPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        return True
 
     @classmethod
     def device_count(cls) -> int:
