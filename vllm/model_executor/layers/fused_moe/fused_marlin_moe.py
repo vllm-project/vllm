@@ -326,15 +326,6 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-
-        if expert_map is not None:
-            topk_ids = expert_map[topk_ids]
-        topk_ids = torch.where(topk_ids == -1, 0, topk_ids)
-
-        local_num_experts = w1.size(0)
-        if global_num_experts == -1:
-            global_num_experts = local_num_experts
-
         return torch.ops.vllm.fused_marlin_moe(
             hidden_states=hidden_states,
             w1=w1,
@@ -350,8 +341,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
-            expert_map=None,
+            expert_map=expert_map,
             output=output)
-        #expert_map = expert_map)
         #intermediate_cache13 = workspace13,
         #intermediate_cache2 = workspace2)
