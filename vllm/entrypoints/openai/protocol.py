@@ -328,6 +328,13 @@ class ResponsesRequest(OpenAIBaseModel):
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
             "to 256 bit). Not supported by vLLM engine V0."))
+
+    enable_response_messages: bool = Field(
+        default=False,
+        description=(
+            "Dictates whether or not to return messages as part of the "
+            "response object. Currently only supported for non-streaming "
+            "non-background and gpt-oss only. "))
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
@@ -1831,6 +1838,11 @@ class ResponsesResponse(OpenAIBaseModel):
     model: str
     object: Literal["response"] = "response"
     output: list[ResponseOutputItem]
+    # These are populated when enable_response_messages is set to True
+    # TODO: Currently an issue where content of harmony messages
+    # is not available when these are serialized. Metadata is available
+    input_messages: Optional[list[ChatCompletionMessageParam]] = None
+    output_messages: Optional[list[ChatCompletionMessageParam]] = None
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1860,6 +1872,8 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: Optional[ResponseUsage] = None,
+        input_messages: Optional[list[ChatCompletionMessageParam]] = None,
+        output_messages: Optional[list[ChatCompletionMessageParam]] = None,
     ) -> "ResponsesResponse":
 
         incomplete_details: Optional[IncompleteDetails] = None
@@ -1868,7 +1882,6 @@ class ResponsesResponse(OpenAIBaseModel):
         # TODO: implement the other reason for incomplete_details,
         # which is content_filter
         # incomplete_details = IncompleteDetails(reason='content_filter')
-
         return cls(
             id=request.request_id,
             created_at=created_time,
@@ -1877,6 +1890,8 @@ class ResponsesResponse(OpenAIBaseModel):
             metadata=request.metadata,
             model=model_name,
             output=output,
+            input_messages=input_messages,
+            output_messages=output_messages,
             parallel_tool_calls=request.parallel_tool_calls,
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,

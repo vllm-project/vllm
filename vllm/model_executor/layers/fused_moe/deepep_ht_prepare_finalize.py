@@ -11,12 +11,30 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
+from vllm.utils import round_up
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
     Prepare/Finalize using DeepEP High-Throughput kernels.
     """
+
+    @staticmethod
+    def maybe_roundup_layer_hidden_size(hidden_size: int,
+                                        dtype: torch.dtype) -> int:
+        # Round up hidden size so it is compatible with DeepEP High Throughput
+        # kernels.
+        # DeepEP intranode kernels make copies in units of,
+        # 32(warp-size) int4 elements. Round up hidden size to respect this.
+        # For example, an input hidden size of 2880 with dtype torch.bfloat16
+        # will be rounded up to 3072.
+        hidden_size_bytes = hidden_size * dtype.itemsize
+        xfer_atom_size = 512  # 32 * 16 (size(int4))
+        if hidden_size_bytes % xfer_atom_size == 0:
+            return hidden_size
+
+        hidden_size_bytes = round_up(hidden_size_bytes, xfer_atom_size)
+        return hidden_size_bytes // dtype.itemsize
 
     def __init__(self, buffer: deep_ep.Buffer, num_dispatchers: int,
                  dp_size: int, rank_expert_offset: int):

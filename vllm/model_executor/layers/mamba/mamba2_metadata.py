@@ -53,13 +53,18 @@ class Mamba2Metadata:
 def get_platform_metadata_classes() -> tuple[type[AttentionMetadata], ...]:
     """Returns the appropriate metadata classes for the current platform."""
     if current_platform.is_rocm():
-        from vllm.attention.backends.rocm_flash_attn import (
-            ROCmFlashAttentionMetadata)
-        return (ROCmFlashAttentionMetadata, PlaceholderAttentionMetadata)
-    elif current_platform.is_cuda():
-        from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-        from vllm.attention.backends.xformers import XFormersMetadata
-        return (FlashAttentionMetadata, XFormersMetadata,
+        from vllm.v1.attention.backends.rocm_aiter_fa import (
+            AiterFlashAttentionMetadata)
+        from vllm.v1.attention.backends.triton_attn import (
+            TritonAttentionMetadata)
+        return (AiterFlashAttentionMetadata, TritonAttentionMetadata,
+                PlaceholderAttentionMetadata)
+    if current_platform.is_cuda():
+        from vllm.v1.attention.backends.flash_attn import (
+            FlashAttentionMetadata)
+        from vllm.v1.attention.backends.xformers import (
+            XFormersAttentionMetadata)
+        return (FlashAttentionMetadata, XFormersAttentionMetadata,
                 PlaceholderAttentionMetadata)
     raise ValueError(
         f"Unsupported platform for Mamba2: {current_platform.device_type}")
