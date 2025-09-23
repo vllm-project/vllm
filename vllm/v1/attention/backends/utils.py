@@ -34,6 +34,8 @@ logger = init_logger(__name__)
 KVCacheLayoutType = Literal["NHD", "HND"]
 _KV_CACHE_LAYOUT_OVERRIDE: Union[KVCacheLayoutType, None] = None
 
+PAD_SLOT_ID = -1
+
 
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
@@ -105,19 +107,57 @@ def _make_metadata_with_slice(
     the requests included in ubatch_slice
     """
 
+    assert not ubatch_slice.is_empty(), (
+        f"Ubatch slice {ubatch_slice} is empty")
+
     request_slice = ubatch_slice.request_slice
     token_slice = ubatch_slice.token_slice
 
+    start_locs = attn_metadata.query_start_loc_cpu
+    first_req = request_slice.start
+    first_tok = token_slice.start
+    last_req = request_slice.stop - 1
+    last_tok = token_slice.stop - 1
+
+    assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], \
+        "Token slice start outside of first request"
+    assert start_locs[last_req] <= last_tok < start_locs[last_req+1], \
+        "Token slice end outside of last request"
+
+    # If the "middle" request has tokens in both ubatches, we have to split it.
+    # If ubatch_slice is the first ubatch then we will be splitting the last
+    # request. If it's the second microbatch, then we will be splitting the
+    # first request
+    splits_first_request = first_tok > start_locs[first_req]
+    splits_last_request = last_tok < start_locs[last_req + 1] - 1
+
+    query_start_loc_cpu = slice_query_start_locs(start_locs, request_slice)
     query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc,
                                              request_slice)
+
     assert len(query_start_loc) >= 2, (
         f"query_start_loc must have at least 2 elements, "
         f"got {len(query_start_loc)}")
-    query_start_loc_cpu = slice_query_start_locs(
-        attn_metadata.query_start_loc_cpu, request_slice)
 
+    if splits_first_request:
+        tokens_skipped = first_tok - start_locs[first_req]
+        query_start_loc[1:] -= tokens_skipped
+        query_start_loc_cpu[1:] -= tokens_skipped
     seq_lens = attn_metadata.seq_lens[request_slice]
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
+
+    if splits_last_request:
+        tokens_skipped = query_start_loc_cpu[-1] - token_slice.stop
+        query_start_loc[-1] -= tokens_skipped
+        query_start_loc_cpu[-1] -= tokens_skipped
+
+        # Make sure we don't modify the seq_lens tensors
+        #  (not cudagraph compatible)
+        seq_lens = seq_lens.clone()
+        seq_lens_cpu = seq_lens_cpu.clone()
+        seq_lens[-1] -= tokens_skipped
+        seq_lens_cpu[-1] -= tokens_skipped
+
     max_seq_len = int(seq_lens_cpu.max())
     num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
         request_slice]
@@ -165,6 +205,7 @@ def split_attn_metadata(
     for ubatch_slice in ubatch_slices:
         results.append(
             _make_metadata_with_slice(ubatch_slice, common_attn_metadata))
+
     return results
 
 
@@ -694,7 +735,6 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    assert torch.all(query_lens[first_prefill:] > decode_threshold)
     assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
@@ -838,3 +878,52 @@ def create_fast_prefill_custom_backend(
         builder_cls=FastPrefillAttentionBuilder)
 
     return attn_backend
+
+
+def compute_causal_conv1d_metadata(query_start_loc_p: torch.Tensor):
+
+    # Needed for causal_conv1d
+    seqlens = query_start_loc_p.diff().to('cpu')
+    nums_dict = {}  # type: ignore
+    batch_ptr = None
+    token_chunk_offset_ptr = None
+    for BLOCK_M in [8]:  # cover all BLOCK_M values
+        nums = -(-seqlens // BLOCK_M)
+        nums_dict[BLOCK_M] = {}
+        nums_dict[BLOCK_M]['nums'] = nums
+        nums_dict[BLOCK_M]['tot'] = nums.sum().item()
+        mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums))
+        nums_dict[BLOCK_M]['mlist'] = mlist
+        mlist_len = len(nums_dict[BLOCK_M]['mlist'])
+        nums_dict[BLOCK_M]['mlist_len'] = mlist_len
+        MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
+        offsetlist = []  # type: ignore
+        for idx, num in enumerate(nums):
+            offsetlist.extend(range(num))
+        offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+        nums_dict[BLOCK_M]['offsetlist'] = offsetlist
+
+        if batch_ptr is None:
+            # Update default value after class definition
+            batch_ptr = torch.full((MAX_NUM_PROGRAMS, ),
+                                   PAD_SLOT_ID,
+                                   dtype=torch.int32,
+                                   device='cuda')
+            token_chunk_offset_ptr = torch.full((MAX_NUM_PROGRAMS, ),
+                                                PAD_SLOT_ID,
+                                                dtype=torch.int32,
+                                                device='cuda')
+        else:
+            if batch_ptr.nelement() < MAX_NUM_PROGRAMS:
+                batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+                token_chunk_offset_ptr.resize_(  # type: ignore
+                    MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+
+        batch_ptr[0:mlist_len].copy_(mlist)
+        token_chunk_offset_ptr[  # type: ignore
+            0:mlist_len].copy_(offsetlist)
+        nums_dict[BLOCK_M]['batch_ptr'] = batch_ptr
+        nums_dict[BLOCK_M]['token_chunk_offset_ptr'] = (token_chunk_offset_ptr
+                                                        )  # type: ignore
+
+    return nums_dict, batch_ptr, token_chunk_offset_ptr
