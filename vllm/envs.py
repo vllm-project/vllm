@@ -188,6 +188,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
+    VLLM_FUSE_QKNORM_AND_ROPE: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
@@ -1309,6 +1310,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
         ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass"],
+    ),
+    # If set, use the fuse QKNorm and RoPE kernel
+    "VLLM_FUSE_QKNORM_AND_ROPE": lambda: bool(
+        int(os.getenv("VLLM_FUSE_QKNORM_AND_ROPE", "0"))
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
