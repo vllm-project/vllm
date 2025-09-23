@@ -10,8 +10,9 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from itertools import product
-from typing import Optional
+from typing import Any, Optional
 
+import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -55,6 +56,30 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
         8: 128 * MiB,  # 128 MB
     }
 }
+
+NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
+    "min_world_size": 4,
+    "thresholds": {
+        4: 2 * MiB,  # 2 MB
+        8: 1 * MiB,  # 1 MB
+    },
+    "always_use_above_world_size": 8  # Always use symm mem for world_size > 8
+}
+
+
+def should_nccl_symm_mem_allreduce(world_size: int,
+                                   input_tensor: torch.Tensor) -> bool:
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        is_symmetric_memory_enabled)
+    if not is_symmetric_memory_enabled():
+        return False
+    if world_size < NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["min_world_size"]:
+        return False
+    threshold = NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["thresholds"].get(world_size)
+    if threshold is not None and input_tensor.nbytes >= threshold:
+        return True
+    return (world_size
+            > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"])
 
 
 def producer(batch_src: Sequence[int],

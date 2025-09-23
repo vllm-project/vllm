@@ -1039,3 +1039,4 @@ steps:
   num_gpus: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
+    - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
