@@ -101,6 +101,7 @@ else()
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
+    find_isa(${CPUINFO} "v" RVV_FOUND) # Check for RISC-V RVV support
 endif()
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
@@ -177,8 +178,14 @@ elseif (S390_FOUND)
         "-mzvector"
         "-march=native"
         "-mtune=native")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    if(RVV_FOUND)
+	    message(FAIL_ERROR "Can't support rvv now.")
+    else()
+        list(APPEND CXX_COMPILE_FLAGS "-march=rv64gc")
+    endif()
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA, S390X ISA or ARMv8 support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA, S390X ISA, ARMv8 or RISC-V support.")
 endif()
 
 #
