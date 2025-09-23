@@ -179,5 +179,4 @@ class PoolingParams(
                 f"extra_kwargs={self.extra_kwargs})")
 
     def __post_init__(self) -> None:
-        assert self.output_kind == RequestOutputKind.FINAL_ONLY,\
-            "For pooling output_kind has to be FINAL_ONLY"
+        """"""

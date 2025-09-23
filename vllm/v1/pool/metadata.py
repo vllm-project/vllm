@@ -59,8 +59,6 @@ class PoolingMetadata:
 
 def build_pooling_cursor(num_scheduled_tokens: list[int],
                          prompt_lens: torch.Tensor, device: torch.device):
-    assert len(prompt_lens) == len(num_scheduled_tokens)
-
     n_seq = len(num_scheduled_tokens)
     index = list(range(n_seq))
     num_scheduled_tokens = torch.tensor(num_scheduled_tokens, device="cpu")

@@ -266,6 +266,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        resumable: Optional[bool] = False,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -279,8 +280,16 @@ class AsyncLLM(EngineClient):
 
         # Convert Input --> Request.
         prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority, data_parallel_rank)
+            request_id,
+            prompt,
+            params,
+            arrival_time,
+            lora_request,
+            tokenization_kwargs,
+            trace_headers,
+            priority,
+            data_parallel_rank,
+            resumable=resumable)
 
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)
@@ -312,6 +321,16 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
 
+    async def resume_request(
+        self,
+        request_id: str,
+        *,
+        prompt_token_ids: Optional[list[int]] = None,
+        finish_forever: Optional[bool] = False,
+    ):
+        await self.engine_core.resume_request_async(
+            request_id, prompt_token_ids, finish_forever=finish_forever)
+
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
     # requests we don't need to send multiple messages to core proc,
@@ -326,6 +345,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        resumable: Optional[bool] = False,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -373,6 +393,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 tokenization_kwargs=tokenization_kwargs,
                 data_parallel_rank=data_parallel_rank,
+                resumable=resumable,
             )
 
             # The output_handler task pushes items into the queue.
@@ -500,6 +521,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         truncate_prompt_tokens: Optional[int] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
+        resumable: Optional[bool] = False,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -537,6 +559,7 @@ class AsyncLLM(EngineClient):
                 trace_headers=trace_headers,
                 priority=priority,
                 tokenization_kwargs=tokenization_kwargs,
+                resumable=resumable,
             )
 
             # The output_handler task pushes items into the queue.

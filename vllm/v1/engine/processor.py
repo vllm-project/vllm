@@ -314,6 +314,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        resumable: Optional[bool] = False,
     ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
@@ -433,6 +434,7 @@ class Processor:
             cache_salt=decoder_inputs.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
+            resumable=resumable,
         )
 
     def _validate_model_inputs(self,

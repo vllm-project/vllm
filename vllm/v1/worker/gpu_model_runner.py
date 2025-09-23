@@ -557,7 +557,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
 
-            if not is_last_rank:
+            if req_data.new_token_ids[i]:
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker.
@@ -1574,7 +1574,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for raw_output, seq_len, prompt_len in zip(
                 raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens):
 
-            output = raw_output.data if seq_len == prompt_len else None
+            output = raw_output.data
             pooler_output.append(output)
 
         return ModelRunnerOutput(

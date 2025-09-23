@@ -79,6 +79,27 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def resume_request(self,
+                       request_id: str,
+                       prompt_token_ids: Optional[list[int]] = None,
+                       finish_forever: Optional[bool] = False) -> None:
+        """Resume a leftover request.
+
+        This method is called when the client wants to resume a previously
+        leftover request.
+
+        Args:
+            request_id: The ID of the request to be resumed.
+            prompt_token_ids: If provided, the new prompt token IDs to use for
+                the resumed request. If None, the original prompt token IDs
+                will be used.
+            finish_forever: If True, the resumed request will be marked as
+                finished after processing the current prompt tokens. If False,
+                the request will continue to generate tokens as usual.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def finish_requests(
         self,
         request_ids: Union[str, Iterable[str]],

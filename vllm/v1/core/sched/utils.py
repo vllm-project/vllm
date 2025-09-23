@@ -49,7 +49,7 @@ def check_stop(request: Request,
         return True
 
     if request.pooling_params:
-        if pooler_output is not None:
+        if pooler_output is not None and not request.resumable:
             request.status = RequestStatus.FINISHED_STOPPED
             return True
         return False

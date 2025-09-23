@@ -281,9 +281,6 @@ class AllPool(PoolingMethod):
         pooling_cursor: PoolingCursor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
 
-        assert not pooling_cursor.is_partial_prefill(), \
-            "partial prefill not supported with ALL pooling"
-
         hidden_states_lst = list(
             hidden_states.split(
                 pooling_cursor.num_scheduled_tokens_cpu.tolist()))

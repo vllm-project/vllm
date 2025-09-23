@@ -183,6 +183,13 @@ class EngineCoreClient(ABC):
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
+    async def resume_request_async(
+            self,
+            request_id: str,
+            prompt_token_ids: Optional[list[int]] = None,
+            finish_forever: Optional[bool] = False) -> None:
+        raise NotImplementedError
+
     async def profile_async(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
@@ -900,6 +907,15 @@ class AsyncMPClient(MPClient):
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)
+        self._ensure_output_queue_task()
+
+    async def resume_request_async(
+            self,
+            request_id: str,
+            prompt_token_ids: Optional[list[int]] = None,
+            finish_forever: Optional[bool] = False) -> None:
+        await self._send_input(EngineCoreRequestType.RESUME,
+                               (request_id, prompt_token_ids, finish_forever))
         self._ensure_output_queue_task()
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:

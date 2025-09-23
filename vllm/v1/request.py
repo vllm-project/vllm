@@ -37,6 +37,7 @@ class Request:
         priority: int = 0,
         block_hasher: Optional[Callable[["Request"],
                                         list["BlockHash"]]] = None,
+        resumable: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -49,6 +50,8 @@ class Request:
         self.structured_output_request = structured_output_request
         self.arrival_time = arrival_time if arrival_time is not None else \
             time.time()
+        self.resumable = resumable
+        self.ready_to_resume = True if resumable else False
 
         self.status = RequestStatus.WAITING
         self.use_structured_output = False
@@ -137,7 +140,14 @@ class Request:
             cache_salt=request.cache_salt,
             priority=request.priority,
             block_hasher=block_hasher,
+            resumable=request.resumable,
         )
+
+    def append_prompt_token_ids(self, token_ids: list[int]) -> None:
+        self.prompt_token_ids.extend(token_ids)
+        self._all_token_ids.extend(token_ids)
+        self.num_prompt_tokens = len(self.prompt_token_ids)
+        self.all_token_ids = ConstantList(self._all_token_ids)
 
     def append_output_token_ids(
         self,

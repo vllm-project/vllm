@@ -250,6 +250,14 @@ class EngineCore:
 
         self.scheduler.add_request(request)
 
+    def resume_request(self,
+                       request_id: str,
+                       prompt_token_ids: Optional[list[int]] = None,
+                       finish_forever: Optional[bool] = False):
+        """Resume a finished request."""
+        self.scheduler.resume_request(request_id, prompt_token_ids,
+                                      finish_forever)
+
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
 
@@ -777,6 +785,9 @@ class EngineCoreProc(EngineCore):
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
             self.add_request(req, request_wave)
+        elif request_type == EngineCoreRequestType.RESUME:
+            request_id, prompt_token_ids, finish_forever = request
+            self.resume_request(request_id, prompt_token_ids, finish_forever)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:

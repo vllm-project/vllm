@@ -65,6 +65,7 @@ class EngineCoreRequest(
     # a wave finished notification is received.
     current_wave: int = 0
     priority: int = 0
+    resumable: bool = False
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -180,6 +181,7 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b'\x03'
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b'\x04'
+    RESUME = b'\x05'
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):

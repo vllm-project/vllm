@@ -3703,6 +3703,14 @@ class VllmConfig:
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
 
+        if self.model_config.architecture == "Qwen3ForGuardModel":
+            logger.info(
+                "Enable qwen3_guard logits computation, disable prefix caching."
+            )
+            self.scheduler_config.long_prefill_token_threshold = 0
+            if self.cache_config is not None:
+                self.cache_config.enable_prefix_caching = False
+
         if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events
                 and not self.cache_config.enable_prefix_caching):
