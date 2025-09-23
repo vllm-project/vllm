@@ -6,10 +6,10 @@ NixlConnector is a high-performance KV cache transfer connector for vLLM's disag
 
 ### Installation
 
-Install the NIXL library:
+Install the NIXL library: `uv pip install nixl`, as a quick start.
 
-- Refer to [NIXL official repository](https://github.com/ai-dynamo/nixl) for installation instructions
-- The required NIXL version can be found in [requirements/kv_connectors.txt](../../requirements/kv_connectors.txt) and other relevant config files
+- Refer to [NIXL official repository](https://github.com/ai-dynamo/nixl) for more installation instructions
+- The specified required NIXL version can be found in [requirements/kv_connectors.txt](../../requirements/kv_connectors.txt) and other relevant config files
 
 ### Transport Configuration
 
@@ -83,9 +83,9 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - Set when prefiller and decoder are on different machines
     - Connection info is passed via KVTransferParams from prefiller to decoder for handshake
 
-- `VLLM_NIXL_ABORT_REQUEST_TIMEOUT`: Auto-release timeout for prefiller's KV cache when decoder unresponsive (seconds) (optional)
-    - When nixl connection is aborted, before decoder reads kv-cache blocks through nixl channel, after this timeout value, prefill will release its kv cache blocks, to avoid holding them indefinitely.
+- `VLLM_NIXL_ABORT_REQUEST_TIMEOUT`: Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request. (Optional)
     - Default: 120
+    - If a request is aborted and the decoder has not yet read the KV-cache blocks through the nixl channel, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
 
 ## Multi-Instance Setup
 
