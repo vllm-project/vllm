@@ -51,7 +51,7 @@ def calculate_diff(
 ):
     """Calculate the difference between Inductor and CUDA implementations."""
     device = torch.device("cuda")
-    x = torch.rand((batch_size, hidden_size), dtype=dtype, device=device)
+    x = torch.randn((batch_size, hidden_size), dtype=dtype, device=device)
 
     quant_fp8 = QuantFP8(False, group_shape, column_major_scales=False)
 
@@ -59,23 +59,25 @@ def calculate_diff(
     torch_eager_out, torch_eager_scale = quant_fp8.forward_native(x)
     cuda_out, cuda_scale = quant_fp8.forward_cuda(x)
 
-    out_allclose = lambda o1, o2: torch.allclose(
-        o1.to(torch.float32),
-        o2.to(torch.float32),
-        rtol=1e-3,
-        atol=1e-5,
-    )
-    scale_allclose = lambda s1, s2: torch.allclose(s1, s2, rtol=1e-3, atol=1e-5)
-
-    if (
-        out_allclose(cuda_out, torch_out)
-        and scale_allclose(cuda_scale, torch_scale)
-        and out_allclose(cuda_out, torch_eager_out)
-        and scale_allclose(cuda_scale, torch_eager_scale)
-    ):
+    try:
+        torch.testing.assert_close(
+            cuda_out.to(torch.float32),
+            torch_out.to(torch.float32),
+            rtol=1e-3,
+            atol=1e-5,
+        )
+        torch.testing.assert_close(cuda_scale, torch_scale, rtol=1e-3, atol=1e-5)
+        torch.testing.assert_close(
+            cuda_out.to(torch.float32),
+            torch_eager_out.to(torch.float32),
+            rtol=1e-3,
+            atol=1e-5,
+        )
+        torch.testing.assert_close(cuda_scale, torch_eager_scale, rtol=1e-3, atol=1e-5)
         print("✅ All implementations match")
-    else:
+    except AssertionError as e:
         print("❌ Implementations differ")
+        print(e)
 
 
 configs = []
