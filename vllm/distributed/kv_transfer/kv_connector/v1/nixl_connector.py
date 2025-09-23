@@ -550,7 +550,8 @@ class NixlConnectorWorker:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
         # Background thread for initializing new NIXL handshakes.
-        self._handshake_initiation_executor: Optional[ThreadPoolExecutor] = None
+        self._handshake_initiation_executor: Optional[
+            ThreadPoolExecutor] = None
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # NIXL is not guaranteed to be thread-safe, limit 1 worker.
             max_workers=1,
