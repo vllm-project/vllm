@@ -75,12 +75,20 @@ class EagleProposer:
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
 
-        self.use_cuda_graph = (self.vllm_config.compilation_config.level
-                               == CompilationLevel.PIECEWISE and
-                               not self.vllm_config.model_config.enforce_eager)
-        self.cudagraph_runtime_mode = (CUDAGraphMode.PIECEWISE
-                                       if self.use_cuda_graph else
-                                       CUDAGraphMode.NONE)
+        self.use_cuda_graph = False
+
+        compilation_config = self.vllm_config.compilation_config
+        if compilation_config.level == CompilationLevel.PIECEWISE:
+            cudagraph_mode = compilation_config.cudagraph_mode
+            if cudagraph_mode == CUDAGraphMode.NONE and \
+                not cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE):
+                logger.warning(
+                    "Currently the eagle proposer only supports cudagraph_mode "
+                    "PIECEWISE, if you want the drafter to use cuda graphs, "
+                    "please set compilation_config.cudagraph_mode to PIECEWISE "
+                    "or FULL_AND_PIECEWISE")
+            self.use_cuda_graph = cudagraph_mode.has_mode(
+                CUDAGraphMode.PIECEWISE)
 
         self.cudagraph_batch_sizes = list(
             reversed(
@@ -195,9 +203,12 @@ class EagleProposer:
         per_layer_attn_metadata = {}
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
+
+        cudagraph_runtime_mode = CUDAGraphMode.NONE
         if self.use_cuda_graph and \
                 num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
@@ -220,7 +231,7 @@ class EagleProposer:
                 per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=num_input_tokens,
-                cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
             ret_hidden_states = self.model(
                 input_ids=input_ids,
@@ -268,8 +279,10 @@ class EagleProposer:
         if self.use_cuda_graph and \
                 batch_size <= self.cudagraph_batch_sizes[-1]:
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
+            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
             input_batch_size = batch_size
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
@@ -333,7 +346,7 @@ class EagleProposer:
                     per_layer_attn_metadata,
                     self.vllm_config,
                     num_tokens=input_batch_size,
-                    cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
@@ -485,14 +498,16 @@ class EagleProposer:
                     num_tokens <= self.cudagraph_batch_sizes[-1]:
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(
                     num_tokens)
+                cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
             else:
                 num_input_tokens = num_tokens
+                cudagraph_runtime_mode = CUDAGraphMode.NONE
             # Run the model.
             with set_forward_context(
                     per_layer_attn_metadata,
                     self.vllm_config,
                     num_tokens=num_input_tokens,
-                    cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
@@ -681,14 +696,12 @@ class EagleProposer:
     ) -> None:
         if use_cudagraphs:
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
-            
-        print(f"Doing dummy run with {num_tokens} tokens")
-        
+
         with set_forward_context(
                 None,
                 self.vllm_config,
                 num_tokens=num_tokens,
-                cudagraph_runtime_mode=self.cudagraph_runtime_mode \
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE \
                     if use_cudagraphs else CUDAGraphMode.NONE,
         ):
             if self.is_multimodal_model:
@@ -704,8 +717,6 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
-            
-        print(f"Dummy run done with {num_tokens} tokens")
 
     def validate_same_kv_cache_group(self,
                                      kv_cache_config: KVCacheConfig) -> None:
