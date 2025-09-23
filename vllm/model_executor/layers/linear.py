@@ -29,6 +29,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils import GiB_bytes
 
 logger = init_logger(__name__)
 
@@ -190,10 +191,27 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=params_dtype),
-                           requires_grad=False)
+        # This method creates unquantized linear weights.
+        # The weights are not quantized, and they are not sharded.
+        # The amount of memory allocated for the weights is
+        # sum(output_partition_sizes) * input_size_per_partition.
+        try:
+            weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                           input_size_per_partition,
+                                           dtype=params_dtype),
+                               requires_grad=False)
+        except torch.cuda.OutOfMemoryError as e:
+            logger.error("Failed to create unquantized linear weights: %s", e)
+            if torch.cuda.is_available():
+                logger.debug("CUDA device: %s", torch.cuda.current_device())
+                logger.debug("Allocated: %.2f GiB",
+                             torch.cuda.memory_allocated() / GiB_bytes)
+                logger.debug("Reserved: %.2f GiB",
+                             torch.cuda.memory_reserved() / GiB_bytes)
+            raise RuntimeError(
+                "Failed to create unquantized linear weights. "
+                "This may be caused by insufficient memory to allocate "
+                "the weight.") from e
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
@@ -740,7 +758,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         """
         Handle special case for models where MLP layers are already
         fused on disk. In this case, we have no shard id. This function
-        determmines the shard id by splitting these layers and then calls
+        determines the shard id by splitting these layers and then calls
         the weight loader using the shard id.
 
         An example of a model with these fused layers:
@@ -787,12 +805,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         assert loaded_shard_id < len(self.output_sizes)
 
         if isinstance(param, BlockQuantScaleParameter):
-            from vllm.model_executor.layers.quantization.fp8 import (
-                Fp8LinearMethod, Fp8MoEMethod)
             assert self.quant_method is not None
-            assert isinstance(self.quant_method,
-                              (Fp8LinearMethod, Fp8MoEMethod))
-            weight_block_size = self.quant_method.quant_config.weight_block_size
+            # Assume the weight block size has been set by quant method
+            assert hasattr(self, "weight_block_size")
+            weight_block_size = self.weight_block_size
             assert weight_block_size is not None
             block_n, _ = weight_block_size[0], weight_block_size[1]
             shard_offset = (
@@ -914,7 +930,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         """
         Handle special case for models where QKV layers are already 
         fused on disk. In this case, we have no shard id. This function
-        determmines the shard id by splitting these layers and then calls
+        determines the shard id by splitting these layers and then calls
         the weight loader using the shard id.
 
         An example of a model with these fused layers:
@@ -971,8 +987,10 @@ class QKVParallelLinear(ColumnParallelLinear):
         # Note(simon): This is needed for Qwen3's fp8 quantization.
         if isinstance(param, BlockQuantScaleParameter):
             assert self.quant_method is not None
-            assert hasattr(self.quant_method, "quant_config")
-            weight_block_size = self.quant_method.quant_config.weight_block_size
+            # Assume the weight block size has been set by quant method
+            assert hasattr(self, "weight_block_size")
+            weight_block_size = self.weight_block_size
+            assert weight_block_size is not None
             block_n, _ = weight_block_size[0], weight_block_size[1]
             shard_offset = (shard_offset + block_n - 1) // block_n
             shard_size = (shard_size + block_n - 1) // block_n

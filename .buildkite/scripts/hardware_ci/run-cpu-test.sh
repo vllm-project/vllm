@@ -66,7 +66,6 @@ function cpu_tests() {
 
     pytest -x -v -s tests/models/language/pooling -m cpu_model
     pytest -x -v -s tests/models/multimodal/generation \
-                --ignore=tests/models/multimodal/generation/test_mllama.py \
                 --ignore=tests/models/multimodal/generation/test_pixtral.py \
                 -m cpu_model"
 

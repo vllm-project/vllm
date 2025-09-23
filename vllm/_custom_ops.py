@@ -117,13 +117,14 @@ def paged_attention_rocm(
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
     fp8_out_scale: Optional[torch.Tensor] = None,
+    mfma_type: str = "fp8" if envs.VLLM_ROCM_FP8_MFMA_PAGE_ATTN else "f16",
 ) -> None:
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
                                       query_start_loc, block_size, max_seq_len,
                                       alibi_slopes, kv_cache_dtype, k_scale,
-                                      v_scale, fp8_out_scale)
+                                      v_scale, fp8_out_scale, mfma_type)
 
 
 def mla_decode_kvcache_cpu(
@@ -255,16 +256,6 @@ def rotary_embedding(
 ) -> None:
     torch.ops._C.rotary_embedding(positions, query, key, head_size,
                                   cos_sin_cache, is_neox)
-
-
-def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
-                             key: Optional[torch.Tensor], head_size: int,
-                             cos_sin_cache: torch.Tensor, is_neox: bool,
-                             rot_dim: int,
-                             cos_sin_cache_offsets: torch.Tensor) -> None:
-    torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
-                                          cos_sin_cache, is_neox, rot_dim,
-                                          cos_sin_cache_offsets)
 
 
 # layer norm ops
@@ -1832,15 +1823,6 @@ def flash_mla_with_kvcache(
     return out, softmax_lse
 
 
-def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
-                       q_pe: torch.Tensor, kv_c_and_k_pe_cache: torch.Tensor,
-                       seq_lens: torch.Tensor, page_table: torch.Tensor,
-                       scale: float) -> torch.Tensor:
-    torch.ops._C.cutlass_mla_decode(out, q_nope, q_pe, kv_c_and_k_pe_cache,
-                                    seq_lens, page_table, scale)
-    return out
-
-
 def sm100_cutlass_mla_decode(out: torch.Tensor, lse: torch.Tensor,
                              q_nope: torch.Tensor, q_pe: torch.Tensor,
                              kv_c_and_k_pe_cache: torch.Tensor,
@@ -2020,3 +2002,27 @@ def onednn_scaled_mm(
                                   input_zp_adj, bias, dnnl_handler.handler)
 
     return output
+
+
+def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
+    """
+    Perform Hadamard transforms using [Hadacore](https://arxiv.org/abs/2412.08832)
+    kernels. Note that these kernels exploit the recursive properties of
+    Sylvester Hadamards, and therefore do not require transform weight data
+
+    Note that sylvester hadamard transforms are also symmetric, which means that
+    this function is also applies the (transpose <=> inverse) transform.
+    
+    :param x: value to be transformed inplace
+    :param inplace: modify value in place
+    :return: value after transformation
+    """
+    return torch.ops._C.hadacore_transform(x, inplace)
+
+
+if hasattr(torch.ops._C, "hadacore_transform"):
+
+    @register_fake("_C::hadacore_transform")
+    def _hadacore_transform_fake(x: torch.Tensor,
+                                 inplace: bool) -> torch.Tensor:
+        return torch.empty_like(x) if not inplace else x

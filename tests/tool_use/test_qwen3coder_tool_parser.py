@@ -15,7 +15,7 @@ from vllm.entrypoints.openai.tool_parsers.qwen3coder_tool_parser import (
     Qwen3CoderToolParser)
 from vllm.entrypoints.openai.tool_parsers.qwen3xml_tool_parser import (
     Qwen3XMLToolParser)
-from vllm.transformers_utils.detokenizer import detokenize_incrementally
+from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"

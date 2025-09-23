@@ -30,9 +30,19 @@ class RotaryEmbedding(CustomOp):
         self.base = base
         self.is_neox_style = is_neox_style
         self.dtype = dtype
+        # TODO(mgoin): disabled for now due to failures
+        # Flashinfer only supports head_size=64, 128, 256, 512.
+        # https://github.com/flashinfer-ai/flashinfer/blob/ebfd655efe830048dba5d582aaa61d61d1cf9a87/include/flashinfer/utils.cuh#L174-L202
+        # self.use_flashinfer = (self.enabled()
+        #                        and dtype in (torch.float16, torch.bfloat16)
+        #                        and current_platform.is_cuda()
+        #                        and has_flashinfer()
+        #                        and self.head_size in [64, 128, 256, 512])
+        self.use_flashinfer = False
 
         cache = self._compute_cos_sin_cache()
-        cache = cache.to(dtype)
+        if not self.use_flashinfer:
+            cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
@@ -57,16 +67,21 @@ class RotaryEmbedding(CustomOp):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
+    def _match_cos_sin_cache_dtype(self, query: torch.Tensor) -> None:
+        # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
+        # is expensive, so avoid calling it if possible
+        if self.cos_sin_cache.device != query.device or \
+            self.cos_sin_cache.dtype != query.dtype:
+            self.cos_sin_cache = self.cos_sin_cache.to(query.device,
+                                                       dtype=query.dtype)
+
     def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """A PyTorch-native implementation of forward()."""
-        if offsets is not None:
-            positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
         cos_sin = self.cos_sin_cache.index_select(0, positions)
@@ -96,27 +111,21 @@ class RotaryEmbedding(CustomOp):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.use_flashinfer:
+            torch.ops.vllm.flashinfer_rotary_embedding(positions, query, key,
+                                                       self.head_size,
+                                                       self.cos_sin_cache,
+                                                       self.is_neox_style)
+            return query, key
+
         from vllm import _custom_ops as ops
 
-        # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
-        # is expensive, so avoid calling it if possible
-        if self.cos_sin_cache.device != query.device or \
-            self.cos_sin_cache.dtype != query.dtype:
-            self.cos_sin_cache = self.cos_sin_cache.to(query.device,
-                                                       dtype=query.dtype)
-
-        # ops.rotary_embedding()/batched_rotary_embedding()
-        # are in-place operations that update the query and key tensors.
-        if offsets is not None:
-            ops.batched_rotary_embedding(positions, query, key, self.head_size,
-                                         self.cos_sin_cache,
-                                         self.is_neox_style, self.rotary_dim,
-                                         offsets)
-        else:
-            ops.rotary_embedding(positions, query, key, self.head_size,
-                                 self.cos_sin_cache, self.is_neox_style)
+        self._match_cos_sin_cache_dtype(query)
+        # ops.rotary_embedding() is an in-place operation
+        # that updates the query and key tensors.
+        ops.rotary_embedding(positions, query, key, self.head_size,
+                             self.cos_sin_cache, self.is_neox_style)
         return query, key
 
     def forward_xpu(
@@ -124,29 +133,20 @@ class RotaryEmbedding(CustomOp):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         from vllm._ipex_ops import ipex_ops as ops
 
-        self.cos_sin_cache = self.cos_sin_cache.to(positions.device,
-                                                   dtype=query.dtype)
-        # ops.rotary_embedding()/batched_rotary_embedding()
-        # are in-place operations that update the query and key tensors.
+        self._match_cos_sin_cache_dtype(query)
+        # ops.rotary_embedding() is an in-place operation
+        # that updates the query and key tensors.
         if key is None:
             # XPU kernel doesn't support key=None so fall back to native impl
             # TODO(sarckk): add support for optional key in
             # ipex.llm.functional.rotary_embedding_batched
-            return self.forward_native(positions, query, key, offsets)
+            return self.forward_native(positions, query, key)
         else:
-            if offsets is not None:
-                ops.batched_rotary_embedding(positions, query, key,
-                                             self.head_size,
-                                             self.cos_sin_cache,
-                                             self.is_neox_style,
-                                             self.rotary_dim, offsets)
-            else:
-                ops.rotary_embedding(positions, query, key, self.head_size,
-                                     self.cos_sin_cache, self.is_neox_style)
+            ops.rotary_embedding(positions, query, key, self.head_size,
+                                 self.cos_sin_cache, self.is_neox_style)
         return query, key
 
     def extra_repr(self) -> str:
