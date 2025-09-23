@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional, Any
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -22,6 +22,11 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
     from triton_kernels.tensor_details import layout
     from triton_kernels.tensor_details.layout import StridedLayout
+
+
+    value_layout_opts: dict[str, Any] = {}
+    scale_layout_opts: dict[str, Any] = {}
+
     if (current_platform.is_cuda()
             and current_platform.is_device_capability(90)
             and not is_torch_equal_or_newer("2.8.1")):
@@ -30,16 +35,12 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
             "this cause swizling to be disabled, which may "
             "cause performance degradation. Please upgrade to torch nightly")
         value_layout = StridedLayout
-        value_layout_opts: dict[str, Any] = {}
         scale_layout = StridedLayout
-        scale_layout_opts: dict[str, Any] = {}
     elif current_platform.is_rocm():
         from triton_kernels.tensor_details.layout import (GFX950MXScaleLayout,
                                                           StridedLayout)
         value_layout = StridedLayout
-        value_layout_opts: dict[str, Any] = {}
         scale_layout = StridedLayout
-        scale_layout_opts: dict[str, Any] = {}
         if envs.VLLM_ROCM_TRITON_HIP_PRESHUFFLE_SCALES:
             scale_layout = GFX950MXScaleLayout
     else:
