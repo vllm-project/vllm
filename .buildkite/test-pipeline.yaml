@@ -887,6 +887,8 @@ steps:
   - tests/v1/test_external_lb_dp.py
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
   - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/v1/worker/test_worker_memory_snapshot.py
   commands:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_external_lb_dp.py
@@ -908,6 +910,7 @@ steps:
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s models/multimodal/generation/test_maverick.py
+  - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
 - label: Plugin Tests (2 GPUs) # 40min
   timeout_in_minutes: 60
