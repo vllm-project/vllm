@@ -378,5 +378,8 @@ def report_usage_stats(
 def record_function_or_nullcontext(name: str) -> AbstractContextManager:
     if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
         return record_function(name)
+    elif envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
+        import nvtx
+        return nvtx.annotate(name)
     else:
         return contextlib.nullcontext()
