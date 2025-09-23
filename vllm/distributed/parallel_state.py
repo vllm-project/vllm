@@ -1032,7 +1032,9 @@ def init_distributed_environment(world_size: int = -1,
         distributed_init_method, backend)
     from vllm.config import get_current_vllm_config
     config = get_current_vllm_config()
-    if config is not None and config.parallel_config.data_parallel_size > 1:
+    if config is not None and config.parallel_config.data_parallel_size > 1 \
+        and config.parallel_config.distributed_executor_backend \
+        != "external_launcher":
         parallel_config = config.parallel_config
         # adjust to take into account data parallelism
         # offset the rank by the data parallel rank
