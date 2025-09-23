@@ -47,7 +47,11 @@ class PadPattern:
                                 fill_value=0.0,
                                 dtype=a.dtype,
                                 device=a.device)
-            result[..., :a.shape[-1]] = a * b
+            result = torch.slice_scatter(result,
+                                         a * b,
+                                         dim=-1,
+                                         start=0,
+                                         end=a.shape[-1])
 
             return result
 
