@@ -740,8 +740,10 @@ class Indexer(nn.Module):
             )
             topk_indices = logits.topk(min(self.topk_tokens, logits.shape[-1]),
                                        dim=-1)[1]
-            mask_lo = topk_indices >= cu_seqlen_ks[:, None]
-            mask_hi = topk_indices < cu_seqlen_ke[:, None]
+            topk_indices -= cu_seqlen_ks[:, None]
+            mask_lo = topk_indices >= 0
+            mask_hi = topk_indices < cu_seqlen_ke[:, None] - cu_seqlen_ks[:,
+                                                                          None]
             mask = mask_lo & mask_hi
             topk_indices = topk_indices.masked_fill(~mask, -1)
             topk_indices_buffer = torch.full(
