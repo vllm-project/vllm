@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
 from typing import Optional
 
 import torch
@@ -10,10 +11,12 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 
+@cache
 def is_rocm_rotary_embedding_enabled() -> bool:
     return (current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER)
 
 
+@cache
 def is_rocm_triton_rotary_embedding_enabled() -> bool:
     return (current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_USE_AITER_TRITON_ROPE)

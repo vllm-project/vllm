@@ -42,6 +42,11 @@ from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
+try:
+    from aiter.ops.triton.moe_op_mxfp4 import _fused_moe_kernel_mxfp4
+except ImportError:
+    _fused_moe_kernel_mxfp4 = None
+
 logger = init_logger(__name__)
 
 
@@ -505,6 +510,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                             use_int8_w8a8: bool,
                             use_int8_w8a16: bool,
                             use_int4_w4a16: bool,
+                            use_mxfp4_w4a4: bool,
                             per_channel_quant: bool,
                             block_shape: Optional[list[int]] = None,
                             B_bias: Optional[torch.Tensor] = None) -> None:
@@ -607,6 +613,58 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             has_zp=B_zp is not None,
             use_int4_w4a16=use_int4_w4a16,
             use_int8_w8a16=use_int8_w8a16,
+            **config,
+        )
+    elif use_mxfp4_w4a4:
+        assert A_scale is not None
+        assert B_scale is not None
+
+        ONE = torch.ones(B.size(0), dtype=torch.float32, device=A.device)
+        # overwrite config with a static one for now
+        config = {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 4,
+            "num_warps": 8,
+            "num_stages": 2,
+            "waves_per_eu": 0,
+            "matrix_instr_nonkdim": 16,
+            "kpack": 1,
+        }
+        _fused_moe_kernel_mxfp4[grid](
+            A,
+            B,
+            C,
+            ONE[0],
+            ONE,
+            A_scale,
+            B_scale,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            B.size(1),
+            A.size(1),
+            EM,
+            num_tokens,
+            A.stride(0),
+            A.stride(1),
+            B.stride(0),
+            B.stride(2),
+            B.stride(1),
+            C.stride(1),
+            C.stride(2),
+            A_scale.stride(0),
+            A_scale.stride(1),
+            B_scale.stride(0),
+            B_scale.stride(2),
+            B_scale.stride(1),
+            MUL_ROUTED_WEIGHT=mul_routed_weight,
+            top_k=top_k,
+            compute_type=compute_type,
+            SWIZZLE_MX_A=False,
+            SWIZZLE_MX_B=False,
             **config,
         )
     else:
@@ -1500,7 +1558,7 @@ def fused_experts_impl(
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    if use_mxfp4_w4a4:
+    if use_mxfp4_w4a4 and not current_platform.supports_mx():
         # Weight has to be dequantized for mxfp4 emulation.
         w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
         w1_scale = None
@@ -1559,6 +1617,8 @@ def fused_experts_impl(
                                 use_int8_w8a8=use_int8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
+                                use_mxfp4_w4a4=use_mxfp4_w4a4
+                                and current_platform.supports_mx(),
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape,
                                 B_bias=w1_bias)
@@ -1608,6 +1668,8 @@ def fused_experts_impl(
                                 use_int8_w8a8=use_int8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
+                                use_mxfp4_w4a4=use_mxfp4_w4a4
+                                and current_platform.supports_mx(),
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape,
                                 B_bias=w2_bias)
@@ -1753,6 +1815,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_int8_w8a8=self.quant_config.use_int8_w8a8,
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            use_mxfp4_w4a4=self.quant_config.use_mxfp4_w4a4,
             per_channel_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
             B_bias=self.w1_bias,
@@ -1786,6 +1849,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_int8_w8a8=self.quant_config.use_int8_w8a8,
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            use_mxfp4_w4a4=self.quant_config.use_mxfp4_w4a4,
             per_channel_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
             B_bias=self.w2_bias,

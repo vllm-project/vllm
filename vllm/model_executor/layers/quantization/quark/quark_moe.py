@@ -417,19 +417,12 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
                 "QuarkW4A4MXFp4MoEMethod with static input scales is currently "
                 "not implemented. Please open an issue.")
 
+        self.emulate = False
         if not current_platform.supports_mx():
             self.emulate = True
             logger.warning_once(
                 "The current platform does not support native MXFP4 "
                 "computation. Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision.")
-        else:
-            self.emulate = True
-            logger.warning_once(
-                "The current platform supports native MXFP4 "
-                "computation, but kernels are not yet integrated in vLLM. "
-                "Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
                 "layers computed in high precision.")
 
