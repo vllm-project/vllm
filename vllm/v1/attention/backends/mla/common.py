@@ -486,6 +486,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.chunked_prefill_workspace_size = max(
             self.chunked_prefill_workspace_size,
             scheduler_config.max_num_seqs * cache_config.block_size)
+
         if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP is triggered,
             # an additional kvcache allgather across the DCP group is therefore
