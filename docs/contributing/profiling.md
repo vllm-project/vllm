@@ -164,6 +164,8 @@ GUI example:
 
 If you run your workload on Intel(R) GPUs, you need the unitrace tool for GPU profiling. The tool is open sourced. Please follow the [instructions](https://github.com/intel/pti-gpu/blob/master/tools/unitrace/README.md) to build and install the tool.
 
+### Example Commands and Usage
+
 #### Offline Inference
 
 For basic usage, you can just append `unitrace <options>`, for example, `unitrace --chrome-kernel-logging`, before any existing script you would run for offline inference.
