@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -80,7 +81,8 @@ class MultiHeadLatentAttention(CustomOp):
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
         self.topk_tokens = mla_modules.indexer.topk_tokens
-        self.use_sparse = mla_modules.is_sparse and False
+        self.use_sparse = mla_modules.is_sparse and os.getenv(
+            "VLLM_MLA_SPARSE_ENABLED") == "1"
 
         # In the MLA backend, kv_cache includes both k_c and
         # pe (i.e. decoupled position embeddings). In particular,
@@ -155,7 +157,7 @@ class MultiHeadLatentAttention(CustomOp):
         if self.use_sparse:
             topk_indices = torch.zeros(q.shape[0], self.topk_tokens)
 
-            # NOTE(Chen): a bit hacky, but need to modify Attention.forward 
+            # NOTE(Chen): a bit hacky, but need to modify Attention.forward
             # otherwise. Try to refactor this later.
             self.mla_attn.impl.set_topk_indices(topk_indices)
 
