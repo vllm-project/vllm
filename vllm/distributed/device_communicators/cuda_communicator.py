@@ -30,18 +30,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
                  unique_name: str = ""):
         super().__init__(cpu_group, device, device_group, unique_name)
         if "tp" not in unique_name:
-            # only tp uses custom allreduce
+            # custom allreduce or torch symm mem can be used only by tp
             use_custom_allreduce = False
+            use_torch_symm_mem = False
         else:
             from vllm.distributed.parallel_state import (
                 _ENABLE_CUSTOM_ALL_REDUCE)
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+            use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
 
         # ep does not use pynccl
         use_pynccl = "ep" not in unique_name
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
+        self.use_torch_symm_mem = use_torch_symm_mem
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -65,7 +68,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.ca_comm: Optional[CustomAllreduce] = None
         self.qr_comm: Optional[QuickAllReduce] = None
         self.symm_mem_comm: Optional[SymmMemCommunicator] = None
-        if envs.VLLM_ALLREDUCE_USE_SYMM_MEM and current_platform.is_cuda():
+        if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
                 group=self.cpu_group,
                 device=self.device,
