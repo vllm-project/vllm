@@ -15,6 +15,8 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorStats)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -144,8 +146,8 @@ class Scheduler(SchedulerInterface):
         )
 
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
-        # projector if needed). Currently, we assume that the encoder also
-        # has the Transformer architecture (e.g., ViT).
+        # projector if needed) for MM models as well as encoder-decoder
+        # transformers.
         self.max_num_encoder_input_tokens = encoder_compute_budget
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
@@ -387,6 +389,14 @@ class Scheduler(SchedulerInterface):
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens))
 
+                        if num_external_computed_tokens is None:
+                            # The request cannot be scheduled because
+                            # the KVConnector couldn't determine
+                            # the number of matched tokens.
+                            self.waiting.pop_request()
+                            skipped_waiting_requests.prepend_request(request)
+                            continue
+
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_new_local_computed_tokens +
                                            num_external_computed_tokens)
@@ -453,13 +463,8 @@ class Scheduler(SchedulerInterface):
                     # always padded to the maximum length. If we support other
                     # encoder-decoder models, this will need to be updated if we
                     # want to only allocate what is needed.
-                    assert ("whisper"
-                            in self.vllm_config.model_config.model.lower()), (
-                                "Whisper is the only supported "
-                                "encoder-decoder model.")
-                    num_encoder_tokens = MULTIMODAL_REGISTRY.\
-                        get_encdec_max_encoder_len(
-                        self.vllm_config.model_config)
+                    num_encoder_tokens =\
+                        self.scheduler_config.max_num_encoder_input_tokens
                 else:
                     num_encoder_tokens = 0
 
@@ -569,8 +574,10 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_blocks,
         )
+        scheduled_requests = (scheduled_new_reqs + scheduled_running_reqs +
+                              scheduled_resumed_reqs)
         structured_output_request_ids, grammar_bitmask = (
-            self.get_grammar_bitmask(self.running,
+            self.get_grammar_bitmask(scheduled_requests,
                                      scheduled_spec_decode_tokens))
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -728,18 +735,18 @@ class Scheduler(SchedulerInterface):
         if num_new_tokens == 0 or not request.has_encoder_inputs:
             return [], num_new_tokens, encoder_compute_budget
         encoder_inputs_to_schedule: list[int] = []
-        mm_positions = request.mm_positions
-        assert mm_positions is not None
-        assert len(mm_positions) > 0
+        mm_features = request.mm_features
+        assert mm_features is not None
+        assert len(mm_features) > 0
 
         # NOTE: since scheduler operates on the request level (possibly with
         # multiple encoder inputs per request), we need to create temporary
         # trackers for accounting at the encoder input level.
         mm_hashes_to_schedule = set()
         num_tokens_to_schedule = 0
-        for i, pos_info in enumerate(mm_positions):
-            start_pos = pos_info.offset
-            num_encoder_tokens = pos_info.length
+        for i, mm_feature in enumerate(mm_features):
+            start_pos = mm_feature.mm_position.offset
+            num_encoder_tokens = mm_feature.mm_position.length
 
             # The encoder output is needed if the two ranges overlap:
             # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
@@ -767,15 +774,19 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            # The same encoder input has already been scheduled in the current
-            # step.
-            if request.mm_hashes[i] in mm_hashes_to_schedule:
-                continue
+            if not self.is_encoder_decoder:
+                # We are not using the encoder cache for encoder-decoder models,
+                # yet.
+                if request.mm_features[i].identifier in mm_hashes_to_schedule:
+                    # The same encoder input has already been scheduled in the
+                    # current step.
+                    continue
 
-            if self.encoder_cache_manager.check_and_update_cache(request, i):
-                # The encoder input is already computed and cached from a
-                # previous step.
-                continue
+                if self.encoder_cache_manager.check_and_update_cache(
+                        request, i):
+                    # The encoder input is already computed and cached from a
+                    # previous step.
+                    continue
 
             # If no encoder input chunking is allowed, we do not want to
             # partially schedule a multimodal item. If the scheduled range would
@@ -808,7 +819,7 @@ class Scheduler(SchedulerInterface):
 
             num_tokens_to_schedule += num_encoder_tokens
             encoder_compute_budget -= num_encoder_tokens
-            mm_hashes_to_schedule.add(request.mm_hashes[i])
+            mm_hashes_to_schedule.add(request.mm_features[i].identifier)
             encoder_inputs_to_schedule.append(i)
 
         return (
@@ -858,9 +869,12 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        kv_connector_output = model_runner_output.kv_connector_output
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
+        kv_connector_stats = (kv_connector_output.kv_connector_stats
+                              if kv_connector_output else None)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -957,9 +971,9 @@ class Scheduler(SchedulerInterface):
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
+                        trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                     ))
-
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
@@ -996,7 +1010,8 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set)
             finished_req_ids.clear()
 
-        if (stats := self.make_stats(spec_decoding_stats)) is not None:
+        if (stats := self.make_stats(spec_decoding_stats,
+                                     kv_connector_stats)) is not None:
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
@@ -1036,10 +1051,16 @@ class Scheduler(SchedulerInterface):
         # Here, we use list(set) to avoid modifying the set while iterating
         # over it.
         for input_id in list(cached_encoder_input_ids):
-            mm_positions = request.mm_positions[input_id]
-            start_pos = mm_positions.offset
-            num_tokens = mm_positions.length
-            if start_pos + num_tokens <= request.num_computed_tokens:
+            mm_feature = request.mm_features[input_id]
+            start_pos = mm_feature.mm_position.offset
+            num_tokens = mm_feature.mm_position.length
+            if self.is_encoder_decoder and request.num_computed_tokens > 0:
+                # With Whisper, as soon as we've generated a single token,
+                # we know we're done with the encoder input. Cross Attention
+                # KVs have been calculated and cached already.
+                self.encoder_cache_manager.free_encoder_input(
+                    request, input_id)
+            elif start_pos + num_tokens <= request.num_computed_tokens:
                 # The encoder output is already processed and stored
                 # in the decoder's KV cache.
                 self.encoder_cache_manager.free_encoder_input(
@@ -1155,20 +1176,21 @@ class Scheduler(SchedulerInterface):
     def make_stats(
         self,
         spec_decoding_stats: Optional[SpecDecodingStats] = None,
+        kv_connector_stats: Optional[KVConnectorStats] = None,
     ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
-        return SchedulerStats(
-            num_running_reqs=len(self.running),
-            num_waiting_reqs=len(self.waiting),
-            kv_cache_usage=self.kv_cache_manager.usage,
-            prefix_cache_stats=prefix_cache_stats,
-            spec_decoding_stats=spec_decoding_stats,
-            num_corrupted_reqs=sum(req.is_output_corrupted
-                                   for req in self.running),
-        )
+        return SchedulerStats(num_running_reqs=len(self.running),
+                              num_waiting_reqs=len(self.waiting),
+                              kv_cache_usage=self.kv_cache_manager.usage,
+                              prefix_cache_stats=prefix_cache_stats,
+                              spec_decoding_stats=spec_decoding_stats,
+                              num_corrupted_reqs=sum(req.is_output_corrupted
+                                                     for req in self.running),
+                              kv_connector_stats=kv_connector_stats.data
+                              if kv_connector_stats else None)
 
     def make_spec_decoding_stats(
         self,
@@ -1188,6 +1210,8 @@ class Scheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        if self.connector is not None:
+            self.connector.shutdown()
 
     ########################################################################
     # KV Connector Related Methods

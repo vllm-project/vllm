@@ -6,8 +6,9 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 import pytest
 
 from vllm.compilation.backends import VllmBackend
-from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
-                         get_field, update_config)
+from vllm.config import ModelConfig, PoolerConfig, VllmConfig, update_config
+from vllm.config.load import LoadConfig
+from vllm.config.utils import get_field
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -206,25 +207,19 @@ def test_get_pooling_config():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     model_config = ModelConfig(model_id)
 
-    pooling_config = model_config._init_pooler_config()
-    assert pooling_config is not None
-
-    assert pooling_config.normalize
-    assert pooling_config.pooling_type == PoolingType.MEAN.name
+    assert model_config.pooler_config is not None
+    assert model_config.pooler_config.normalize
+    assert model_config.pooler_config.pooling_type == PoolingType.MEAN.name
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    model_config = ModelConfig(model_id)
+    pooler_config = PoolerConfig(pooling_type="CLS", normalize=True)
+    model_config = ModelConfig(model_id, pooler_config=pooler_config)
 
-    override_pooler_config = PoolerConfig(pooling_type='CLS', normalize=True)
-    model_config.override_pooler_config = override_pooler_config
-
-    pooling_config = model_config._init_pooler_config()
-    assert pooling_config is not None
-    assert asdict(pooling_config) == asdict(override_pooler_config)
+    assert asdict(model_config.pooler_config) == asdict(pooler_config)
 
 
 @pytest.mark.parametrize(
@@ -298,9 +293,8 @@ def test_rope_customization():
                     reason="Encoder Decoder models not supported on ROCm.")
 @pytest.mark.parametrize(("model_id", "is_encoder_decoder"), [
     ("facebook/opt-125m", False),
-    ("facebook/bart-base", True),
+    ("openai/whisper-tiny", True),
     ("meta-llama/Llama-3.2-1B-Instruct", False),
-    ("meta-llama/Llama-3.2-11B-Vision", True),
 ])
 def test_is_encoder_decoder(model_id, is_encoder_decoder):
     config = ModelConfig(model_id)

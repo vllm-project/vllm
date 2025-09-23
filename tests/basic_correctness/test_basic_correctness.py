@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm import LLM, envs
+from vllm import LLM
 from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 
 from ..conftest import HfRunner, VllmRunner
@@ -24,14 +24,6 @@ MODELS = [
 ]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def test_vllm_gc_ed():
@@ -62,6 +54,8 @@ def _fix_prompt_embed_outputs(
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("model_executor", ["uni", "mp"])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
 def test_models(
     monkeypatch: pytest.MonkeyPatch,
@@ -70,13 +64,10 @@ def test_models(
     backend: str,
     max_tokens: int,
     enforce_eager: bool,
+    async_scheduling: bool,
+    model_executor: str,
     enable_prompt_embeds: bool,
 ) -> None:
-
-    if enable_prompt_embeds and envs.is_set(
-            "VLLM_USE_V1") and envs.VLLM_USE_V1:
-        pytest.skip("enable_prompt_embeds is not supported in v1.")
-
     if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")
@@ -98,11 +89,15 @@ def test_models(
                     prompt_embeds = hf_model.get_prompt_embeddings(
                         example_prompts)
 
-        with VllmRunner(model,
-                        max_model_len=8192,
-                        enforce_eager=enforce_eager,
-                        enable_prompt_embeds=enable_prompt_embeds,
-                        gpu_memory_utilization=0.7) as vllm_model:
+        with VllmRunner(
+                model,
+                max_model_len=8192,
+                enforce_eager=enforce_eager,
+                enable_prompt_embeds=enable_prompt_embeds,
+                gpu_memory_utilization=0.7,
+                async_scheduling=async_scheduling,
+                distributed_executor_backend=model_executor,
+        ) as vllm_model:
             if enable_prompt_embeds:
                 vllm_outputs = vllm_model.generate_greedy(
                     prompt_embeds, max_tokens)
@@ -150,11 +145,6 @@ def test_models_distributed(
     extra_env: dict[str, str],
     enable_prompt_embeds: bool,
 ) -> None:
-
-    if enable_prompt_embeds and envs.is_set(
-            "VLLM_USE_V1") and envs.VLLM_USE_V1:
-        pytest.skip("enable_prompt_embeds is not supported in v1.")
-
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 

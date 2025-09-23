@@ -14,6 +14,10 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+    _get_config_dtype_str,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
@@ -134,43 +138,36 @@ def benchmark_config(
     def run():
         from vllm.model_executor.layers.fused_moe import override_config
 
+        if use_fp8_w8a8:
+            quant_dtype = torch.float8_e4m3fn
+        elif use_int8_w8a16:
+            quant_dtype = torch.int8
+        else:
+            quant_dtype = None
+
+        quant_config = FusedMoEQuantConfig.make(
+            quant_dtype=quant_dtype,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_quant_shape,
+        )
+
         with override_config(config):
-            if use_deep_gemm:
-                topk_weights, topk_ids, token_expert_indices = fused_topk(
-                    x, input_gating, topk, False
-                )
-                return fused_experts(
-                    x,
-                    w1,
-                    w2,
-                    topk_weights,
-                    topk_ids,
-                    inplace=True,
-                    use_fp8_w8a8=use_fp8_w8a8,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    a1_scale=a1_scale,
-                    a2_scale=a2_scale,
-                    block_shape=block_quant_shape,
-                    allow_deep_gemm=True,
-                )
-            else:
-                fused_moe(
-                    x,
-                    w1,
-                    w2,
-                    input_gating,
-                    topk,
-                    renormalize=True,
-                    inplace=True,
-                    use_fp8_w8a8=use_fp8_w8a8,
-                    use_int8_w8a16=use_int8_w8a16,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    a1_scale=a1_scale,
-                    a2_scale=a2_scale,
-                    block_shape=block_quant_shape,
-                )
+            topk_weights, topk_ids, token_expert_indices = fused_topk(
+                x, input_gating, topk, renormalize=not use_deep_gemm
+            )
+            return fused_experts(
+                x,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                inplace=True,
+                quant_config=quant_config,
+                allow_deep_gemm=use_deep_gemm,
+            )
 
     # JIT compilation & warmup
     run()
@@ -414,7 +411,7 @@ class BenchmarkWorker:
         use_deep_gemm: bool = False,
     ) -> tuple[dict[str, int], float]:
         current_platform.seed_everything(self.seed)
-        dtype_str = get_config_dtype_str(
+        dtype_str = _get_config_dtype_str(
             dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
         )
         # NOTE(woosuk): The current naming convention uses w2.shape[2], which
@@ -547,7 +544,7 @@ def save_configs(
     block_quant_shape: list[int],
     save_dir: str,
 ) -> None:
-    dtype_str = get_config_dtype_str(
+    dtype_str = _get_config_dtype_str(
         dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
     )
 
@@ -560,7 +557,7 @@ def save_configs(
     filename = os.path.join(save_dir, filename)
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
-        json.dump(configs, f, indent=4)
+        json.dump({"triton_version": triton.__version__, **configs}, f, indent=4)
         f.write("\n")
 
 
@@ -594,7 +591,11 @@ def main(args: argparse.Namespace):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
-    elif config.architectures[0] in ("Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"):
+    elif config.architectures[0] in (
+        "Qwen2MoeForCausalLM",
+        "Qwen3MoeForCausalLM",
+        "Qwen3NextForCausalLM",
+    ):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
@@ -678,7 +679,11 @@ def main(args: argparse.Namespace):
         is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16)
         search_space = get_configs_compute_bound(is_fp16, block_quant_shape)
         print(f"Start tuning over {len(search_space)} configurations...")
-
+        if use_deep_gemm:
+            raise ValueError(
+                "Tuning with --use-deep-gemm is not supported as it only tunes Triton "
+                "kernels. Please remove the flag."
+            )
         start = time.time()
         configs = _distribute(
             "tune",

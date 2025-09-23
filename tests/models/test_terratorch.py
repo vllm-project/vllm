@@ -5,13 +5,12 @@ import pytest
 import torch
 
 from tests.conftest import VllmRunner
-from vllm.utils import set_default_torch_num_threads
 
 
 @pytest.mark.parametrize(
     "model",
     [
-        "mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
+        "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
         "mgazz/Prithvi_v2_eo_300_tl_unet_agb"
     ],
 )
@@ -25,19 +24,17 @@ def test_inference(
     prompt = dict(prompt_token_ids=[1],
                   multi_modal_data=dict(pixel_values=pixel_values,
                                         location_coords=location_coords))
-    with (
-            set_default_torch_num_threads(1),
-            vllm_runner(
-                model,
-                runner="pooling",
-                dtype=torch.float16,
-                enforce_eager=True,
-                skip_tokenizer_init=True,
-                # Limit the maximum number of sequences to avoid the
-                # test going OOM during the warmup run
-                max_num_seqs=32,
-            ) as vllm_model,
-    ):
+    with vllm_runner(
+            model,
+            runner="pooling",
+            dtype="half",
+            enforce_eager=True,
+            skip_tokenizer_init=True,
+            # Limit the maximum number of sequences to avoid the
+            # test going OOM during the warmup run
+            max_num_seqs=32,
+            default_torch_num_threads=1,
+    ) as vllm_model:
 
         vllm_output = vllm_model.llm.encode(prompt)
         assert torch.equal(

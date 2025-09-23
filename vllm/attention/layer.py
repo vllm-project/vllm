@@ -23,11 +23,16 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import GiB_bytes, direct_register_custom_op
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
+try:
+    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
+except AttributeError:
+    tag_cudagraph_unsafe = ()  # type: ignore[assignment]
 
 
 def check_xformers_availability():
@@ -53,6 +58,14 @@ def check_xformers_availability():
         logger.warning("Xformers is not available, falling back.")
 
     return USE_XFORMERS_OPS
+
+
+def check_upstream_fa_availability(dtype: torch.dtype):
+    if dtype in (torch.float16, torch.bfloat16) and current_platform.is_cuda(
+    ) and current_platform.has_device_capability(80):
+        from transformers.utils import is_flash_attn_2_available
+        return is_flash_attn_2_available()
+    return False
 
 
 class Attention(nn.Module, AttentionLayerBase):
@@ -216,9 +229,26 @@ class Attention(nn.Module, AttentionLayerBase):
             ).parallel_config.pipeline_parallel_size)
         ]
 
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        try:
+            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+        except torch.cuda.OutOfMemoryError as e:
+            logger.error(
+                "Failed to initialize attention q/k/v range constants: %s", e)
+            if torch.cuda.is_available():
+                logger.debug("CUDA device: %s", torch.cuda.current_device())
+                logger.debug("Allocated: %.2f GiB",
+                             torch.cuda.memory_allocated() / GiB_bytes)
+                logger.debug("Reserved: %.2f GiB",
+                             torch.cuda.memory_reserved() / GiB_bytes)
+            raise RuntimeError(
+                "Failed to initialize q/k/v range constants. "
+                "This may be caused by insufficient memory to allocate "
+                "kv cache.") from e
 
     def forward(
         self,
@@ -349,28 +379,54 @@ class MultiHeadAttention(nn.Module):
             f"divisible by num_kv_heads ({self.num_kv_heads})"
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        # During model initialization, the default dtype is set as the model
+        # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype=None,
-                                        block_size=16,
-                                        is_attention_free=False)
-        backend = backend_name_to_enum(attn_backend.get_name())
-        if current_platform.is_rocm():
-            # currently, only torch_sdpa is supported on rocm
+
+        # Determine the attention backend
+        backend = get_vit_attn_backend(head_size=head_size, dtype=dtype)
+
+        # Some auto-selected backends can be upgraded
+        # to upstream flash attention if available.
+        # If vllm native fa is selected, we use it directly.
+        use_upstream_fa = False
+        if backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
+                dtype):
+            backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
+
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            # currently, only torch_sdpa is supported on rocm/xpu
             self.attn_backend = _Backend.TORCH_SDPA
         else:
-            if backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1,
-                           _Backend.FLEX_ATTENTION):
-                backend = _Backend.XFORMERS
 
             self.attn_backend = backend if backend in {
-                _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
+                _Backend.TORCH_SDPA,
+                _Backend.TORCH_SDPA_VLLM_V1,
+                _Backend.XFORMERS,
+                _Backend.PALLAS_VLLM_V1,
+                _Backend.ROCM_AITER_FA,
+                _Backend.FLASH_ATTN,
+                _Backend.FLASH_ATTN_VLLM_V1,
             } else _Backend.TORCH_SDPA
 
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
             self.attn_backend = _Backend.TORCH_SDPA
+
+        if self.attn_backend in {
+                _Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1
+        }:
+            if use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+                self._flash_attn_varlen_func = flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
+                self._flash_attn_varlen_func = flash_attn_varlen_func
+
+        logger.info_once(
+            f"MultiHeadAttention attn_backend: {self.attn_backend}, "
+            f"use_upstream_fa: {use_upstream_fa}")
 
     def forward(
         self,
@@ -378,9 +434,11 @@ class MultiHeadAttention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> torch.Tensor:
-        """Input shape: batch_size x seq_len x hidden_size"""
-        # TODO(Isotr0py): Use existing backend implementations and support FA3
-        bsz, q_len, _ = query.size()
+        """Input shape: 
+        (batch_size x seq_len x hidden_size) or
+        (batch_size x seq_len x num_heads x head_size)
+        """
+        bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
 
         query = query.view(bsz, q_len, self.num_heads, self.head_size)
@@ -392,14 +450,39 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend == _Backend.XFORMERS:
+        if self.attn_backend in {
+                _Backend.FLASH_ATTN,
+                _Backend.FLASH_ATTN_VLLM_V1,
+        }:
+
+            cu_seqlens_q = torch.arange(0, (bsz + 1) * q_len,
+                                        step=q_len,
+                                        dtype=torch.int32,
+                                        device=query.device)
+            cu_seqlens_k = torch.arange(0, (bsz + 1) * kv_len,
+                                        step=kv_len,
+                                        dtype=torch.int32,
+                                        device=key.device)
+
+            out = self._flash_attn_varlen_func(
+                query.flatten(0, 1),
+                key.flatten(0, 1),
+                value.flatten(0, 1),
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=q_len,
+                max_seqlen_k=kv_len,
+                softmax_scale=self.scale,
+            )
+        elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
             out = xops.memory_efficient_attention_forward(query,
                                                           key,
                                                           value,
                                                           scale=self.scale)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif (self.attn_backend == _Backend.TORCH_SDPA
+              or self.attn_backend == _Backend.TORCH_SDPA_VLLM_V1):
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
             out = F.scaled_dot_product_attention(query,
@@ -413,6 +496,19 @@ class MultiHeadAttention(nn.Module):
             from torch_xla.experimental.custom_kernel import flash_attention
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
+        elif self.attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+
+            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
+            out = flash_attn_varlen_func(query,
+                                         key,
+                                         value,
+                                         softmax_scale=self.scale)
+        else:
+            # ViT attention hasn't supported this backend yet
+            raise NotImplementedError(
+                f"ViT attention hasn't supported {self.attn_backend} "
+                f"backend yet.")
 
         return out.reshape(bsz, q_len, -1)
 
@@ -485,6 +581,7 @@ direct_register_custom_op(
     mutates_args=[],
     fake_impl=unified_attention_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
 )
 
 
@@ -535,4 +632,5 @@ direct_register_custom_op(
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
 )

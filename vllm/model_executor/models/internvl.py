@@ -7,6 +7,7 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, Optional, TypeVar, Union
@@ -24,7 +25,6 @@ from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -37,6 +37,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import set_default_torch_num_threads
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -115,13 +116,26 @@ InternVLVideoInputs = Union[InternVLVideoPixelInputs,
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
 def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
-    return T.Compose([
+    transform = T.Compose([
         T.Lambda(lambda img: convert_image_mode(img, 'RGB')),
         T.Resize((input_size, input_size),
                  interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor(),
         T.Normalize(mean=MEAN, std=STD)
     ])
+    # Image transformation operations (which include tensor computations
+    # on the CPU) can occupy a substantial number of CPU cores, introducing
+    # overhead due to CPU contention. This issue becomes particularly
+    # noticeable when deploying multiple vLLM instances on a single machine.
+    # Therefore, it is necessary to limit the number of threads allocated to
+    # image transformation tasks.
+    num_threads = int(os.environ.get("OMP_NUM_THREADS", "1"))
+
+    def apply(img):
+        with set_default_torch_num_threads(num_threads):
+            return transform(img)
+
+    return apply
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
@@ -1020,6 +1034,8 @@ class InternVLMultiModalProcessor(
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                         SupportsLoRA):
 
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -1038,6 +1054,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self._patch_quant_config(config, quant_config)
 
         image_size = config.force_image_size or config.vision_config.image_size
@@ -1105,7 +1122,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                 quant_config=quant_config,
                 num_hidden_layers_override=num_hidden_layers,
                 prefix=prefix,
-            )
+                use_data_parallel=self.use_data_parallel)
         else:
             return InternVisionPatchModel(config.vision_config)
 
@@ -1381,10 +1398,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

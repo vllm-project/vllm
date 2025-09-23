@@ -36,7 +36,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from packaging.version import Version
 from transformers import BatchFeature
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor, smart_resize)
@@ -44,12 +46,12 @@ from transformers.models.glm4v.video_processing_glm4v import (
     Glm4vVideoProcessor)
 from transformers.video_utils import VideoMetadata
 
+from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               parallel_state)
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
-from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -67,7 +69,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -81,7 +82,7 @@ from .qwen2_vl import (_create_qwen2vl_field_factory,
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-from .vision import get_vit_attn_backend
+from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
 
@@ -260,7 +261,15 @@ class Glm4vVisionAttention(nn.Module):
         )
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend = get_vit_attn_backend(
+            head_size=self.hidden_size_per_attention_head,
+            dtype=torch.get_default_dtype())
+        self.use_upstream_fa = False
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
+            self.use_upstream_fa = True
+
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN,
                 _Backend.TORCH_SDPA,
@@ -272,22 +281,9 @@ class Glm4vVisionAttention(nn.Module):
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
         seq_len, bs, _ = qkv.shape
-        if self.tp_size > 1:
-            qkv = all_gather_interleave(qkv, self.qkv.hidden_size,
-                                        self.tp_size)
 
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
         q, k, v = qkv.chunk(3, dim=2)
-
-        # 3 * [s, b, head * head_dim]
-        if self.tp_size > 1:
-            splitter = partial(
-                dist_utils.split_tensor_along_last_dim,
-                num_partitions=self.tp_size,
-            )
-            q = splitter(q)[self.tp_rank]
-            k = splitter(k)[self.tp_rank]
-            v = splitter(v)[self.tp_rank]
 
         # 3 * [s, b, head * head_dim] -> 3 * [s, b, head, head_dim]
         new_shape = (
@@ -317,13 +313,18 @@ class Glm4vVisionAttention(nn.Module):
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
                    for x in (q, k, v))
         if rotary_pos_emb is not None:
-            q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
-            k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
+            # [2 * b, s, heads, head_dim]
+            qk_concat = torch.cat([q, k], dim=0)
+            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
+            q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.attn_backend == _Backend.FLASH_ATTN:
             # from vllm_flash_attn.flash_attn_interface import (
             #   flash_attn_varlen_func)
-            from flash_attn import flash_attn_varlen_func
+            if self.use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -340,8 +341,8 @@ class Glm4vVisionAttention(nn.Module):
             )
 
             context_layer = rearrange(output,
-                                      "(b s) ... -> b s ...",
-                                      b=batch_size)
+                                      "(b s) h d -> s b (h d)",
+                                      b=batch_size).contiguous()
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             outputs = []
@@ -360,6 +361,8 @@ class Glm4vVisionAttention(nn.Module):
                 output_i = rearrange(output_i, "b h s d -> b s h d ")
                 outputs.append(output_i)
             context_layer = torch.cat(outputs, dim=1)
+            context_layer = rearrange(context_layer,
+                                      "b s h d -> s b (h d)").contiguous()
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
@@ -370,9 +373,8 @@ class Glm4vVisionAttention(nn.Module):
 
             context_layer = xops.memory_efficient_attention_forward(
                 q, k, v, attn_bias=attn_bias, p=0, scale=None)
-
-        context_layer = rearrange(context_layer,
-                                  "b s h d -> s b (h d)").contiguous()
+            context_layer = rearrange(context_layer,
+                                      "b s h d -> s b (h d)").contiguous()
 
         output, _ = self.proj(context_layer)
         return output
@@ -420,15 +422,16 @@ class Glm4vVisionBlock(nn.Module):
             max_seqlen: Optional[int] = None,  # Only used for Flash Attention
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
-        x = x + self.attn(
+        x_attn = self.attn(
             self.norm1(x),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             max_seqlen=max_seqlen,
             seqlens=seqlens,
         )
+        x_fused_norm, residual = self.norm2(x, residual=x_attn)
+        x = residual + self.mlp(x_fused_norm)
 
-        x = x + self.mlp(self.norm2(x))
         return x
 
 
@@ -728,7 +731,11 @@ class Glm4vVisionTransformer(nn.Module):
         self.post_layernorm = RMSNorm(vision_config.hidden_size,
                                       eps=vision_config.rms_norm_eps)
 
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim, dtype=torch.get_default_dtype())
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
@@ -997,28 +1004,32 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         max_frame_idx = meta_frames - 1
         duration = metadata.get("duration",
                                 round(max_frame_idx / video_fps) + 1)
-        if duration <= video_processor.max_duration:
-            n = int(math.floor(duration * video_processor.fps))
-            frame_indices = [
-                min(
-                    max_frame_idx,
-                    int(math.ceil(i * video_fps / video_processor.fps)),
-                ) for i in range(n)
-            ]
+        do_sample_frames = metadata["do_sample_frames"]
+        if not do_sample_frames:
+            frame_indices = metadata["frames_indices"]
         else:
-            num_samples = int(video_processor.max_duration *
-                              video_processor.fps)
-            if num_samples >= meta_frames:
-                frame_indices = list(range(meta_frames))
-            else:
-                target_seconds = np.linspace(0,
-                                             duration,
-                                             num_samples,
-                                             endpoint=True)
+            if duration <= video_processor.max_duration:
+                n = int(math.floor(duration * video_processor.fps))
                 frame_indices = [
-                    min(max_frame_idx, int(math.ceil(t * video_fps)))
-                    for t in target_seconds
+                    min(
+                        max_frame_idx,
+                        int(math.ceil(i * video_fps / video_processor.fps)),
+                    ) for i in range(n)
                 ]
+            else:
+                num_samples = int(video_processor.max_duration *
+                                  video_processor.fps)
+                if num_samples >= meta_frames:
+                    frame_indices = list(range(meta_frames))
+                else:
+                    target_seconds = np.linspace(0,
+                                                 duration,
+                                                 num_samples,
+                                                 endpoint=True)
+                    frame_indices = [
+                        min(max_frame_idx, int(math.ceil(t * video_fps)))
+                        for t in target_seconds
+                    ]
 
         seen, uniq = set(), []
         for idx in frame_indices:
@@ -1035,6 +1046,43 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         for idx in range(0, len(timestamps_list)):
             selected_timestamps.append(timestamps_list[idx])
         return selected_timestamps
+
+    def _construct_video_placeholder(
+        self,
+        video_array: np.ndarray,
+        metadata: dict[str, Any],
+        grid_thw: torch.Tensor,
+    ) -> str:
+        hf_processor = self.get_hf_processor()
+        tokenizer = self.get_tokenizer()
+        image_processor = hf_processor.image_processor
+
+        hf_config = self.get_hf_config()
+        boi_token_id = hf_config.image_start_token_id
+        eoi_token_id = hf_config.image_end_token_id
+        bov_token_id = hf_config.video_start_token_id
+        eov_token_id = hf_config.video_end_token_id
+        merge_length = image_processor.merge_size**2
+
+        assert isinstance(grid_thw, torch.Tensor)
+        timestamps = self._get_video_second_idx(metadata, len(video_array))
+        frames_idx_token = [
+            tokenizer.encode(str(i), add_special_tokens=False)
+            for i in timestamps
+        ]
+        T, H, W = grid_thw
+        num_tokens_per_frame = int(H * W) // merge_length
+        placeholder = []
+        placeholder.append(bov_token_id)
+        for frame_idx in frames_idx_token:
+            placeholder.append(boi_token_id)
+            placeholder.extend([hf_processor.video_token_id] *
+                               num_tokens_per_frame)
+            placeholder.append(eoi_token_id)
+            placeholder.extend(frame_idx)
+        placeholder.append(eov_token_id)
+
+        return placeholder
 
 
 class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
@@ -1098,7 +1146,9 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
                 "fps": 2.0,
                 "duration": num_frames / 2.0,
                 "total_num_frames": num_frames,
+                "frames_indices": [i for i in range(num_frames)],
                 "video_backend": "opencv",
+                "do_sample_frames": False,
             }
             video_item = (video.copy(), video_metadata)
             video_items.append(video_item)
@@ -1131,48 +1181,56 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             for item in mm_data.pop("videos", []):
                 video_array, metadata = item
 
-                # FIXME(Isotr0py): Activate the below logic after we can disable
-                # resampling from video loader backend.
-                # assert metadata["total_num_frames"] == len(video_array), (
-                #     f"Total frames {metadata['total_num_frames']} does not "
-                #     f"match the length of video array {len(video_array)}.")
-
-                # NOTE: Temporary workaround for resampled videos.
-                # this can cause a divergence with HF implementation if
-                # the input video is resampled in advance.
-
-                if metadata["total_num_frames"] != len(video_array):
-                    logger.warning(
-                        "Total frames in metadata "
-                        "(%s) does not match the length of "
-                        "video array %s. This can "
-                        "be because the video is resampled "
-                        "in advance. This may cause "
-                        "a divergence with HF implementation.",
-                        metadata["total_num_frames"],
-                        len(video_array),
-                    )
-                    metadata["total_num_frames"] = len(video_array)
-                metadata = VideoMetadata(**metadata)
+                # don't update mm_kwargs inplace
+                video_mm_kwargs = dict(**mm_kwargs)
+                video_mm_kwargs["do_sample_frames"] = metadata.get(
+                    "do_sample_frames", True)
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
-                video_mm_data["video_metadata"] = [[metadata]]
+
+                # backward compatibility for Transformers 4.55
+                unuse_metadata = ["do_sample_frames"]
+                if not hasattr(
+                        VideoMetadata,
+                        "frames_indices") and "frames_indices" in metadata:
+                    unuse_metadata.append("frames_indices")
+
+                video_mm_data["video_metadata"] = [[
+                    VideoMetadata(
+                        **{
+                            k: metadata[k]
+                            for k in metadata if k not in unuse_metadata
+                        })
+                ]]
 
                 video_outputs = super()._call_hf_processor(
                     prompt="<|begin_of_video|><|video|><|end_of_video|>",
                     mm_data=video_mm_data,
-                    mm_kwargs=mm_kwargs,
+                    mm_kwargs=video_mm_kwargs,
                     tok_kwargs=tok_kwargs,
                 )
-                input_ids = video_outputs.pop("input_ids")
-                input_ids[input_ids == processor.image_token_id] = (
-                    processor.video_token_id)
-                video_placeholder = processor.tokenizer.batch_decode(
-                    input_ids)[0]
+                if not video_mm_kwargs["do_sample_frames"] and Version(
+                        TRANSFORMERS_VERSION) < Version("4.56.0"):
+                    # Transformers v4.55 has incorrect timestamps issue for
+                    # skip sampling. We construct the placeholder manually to
+                    # get placeholders with correct timestamps.
+                    placeholder = self.info._construct_video_placeholder(
+                        video_array,
+                        metadata,
+                        video_outputs["video_grid_thw"].squeeze(0),
+                    )
+                    video_placeholder = processor.tokenizer.decode(placeholder)
+                else:
+                    input_ids = video_outputs.pop("input_ids")
+                    input_ids[input_ids == processor.image_token_id] = (
+                        processor.video_token_id)
+                    video_placeholder = processor.tokenizer.batch_decode(
+                        input_ids)[0]
                 prompt = prompt.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
                     video_placeholder,
+                    1,
                 )
 
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
@@ -1215,14 +1273,6 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(
             **hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        hf_config = self.info.get_hf_config()
-
-        boi_token_id = hf_config.image_start_token_id
-        eoi_token_id = hf_config.image_end_token_id
-
-        bov_token_id = hf_config.video_start_token_id
-        eov_token_id = hf_config.video_end_token_id
 
         merge_length = image_processor.merge_size**2
 
@@ -1240,21 +1290,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             assert isinstance(grid_thw, torch.Tensor)
 
             video, metadata = mm_items["video"][item_idx]
-            timestamps = self.info._get_video_second_idx(metadata, len(video))
-            frames_idx_token = [
-                tokenizer.encode(str(i), add_special_tokens=False)
-                for i in timestamps
-            ]
-            num_tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
-            placeholder = []
-            placeholder.append(bov_token_id)
-            for frame_idx in frames_idx_token:
-                placeholder.append(boi_token_id)
-                placeholder.extend([hf_processor.video_token_id] *
-                                   num_tokens_per_frame)
-                placeholder.append(eoi_token_id)
-                placeholder.extend(frame_idx)
-            placeholder.append(eov_token_id)
+            placeholder = self.info._construct_video_placeholder(
+                video, metadata, grid_thw)
             return PromptUpdateDetails.select_token_id(
                 placeholder,
                 embed_token_id=hf_processor.video_token_id,
@@ -1355,7 +1392,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 raise ValueError(f"{name} should be 2D or batched 3D tensor. "
                                  f"Got ndim: {mm_input.ndim} "
                                  f"(shape={mm_input.shape})")
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, mm_input.shape[-1])
         else:
             return torch.concat(mm_input)
 
@@ -1429,6 +1466,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             self, image_input: Glm4vImageInputs) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
 
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
@@ -1443,13 +1481,15 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 image_embeds = self.visual(pixel_values,
                                            grid_thw=grid_thw.tolist())
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod(-1) // merge_size // merge_size
-        return image_embeds.split(sizes.tolist())
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
+        return image_embeds.split(sizes)
 
     def _process_video_input(
             self, video_input: Glm4vVideoInputs) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
 
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
@@ -1466,8 +1506,9 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                                            grid_thw=grid_thw.tolist())
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod(-1) // merge_size // merge_size
-        return video_embeds.split(sizes.tolist())
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
+        return video_embeds.split(sizes)
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
@@ -1496,7 +1537,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
@@ -1572,17 +1613,10 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 **NOTE**: If mrope is enabled (default setting for GLM-4V
                 opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-            pixel_values: Pixel values to be fed to a model.
-                `None` if no images are passed.
-            image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in LLM.
-                `None` if no images are passed.
-            pixel_values_videos: Pixel values of videos to be fed to a model.
-                `None` if no videos are passed.
-            video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM.
-                `None` if no videos are passed.
-            second_per_grid_ts: Tensor `(num_videos)` of video time interval (
-                in seconds) for each grid along the temporal dimension in the
-                3D position IDs. `None` if no videos are passed.
+            intermediate_tensors: Optional intermediate tensors for pipeline
+                parallelism.
+            inputs_embeds: Optional pre-computed input embeddings.
+            **kwargs: Additional keyword arguments.
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -1618,10 +1652,8 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

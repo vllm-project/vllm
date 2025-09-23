@@ -67,7 +67,6 @@ from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    SupportsPP)
 from vllm.model_executor.models.moonvit import MoonVitPretrainedModel
 from vllm.model_executor.models.utils import merge_multimodal_embeddings
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -77,13 +76,13 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
+from .vision import run_dp_sharded_mrope_vision_model
 
 
 # For dummy input only
@@ -328,6 +327,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 config.text_config.hidden_size,
                 org_num_embeddings=self.config.text_config.vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
         else:
             self.lm_head = PPMissingLayer()
@@ -483,10 +483,8 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata,
                        **kwargs) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata, **kwargs)
+        logits = self.logits_processor(self.lm_head, hidden_states, **kwargs)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

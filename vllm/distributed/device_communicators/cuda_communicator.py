@@ -57,11 +57,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.ca_comm: Optional[CustomAllreduce] = None
         self.qr_comm: Optional[QuickAllReduce] = None
         self.symm_mem_comm: Optional[SymmMemCommunicator] = None
+        if envs.VLLM_ALLREDUCE_USE_SYMM_MEM and current_platform.is_cuda():
+            self.symm_mem_comm = SymmMemCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
+                symm_mem_enabled=(self.symm_mem_comm is not None
+                                  and not self.symm_mem_comm.disabled),
             )
 
             if current_platform.is_rocm():
@@ -72,11 +80,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group,
                                               device=self.device)
-        if envs.VLLM_ALLREDUCE_USE_SYMM_MEM and current_platform.is_cuda():
-            self.symm_mem_comm = SymmMemCommunicator(
-                group=self.cpu_group,
-                device=self.device,
-            )
 
         if self.use_all2all:
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
@@ -84,6 +87,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import NaiveAll2AllManager
                 self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
                 logger.info("Using naive all2all manager.")
+            elif all2all_backend == "allgather_reducescatter":
+                from .all2all import AgRsAll2AllManager
+                self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
+                logger.info("Using AllGather-ReduceScatter all2all manager.")
             elif all2all_backend == "pplx":
                 from .all2all import PPLXAll2AllManager
                 self.all2all_manager = PPLXAll2AllManager(self.cpu_group)

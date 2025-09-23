@@ -3,6 +3,7 @@
 
 import itertools
 from collections.abc import Generator
+from typing import get_args
 
 import pytest
 import torch
@@ -430,7 +431,7 @@ def test_zero_logprobs(vllm_model, example_prompts,
 
 
 def test_all_logprobs(example_prompts, monkeypatch: pytest.MonkeyPatch):
-    """Engine should return all vocabulary logprobs
+    """Engine should return all vocabulary logprobs and prompt logprobs
 
     Args:
       example_prompts: list of example prompts (test fixture)
@@ -444,19 +445,27 @@ def test_all_logprobs(example_prompts, monkeypatch: pytest.MonkeyPatch):
             # 2 other llms alive during whole session
             gpu_memory_utilization=0.15,
             max_model_len=256)
+
         sampling_params_logprobs_all = SamplingParams(max_tokens=5,
-                                                      logprobs=-1)
+                                                      logprobs=-1,
+                                                      prompt_logprobs=-1)
         results_logprobs_all = runner.llm.generate(
             example_prompts, sampling_params=sampling_params_logprobs_all)
         vocab_size = runner.llm.llm_engine.get_model_config().get_vocab_size()
+
         for i in range(len(results_logprobs_all)):
             logprobs = results_logprobs_all[i].outputs[0].logprobs
+            prompt_logprobs = results_logprobs_all[i].prompt_logprobs
             assert logprobs is not None
             for logprob in logprobs:
                 assert len(logprob) == vocab_size
+            assert prompt_logprobs is not None
+            assert prompt_logprobs[0] is None
+            for prompt_logprob in prompt_logprobs[1:]:
+                assert len(prompt_logprob) == vocab_size
 
 
-@pytest.mark.parametrize("logprobs_mode", list(LogprobsMode))
+@pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
 def test_logprobs_mode(logprobs_mode: LogprobsMode,
                        monkeypatch: pytest.MonkeyPatch):
     """Test with LLM engine with different logprobs_mode.
@@ -485,14 +494,12 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode,
             for logprobs in output.logprobs:
                 for token_id in logprobs:
                     logprob = logprobs[token_id]
-                    if logprobs_mode in (LogprobsMode.RAW_LOGPROBS,
-                                         LogprobsMode.PROCESSED_LOGPROBS):
+                    if logprobs_mode in ("raw_logprobs", "processed_logprobs"):
                         assert logprob.logprob <= 0
                     if logprob.logprob > 0:
                         positive_values = positive_values + 1
                     total_token_with_logprobs = total_token_with_logprobs + 1
         assert total_token_with_logprobs >= len(results[0].outputs)
-        if logprobs_mode in (LogprobsMode.RAW_LOGITS,
-                             LogprobsMode.PROCESSED_LOGITS):
+        if logprobs_mode in ("raw_logits", "processed_logits"):
             assert positive_values > 0
         del llm

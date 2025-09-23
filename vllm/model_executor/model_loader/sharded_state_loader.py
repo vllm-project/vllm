@@ -10,7 +10,8 @@ from typing import Any, Optional
 import torch
 from torch import nn
 
-from vllm.config import LoadConfig, ModelConfig
+from vllm.config import ModelConfig
+from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (

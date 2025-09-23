@@ -262,9 +262,9 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        decoding_config = vllm_config.decoding_config
-        if decoding_config.reasoning_backend == "":
-            decoding_config.reasoning_backend = "openai_gptoss"
+        structured_outputs_config = vllm_config.structured_outputs_config
+        if structured_outputs_config.reasoning_parser == "":
+            structured_outputs_config.reasoning_parser = "openai_gptoss"
 
         # Increase the max capture size from 512 to 1024 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
@@ -312,7 +312,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         # TODO(tdoublep): remove as full cuda graph support is added
         FCG_NOT_SUPPORTED_MODELS = [
-            "Lfm2ForCausalLM", "MiniMaxText01ForCausalLM"
+            "Lfm2ForCausalLM",
+            "MiniMaxText01ForCausalLM",
         ]
 
         if (model_config.architecture not in FCG_NOT_SUPPORTED_MODELS

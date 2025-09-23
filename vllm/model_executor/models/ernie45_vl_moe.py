@@ -48,7 +48,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .ernie45_moe import Ernie4_5_MoeMLP
@@ -287,8 +286,13 @@ class Ernie4_5_VLMoeMoE(nn.Module):
         if self.has_shared_experts:
             shared_output = self.shared_experts(hidden_states)
 
-        if visual_token_mask is not None and visual_token_mask.any():
-            # assert visual_token_mask.shape[0] != hidden_states.shape[0]
+        if visual_token_mask is not None and visual_token_mask.all():
+            # only vision modal input
+            router_logits, _ = self.vision_experts_gate(hidden_states)
+            final_hidden_states = self.vision_experts(
+                hidden_states=hidden_states, router_logits=router_logits)
+        elif visual_token_mask is not None and visual_token_mask.any():
+            # text and vision modals input
             visual_token_mask = visual_token_mask.repeat(
                 1, self.hidden_size).bool()
             text_token_mask = ~visual_token_mask
@@ -310,7 +314,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 hidden_states=vision_hidden_states,
                 router_logits=vision_router_logits).flatten()
         else:
-            # text modal input processing directly
+            # only text modal input
             text_router_logits, _ = self.text_experts_gate(hidden_states)
 
             final_hidden_states = self.text_experts(
@@ -552,7 +556,9 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
 
@@ -580,10 +586,8 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

@@ -25,7 +25,7 @@
 from collections.abc import Iterable, Mapping, Sequence
 from copy import copy
 from functools import partial
-from typing import Any, Callable, Optional, Union
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -48,10 +48,8 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLProcessingInfo, Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoInputs, Qwen2_5_VLVideoPixelInputs)
 from vllm.model_executor.models.qwen2_audio import (
-    Qwen2AudioFeatureInputs, Qwen2AudioProcessingInfo,
-    _get_feat_extract_output_lengths)
+    Qwen2AudioProcessingInfo, _get_feat_extract_output_lengths)
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
@@ -66,6 +64,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import decode_tokens, encode_tokens
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -79,6 +78,26 @@ except (ImportError, ModuleNotFoundError):
     flash_attn = None
 
 logger = init_logger(__name__)
+
+
+class Qwen2_5OmniAudioFeatureInputs(TensorSchema):
+    """
+    Dimensions:
+        - na: Number of audios
+        - nmb: Number of mel bins
+        - msl: Maximum sequence length
+        - tsl: Total sequence length
+    """
+    type: Literal["audio_features"]
+    input_features: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("nmb", "tsl"),
+    ]
+
+    feature_attention_mask: Annotated[
+        torch.Tensor,
+        TensorShape("na", "msl"),
+    ]
 
 
 def create_qwen2_5_omni_thinker_field_factory(
@@ -531,12 +550,14 @@ class Qwen2_5OmniConditionalGenerationMixin:
             raise ValueError(f"Incorrect type of {name}. "
                              f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
+            if dim == 0:
+                return mm_input.reshape(-1, *mm_input.shape[2:])
             return torch.concat(list(mm_input), dim=dim)
         else:
             return torch.concat(mm_input, dim=dim)
 
     def _parse_and_validate_audio_input(
-            self, **kwargs: object) -> Optional[Qwen2AudioFeatureInputs]:
+            self, **kwargs: object) -> Optional[Qwen2_5OmniAudioFeatureInputs]:
         input_audio_features = kwargs.pop('input_audio_features', None)
         audio_feature_lengths = kwargs.pop('audio_feature_lengths', None)
         feature_attention_mask = kwargs.pop('feature_attention_mask', None)
@@ -550,7 +571,8 @@ class Qwen2_5OmniConditionalGenerationMixin:
         if not isinstance(input_audio_features, (torch.Tensor, list)):
             raise ValueError("Incorrect type of audio input features. "
                              f"Got type: {type(input_audio_features)}")
-        return Qwen2AudioFeatureInputs(
+        return Qwen2_5OmniAudioFeatureInputs(
+            type="audio_features",
             input_features=input_audio_features,
             audio_feature_lengths=audio_feature_lengths,
             feature_attention_mask=feature_attention_mask)
@@ -633,7 +655,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
 
     def _process_audio_input(
         self,
-        audio_input: Qwen2AudioFeatureInputs,
+        audio_input: Qwen2_5OmniAudioFeatureInputs,
         audio_hashes: list[str] = None,
         cached_audio_features: torch.Tensor = None,
     ) -> torch.Tensor:
@@ -660,8 +682,8 @@ class Qwen2_5OmniConditionalGenerationMixin:
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_feat_lengths,
         )
-        audio_features = audio_outputs.last_hidden_state
-        return audio_features.split(audio_output_lengths.tolist())
+        return audio_outputs.last_hidden_state.split(
+            audio_output_lengths.tolist())
 
     def _process_image_input(
             self,
@@ -715,6 +737,22 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             "thinker.model.": "language_model.model.",
             "thinker.": "",
         })
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "attn.qkv": [
+            "attn.q",
+            "attn.k",
+            "attn.v",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -800,15 +838,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_mm_mapping(self) -> MultiModelKeys:
-        """Get module prefix for multimodal models to filter LoRA modules."""
-        return MultiModelKeys.from_string_field(
-            language_model="language_model",
-            connector=[],  # No explicit connector in this model
-            tower_model=["visual",
-                         "audio_tower"],  # Exclude vision and audio towers
-        )
-
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
 
@@ -818,7 +847,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
@@ -845,7 +874,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         if multimodal_embeddings is not None \
             and len(multimodal_embeddings) != 0:
 
-            # TODO (ywang96): support overlapping modalitiy embeddings so that
+            # TODO (ywang96): support overlapping modality embeddings so that
             # `use_audio_in_video` will work on V1.
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings, [
@@ -925,10 +954,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -946,3 +973,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                                              mapper=self.hf_to_vllm_mapper)
 
         return loaded_weights
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="merger.",
+            tower_model=["visual.", "audio_tower."])
