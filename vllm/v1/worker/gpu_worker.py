@@ -383,11 +383,13 @@ class Worker(WorkerBase):
                 f"for non-torch memory, and {GiB(cuda_graph_memory_bytes)} "
                 f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
-                f"{kv_cache_memory_bytes_to_requested_limit}` to fit into "
-                f"requested memory, or `--kv-cache-memory="
-                f"{kv_cache_memory_bytes_to_gpu_limit}` to fully "
+                f"{kv_cache_memory_bytes_to_requested_limit}` "
+                f"({GiB(kv_cache_memory_bytes_to_requested_limit)} GiB) to fit "
+                f"into requested memory, or `--kv-cache-memory="
+                f"{kv_cache_memory_bytes_to_gpu_limit}` "
+                f"({GiB(kv_cache_memory_bytes_to_gpu_limit)} GiB) to fully "
                 f"utilize gpu memory. Current kv cache memory in use is "
-                f"{int(self.available_kv_cache_memory_bytes)} bytes.")
+                f"{GiB(self.available_kv_cache_memory_bytes)} GiB.")
 
             logger.debug(msg)
 
