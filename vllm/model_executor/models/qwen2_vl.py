@@ -66,7 +66,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -78,7 +77,7 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA, SupportsMRoPE,
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-from .vision import get_vit_attn_backend
+from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
 
