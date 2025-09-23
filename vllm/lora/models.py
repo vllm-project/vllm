@@ -152,30 +152,29 @@ class LoRAModel:
                     module_name, peft_helper, lora_embeddings_tensor)
 
             if is_bias:
-                loras[module_name].bias = tensor.to(device=device,
-                                                    dtype=dtype).t()
-                bias = tensor.to(device=device, dtype=dtype).t()
+                loras[module_name].bias = tensor.to(device=device, dtype=dtype)
+                bias = tensor.to(device=device, dtype=dtype)
                 if pin_memory:
                     bias = bias.pin_memory()
                 loras[module_name].bias = bias
             elif is_lora_a:
                 loras[module_name].lora_a = tensor.to(device=device,
-                                                      dtype=dtype).t()
+                                                      dtype=dtype)
                 if pin_memory:
                     loras[module_name].lora_a = loras[
                         module_name].lora_a.pin_memory()
             else:
                 loras[module_name].lora_b = tensor.to(device=device,
-                                                      dtype=dtype).t()
+                                                      dtype=dtype)
                 assert embedding_padding_modules is not None
                 if any(name in module_name
                        for name in embedding_padding_modules
                        ) and target_embedding_padding is not None:
                     lora_b = loras[module_name].lora_b
-                    assert target_embedding_padding >= lora_b.shape[1]
-                    addition = target_embedding_padding - lora_b.shape[1]
+                    assert target_embedding_padding >= lora_b.shape[0]
+                    addition = target_embedding_padding - lora_b.shape[0]
                     loras[module_name].lora_b = torch.nn.functional.pad(
-                        lora_b, (0, addition))
+                        lora_b, (0, 0, 0, addition))
                 if pin_memory:
                     loras[module_name].lora_b = loras[
                         module_name].lora_b.pin_memory()
@@ -585,7 +584,6 @@ class LoRAModelManager:
                         "cpu",
                         bias_enabled=bias_enabled,
                     )
-                lora.optimize()
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
@@ -600,7 +598,6 @@ class LoRAModelManager:
                         "cpu",
                         bias_enabled=bias_enabled,
                     )
-                    lora.optimize()
                     subloras.append(lora)
                 lora = PackedLoRALayerWeights.pack(subloras)
             model.loras[module_name] = lora
