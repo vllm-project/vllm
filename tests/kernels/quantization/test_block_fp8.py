@@ -12,7 +12,7 @@ from tests.kernels.quant_utils import (native_per_token_group_quant_fp8,
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     cutlass_scaled_mm, get_col_major_tma_aligned_tensor,
-    per_token_group_quant_fp8, w8a8_block_fp8_matmul)
+    per_token_group_quant_fp8, w8a8_triton_block_scaled_mm)
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import fp8_gemm_nt, per_block_cast_to_fp8
@@ -90,7 +90,8 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size,
                                        out_dtype)
-    out = w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
+    out = w8a8_triton_block_scaled_mm(A_fp8, B_fp8, As, Bs, block_size,
+                                      out_dtype)
 
     rel_diff = (torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
