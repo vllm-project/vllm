@@ -47,13 +47,12 @@ unless otherwise specified, backends are controlled via `VLLM_ALL2ALL_BACKEND`. 
 | Per tensor                  | T      |
 
 Modular kernels are supported by the following `FusedMoEMethodBase` classes.
-- [`ModelOptFp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/modelopt.py)
-- [`Fp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/fp8.py)
-- [`CompressedTensorsW4A4MoeMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py)
-- [`CompressedTensorsW8A8Fp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py)
-- [`Mxfp4MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/mxfp4.py)
-- [`UnquantizedFusedMoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/layer.py)
-
+ - [`ModelOptFp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/modelopt.py)
+ - [`Fp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/fp8.py)
+ - [`CompressedTensorsW4A4MoeMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py)
+ - [`CompressedTensorsW8A8Fp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py)
+ - [`Mxfp4MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/mxfp4.py)
+ - [`UnquantizedFusedMoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/layer.py)
 
 ## Fused MoE Experts Kernels
 
@@ -70,7 +69,6 @@ As with the backends, some experts support applying topk weights on the input ac
 Most experts flavors include an equivalent modular interface which will be a subclass of `FusedMoEPermuteExpertsUnpermute`.
 
 To be used with a particular `FusedMoEPrepareAndFinalize` sub-class, MoE kernels must have compatible activation formats, quantization types and quantization formats.
-
 
 | Kernel                       | Input act. format | Quant. types    | Quant. format | Activation function                         | Apply Weight On Input | Modular | Source                                                                                                                                                                                                                                                                                               |
 |------------------------------|-------------------|-----------------|---------------|---------------------------------------------|-----------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -106,4 +104,3 @@ The following table shows "families" of modular kernels that are intended to wor
 | deepep_high_throughput, pplx | `DeepEPHTPrepareAndFinalize`, `PplxPrepareAndFinalize` | `BatchedDeepGemmExperts`, `BatchedTritonExperts`, `BatchedTritonOrDeepGemmExperts`, `CutlassBatchedExpertsFp8` |
 | deepep_low_latency           | `DeepEPLLPrepareAndFinalize`                           | `DeepGemmExperts`, `TritonExperts`, `TritonOrDeepGemmExperts`, `CutlassExpertsFp8`                             |
 | flashinfer                   | `FlashInferCutlassMoEPrepareAndFinalize`               | `FlashInferExperts`                                                                                            |
-
