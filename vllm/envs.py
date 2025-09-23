@@ -605,6 +605,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ else None,
 
+    # If set, vllm will force use Triton compressed tensor MOE kernel;
+    # otherwise it will use the cutlass based one.
+    "VLLM_TRITON_COMPRESSED_TENSORS_MOE_KERNEL":
+    lambda: bool(
+        int(os.getenv("VLLM_TRITON_COMPRESSED_TENSORS_MOE_KERNEL", "0"))),
+
+    # If set, vllm will force flashinfer to use tensor cores;
+    # otherwise will use heuristic based on model architecture.
+    "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
+    lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
+
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
