@@ -98,7 +98,7 @@ from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
@@ -372,18 +372,19 @@ class OpenAIServingResponses(OpenAIServing):
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
-                    if sampling_params.guided_decoding is None:
+                    if sampling_params.structured_outputs is None:
                         updated_structural_tag = \
                             reasoning_parser.prepare_structured_tag( \
                                 None, self.tool_server)
-                        sampling_params.guided_decoding = \
-                            GuidedDecodingParams(structural_tag=updated_structural_tag)
+                        sampling_params.structured_outputs = \
+                            StructuredOutputsParams(structural_tag = \
+                                updated_structural_tag)
                     else:
                         updated_structural_tag = \
                             reasoning_parser.prepare_structured_tag( \
-                            sampling_params.guided_decoding.structural_tag, \
+                            sampling_params.structured_outputs.structural_tag,\
                             self.tool_server)
-                        sampling_params.guided_decoding.structural_tag = \
+                        sampling_params.structured_outputs.structural_tag = \
                             updated_structural_tag
 
                 generator = self._generate_with_builtin_tools(
