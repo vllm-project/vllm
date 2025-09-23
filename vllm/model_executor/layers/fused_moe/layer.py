@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEModularKernel,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.fused_moe.routing_simulator import (
@@ -40,6 +39,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (cdiv, direct_register_custom_op, has_deep_ep, has_pplx,
                         round_up)
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
@@ -297,22 +297,36 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             self.rocm_aiter_fused_experts = rocm_aiter_fused_experts
         else:
             self.rocm_aiter_fused_experts = None  # type: ignore
-        
-        self.flashinfer_cutlass_moe_enabled = has_flashinfer_cutlass_fused_moe() and envs.VLLM_USE_FLASHINFER_MOE_FP16 and self.moe.moe_parallel_config.use_ep and self.moe.moe_parallel_config.dp_size == 1
+
+        self.flashinfer_cutlass_moe_enabled = (
+            has_flashinfer_cutlass_fused_moe()
+            and envs.VLLM_USE_FLASHINFER_MOE_FP16
+            and self.moe.moe_parallel_config.use_ep
+            and self.moe.moe_parallel_config.dp_size == 1)
         if self.flashinfer_cutlass_moe_enabled:
-            logger.info_once("Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod")
-            from .flashinfer_cutlass_moe import flashinfer_cutlass_moe
+            logger.info_once(
+                "Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod"
+            )
             from functools import partial
-            self.flashinfer_cutlass_moe = partial(flashinfer_cutlass_moe,
-                                                  tp_rank=self.moe.moe_parallel_config.tp_rank,
-                                                  tp_size=self.moe.moe_parallel_config.tp_size,
-                                                  ep_rank=self.moe.moe_parallel_config.ep_rank,
-                                                  ep_size=self.moe.moe_parallel_config.ep_size)
+
+            from .flashinfer_cutlass_moe import flashinfer_cutlass_moe
+            self.flashinfer_cutlass_moe = partial(
+                flashinfer_cutlass_moe,
+                tp_rank=self.moe.moe_parallel_config.tp_rank,
+                tp_size=self.moe.moe_parallel_config.tp_size,
+                ep_rank=self.moe.moe_parallel_config.ep_rank,
+                ep_size=self.moe.moe_parallel_config.ep_size)
         else:
-            if self.moe.moe_parallel_config.use_ep and self.moe.moe_parallel_config.dp_size == 1:
-                logger.info_once("FlashInfer CUTLASS MoE is available for EP but not enabled, consider setting VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.")
+            if (self.moe.moe_parallel_config.use_ep
+                    and self.moe.moe_parallel_config.dp_size == 1):
+                logger.info_once(
+                    "FlashInfer CUTLASS MoE is available for EP"
+                    " but not enabled, consider setting"
+                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.")
             elif self.moe.moe_parallel_config.dp_size > 1:
-                logger.info_once("FlashInfer CUTLASS MoE is currently not available for DP.")
+                logger.info_once(
+                    "FlashInfer CUTLASS MoE is currently not available for DP."
+                )
             self.flashinfer_cutlass_moe = None  # type: ignore
 
     def maybe_make_prepare_finalize(

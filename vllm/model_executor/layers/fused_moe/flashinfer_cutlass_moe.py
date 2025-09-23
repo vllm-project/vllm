@@ -52,8 +52,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         tp_size: int = 1,
     ):
         super().__init__(quant_config)
-        assert quant_config.quant_dtype in ("nvfp4", torch.float8_e4m3fn, None), (
-            "Only nvfp4, fp8, bfloat16 and float16 quantization are currently supported.")
+        assert quant_config.quant_dtype in (
+            "nvfp4", torch.float8_e4m3fn,
+            None), ("Only nvfp4, fp8, bfloat16 and"
+                    " float16 quantization are currently supported.")
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
@@ -109,7 +111,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         aq_m, aq_n = aq.shape
         workspace2 = ()
-        output_shape = (aq_m, aq_n * 2) if self.quant_dtype == "nvfp4" else (aq_m, aq_n)
+        output_shape = (aq_m,
+                        aq_n * 2) if self.quant_dtype == "nvfp4" else (aq_m,
+                                                                       aq_n)
         workspace_dtype = a.dtype
         workspace1 = output_shape
         # The workspace is determined by `aq`, since it comes after any
@@ -134,8 +138,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: Optional[bool],
     ):
-    
-
 
         if self.quant_dtype == torch.float8_e4m3fn:
             quant_scales = [
