@@ -74,8 +74,6 @@ class StructuredOutputManager:
 
         self.need_structured_in_reasoning = \
             self.vllm_config.model_config.need_structured_in_reasoning
-        logger.info("need_structured_in_reasoning: %s",
-                    self.need_structured_in_reasoning)
 
     def grammar_init(self, request: Request) -> None:
         if request.structured_output_request is None:

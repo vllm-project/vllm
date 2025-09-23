@@ -370,25 +370,22 @@ class OpenAIServingResponses(OpenAIServing):
                 else:
                     context = SimpleContext()
 
-                # TODO Hanchen make sampling params to include the structural
-                # tag
-                reasoning_parser = self.reasoning_parser(tokenizer)
-                if sampling_params.guided_decoding is None:
-                    updated_structural_tag = \
-                        reasoning_parser.prepare_structured_tag( \
-                            None, self.tool_server)
-                    sampling_params.guided_decoding = \
-                        GuidedDecodingParams(structural_tag=updated_structural_tag)
-                else:
-                    logger.info("In the second situation")
-                    updated_structural_tag = \
-                        reasoning_parser.prepare_structured_tag( \
-                        sampling_params.guided_decoding.structural_tag, \
-                        self.tool_server)
-                    sampling_params.guided_decoding.structural_tag = \
-                        updated_structural_tag
-                logger.info("updated_structural_tag:\%s",
-                            updated_structural_tag)
+                if self.reasoning_parser is not None:
+                    reasoning_parser = self.reasoning_parser(tokenizer)
+                    if sampling_params.guided_decoding is None:
+                        updated_structural_tag = \
+                            reasoning_parser.prepare_structured_tag( \
+                                None, self.tool_server)
+                        sampling_params.guided_decoding = \
+                            GuidedDecodingParams(structural_tag=updated_structural_tag)
+                    else:
+                        updated_structural_tag = \
+                            reasoning_parser.prepare_structured_tag( \
+                            sampling_params.guided_decoding.structural_tag, \
+                            self.tool_server)
+                        sampling_params.guided_decoding.structural_tag = \
+                            updated_structural_tag
+
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     request_prompt=request_prompts[i],
@@ -1839,11 +1836,6 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 processer = self._process_simple_streaming_events
             # TODO Hanchen make sampling params to include the structural tag
-            # sampling_params.structured_tag = \
-            #     self.reasoning_parser.prepare_structured_tag(
-            #         sampling_params.structured_tag, self.tool_server)
-            # logger.info("sampling_params.structured_tag: %s",
-            #             sampling_params.structured_tag)
 
             initial_response = ResponsesResponse.from_request(
                 request,

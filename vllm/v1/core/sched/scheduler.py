@@ -896,8 +896,6 @@ class Scheduler(SchedulerInterface):
                 # Therefore, we might introduce some additional
                 # cycle to fill in the bitmask, which could be a big no-op.
                 structured_output_request_ids[req.request_id] = i
-                logger.info("structured_output_request_ids:\%s",
-                            structured_output_request_ids)
 
         if not structured_output_request_ids:
             bitmask = None
