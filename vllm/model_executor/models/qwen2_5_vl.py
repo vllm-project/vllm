@@ -59,7 +59,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
@@ -74,7 +73,7 @@ from .qwen2_vl import (Qwen2VLMultiModalProcessor, Qwen2VLProcessingInfo,
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-from .vision import get_vit_attn_backend
+from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
 
