@@ -60,6 +60,9 @@ class FakeNixlWrapper:
     def register_memory(self, descs, backends) -> None:
         pass
 
+    def deregister_memory(self, descs) -> None:
+        pass
+
     def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in blocks_data]
 
@@ -84,6 +87,12 @@ class FakeNixlWrapper:
         return "PROC"
 
     def release_xfer_handle(self, handle: int) -> None:
+        pass
+
+    def release_dlist_handle(self, handle: int) -> None:
+        pass
+
+    def remove_remote_agent(self, agent: str) -> None:
         pass
 
     def send_notif(self, agent_name: str, notif_msg: bytes) -> None:
@@ -905,3 +914,46 @@ def test_kv_buffer_to_nixl_memory_types(dist_init, kv_buffer_device,
         # Verify get_reg_descs was called with the correct memory_type
         assert connector.connector_worker.kv_buffer_device == kv_buffer_device
         assert connector.connector_worker.nixl_memory_type == nixl_memory_type
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper)
+def test_shutdown_cleans_up_resources(dist_init):
+    """Test that shutdown() properly cleans up all resources."""
+    vllm_config = create_vllm_config()
+
+    worker = NixlConnectorWorker(vllm_config,
+                                 vllm_config.kv_transfer_config.engine_id)
+    nixl_wrapper = worker.nixl_wrapper
+
+    with patch.object(worker, '_handshake_initiation_executor') as mock_exec, \
+         patch.object(worker, '_nixl_handshake_listener_t') as mock_listener, \
+         patch.object(nixl_wrapper, 'release_xfer_handle') as mock_rel_xfer, \
+         patch.object(nixl_wrapper, 'release_dlist_handle') as mock_rel_dlist, \
+         patch.object(nixl_wrapper, 'remove_remote_agent') as mock_rem_agent, \
+         patch.object(nixl_wrapper, 'deregister_memory') as mock_dereg:
+
+        worker._recving_transfers = {"req1": [(123, time.perf_counter())]}
+        worker.src_xfer_side_handle = 456
+        worker.dst_xfer_side_handles = {"engine1": 789}
+        worker._remote_agents = {"engine1": {0: "agent1"}}
+        worker._registered_descs = ["desc1", "desc2"]
+
+        worker.shutdown()
+
+        # Test idempotency
+        worker.shutdown()
+        worker.shutdown()
+
+        mock_exec.shutdown.assert_called_with(wait=False)
+        mock_listener.join.assert_called_once_with(timeout=0)
+
+        mock_rel_xfer.assert_called_once_with(123)
+        assert mock_rel_dlist.call_count == 2
+        mock_rel_dlist.assert_any_call(456)  # src handle
+        mock_rel_dlist.assert_any_call(789)  # dst handle
+        mock_rem_agent.assert_called_once_with("agent1")
+        assert mock_dereg.call_count == 2
+        mock_dereg.assert_any_call("desc1")
+        mock_dereg.assert_any_call("desc2")
