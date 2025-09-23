@@ -288,7 +288,11 @@ class FusedMoEQuantConfig:
 
     @property
     def use_mxfp4_w4a4(self) -> bool:
-        return self.quant_dtype == "mxfp4"
+        return (self._a1.dtype == "mxfp4" and self._w1.dtype == "mxfp4")
+
+    @property
+    def use_mxfp4_w4a16(self) -> bool:
+        return (self._a1.dtype is None and self._w1.dtype == "mxfp4")
 
     @property
     def use_nvfp4_w4a4(self) -> bool:
@@ -450,6 +454,22 @@ def int8_w8a8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=False,
         block_shape=None,
+    )
+
+
+def mxfp4_w4a16_moe_quant_config(
+        w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+        w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+        w1_bias: Optional[torch.Tensor] = None,
+        w2_bias: Optional[torch.Tensor] = None) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for unquantized activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(),
+        _a2=FusedMoEQuantDesc(),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
     )
 
 
