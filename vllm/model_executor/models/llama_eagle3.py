@@ -291,3 +291,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         )
         loader.load_weights(model_weights.items())
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.get_input_embeddings(input_ids)
+        return inputs_embeds
