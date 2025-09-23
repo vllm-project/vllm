@@ -14,10 +14,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.utils import cdiv, has_triton_kernels
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
-if has_triton_kernels():
-    from triton_kernels.matmul_ogs import PrecisionConfig
-
 logger = init_logger(__name__)
+
+if has_triton_kernels():
+    try:
+        from triton_kernels.matmul_ogs import PrecisionConfig
+    except ImportError:
+        logger.error(
+            "Failed to import Triton kernels. Please make sure your triton "
+            "version is compatible.")
 
 
 def _get_config_dtype_str(
