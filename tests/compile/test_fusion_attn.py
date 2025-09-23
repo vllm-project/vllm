@@ -215,10 +215,9 @@ else:
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("model_name, model_class", MODELS)
 @pytest.mark.parametrize(
-    "backend",
-    ["flashinfer.FlashInferBackend"] if current_platform.is_cuda() else [
-        "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend",
-        "rocm_attn.RocmAttentionBackend", "triton_attn.TritonAttentionBackend"
+    "backend", [_Backend.FLASHINFER] if current_platform.is_cuda() else [
+        _Backend.ROCM_AITER_UNIFIED_ATTN, _Backend.ROCM_ATTN_VLLM_V1,
+        _Backend.TRITON_ATTN_VLLM_V1
     ])
 # TODO(boyuan): test inductor graph partition on rocm
 @pytest.mark.parametrize(
@@ -247,13 +246,13 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                     "in PyTorch 2.9+")
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     # Mock the _cached_get_attn_backend function to avoid cached results
     monkeypatch.setattr(
         "vllm.attention.selector._cached_get_attn_backend",
         lambda *args, **kwargs: resolve_obj_by_qualname(
-            "vllm.v1.attention.backends." + backend))
+            current_platform.get_attn_backend_cls(
+                backend, head_size, dtype, "fp8", 16, True, False, False)))
 
     device = torch.device("cuda:0")
     torch.manual_seed(42)
@@ -291,10 +290,10 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
     torch._dynamo.mark_dynamic(k, 0)
     torch._dynamo.mark_dynamic(v, 0)
 
-    use_hnd = backend in ("rocm_attn.RocmAttentionBackend", )
+    use_hnd = backend in (_Backend.ROCM_ATTN_VLLM_V1, )
     kv_first = backend in (
-        "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend",
-        "rocm_attn.RocmAttentionBackend",
+        _Backend.ROCM_AITER_UNIFIED_ATTN,
+        _Backend.ROCM_ATTN_VLLM_V1,
     )
 
     # Run model directly without compilation and fusion
@@ -348,7 +347,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
         result_fused_1 = model_compiled(q, k, v)
 
-        if backend == "flashinfer.FlashInferBackend":
+        if backend == _Backend.FLASHINFER:
             # With the Flashinfer backend after the 1st round of the forward
             # pass, output quant scale should be loaded into the attn layer's
             # _o_scale_float, the 2nd round should reuse the loaded
