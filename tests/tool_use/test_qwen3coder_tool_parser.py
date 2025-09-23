@@ -13,8 +13,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ToolCall)
 from vllm.entrypoints.openai.tool_parsers.qwen3coder_tool_parser import (
     Qwen3CoderToolParser)
-from vllm.entrypoints.openai.tool_parsers.qwen3coder_xml_tool_parser import (
-    Qwen3CoderXMLToolParser)
+from vllm.entrypoints.openai.tool_parsers.qwen3xml_tool_parser import (
+    Qwen3XMLToolParser)
 from vllm.transformers_utils.detokenizer import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
@@ -33,7 +33,7 @@ def qwen3_tool_parser(qwen3_tokenizer):
 
 @pytest.fixture
 def qwen3_xml_tool_parser(qwen3_tokenizer):
-    return Qwen3CoderXMLToolParser(qwen3_tokenizer)
+    return Qwen3XMLToolParser(qwen3_tokenizer)
 
 
 @pytest.fixture(params=["original", "xml"])

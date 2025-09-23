@@ -1054,8 +1054,8 @@ class StreamingXMLToolCallParser:
         self.deferred_param_raw_value = ""
 
 
-@ToolParserManager.register_module("qwen3_coder_xml")
-class Qwen3CoderXMLToolParser(ToolParser):
+@ToolParserManager.register_module("qwen3_xml")
+class Qwen3XMLToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
