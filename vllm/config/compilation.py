@@ -488,6 +488,8 @@ class CompilationConfig:
                              "use_inductor_graph_partition=False instead.")
 
         for op in self.custom_ops:
+            if not op:  # Skip empty strings
+                continue
             if op[0] not in {'+', '-'} and op not in {'all', 'none'}:
                 raise ValueError(f"Invalid syntax '{op}' for custom op, "
                                  "must be 'all', 'none', '+op' or '-op' "
