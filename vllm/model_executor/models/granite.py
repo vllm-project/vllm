@@ -472,10 +472,6 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             torch.zeros((batch_size, self.config.hidden_size),
                         dtype=dtype,
                         device=device),
-            "residual":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
         })
 
     def load_weights(self, weights: Iterable[tuple[str,
