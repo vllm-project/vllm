@@ -78,6 +78,7 @@ def run_benchmark(
         cache_layout=kv_cache_layout,
     )
     key_cache, value_cache = key_caches[0], value_caches[0]
+    # to free unused memory
     del key_caches, value_caches
 
     # compute per-kernel scaling factors for fp8 conversion (if used).
@@ -86,22 +87,22 @@ def run_benchmark(
 
     if implementation == "cuda":
         function_under_test = lambda: ops.reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
+            key,  # noqa: F821
+            value,  # noqa: F821
+            key_cache,  # noqa: F821
+            value_cache,  # noqa: F821
+            slot_mapping,  # noqa: F821
             kv_cache_dtype,
             k_scale,
             v_scale,
         )
     else:
         function_under_test = lambda: triton_reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
+            key,  # noqa: F821
+            value,  # noqa: F821
+            key_cache,  # noqa: F821
+            value_cache,  # noqa: F821
+            slot_mapping,  # noqa: F821
             kv_cache_dtype,
             k_scale,
             v_scale,
