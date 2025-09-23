@@ -182,15 +182,6 @@ class Worker(WorkerBase):
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
-            # Force NCCL initialization on the current thread if using tensor
-            # parallelism
-            if self.parallel_config.world_size > 1:
-                # Perform a dummy collective to ensure NCCL is fully initialized
-                dummy_tensor = torch.zeros(1, device=self.device)
-                torch.distributed.all_reduce(dummy_tensor)
-                # Clean up the dummy tensor
-                del dummy_tensor
-
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
             torch.cuda.empty_cache()
