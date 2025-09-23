@@ -892,7 +892,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Custom layout for weight swizzle mxfp4 moe
     "VLLM_ROCM_TRITON_HIP_PRESHUFFLE_SCALES":
-    lambda: (os.getenv("VLLM_ROCM_TRITON_HIP_PRESHUFFLE_SCALES", "False").lower() in
+    lambda: (os.getenv("VLLM_ROCM_TRITON_HIP_PRESHUFFLE_SCALES",
+                       "False").lower() in
              ("true", "1")),
 
     # Custom quick allreduce kernel for MI3* cards
