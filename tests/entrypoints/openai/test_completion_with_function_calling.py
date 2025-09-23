@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import datetime
 from typing import Union
 
 import openai  # use the official client for correctness check
@@ -142,7 +143,7 @@ def server():  # noqa: F811
         "--dtype",
         "half",
         "--enable-auto-tool-choice",
-        "--guided-decoding-backend",
+        "--structured-outputs-config.backend",
         "xgrammar",
         "--tool-call-parser",
         "hermes",
@@ -225,7 +226,7 @@ def k2_server():  # noqa: F811
         "--dtype",
         "half",
         "--enable-auto-tool-choice",
-        "--guided-decoding-backend",
+        "--structured-outputs-config.backend",
         "xgrammar",
         "--tool-call-parser",
         "hermes",
@@ -284,3 +285,62 @@ async def test_tool_id_kimi_k2(k2_client: openai.AsyncOpenAI, model_name: str,
                 output.extend(chunk.choices[0].delta.tool_calls)
         for o in output:
             assert o.id is None or o.id == 'functions.get_current_weather:0'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("arguments", ["{}", ''])
+async def test_no_args_tool_call(client: openai.AsyncOpenAI, model_name: str,
+                                 arguments: str):
+    # Step 1: Define a tool that requires no parameters
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_current_time",
+            "description":
+            "Get the current date and time. No parameters needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {},  # No parameters
+                "required": []  # No required fields
+            }
+        }
+    }]
+    messages = [{"role": "user", "content": "What time is it now?"}]
+    # Step 2: Send user message and let model decide whether to call the tool
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        tools=tools,
+        tool_choice="auto"  # Let model choose automatically
+    )
+
+    # Step 3: Check if model wants to call a tool
+    message = response.choices[0].message
+    if message.tool_calls:
+        # Get the first tool call
+        tool_call = message.tool_calls[0]
+        tool_name = tool_call.function.name
+        # Step 4: Execute the tool locally (no parameters)
+        if tool_name == "get_current_time":
+            # Test both empty string and "{}" for no-arg tool calls
+            tool_call.function.arguments = arguments
+            messages.append(message)
+            current_time = datetime.datetime.now()
+            result = current_time.isoformat()
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result,
+            })
+            # Step 5: Send tool result back to model to continue conversation
+            final_response = await client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+            )
+            # Output final natural language response
+            assert final_response.choices[0].message.content is not None
+
+    else:
+        # No tool called — just print model's direct reply
+        assert message.content is not None

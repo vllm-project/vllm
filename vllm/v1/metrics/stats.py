@@ -3,7 +3,7 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -43,6 +43,7 @@ class SchedulerStats:
         default_factory=PrefixCacheStats)
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
+    kv_connector_stats: Optional[dict[str, Any]] = None
 
     num_corrupted_reqs: int = 0
 

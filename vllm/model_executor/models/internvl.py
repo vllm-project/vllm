@@ -25,7 +25,6 @@ from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -1035,6 +1034,8 @@ class InternVLMultiModalProcessor(
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                         SupportsLoRA):
 
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -1053,6 +1054,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self._patch_quant_config(config, quant_config)
 
         image_size = config.force_image_size or config.vision_config.image_size
@@ -1120,7 +1122,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                 quant_config=quant_config,
                 num_hidden_layers_override=num_hidden_layers,
                 prefix=prefix,
-            )
+                use_data_parallel=self.use_data_parallel)
         else:
             return InternVisionPatchModel(config.vision_config)
 
@@ -1396,10 +1398,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

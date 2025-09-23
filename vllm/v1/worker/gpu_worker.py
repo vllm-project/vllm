@@ -487,7 +487,7 @@ class Worker(WorkerBase):
                     sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        self.model_runner._dummy_run(1, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
@@ -683,7 +683,8 @@ class Worker(WorkerBase):
             tensorizer_config=tensorizer_config, )
 
     def shutdown(self) -> None:
-        self.model_runner.ensure_kv_transfer_shutdown()
+        if runner := getattr(self, "model_runner", None):
+            runner.ensure_kv_transfer_shutdown()
 
 
 def init_worker_distributed_environment(

@@ -133,6 +133,14 @@ public:
     // printf("    sm_count = %d\n", sm_count);
     int max_splits = ceil_div(K, 128);
     max_splits = min(16, max_splits);
+
+    // TODO: This avoids a hang when the batch size larger than 1 and 
+    // there is more than 4 kv_splits. 
+    // Discuss with NVIDIA how this can be fixed.
+    if (B > 1) {
+      max_splits = min(2, max_splits);
+    }
+    
     // printf("    max_splits = %d\n", max_splits);
     int sms_per_batch = max(1, sm_count / B);
     // printf("    sms_per_batch = %d\n", sms_per_batch);
