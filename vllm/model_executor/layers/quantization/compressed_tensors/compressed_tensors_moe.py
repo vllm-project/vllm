@@ -511,7 +511,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             and self.input_quant.strategy == QuantizationStrategy.TOKEN)
         if not (per_tensor or per_channel):
             assert self.weight_quant.strategy == QuantizationStrategy.BLOCK
-            logger.debug("WQ = %s", str(self.weight_quant))
             self.weight_block_size = self.weight_quant.block_structure
             assert self.weight_quant.dynamic is not None
         else:
