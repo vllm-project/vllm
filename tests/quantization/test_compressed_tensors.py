@@ -18,6 +18,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A16Fp4, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    W8A8BlockFp8LinearOp)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -43,12 +46,9 @@ ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
 
 
 @pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    if not current_platform.is_cpu():
-        monkeypatch.setenv('VLLM_USE_V1', '0')
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 @pytest.mark.parametrize(
@@ -176,10 +176,11 @@ def test_compressed_tensors_w8a8_logprobs(
 
     dtype = "bfloat16"
 
-    # skip language translation prompt for the static per tensor asym model
-    if (model_path ==
-            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym"
-        ):  # noqa: E501
+    # skip language translation prompt for the static per tensor models
+    if model_path in (
+            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Sym",
+            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym",
+    ):
         example_prompts = example_prompts[0:-1]
 
     with hf_runner(model_path, dtype=dtype) as hf_model:
@@ -359,6 +360,9 @@ def test_compressed_tensors_fp8(vllm_runner):
         assert output
 
 
+@pytest.mark.skipif(
+    not current_platform.is_kv_cache_dtype_supported("fp8", None),
+    reason="FP8 KV cache is not supported on this device.")
 @pytest.mark.skipif(not current_platform.is_cuda(),
                     reason="This test is skipped on non-CUDA platform.")
 def test_compressed_tensors_kv_cache(vllm_runner):
@@ -741,3 +745,35 @@ def test_compressed_tensors_transforms_perplexity(vllm_runner, model, prompt,
         perplexity = llm.generate_prompt_perplexity([prompt])[0]
         print(perplexity)
         assert perplexity <= exp_perplexity
+
+
+def test_compressed_tensors_fp8_block_enabled(vllm_runner):
+    model_path = "RedHatAI/Qwen3-0.6B-FP8-BLOCK"
+    with vllm_runner(model_path) as llm:
+
+        fp8_dtype = current_platform.fp8_dtype()
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            assert isinstance(qkv_proj.quant_method,
+                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
+            assert isinstance(qkv_proj.scheme.w8a8_block_fp8_linear,
+                              W8A8BlockFp8LinearOp)
+
+            assert qkv_proj.weight.dtype is fp8_dtype
+            assert qkv_proj.weight_scale.dtype is torch.float32
+            assert len(qkv_proj.weight.shape) == 2
+            assert len(qkv_proj.weight_scale.shape) == 2
+
+            input_quant_op = \
+                qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
+            assert isinstance(input_quant_op, QuantFP8)
+            assert input_quant_op._forward_method == input_quant_op.forward_cuda
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        assert output
