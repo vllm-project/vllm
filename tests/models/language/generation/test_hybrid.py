@@ -20,7 +20,9 @@ pytestmark = pytest.mark.hybrid_model
 SSM_MODELS = [
     "state-spaces/mamba-130m-hf",
     "tiiuae/falcon-mamba-tiny-dev",
-    "yujiepan/mamba2-codestral-v0.1-tiny-random",
+    # mamba2-codestral in transformers is broken pending:
+    # https://github.com/huggingface/transformers/pull/40861
+    #"yujiepan/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
@@ -31,28 +33,13 @@ HYBRID_MODELS = [
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
-]
-
-V1_SUPPORTED_MODELS = [
-    "state-spaces/mamba-130m-hf",
-    "ai21labs/Jamba-tiny-dev",
-    "pfnet/plamo-2-1b",
-    "yujiepan/mamba2-codestral-v0.1-tiny-random",
-    "Zyphra/Zamba2-1.2B-instruct",
-    "hmellor/tiny-random-BambaForCausalLM",
-    "ibm-granite/granite-4.0-tiny-preview",
-    "tiiuae/Falcon-H1-0.5B-Base",
-    "LiquidAI/LFM2-1.2B",
+    "tiny-random/qwen3-next-moe",
 ]
 
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
-]
-
-V0_UNSUPPORTED_MODELS = [
-    "LiquidAI/LFM2-1.2B",
 ]
 
 FP32_STATE_MODELS = [
@@ -88,20 +75,16 @@ def test_models(
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
-    if model in V1_SUPPORTED_MODELS:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-            vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, num_logprobs)
-    else:
-        vllm_v1_outputs = None
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
-    if model in V1_SUPPORTED_MODELS:
-        check_logprobs_close(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=vllm_v1_outputs,
-            name_0="hf",
-            name_1="vllm-v1",
-        )
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
 
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
@@ -299,14 +282,14 @@ def test_full_cuda_graph(
             example_prompts, max_tokens, num_logprobs)
 
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_v1_outputs,
+        outputs_1_lst=vllm_outputs,
         name_0="hf",
-        name_1="vllm-v1",
+        name_1="vllm",
     )
 
 
@@ -340,12 +323,12 @@ def test_fp32_cache_state(
     with vllm_runner(model,
                      max_num_seqs=MAX_NUM_SEQS,
                      **{cache_dtype_param: "float32"}) as vllm_model:
-        vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_v1_outputs,
+        outputs_1_lst=vllm_outputs,
         name_0="hf",
-        name_1="vllm-v1",
+        name_1="vllm",
     )

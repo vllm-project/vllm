@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
+                                              compute_causal_conv1d_metadata,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
@@ -52,7 +53,6 @@ class GDNAttentionMetadata:
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: Optional[dict] = None
-    cu_seqlen: Optional[int] = None
     batch_ptr: Optional[torch.Tensor] = None
     token_chunk_offset_ptr: Optional[torch.Tensor] = None
 
@@ -134,6 +134,7 @@ class GDNAttentionMetadataBuilder(
         context_lens = m.num_computed_tokens_cpu
         context_lens_tensor = context_lens.to(query_start_loc.device)
         seq_lens_tensor = m.seq_lens
+        nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         if (not self.use_spec_decode or num_draft_tokens is None
                 or num_draft_tokens.sum().item() == 0):
@@ -210,6 +211,8 @@ class GDNAttentionMetadataBuilder(
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks]
+            nums_dict, batch_ptr, token_chunk_offset_ptr = \
+                compute_causal_conv1d_metadata(non_spec_query_start_loc)
         else:
             has_initial_state = None
         num_actual_tokens = num_prefill_tokens + num_decode_tokens + \
@@ -297,6 +300,9 @@ class GDNAttentionMetadataBuilder(
             spec_sequence_masks=spec_sequence_masks,
             spec_token_masks=spec_token_masks,
             num_accepted_tokens=num_accepted_tokens,
+            nums_dict=nums_dict,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         return attn_metadata
 

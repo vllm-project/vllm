@@ -100,7 +100,6 @@ class MambaStateShapeCalculator:
         intermediate_size: int,
         state_size: int,
         conv_kernel: int,
-        use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         conv_state_shape = (divide(intermediate_size,
                                    tp_world_size), conv_kernel - 1)
@@ -108,11 +107,7 @@ class MambaStateShapeCalculator:
         temporal_state_shape = (divide(intermediate_size,
                                        tp_world_size), state_size)
 
-        # In V0, the conv_state shape was swapped during allocation in
-        # MambaCacheManager, but in V1 it needs to be determined here at the
-        # calculation level
-        if use_v1:
-            conv_state_shape = conv_state_shape[1], conv_state_shape[0]
+        conv_state_shape = conv_state_shape[1], conv_state_shape[0]
 
         return conv_state_shape, temporal_state_shape
 
@@ -126,7 +121,6 @@ class MambaStateShapeCalculator:
         head_dim: int,
         state_size: int,
         conv_kernel: int,
-        use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
@@ -137,8 +131,6 @@ class MambaStateShapeCalculator:
 
         # contiguous along 'dim' axis
         conv_state_shape = (conv_kernel - 1, divide(conv_dim, tp_world_size))
-        if not use_v1:
-            conv_state_shape = conv_state_shape[1], conv_state_shape[0]
 
         # These are not TP-ed as they depend on A, dt_bias, D
         # - they are typically small
@@ -153,12 +145,9 @@ class MambaStateShapeCalculator:
         tp_world_size: int,
         intermediate_size: int,
         conv_kernel: int,
-        use_v1: bool = True,
     ) -> tuple[tuple[int, int]]:
         conv_dim = divide(intermediate_size, tp_world_size)
         conv_state_shape = (conv_kernel - 1, conv_dim)
-        if not use_v1:
-            conv_state_shape = conv_state_shape[1], conv_state_shape[0]
         return (conv_state_shape, )
 
     @classmethod
@@ -183,7 +172,6 @@ class MambaStateShapeCalculator:
         head_v_dim: int,
         conv_kernel_size: int,
         num_spec: int = 0,
-        use_v1: bool = True,
     ):
         conv_dim = (head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads)
         conv_state_shape = (
@@ -191,11 +179,7 @@ class MambaStateShapeCalculator:
             conv_kernel_size - 1 + num_spec,
         )
 
-        # In V0, the conv_state shape was swapped during allocation in
-        # MambaCacheManager, but in V1 it needs to be determined here at the
-        # calculation level
-        if use_v1:
-            conv_state_shape = conv_state_shape[1], conv_state_shape[0]
+        conv_state_shape = conv_state_shape[1], conv_state_shape[0]
 
         temporal_state_shape = (divide(num_v_heads,
                                        tp_world_size), head_k_dim, head_v_dim)

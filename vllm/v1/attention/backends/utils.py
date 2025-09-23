@@ -34,6 +34,8 @@ logger = init_logger(__name__)
 KVCacheLayoutType = Literal["NHD", "HND"]
 _KV_CACHE_LAYOUT_OVERRIDE: Union[KVCacheLayoutType, None] = None
 
+PAD_SLOT_ID = -1
+
 
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
@@ -838,3 +840,52 @@ def create_fast_prefill_custom_backend(
         builder_cls=FastPrefillAttentionBuilder)
 
     return attn_backend
+
+
+def compute_causal_conv1d_metadata(query_start_loc_p: torch.Tensor):
+
+    # Needed for causal_conv1d
+    seqlens = query_start_loc_p.diff().to('cpu')
+    nums_dict = {}  # type: ignore
+    batch_ptr = None
+    token_chunk_offset_ptr = None
+    for BLOCK_M in [8]:  # cover all BLOCK_M values
+        nums = -(-seqlens // BLOCK_M)
+        nums_dict[BLOCK_M] = {}
+        nums_dict[BLOCK_M]['nums'] = nums
+        nums_dict[BLOCK_M]['tot'] = nums.sum().item()
+        mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums))
+        nums_dict[BLOCK_M]['mlist'] = mlist
+        mlist_len = len(nums_dict[BLOCK_M]['mlist'])
+        nums_dict[BLOCK_M]['mlist_len'] = mlist_len
+        MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
+        offsetlist = []  # type: ignore
+        for idx, num in enumerate(nums):
+            offsetlist.extend(range(num))
+        offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+        nums_dict[BLOCK_M]['offsetlist'] = offsetlist
+
+        if batch_ptr is None:
+            # Update default value after class definition
+            batch_ptr = torch.full((MAX_NUM_PROGRAMS, ),
+                                   PAD_SLOT_ID,
+                                   dtype=torch.int32,
+                                   device='cuda')
+            token_chunk_offset_ptr = torch.full((MAX_NUM_PROGRAMS, ),
+                                                PAD_SLOT_ID,
+                                                dtype=torch.int32,
+                                                device='cuda')
+        else:
+            if batch_ptr.nelement() < MAX_NUM_PROGRAMS:
+                batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+                token_chunk_offset_ptr.resize_(  # type: ignore
+                    MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+
+        batch_ptr[0:mlist_len].copy_(mlist)
+        token_chunk_offset_ptr[  # type: ignore
+            0:mlist_len].copy_(offsetlist)
+        nums_dict[BLOCK_M]['batch_ptr'] = batch_ptr
+        nums_dict[BLOCK_M]['token_chunk_offset_ptr'] = (token_chunk_offset_ptr
+                                                        )  # type: ignore
+
+    return nums_dict, batch_ptr, token_chunk_offset_ptr
