@@ -67,6 +67,7 @@ class _Backend(enum.Enum):
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
     XFORMERS_VLLM_V1 = enum.auto()
+    ROCM_ATTN_VLLM_V1 = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
@@ -482,20 +483,6 @@ class Platform:
                 == "external_launcher")
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
-        return False
-
-    @classmethod
-    def default_v1(cls, model_config: ModelConfig) -> bool:
-        """
-        Returns whether the current platform supports v1 by default.
-        """
-        return cls.supports_v1(model_config)
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         """
         Returns if custom allreduce is supported on the current platform
@@ -588,6 +575,13 @@ class Platform:
         return False
 
     @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        """
+        Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
     def use_sync_weight_loader(cls) -> bool:
         """
         Returns if the current platform needs to sync weight loader.
@@ -609,6 +603,21 @@ class Platform:
             return out
 
         return _synced_weight_loader
+
+    @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        """
+        Returns a mapping from device_type to a tuple of supported 
+        kv_buffer_device for nixl.
+        """
+        return {}
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> Optional[str]:
+        """
+        Returns the nixl memory type for the current platform.
+        """
+        return None
 
 
 class UnspecifiedPlatform(Platform):
