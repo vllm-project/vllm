@@ -140,11 +140,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     ):
         self.reset_lora(index)
         self.lora_a_stacked[index,
-                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-                                lora_a.T, non_blocking=True)
+                            0, :lora_a.shape[0], :lora_a.shape[1]].copy_(
+                                lora_a, non_blocking=True)
         self.lora_b_stacked[index,
-                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-                                lora_b.T, non_blocking=True)
+                            0, :lora_b.shape[0], :lora_b.shape[1]].copy_(
+                                lora_b, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
                 index,

@@ -164,6 +164,7 @@ steps:
   - tests/v1/test_internal_lb_dp.py
   - tests/v1/test_hybrid_lb_dp.py
   - tests/v1/engine/test_engine_core_client.py
+  - tests/distributed/test_symm_mem_allreduce.py
   commands:
   # test with torchrun tp=2 and external_dp=2
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
@@ -188,6 +189,7 @@ steps:
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
+  - pytest -v -s distributed/test_symm_mem_allreduce.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
@@ -329,6 +331,8 @@ steps:
     - python3 offline_inference/basic/classify.py
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
+    - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
+    - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
 
 - label: Platform Tests (CUDA) # 4min
   timeout_in_minutes: 15
@@ -1037,3 +1041,4 @@ steps:
   num_gpus: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
+    - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
