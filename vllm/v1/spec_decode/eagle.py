@@ -78,8 +78,7 @@ class EagleProposer:
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
 
-        self.attn_metadata_builders: Optional[
-            list[AttentionMetadataBuilder]] = None
+        self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
@@ -195,12 +194,10 @@ class EagleProposer:
         assert self.runner is not None
 
         # Select the correct attention metadata builders for EAGLE layers.
-        ubatch_id = dbo_current_ubatch_id()
         # Get the attention metadata builders once and reuse for later.
-        self.attn_metadata_builders = (self._get_attention_metadata_builders()
-                                       if self.attn_metadata_builders is None
-                                       else self.attn_metadata_builders)
-        builder = self.attn_metadata_builders[ubatch_id]
+        builder = (self._get_attention_metadata_builder()
+                   if self.attn_metadata_builder is None else
+                   self.attn_metadata_builder)
         attn_metadata = builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0)
 
@@ -854,15 +851,27 @@ class EagleProposer:
                 "The EAGLE head's vocab embedding will be loaded separately"
                 " from the target model.")
 
-        if (get_pp_group().world_size == 1 and self.model.lm_head.weight.shape
-                == target_language_model.lm_head.weight.shape):
-            logger.info("Assuming the EAGLE head shares the same lm_head"
-                        " with the target model.")
-            del self.model.lm_head
-            self.model.lm_head = target_language_model.lm_head
+        # share lm_head with the target model if needed
+        # some model definition do not define lm_head explicitly
+        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
+        if self.vllm_config.speculative_config.method != "eagle3":
+            if hasattr(target_language_model, "lm_head"):
+                logger.info(
+                    "Loading EAGLE LM head weights from the target model.")
+                self.model.lm_head = target_language_model.lm_head
         else:
-            logger.info("The EAGLE head's lm_head will be loaded separately"
-                        " from the target model.")
+            if (hasattr(self.model, "lm_head")
+                    and hasattr(target_language_model, "lm_head")
+                    and self.model.lm_head.weight.shape
+                    == target_language_model.lm_head.weight.shape):
+                logger.info("Assuming the EAGLE head shares the same lm_head"
+                            " with the target model.")
+                del self.model.lm_head
+                self.model.lm_head = target_language_model.lm_head
+            else:
+                logger.info(
+                    "The EAGLE head's lm_head will be loaded separately"
+                    " from the target model.")
 
     @torch.inference_mode()
     def dummy_run(
@@ -885,7 +894,7 @@ class EagleProposer:
                 inputs_embeds=inputs_embeds,
             )
 
-    def _get_attention_metadata_builders(
+    def _get_attention_metadata_builder(
             self) -> list[AttentionMetadataBuilder]:
         """Find and return the attention metadata builders for EAGLE layers.
         
@@ -895,20 +904,20 @@ class EagleProposer:
         Raises:
             AssertionError: If no metadata builders are found for EAGLE layers.
         """
-        builders = None
+        builder = None
         chosen_layer = self.attn_layer_names[0]
 
         for kv_cache_group in self.runner.attn_groups:
             for attn_group in kv_cache_group:
                 if chosen_layer in attn_group.layer_names:
-                    builders = attn_group.metadata_builders
+                    builder = attn_group.get_metadata_builder()
                     break
-            if builders is not None:
+            if builder is not None:
                 break
 
-        assert builders is not None, (
+        assert builder is not None, (
             "Failed to find attention metadata builders for EAGLE layers.")
-        return builders
+        return builder
 
     def validate_same_kv_cache_group(self,
                                      kv_cache_config: KVCacheConfig) -> None:
