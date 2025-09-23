@@ -11,7 +11,6 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
-from vllm import envs
 from vllm.attention import Attention, AttentionBackend, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, ModelConfig, SpeculativeConfig,
@@ -35,7 +34,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba2_metadata import update_metadata
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     mamba_v2_sharded_weight_loader)
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -51,7 +49,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, sharded_weight_loader)
-from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -198,14 +195,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
-            self.tp_size,
-            self.num_k_heads,
-            self.num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
-            self.conv_kernel_size,
-            self.num_spec,
-            use_v1=True)
+            self.tp_size, self.num_k_heads, self.num_v_heads, self.head_k_dim,
+            self.head_v_dim, self.conv_kernel_size, self.num_spec)
 
     def __init__(
         self,
@@ -394,7 +385,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        cache_params: Optional[MambaCacheParams] = None,
     ):
         return torch.ops.vllm.gdn_attention(
             hidden_states,
@@ -416,7 +406,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
-        conv_metadata = attn_metadata
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -479,12 +468,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # 2.2: process the remaining part
         if attn_metadata.num_prefills > 0:
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
-            if conv_metadata.cu_seqlen is None:
-                conv_metadata = update_metadata(mixed_qkv_non_spec_T,
-                                                non_spec_query_start_loc,
-                                                conv_metadata)
             # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "mamba_cache_params.state_indices_tensor"
+            #   pointed to by "state_indices_tensor"
             mixed_qkv_non_spec = causal_conv1d_fn(
                 mixed_qkv_non_spec_T,
                 conv_weights,
@@ -494,7 +479,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
-                metadata=conv_metadata,
+                metadata=attn_metadata,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             mixed_qkv_non_spec = causal_conv1d_update(
@@ -1075,7 +1060,6 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         scheduler_config = vllm_config.scheduler_config
         assert not cache_config.enable_prefix_caching, \
             "Qwen3Next currently does not support prefix caching"
-        assert envs.VLLM_USE_V1, "Qwen3Next requires VLLM_USE_V1"
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
@@ -1195,14 +1179,10 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         num_spec = (vllm_config.speculative_config.num_speculative_tokens
                     if vllm_config.speculative_config else 0)
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
-            tp_size,
-            hf_config.linear_num_key_heads,
-            hf_config.linear_num_value_heads,
-            hf_config.linear_key_head_dim,
-            hf_config.linear_value_head_dim,
-            hf_config.linear_conv_kernel_dim,
-            num_spec,
-            use_v1=True)
+            tp_size, hf_config.linear_num_key_heads,
+            hf_config.linear_num_value_heads, hf_config.linear_key_head_dim,
+            hf_config.linear_value_head_dim, hf_config.linear_conv_kernel_dim,
+            num_spec)
 
     def compute_logits(
         self,
