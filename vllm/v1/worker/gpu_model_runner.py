@@ -3390,8 +3390,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _capture_cudagraphs(self, compilation_cases: list[int],
                             cudagraph_runtime_mode: CUDAGraphMode,
                             uniform_decode: bool):
-        assert cudagraph_runtime_mode in [CUDAGraphMode.FULL,
-                                         CUDAGraphMode.PIECEWISE],\
+        assert cudagraph_runtime_mode != CUDAGraphMode.NONE and \
+            cudagraph_runtime_mode.valid_runtime_modes(), \
             f"Invalid cudagraph runtime mode: {cudagraph_runtime_mode}"
 
         # Only rank 0 should print progress bar during capture

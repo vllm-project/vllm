@@ -578,48 +578,29 @@ class CompilationConfig:
             "set_splitting_ops_for_v1 should only be called when "
             "level is CompilationLevel.PIECEWISE")
 
-        use_inductor_graph_partition_msg = (
-            "When use_inductor_graph_partition=True, splitting_ops "
-            "are ignored and set to an empty list. Instead, "
-            "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
-            "used to annotate custom ops for graph partition.")
+        if self.use_inductor_graph_partition:
+            self.set_splitting_ops_for_inductor_graph_partition()
+            return
+
+        if self.pass_config.enable_attn_fusion:
+            # here use_inductor_graph_partition is False
+            self.set_splitting_ops_for_attn_fusion()
+            return
 
         if self.splitting_ops is None:
-            if self.use_inductor_graph_partition:
-                # When using inductor graph partition, we set splitting_ops
-                # to be empty and rely on torch._C.Tag.cudagraph_unsafe to
-                # annotate custom ops as splitting ops.
-                logger.warning_once(use_inductor_graph_partition_msg)
-                self.splitting_ops = []
-            elif self.pass_config.enable_attn_fusion:
-                self.splitting_ops = []
-                if self.cudagraph_mode.has_piecewise_cudagraphs():
-                    logger.warning_once(
-                        "enable_attn_fusion is incompatible with piecewise "
-                        "cudagraph when use_inductor_graph_partition is off."
-                        "In this case, splitting_ops will be set to empty "
-                        "list, and cudagraph_mode will be set to FULL. "
-                        "Please ensure you are using attention backends that "
-                        "support cudagraph or set cudagraph_mode to NONE "
-                        "explicitly if encountering any problems.")
-                    self.cudagraph_mode = CUDAGraphMode.FULL
-            else:
-                # NOTE: When using full cudagraph, instead of setting an empty
-                # list and capture the full cudagraph inside the flattened fx
-                # graph, we keep the piecewise fx graph structure but capture
-                # the full cudagraph outside the fx graph. This reduces some
-                # cpu overhead when the runtime batch_size is not cudagraph
-                # captured. see https://github.com/vllm-project/vllm/pull/20059
-                # for details. Make a copy to avoid mutating the class-level
-                # list via reference.
-                self.splitting_ops = list(self._attention_ops)
+            # NOTE: When using full cudagraph, instead of setting an empty
+            # list and capture the full cudagraph inside the flattened fx
+            # graph, we keep the piecewise fx graph structure but capture
+            # the full cudagraph outside the fx graph. This reduces some
+            # cpu overhead when the runtime batch_size is not cudagraph
+            # captured. see https://github.com/vllm-project/vllm/pull/20059
+            # for details. Make a copy to avoid mutating the class-level
+            # list via reference.
+            self.splitting_ops = list(self._attention_ops)
         elif len(self.splitting_ops) == 0:
             logger.warning_once(
-                "Using piecewise compilation with empty "
-                "splitting_ops and use_inductor_graph_partition"
-                f"={self.use_inductor_graph_partition}.")
-            if (self.cudagraph_mode == CUDAGraphMode.PIECEWISE
-                    and not self.use_inductor_graph_partition):
+                "Using piecewise compilation with empty splitting_ops")
+            if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                 logger.warning_once(
                     "Piecewise compilation with empty splitting_ops do not" \
                     "contains piecewise cudagraph. Setting cudagraph_"
@@ -635,14 +616,36 @@ class CompilationConfig:
                     "to FULL.")
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
-        else:  # len(self.splitting_ops) > 0:
-            if self.use_inductor_graph_partition:
-                logger.warning_once(use_inductor_graph_partition_msg)
-                self.splitting_ops = []
-            assert not self.pass_config.enable_attn_fusion or \
-                not self.splitting_ops_contain_attention(), (
-                "attention ops should not be in splitting_ops "
-                "when enable_attn_fusion is True")
+
+    def set_splitting_ops_for_inductor_graph_partition(self):
+        use_inductor_graph_partition_msg = (
+            "When use_inductor_graph_partition=True, splitting_ops "
+            "are ignored and set to an empty list. Instead, "
+            "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
+            "used to annotate custom ops for graph partition.")
+        if self.splitting_ops is not None and \
+            len(self.splitting_ops) > 0:
+            logger.warning_once(use_inductor_graph_partition_msg)
+        self.splitting_ops = []
+
+    def set_splitting_ops_for_attn_fusion(self):
+        assert self.pass_config.enable_attn_fusion
+        if self.splitting_ops is None:
+            self.splitting_ops = []
+            if self.cudagraph_mode.has_piecewise_cudagraphs():
+                logger.warning_once(
+                    "enable_attn_fusion is incompatible with piecewise "
+                    "cudagraph when use_inductor_graph_partition is off."
+                    "In this case, splitting_ops will be set to empty "
+                    "list, and cudagraph_mode will be set to FULL. "
+                    "Please ensure you are using attention backends that "
+                    "support cudagraph or set cudagraph_mode to NONE "
+                    "explicitly if encountering any problems.")
+                self.cudagraph_mode = CUDAGraphMode.FULL
+
+        assert not self.splitting_ops_contain_attention(), (
+            "attention ops should not be in splitting_ops "
+            "when enable_attn_fusion is True")
 
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
