@@ -385,10 +385,6 @@ class CudaPlatformBase(Platform):
         return cls.has_device_capability(89)
 
     @classmethod
-    def supports_v1(cls, model_config: "ModelConfig") -> bool:
-        return True
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         return True
 

@@ -13,7 +13,6 @@ from vllm import SamplingParams
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
-from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPAsyncMPClient
@@ -28,10 +27,6 @@ engine_args = AsyncEngineArgs(
     tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
     data_parallel_size=DP_SIZE,
 )
-
-if not current_platform.supports_v1(engine_args.create_model_config()):
-    pytest.skip(reason="Requires V1-supporting platform.",
-                allow_module_level=True)
 
 
 async def generate(
