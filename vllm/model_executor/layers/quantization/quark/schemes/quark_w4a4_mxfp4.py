@@ -20,7 +20,7 @@ try:
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
     from vllm.utils import direct_register_custom_op
-    if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
+    if envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM:
         from aiter import gemm_a4w4, per_1x32_f4_quant_hip
 
     def gemm_with_dynamic_quant(
@@ -31,7 +31,7 @@ try:
         out_dtype: Optional[torch.dtype] = torch.bfloat16,
     ) -> torch.Tensor:
         M = x.shape[0]
-        if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
+        if envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM:
             if x_scales is None:
                 # use hip quant kernel for performance
                 x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
