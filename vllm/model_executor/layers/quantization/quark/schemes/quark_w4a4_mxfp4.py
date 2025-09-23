@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
 from typing import Any, Callable, Optional
 
 import torch
@@ -14,13 +15,21 @@ from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
 
+
+@cache
+def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
+    return current_platform.is_rocm() \
+        and envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM \
+        and envs.VLLM_ROCM_USE_AITER
+
+
 try:
     from aiter.ops.shuffle import shuffle_weight
     from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
     from vllm.utils import direct_register_custom_op
-    if envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM:
+    if is_rocm_aiter_fp4_asm_gemm_enabled():
         from aiter import gemm_a4w4, per_1x32_f4_quant_hip
 
     def gemm_with_dynamic_quant(
@@ -28,10 +37,11 @@ try:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         x_scales: torch.Tensor = None,
+        rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: Optional[torch.dtype] = torch.bfloat16,
     ) -> torch.Tensor:
         M = x.shape[0]
-        if envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM:
+        if rocm_use_aiter_fp4_asm_gemm:
             if x_scales is None:
                 # use hip quant kernel for performance
                 x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
@@ -72,6 +82,7 @@ try:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         x_scales: torch.Tensor = None,
+        rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: Optional[torch.dtype] = torch.bfloat16,
     ) -> torch.Tensor:
         return torch.empty((*x.shape[:-1], weight.shape[0]),
@@ -101,6 +112,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
         self.emulate = not current_platform.supports_mx()
+        self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
         if not self.emulate and (dynamic_mxfp4_quant is None
                                  or gemm_afp4wfp4 is None):
             # Currently need these kernels if not emulating
@@ -153,7 +165,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
             # This call is necessary to release the scales memory.
             torch.cuda.empty_cache()
         else:
-            if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
+            if self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
                 sm, sn = weight_scale_shuffle.shape
@@ -227,4 +239,4 @@ class QuarkW4A4MXFP4(QuarkScheme):
         else:
             return torch.ops.vllm.gemm_with_dynamic_quant(
                 x, layer.weight, layer.weight_scale, x_quant_scales,
-                self.out_dtype)
+                self.rocm_use_aiter_fp4_asm_gemm, self.out_dtype)

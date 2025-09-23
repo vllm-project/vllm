@@ -137,17 +137,10 @@ class RotaryEmbedding(CustomOp):
             rocm_aiter_rotary_emb(positions, query, key, self.cos_sin_cache,
                                   self.head_size, self.rotary_dim, offsets)
         else:
-            # ops.rotary_embedding()/batched_rotary_embedding()
-            # are in-place operations that update the query and key tensors.
-            if offsets is not None:
-                ops.batched_rotary_embedding(positions, query, key,
-                                             self.head_size,
-                                             self.cos_sin_cache,
-                                             self.is_neox_style,
-                                             self.rotary_dim, offsets)
-            else:
-                ops.rotary_embedding(positions, query, key, self.head_size,
-                                     self.cos_sin_cache, self.is_neox_style)
+            # ops.rotary_embedding() is an in-place operation
+            # that updates the query and key tensors.
+            ops.rotary_embedding(positions, query, key, self.head_size,
+                                 self.cos_sin_cache, self.is_neox_style)
         return query, key
 
     def forward_hip(
