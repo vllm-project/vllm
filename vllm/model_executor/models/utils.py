@@ -18,7 +18,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import NestedTensors
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (cdiv, direct_register_custom_op,
                         get_cuda_view_from_cpu_tensor, is_pin_memory_available,
@@ -796,8 +795,6 @@ def sequence_parallel_chunk_impl_fake(x: torch.Tensor) -> torch.Tensor:
 direct_register_custom_op(
     op_name="sequence_parallel_chunk_impl",
     op_func=sequence_parallel_chunk_impl,
-    mutates_args=[],
     fake_impl=sequence_parallel_chunk_impl_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
