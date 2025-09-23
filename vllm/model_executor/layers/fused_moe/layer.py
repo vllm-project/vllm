@@ -312,6 +312,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             from .flashinfer_cutlass_moe import flashinfer_cutlass_moe
             self.flashinfer_cutlass_moe = partial(
                 flashinfer_cutlass_moe,
+                quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
                 tp_rank=self.moe.moe_parallel_config.tp_rank,
                 tp_size=self.moe.moe_parallel_config.tp_size,
                 ep_rank=self.moe.moe_parallel_config.ep_rank,
@@ -583,7 +584,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                quant_config=self.moe_quant_config,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         elif self.fused_experts is not None:
