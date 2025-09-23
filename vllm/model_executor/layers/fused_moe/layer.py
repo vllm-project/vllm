@@ -972,7 +972,7 @@ class FusedMoE(CustomOp):
                         "experts. Falling back to linear expert placement.")
                     expert_placement_strategy = "linear"
 
-            self.expert_map : Optional[torch.Tensor]
+            self.expert_map: Optional[torch.Tensor]
             local_num_experts, expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
