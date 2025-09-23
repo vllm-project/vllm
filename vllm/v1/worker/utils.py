@@ -8,7 +8,6 @@ import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
@@ -17,8 +16,6 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
-
-logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.attention.layer import Attention
