@@ -108,6 +108,7 @@ class MultiHeadLatentAttention(CustomOp):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             kv_b_proj=self.kv_b_proj,
+            indexer=self.indexer,
         )
 
         self.prefix = prefix
@@ -153,6 +154,11 @@ class MultiHeadLatentAttention(CustomOp):
 
         q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
             positions, q[..., self.qk_nope_head_dim:], k_pe)
+        
+        if self.indexer:
+            topk_indices = self.indexer(hidden_states, q_c, positions, self.rotary_emb)
+            # if topk_indices is not None:
+                # print(topk_indices)
 
         if self.use_sparse:
             topk_indices = torch.zeros(q.shape[0], self.topk_tokens)
