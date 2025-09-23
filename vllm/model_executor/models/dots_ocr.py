@@ -41,7 +41,7 @@ from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import (DotsOCRConfig,
                                                      DotsVisionConfig)
-
+from .vision import run_dp_sharded_vision_model
 IMAGE_TOKEN = "<|imgpad|>"
 
 
@@ -203,14 +203,14 @@ class PatchMerger(nn.Module):
                                  self.hidden_size,
                                  bias=True,
                                  return_bias=False,
-                                 prefix=f"{prefix}.fc1",
+                                 prefix=f"{prefix}.0",
                                  disable_tp=use_data_parallel),
             nn.GELU(),
             RowParallelLinear(self.hidden_size,
                               dim,
                               bias=True,
                               return_bias=False,
-                              prefix=f"{prefix}.fc3",
+                              prefix=f"{prefix}.2",
                               disable_tp=use_data_parallel),
         )
 
@@ -571,6 +571,7 @@ class DotsVisionTransformer(nn.Module):
             dim=config.hidden_size,
             context_dim=config.embed_dim,
             spatial_merge_size=config.spatial_merge_size,
+            use_data_parallel=use_data_parallel,
         )
 
     @property
