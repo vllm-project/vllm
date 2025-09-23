@@ -201,6 +201,7 @@ Right before the client is started, you can run
 ```bash
 unitrace --resume <session>
 ```
+
 to start profiling.
 
 ```bash
