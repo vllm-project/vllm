@@ -3,7 +3,7 @@
 import importlib
 import json
 from importlib.util import find_spec
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -11,6 +11,19 @@ from packaging import version
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.config import (
+    FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEQuantConfig,
+    biased_moe_quant_config,
+    nvfp4_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE,
+    FusedMoEConfig,
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -22,6 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -48,6 +62,31 @@ def should_skip(prefix: str, skip_modules: list[str]) -> bool:
     should_skip("model.model.layers.1.q_proj", ["layers.1"])  -> True
     should_skip("model.model.layers.11.q_proj", ["layers.1"]) -> False
     """
+
+    # Temporary hacky workaround for:
+    # 1. prefix == 'model.layers.0.self_attn.qkv_proj'
+    # 2. skip_modules containing 'model.layers.0.self_attn.q_proj',
+    #    'model.layers.0.self_attn.k_proj',
+    #    'model.layers.0.self_attn.v_proj
+    if "self_attn.qkv_proj" in prefix:
+        unfused_q = prefix.replace("qkv_proj", "q_proj")
+        unfused_k = prefix.replace("qkv_proj", "k_proj")
+        unfused_v = prefix.replace("qkv_proj", "v_proj")
+        if (
+            (unfused_q in skip_modules)
+            and (unfused_k in skip_modules)
+            and (unfused_v in skip_modules)
+        ):
+            return True
+
+    # Temporary hacky workaround for:
+    # 1. prefix == 'model.layers.0.mlp.shared_expert.gate_up_proj'
+    # 2. skip_modules containing 'model.layers.0.mlp.shared_expert.gate_proj'
+    if "gate_up_proj" in prefix:
+        unfused_gate = prefix.replace("gate_up_proj", "gate_proj")
+        if unfused_gate in skip_modules:
+            return True
+
     for s in skip_modules:
         if prefix == s:
             return True
@@ -181,10 +220,66 @@ class TorchAOConfig(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
+        from torchao.quantization import ModuleFqnToConfig
+
+        if isinstance(layer, FusedMoE):
+            module_fqn = prefix
+
+            # Note: `TorchAOConfig` is not supported because for any reasonable
+            # MoE quantization we need to leave gates in high precision.
+            assert isinstance(self.torchao_config, ModuleFqnToConfig), (
+                f"unsupported type {type(self.torchao_config)}"
+            )
+
+            # module_fqn is FQN of the MoE layer, for example
+            #
+            #   model.layers.0.mlp.experts
+            #
+            # module_fqn_to_config has configs for individual linears, for
+            # example
+            #
+            #   {
+            #     'model.layers.9.mlp.experts.9.up_proj':
+            #       Float8DynamicActivationFloat8WeightConfig(...),
+            #     ...,
+            #   }
+            #
+            # (i) to properly stitch E 2d experts into one 3d expert we need
+            #     all E 2d experts to be quantized the same way
+            # (ii) to call existing fused MoE kernels, we need w13 and w2 to
+            #     be quantized the same way. Note that this technically doesn't
+            #     apply to weight-only quant, but for now let's keep things
+            #     simple and enforce it.
+            #
+            # (i) && (ii) means that we can only have one unique quant config
+            # on all of the expert weights.  The code below enforces this.
+            #
+            # Note: torchao configs are not hashable
+            # (see https://github.com/pytorch/ao/issues/3062),
+            # so for now we do this check with a for loop.
+            first_config = None
+            for k, cur_config in self.torchao_config.module_fqn_to_config.items():
+                if not k.startswith(module_fqn):
+                    continue
+                if first_config is None:
+                    first_config = cur_config
+                elif cur_config == first_config:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"inconsistent configs {first_config} and "
+                        f"{cur_config} in a single MoE module, this is "
+                        "not supported"
+                    )
+            if first_config is None:
+                first_config = self.torchao_config.module_fqn_to_config["_default"]
+            assert first_config is not None
+            return TorchAOMoEMethod(
+                TorchAOConfig(first_config, self.skip_modules), layer.moe_config
+            )
+
         if not isinstance(layer, LinearBase):
             return None
-
-        from torchao.quantization import ModuleFqnToConfig
 
         if should_skip(prefix, self.skip_modules):
             return UnquantizedLinearMethod()
@@ -298,3 +393,205 @@ class TorchAOLinearMethod(LinearMethodBase):
         )
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
+
+
+class TorchAOMoEMethod(FusedMoEMethodBase):
+    """
+    A Mixture of Experts method for TorchAO checkpoints.
+    """
+
+    def __init__(
+        self,
+        quant_config: TorchAOConfig,
+        moe_config: FusedMoEConfig,
+    ):
+        super().__init__(moe_config)
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.hidden_size = hidden_size
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        w13_weight = torchao_quantize_param_data(
+            w13_weight, self.quant_config.torchao_config
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        w2_weight = torchao_quantize_param_data(
+            w2_weight, self.quant_config.torchao_config
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> Optional[FusedMoEQuantConfig]:
+        if self.moe.has_bias:
+            return biased_moe_quant_config(
+                layer.w13_bias,
+                layer.w2_bias,
+            )
+        else:
+            return FUSED_MOE_UNQUANTIZED_CONFIG
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        from torchao.prototype.mx_formats.mx_tensor import MXTensor
+        from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor
+        from torchao.quantization.quantize_.workflows.float8.float8_tensor import (  # noqa: E501
+            Float8Tensor,
+        )
+
+        assert self.fused_experts is None
+
+        if enable_eplb:
+            raise NotImplementedError("EPLB not supported for `TorchAOMoEMethod` yet.")
+
+        zero_expert_num = getattr(layer, "zero_expert_num", 0)
+        zero_expert_type = getattr(layer, "zero_expert_type", None)
+
+        topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype,
+            zero_expert_num=zero_expert_num,
+            zero_expert_type=zero_expert_type,
+        )
+
+        use_cutlass_w4a4 = (
+            # CUDA capability 10.0+
+            current_platform.has_device_capability(100)
+            # weights are NVFP4
+            and isinstance(layer.w13_weight, NVFP4Tensor)
+        )
+        if use_cutlass_w4a4:
+            logger.info_once("torchao MoE cutlass_w4a4")
+            # print("nvfp4 path")
+            # TODO(before land): fix the errors and use
+            # self.moe_quant_config instead
+            e = layer.num_experts
+            moe_quant_config = nvfp4_moe_quant_config(
+                # TODO(before land): calibrate the global activation scales
+                # and save in the checkpoint
+                # g1_alphas = 1 / w13_input_global_scale
+                g1_alphas=torch.ones(e, device="cuda", dtype=torch.float32),
+                # g2_alphas = 1 / w2_input_global_scale * w2_weight_scale_2
+                g2_alphas=torch.ones(e, device="cuda", dtype=torch.float32),
+                a1_gscale=(1 / torch.ones(e, device="cuda", dtype=torch.float32)),
+                a2_gscale=(1 / torch.ones(e, device="cuda", dtype=torch.float32)),
+                # TODO(before land): rename NVFP4Tensor._scale_e4m3 to scale
+                w1_scale=layer.w13_weight._scale_e4m3,
+                w2_scale=layer.w2_weight._scale_e4m3,
+            )
+
+            result = cutlass_moe_fp4(
+                a=x,
+                w1_fp4=layer.w13_weight.qdata,
+                w2_fp4=layer.w2_weight.qdata,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                quant_config=moe_quant_config,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                m=x.shape[0],
+                n=layer.w2_weight.shape[2] * 2,
+                k=x.shape[1],
+                e=layer.w13_weight.shape[0],
+            )
+
+        else:
+            logger.info_once("torchao MoE weight_only fallback")
+            # print("weight_only path")
+            # weight-only fallback
+            # TODO(before land): torchao should have a consistent way to convert
+            # AOBaseTensor to high precision, so we can remove the if statement
+            # below. Context: https://github.com/pytorch/ao/issues/3118
+            if isinstance(layer.w13_weight, (NVFP4Tensor, MXTensor)):
+                w13 = layer.w13_weight.to_dtype(x.dtype)
+                w2 = layer.w2_weight.to_dtype(x.dtype)
+            else:
+                assert isinstance(layer.w13_weight, Float8Tensor), (
+                    f"unsupported type {type(layer.w13_weight)}"
+                )
+                w13 = layer.w13_weight.dequantize()
+                w2 = layer.w2_weight.dequantize()
+
+            result = fused_experts(
+                hidden_states=x,
+                w1=w13,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+            )
+
+        if zero_expert_num != 0 and zero_expert_type is not None:
+            assert not isinstance(result, tuple), (
+                "Shared + zero experts are mutually exclusive not yet supported"
+            )
+            return result, zero_expert_result
+        else:
+            return result
