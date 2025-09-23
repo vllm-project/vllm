@@ -680,7 +680,7 @@ vllm bench serve \
   --save-result \
   --result-dir ~/vllm_benchmark_results \
   --save-detailed \
-  --endpoint /v1/chat/completion
+  --endpoint /v1/chat/completions
 ```
 
 ##### Videos (ShareGPT4Video)
@@ -707,7 +707,7 @@ vllm bench serve \
   --save-result \
   --result-dir ~/vllm_benchmark_results \
   --save-detailed \
-  --endpoint /v1/chat/completion
+  --endpoint /v1/chat/completions
 ```
 
 ##### Synthetic Random Images (random-mm)
