@@ -961,7 +961,7 @@ class LLM:
         )
 
         if pooling_task is None and len(self.supported_tasks) == 1:
-            pooling_task = self.supported_tasks[0] # type: ignore[assignment]
+            pooling_task = self.supported_tasks[0]  # type: ignore[assignment]
 
         if pooling_task == "encode":
             pooling_task = encode2pooling_task(self.supported_tasks)
