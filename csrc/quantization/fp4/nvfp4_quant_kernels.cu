@@ -26,13 +26,14 @@
 #include "dispatch_utils.h"
 
 #include "cuda_utils.h"
+#include "launch_bounds_utils.h"
 #include "nvfp4_utils.cuh"
 
 namespace vllm {
 
 // Use UE4M3 by default.
 template <class Type, bool UE8M0_SF = false>
-__global__ void __launch_bounds__(512, 4)
+__global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
                     float const* SFScale, uint32_t* out, uint32_t* SFout) {
   using PackedVec = PackedVec<Type>;
@@ -75,8 +76,9 @@ void invokeFP4Quantization(int m, int n, T const* input, float const* SFScale,
   // Grid, Block size.
   // Each thread converts 8 values.
   dim3 block(std::min(int(n / ELTS_PER_THREAD), 512));
-  // Get number of blocks per SM (assume we can fully utilize the SM).
-  int const numBlocksPerSM = 2048 / block.x;
+  // Get number of blocks per SM
+  int const numBlocksPerSM =
+      vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
   dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
 
   // Launch the cvt kernel.

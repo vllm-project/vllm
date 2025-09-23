@@ -6,7 +6,7 @@ from typing import Any, Literal, Optional, Union
 
 import torch
 
-from vllm.config.lora import LoRAConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
@@ -27,25 +27,26 @@ class WorkerLoRAManager:
 
     def __init__(
         self,
-        max_num_seqs: int,
-        max_num_batched_tokens: int,
-        vocab_size: int,
-        lora_config: LoRAConfig,
+        vllm_config: VllmConfig,
         device: torch.device,
         embedding_modules: dict[str, str],
         embedding_padding_modules: list[str],
         lora_model_cls: type[LoRAModel] = LoRAModel,
-        max_position_embeddings: Optional[int] = None,
     ):
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
         self.embedding_padding_modules = embedding_padding_modules
         self._cached_dummy_lora: Union[None, Literal[False], LoRAModel] = False
-        self.max_num_seqs = max_num_seqs
-        self.max_num_batched_tokens = max_num_batched_tokens
-        self.vocab_size = vocab_size
-        self.lora_config = lora_config
-        self.max_position_embeddings = max_position_embeddings
+        self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens)
+        self.vocab_size = vllm_config.model_config.get_vocab_size()
+        self.lora_config = vllm_config.lora_config
+
+        # Use get_text_config() in case of multimodal models
+        text_config = vllm_config.model_config.hf_config.get_text_config()
+
+        self.max_position_embeddings = text_config.max_position_embeddings
         self.device = device
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager

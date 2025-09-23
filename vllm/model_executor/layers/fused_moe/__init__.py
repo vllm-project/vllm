@@ -78,3 +78,12 @@ if HAS_TRITON:
         "TritonOrDeepGemmExperts",
         "BatchedTritonOrDeepGemmExperts",
     ]
+else:
+    # Some model classes directly use the custom ops. Add placeholders
+    # to avoid import errors.
+    def _raise_exception(method: str):
+        raise NotImplementedError(
+            f"{method} is not implemented as lack of triton.")
+
+    fused_topk = lambda *args, **kwargs: _raise_exception("fused_topk")
+    fused_experts = lambda *args, **kwargs: _raise_exception("fused_experts")
