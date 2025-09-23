@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -41,12 +42,18 @@ class OpenAIToolParser(ToolParser):
         if len(parser.messages) > 0:
             for msg in parser.messages:
                 if msg.recipient and msg.recipient.startswith("functions."):
+                    if "json" in msg.content_type:
+                        # round-trip JSON text to ensure valid JSON and remove
+                        # any extra newlines
+                        tool_args = json.dumps(json.loads(msg.content[0].text))
+                    else:
+                        tool_args = msg.content[0].text
                     tool_calls.append(
                         ToolCall(
                             type="function",
                             function=FunctionCall(
                                 name=msg.recipient.split("functions.")[1],
-                                arguments=msg.content[0].text,
+                                arguments=tool_args,
                             ),
                         ))
                 elif msg.channel == "final":

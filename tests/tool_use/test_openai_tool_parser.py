@@ -70,7 +70,12 @@ def test_extract_tool_calls_no_tools(openai_tool_parser, harmony_encoding):
     assert extracted_info.content == "This is a test"
 
 
-def test_extract_tool_calls_single_tool(openai_tool_parser, harmony_encoding):
+@pytest.mark.parametrize("tool_args", [
+    '{"location": "Tokyo"}',
+    '{\n"location": "Tokyo"\n}',
+])
+def test_extract_tool_calls_single_tool(openai_tool_parser, harmony_encoding,
+                                        tool_args):
     convo = Conversation.from_messages([
         Message.from_role_and_content(Role.USER,
                                       "What is the weather in Tokyo?"),
@@ -80,7 +85,7 @@ def test_extract_tool_calls_single_tool(openai_tool_parser, harmony_encoding):
         ).with_channel("analysis"),
         Message.from_role_and_content(
             Role.ASSISTANT,
-            '{"location": "Tokyo"}').with_channel("commentary").with_recipient(
+            tool_args).with_channel("commentary").with_recipient(
                 "functions.get_current_weather").with_content_type("json"),
     ])
     token_ids = harmony_encoding.render_conversation_for_completion(
