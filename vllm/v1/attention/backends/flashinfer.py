@@ -524,12 +524,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "FlashInfer backend currently does not support attention "
                 "sinks, please use trtllm on blackwell or flash attention on "
                 "earlier GPUs.")
-        
+
         # If TRTLLM attention is not used, the q quantization is not supported.
         # Fall back to use model dtype.
         if not (prefill_use_trtllm and decode_use_trtllm):
             self.q_data_type = self.model_config.dtype
-
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
