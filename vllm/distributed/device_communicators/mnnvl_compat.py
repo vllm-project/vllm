@@ -27,8 +27,3 @@ class CustomCommunicator(CommBackend):
 
     def Split(self, color: int, key: int) -> 'CustomCommunicator':
         return self
-
-    def allgather_bytes(self, data: bytes):
-        result = [data] * self.Get_size()
-        torch.distributed.all_gather_object(result, data)
-        return result
