@@ -197,7 +197,6 @@ class InputProcessingContext(InputContext):
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={allowed_kwargs}")
-            logger.exception(exc)
 
             raise ValueError(msg) from exc
 
