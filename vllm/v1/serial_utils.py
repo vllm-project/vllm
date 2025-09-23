@@ -7,7 +7,7 @@ import pickle
 from collections.abc import Sequence
 from inspect import isclass
 from types import FunctionType
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import cloudpickle
 import msgspec
@@ -57,6 +57,42 @@ def _typestr(val: Any) -> Optional[tuple[str, str]]:
         return None
     t = type(val)
     return t.__module__, t.__qualname__
+
+
+def _encode_type_info_recursive(obj: Any) -> Any:
+    """Recursively encode type information for nested structures of
+    lists/dicts."""
+    if obj is None:
+        return None
+    if type(obj) is list:
+        return [_encode_type_info_recursive(item) for item in obj]
+    if type(obj) is dict:
+        return {k: _encode_type_info_recursive(v) for k, v in obj.items()}
+    return _typestr(obj)
+
+
+def _decode_type_info_recursive(
+        type_info: Any, data: Any, convert_fn: Callable[[Sequence[str], Any],
+                                                        Any]) -> Any:
+    """Recursively decode type information for nested structures of
+    lists/dicts."""
+    if type_info is None:
+        return data
+    if isinstance(type_info, dict):
+        assert isinstance(data, dict)
+        return {
+            k: _decode_type_info_recursive(type_info[k], data[k], convert_fn)
+            for k in type_info
+        }
+    if isinstance(type_info, list) and (
+            # Exclude serialized tensors/numpy arrays.
+            len(type_info) != 2 or not isinstance(type_info[0], str)):
+        assert isinstance(data, list)
+        return [
+            _decode_type_info_recursive(ti, d, convert_fn)
+            for ti, d in zip(type_info, data)
+        ]
+    return convert_fn(type_info, data)
 
 
 class MsgpackEncoder:
@@ -129,12 +165,10 @@ class MsgpackEncoder:
             result = obj.result
             if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
                 return None, result
-            # Since utility results are not strongly typed, we also encode
-            # the type (or a list of types in the case it's a list) to
-            # help with correct msgspec deserialization.
-            return _typestr(result) if type(result) is not list else [
-                _typestr(v) for v in result
-            ], result
+            # Since utility results are not strongly typed, we recursively
+            # encode type information for nested structures of lists/dicts
+            # to help with correct msgspec deserialization.
+            return _encode_type_info_recursive(result), result
 
         if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             raise TypeError(f"Object of type {type(obj)} is not serializable"
@@ -174,7 +208,7 @@ class MsgpackEncoder:
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
         # view the tensor as a contiguous 1D array of bytes
-        arr = obj.flatten().contiguous().view(torch.uint8).numpy()
+        arr = obj.flatten().contiguous().cpu().view(torch.uint8).numpy()
         if obj.nbytes < self.size_threshold:
             # Smaller tensors are encoded inline, just like ndarrays.
             data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)
@@ -288,15 +322,9 @@ class MsgpackDecoder:
             if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
                 raise TypeError("VLLM_ALLOW_INSECURE_SERIALIZATION must "
                                 "be set to use custom utility result types")
-            assert isinstance(result_type, list)
-            if len(result_type) == 2 and isinstance(result_type[0], str):
-                result = self._convert_result(result_type, result)
-            else:
-                assert isinstance(result, list)
-                result = [
-                    self._convert_result(rt, r)
-                    for rt, r in zip(result_type, result)
-                ]
+            # Use recursive decoding to handle nested structures
+            result = _decode_type_info_recursive(result_type, result,
+                                                 self._convert_result)
         return UtilityResult(result)
 
     def _convert_result(self, result_type: Sequence[str], result: Any) -> Any:

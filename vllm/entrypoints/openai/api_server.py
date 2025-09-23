@@ -17,13 +17,14 @@ from argparse import Namespace
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional
+from typing import Annotated, Any, Callable, Literal, Optional
 
 import prometheus_client
 import pydantic
 import regex as re
 import uvloop
-from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
+from fastapi import (APIRouter, Depends, FastAPI, Form, HTTPException, Query,
+                     Request)
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -38,7 +39,6 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_hf_chat_template,
@@ -167,6 +167,9 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    if client_config:
+        engine_args._api_process_count = client_config.get("client_count", 1)
+        engine_args._api_process_rank = client_config.get("client_index", 0)
 
     if disable_frontend_multiprocessing is None:
         disable_frontend_multiprocessing = bool(
@@ -201,50 +204,38 @@ async def build_async_engine_client_from_engine_args(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     # V1 AsyncLLM.
-    if envs.VLLM_USE_V1:
-        if disable_frontend_multiprocessing:
-            logger.warning(
-                "V1 is enabled, but got --disable-frontend-multiprocessing. "
-                "To disable frontend multiprocessing, set VLLM_USE_V1=0.")
+    assert envs.VLLM_USE_V1
 
-        from vllm.v1.engine.async_llm import AsyncLLM
-        async_llm: Optional[AsyncLLM] = None
-        client_count = client_config.pop(
-            "client_count") if client_config else 1
-        client_index = client_config.pop(
-            "client_index") if client_config else 0
-        try:
-            async_llm = AsyncLLM.from_vllm_config(
-                vllm_config=vllm_config,
-                usage_context=usage_context,
-                enable_log_requests=engine_args.enable_log_requests,
-                disable_log_stats=engine_args.disable_log_stats,
-                client_addresses=client_config,
-                client_count=client_count,
-                client_index=client_index)
+    if disable_frontend_multiprocessing:
+        logger.warning(
+            "V1 is enabled, but got --disable-frontend-multiprocessing. "
+            "To disable frontend multiprocessing, set VLLM_USE_V1=0.")
 
-            # Don't keep the dummy data in memory
-            await async_llm.reset_mm_cache()
+    from vllm.v1.engine.async_llm import AsyncLLM
+    async_llm: Optional[AsyncLLM] = None
 
-            yield async_llm
-        finally:
-            if async_llm:
-                async_llm.shutdown()
+    # Don't mutate the input client_config
+    client_config = dict(client_config) if client_config else {}
+    client_count = client_config.pop("client_count", 1)
+    client_index = client_config.pop("client_index", 0)
 
-    # V0 AsyncLLM.
-    else:
+    try:
+        async_llm = AsyncLLM.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            enable_log_requests=engine_args.enable_log_requests,
+            disable_log_stats=engine_args.disable_log_stats,
+            client_addresses=client_config,
+            client_count=client_count,
+            client_index=client_index)
 
-        engine_client: Optional[EngineClient] = None
-        try:
-            engine_client = AsyncLLMEngine.from_vllm_config(
-                vllm_config=vllm_config,
-                usage_context=usage_context,
-                enable_log_requests=engine_args.enable_log_requests,
-                disable_log_stats=engine_args.disable_log_stats)
-            yield engine_client
-        finally:
-            if engine_client and hasattr(engine_client, "shutdown"):
-                engine_client.shutdown()
+        # Don't keep the dummy data in memory
+        await async_llm.reset_mm_cache()
+
+        yield async_llm
+    finally:
+        if async_llm:
+            async_llm.shutdown()
 
 
 async def validate_json_request(raw_request: Request):
@@ -973,9 +964,22 @@ if envs.VLLM_SERVER_DEV_MODE:
     logger.warning("SECURITY WARNING: Development endpoints are enabled! "
                    "This should NOT be used in production!")
 
+    PydanticVllmConfig = pydantic.TypeAdapter(VllmConfig)
+
     @router.get("/server_info")
-    async def show_server_info(raw_request: Request):
-        server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
+    async def show_server_info(
+        raw_request: Request,
+        config_format: Annotated[Literal["text", "json"],
+                                 Query()] = "text",
+    ):
+        vllm_config: VllmConfig = raw_request.app.state.vllm_config
+        server_info = {
+            "vllm_config":
+            str(vllm_config)
+            if config_format == "text" else PydanticVllmConfig.dump_python(
+                vllm_config, mode="json", fallback=str)
+            # fallback=str is needed to handle e.g. torch.dtype
+        }
         return JSONResponse(content=server_info)
 
     @router.post("/reset_prefix_cache")
@@ -1873,8 +1877,6 @@ async def run_server_worker(listen_address,
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
-    server_index = client_config.get("client_index", 0) if client_config else 0
-
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
@@ -1890,7 +1892,8 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
-        logger.info("Starting vLLM API server %d on %s", server_index,
+        logger.info("Starting vLLM API server %d on %s",
+                    vllm_config.parallel_config._api_process_rank,
                     listen_address)
         shutdown_task = await serve_http(
             app,

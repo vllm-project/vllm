@@ -31,7 +31,7 @@ logger = init_logger(__name__)
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "ernie_mtp", "qwen3_next_mtp"]
+                            "ernie_mtp", "qwen3_next_mtp", "mimo_mtp"]
 
 
 @config
@@ -527,7 +527,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        eagle3_target_supported = ["llama", "qwen", "minicpm"]
+        eagle3_target_supported = ["llama", "qwen", "minicpm", "gpt_oss"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
