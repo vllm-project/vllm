@@ -150,6 +150,7 @@ class ParallelConfig:
 
     # Whether to profile Ray workers with unitrace
     ray_workers_use_unitrace: bool = False
+    """Whether to profile Ray workers with unitrace, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-unitrace-profiler."""
 
     ray_runtime_env: Optional[RuntimeEnv] = None
     """Ray runtime environment to pass to distributed workers."""
