@@ -8,9 +8,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              split_tensor_along_last_dim,
+from vllm.distributed import (split_tensor_along_last_dim,
                               tensor_model_parallel_all_reduce)
 # yapf: disable
 from vllm.model_executor.layers.linear import RowParallelLinear
@@ -25,12 +23,9 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def __init__(self, base_layer: RowParallelLinear) -> None:
         super().__init__(base_layer)
 
-        self.tp_size = get_tensor_model_parallel_world_size()
         # reset input_size
         self.input_size = self.base_layer.input_size_per_partition
         self.output_size = self.base_layer.output_size
-
-        self.tp_rank = get_tensor_model_parallel_rank()
         # There is only one LoRA layer.
         self.n_slices = 1
 
@@ -68,12 +63,12 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         else:
             # TODO: simplify code below
             splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.base_layer.tp_size)
+                input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
         output_parallel = self.apply(input_parallel)
-        if self.base_layer.reduce_results and self.base_layer.tp_size > 1:
+        if self.base_layer.reduce_results and self.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output_ = output_parallel
@@ -154,8 +149,8 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             buffer, x, self.lora_a_stacked, 1.0)
         if not current_platform.can_update_inplace():
             buffer = shrunk_buffer
-
-        buffer = tensor_model_parallel_all_reduce(buffer)
+        if self.tp_size>1:
+            buffer = tensor_model_parallel_all_reduce(buffer)
 
         # following S-LoRA, allows the fusing of all_gather and all_reduce
         # by adding the column partitioned lora output to a slice of output
