@@ -113,6 +113,8 @@ class XPUPlatform(Platform):
         # lazy import to avoid circular import
         from vllm.config import CompilationLevel, CUDAGraphMode
         compilation_config = vllm_config.compilation_config
+        if compilation_config.compile_sizes is None:
+            compilation_config.compile_sizes = []
 
         assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE, \
             "CUDA graph mode should be NONE on XPU"
