@@ -7,6 +7,7 @@ from .glm4_moe_reasoning_parser import Glm4MoeModelReasoningParser
 from .gptoss_reasoning_parser import GptOssReasoningParser
 from .granite_reasoning_parser import GraniteReasoningParser
 from .hunyuan_a13b_reasoning_parser import HunyuanA13BReasoningParser
+from .minimax_m1_reasoning_parser import MiniMaxM1ReasoningParser
 from .mistral_reasoning_parser import MistralReasoningParser
 from .qwen3_reasoning_parser import Qwen3ReasoningParser
 from .step3_reasoning_parser import Step3ReasoningParser
@@ -22,4 +23,5 @@ __all__ = [
     "MistralReasoningParser",
     "Step3ReasoningParser",
     "GptOssReasoningParser",
+    "MiniMaxM1ReasoningParser",
 ]
