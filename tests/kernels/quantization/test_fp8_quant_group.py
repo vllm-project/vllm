@@ -54,7 +54,7 @@ def test_quantfp8_group_functionality(batch_size: int, hidden_dim: int,
                             column_major_scales=True,
                             use_ue8m0=use_ue8m0)
     _, scales_col = quant_op_col.forward_native(x.clone())
-    assert scales_col.shape == (expected_num_groups, batch_size)
+    assert scales_col.shape == (batch_size, expected_num_groups)
 
     # 3. Test CUDA implementation (only for divisible dimensions)
     if is_divisible:
