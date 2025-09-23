@@ -509,8 +509,15 @@ class VllmConfig:
             if self.compilation_config.cudagraph_mode is None:
                 if envs.VLLM_USE_V1 and self.compilation_config.level \
                     == CompilationLevel.PIECEWISE:
+                    # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = \
-                        CUDAGraphMode.PIECEWISE
+                        CUDAGraphMode.FULL_AND_PIECEWISE
+
+                    # pooling model does not support full cudagraphs
+                    if self.model_config is not None and \
+                        self.model_config.pooler_config is not None:
+                        self.compilation_config.cudagraph_mode = \
+                            CUDAGraphMode.PIECEWISE
                 else:
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -686,6 +693,23 @@ class VllmConfig:
                     # Hybrid KV cache manager is not yet supported with chunked
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
+
+        def has_blocked_weights():
+            if self.quant_config is not None:
+                if hasattr(self.quant_config, "weight_block_size"):
+                    return self.quant_config.weight_block_size is not None
+                elif hasattr(self.quant_config, "has_blocked_weights"):
+                    return self.quant_config.has_blocked_weights()
+            return False
+
+        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
+        # On H100 the CUDA kernel is faster than
+        # native implementation
+        # https://github.com/vllm-project/vllm/issues/25094
+        if has_blocked_weights():
+            custom_ops = self.compilation_config.custom_ops
+            if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
+                custom_ops.append("+quant_fp8")
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
