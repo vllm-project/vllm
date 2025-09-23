@@ -68,7 +68,7 @@ class Relu3(ReLUSquaredActivation):
     ])
 def test_enabled_ops(env: Optional[str], torch_level: int, use_inductor: bool,
                      ops_enabled: list[int], default_on: bool):
-    custom_ops = [] if env is None else env.split(",")
+    custom_ops = env.split(',') if env else []
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(use_inductor=bool(use_inductor),
                                              level=torch_level,
