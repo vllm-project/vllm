@@ -722,9 +722,9 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         # (param_name, weight_name, expert_id, shard_id)
         # FIXME: bf16 and gate_up_proj, down_proj only
         return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
+            ckpt_gate_proj_name="gate_up_proj",
             ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
+            #ckpt_up_proj_name="up_proj",
             num_experts=self.config.num_local_experts, # 24, # FIXME: should be 24 since there are only 24 layers num_hidden_layers
             num_redundant_experts=0)
 
