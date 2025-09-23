@@ -144,7 +144,9 @@ class QWenBlock(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_1 = RMSNorm(config.hidden_size,
+                            eps=config.layer_norm_epsilon,
+                            prefix=maybe_prefix(prefix, "input_layernorm"))
 
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -157,7 +159,9 @@ class QWenBlock(nn.Module):
                                   quant_config=quant_config,
                                   prefix=f"{prefix}.attn")
 
-        self.ln_2 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_2 = RMSNorm(config.hidden_size,
+                            eps=config.layer_norm_epsilon,
+                            prefix=maybe_prefix(prefix, "post_layernorm"))
 
         self.mlp = QWenMLP(config.hidden_size,
                            config.intermediate_size // 2,
