@@ -16,6 +16,16 @@ from vllm.triton_utils import tl, triton
 from .op import exp
 
 
+@triton.heuristics({
+    'USE_INITIAL_STATE':
+    lambda args: args['h0'] is not None,
+    'IS_VARLEN':
+    lambda args: args['cu_seqlens'] is not None,
+    "IS_CONTINUOUS_BATCHING":
+    lambda args: args['ssm_state_indices'] is not None,
+    "IS_SPEC_DECODING":
+    lambda args: args['num_accepted_tokens'] is not None,
+})
 @triton.jit(do_not_specialize=['N', 'T'])
 def fused_recurrent_gated_delta_rule_fwd_kernel(
     q,
@@ -30,26 +40,27 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     ssm_state_indices,
     num_accepted_tokens,
     scale,
-    N,  # num of sequences
+    N: tl.int64,  # num of sequences
     T: tl.int64,  # num of tokens
-    B,
-    H,
-    HV,
-    K,
-    V,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    stride_init_state_token,
-    stride_final_state_token,
-    stride_indices_seq,
-    stride_indices_tok,
+    stride_init_state_token: tl.constexpr,
+    stride_final_state_token: tl.constexpr,
+    stride_indices_seq: tl.constexpr,
+    stride_indices_tok: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     INPLACE_FINAL_STATE: tl.constexpr,  # whether to store final state inplace
-    IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
+    IS_BETA_HEADWISE: tl.
+    constexpr,  # whether beta is headwise vector or scalar,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
-    IS_VARLEN,
-    IS_CONTINUOUS_BATCHING,
-    IS_SPEC_DECODING,
+    IS_VARLEN: tl.constexpr,
+    IS_CONTINUOUS_BATCHING: tl.constexpr,
+    IS_SPEC_DECODING: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -87,11 +98,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
-            if IS_SPEC_DECODING and num_accepted_tokens is not None:
+            if IS_SPEC_DECODING:
                 i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
             else:
                 i_t = 0
-                i_t = i_t.to(tl.int64)
             p_h0 = h0 + tl.load(ssm_state_indices + i_n * stride_indices_seq +
                                 i_t).to(tl.int64) * stride_init_state_token
         else:
@@ -161,6 +171,8 @@ def fused_recurrent_gated_delta_rule_fwd(
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
+    num_stages = 3
+    num_warps = 1
 
     o = q.new_empty(NK, *v.shape)
     if inplace_final_state:
@@ -205,14 +217,11 @@ def fused_recurrent_gated_delta_rule_fwd(
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
-        USE_INITIAL_STATE=initial_state is not None,
-        INPLACE_FINAL_STATE=inplace_final_state,
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        IS_VARLEN=cu_seqlens is not None,
-        IS_CONTINUOUS_BATCHING=ssm_state_indices is not None,
-        IS_SPEC_DECODING=num_accepted_tokens is not None,
-        num_stages=3,
+        INPLACE_FINAL_STATE=inplace_final_state,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     o = o.squeeze(0)
     return o, final_state
