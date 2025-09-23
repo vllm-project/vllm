@@ -33,6 +33,7 @@ class TritonMLABackend(MLACommonBackend):
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
+
     def __init__(
             self,
             num_heads: int,
@@ -145,10 +146,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                         self.kv_lora_rank,
                         dtype=q.dtype,
                         device=q.device)
-        lse = torch.zeros(B,
-                        q_num_heads,
-                        dtype=q.dtype,
-                        device=q.device) 
+        lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
         num_kv_splits = 4  # TODO: heuristic
 
         # TODO(lucas) Allocate ahead of time
