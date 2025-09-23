@@ -46,7 +46,6 @@ def register_nccl_symmetric_ops(pynccl_comm):
     direct_register_custom_op(
         op_name="all_reduce_symmetric_with_copy",
         op_func=all_reduce_symmetric_with_copy_impl,
-        mutates_args=[],
         fake_impl=all_reduce_symmetric_with_copy_fake,
     )
 

@@ -27,7 +27,6 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn, selective_state_update)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 
@@ -464,5 +463,4 @@ direct_register_custom_op(
     op_func=mamba_mixer,
     mutates_args=["output"],
     fake_impl=mamba_mixer_fake,
-    dispatch_key=current_platform.dispatch_key,
 )

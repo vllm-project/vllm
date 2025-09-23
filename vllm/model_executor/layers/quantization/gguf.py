@@ -161,7 +161,6 @@ try:
     direct_register_custom_op(
         op_name="_fused_mul_mat_gguf",
         op_func=_fused_mul_mat_gguf,
-        mutates_args=[],
         fake_impl=_fused_mul_mat_gguf_fake,
     )
     fused_mul_mat_gguf = torch.ops.vllm._fused_mul_mat_gguf
@@ -273,7 +272,6 @@ try:
     direct_register_custom_op(
         op_name="_fused_moe_gguf",
         op_func=_fused_moe_gguf,
-        mutates_args=[],
         fake_impl=_fused_moe_gguf_fake,
     )
     fused_moe_gguf = torch.ops.vllm._fused_moe_gguf
@@ -319,7 +317,6 @@ try:
     direct_register_custom_op(
         op_name="_apply_gguf_embedding",
         op_func=_apply_gguf_embedding,
-        mutates_args=[],
         fake_impl=_apply_gguf_embedding_fake,
     )
     apply_gguf_embedding = torch.ops.vllm._apply_gguf_embedding
