@@ -34,7 +34,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction, composed_weight_loader, sharded_weight_loader)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
@@ -765,5 +764,4 @@ direct_register_custom_op(
     op_func=mamba_mixer2,
     mutates_args=["output"],
     fake_impl=mamba_mixer2_fake,
-    dispatch_key=current_platform.dispatch_key,
 )

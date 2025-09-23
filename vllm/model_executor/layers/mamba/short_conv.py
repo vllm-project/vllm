@@ -21,7 +21,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
-from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.short_conv_attn import (
     ShortConvAttentionMetadata)
@@ -251,5 +250,4 @@ direct_register_custom_op(
     op_func=short_conv,
     mutates_args=["output"],
     fake_impl=short_conv_fake,
-    dispatch_key=current_platform.dispatch_key,
 )

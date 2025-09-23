@@ -1256,7 +1256,6 @@ def outplace_fused_experts_fake(
 direct_register_custom_op(
     op_name="outplace_fused_experts",
     op_func=outplace_fused_experts,
-    mutates_args=[],
     fake_impl=outplace_fused_experts_fake,
     tags=(() if is_torch_equal_or_newer("2.7.0") else
           (torch.Tag.needs_fixed_stride_order, )),

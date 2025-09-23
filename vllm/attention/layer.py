@@ -575,9 +575,7 @@ def unified_attention_fake(
 direct_register_custom_op(
     op_name="unified_attention",
     op_func=unified_attention,
-    mutates_args=[],
     fake_impl=unified_attention_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=tag_cudagraph_unsafe,
 )
 
@@ -628,6 +626,5 @@ direct_register_custom_op(
     op_func=unified_attention_with_output,
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=tag_cudagraph_unsafe,
 )

@@ -235,6 +235,5 @@ def fused_marlin_moe_fake(hidden_states: torch.Tensor,
 direct_register_custom_op(
     op_name="fused_marlin_moe",
     op_func=fused_marlin_moe,
-    mutates_args=[],
     fake_impl=fused_marlin_moe_fake,
 )
