@@ -25,6 +25,7 @@ total. And when deploying, we'll have 288 sets of linear layer weights for each
 MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -45,6 +46,9 @@ from .rebalance_execute import (move_from_buffer,
                                 rearrange_expert_weights_inplace,
                                 transfer_layer)
 from .async_worker import start_async_worker
+
+logger = init_logger(__name__)
+
 
 @dataclass
 class EplbState:

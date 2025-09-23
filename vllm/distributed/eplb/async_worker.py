@@ -1,5 +1,8 @@
-from __future__ import annotations
-
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+The async worker that transfers experts in the background.
+"""
 import asyncio
 import threading
 from typing import Optional, TYPE_CHECKING
