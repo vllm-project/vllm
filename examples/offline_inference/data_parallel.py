@@ -102,8 +102,12 @@ def parse_args():
         type=str,
     )
     parser.add_argument(
-        "--enable-expert-parallel", action="store_true", help="Enable expert parallel."
+        "--disable-expert-parallel",
+        dest="enable_expert_parallel",
+        action="store_false",
+        help="Disable expert parallel (default: enabled).",
     )
+    parser.set_defaults(enable_expert_parallel=True)
     return parser.parse_args()
 
 
