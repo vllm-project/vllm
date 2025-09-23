@@ -960,7 +960,9 @@ class LLM:
             "  - For multi-vector retrieval, use `pooling_task=\"token_embed\"`"
         )
 
-        if pooling_task is None and len(self.supported_tasks) == 1:
+        if pooling_task is None and self.supported_tasks == [
+                "token_classify"
+        ] or self.supported_tasks == ["token_embed"]:
             pooling_task = self.supported_tasks[0]  # type: ignore[assignment]
 
         if pooling_task == "encode":
