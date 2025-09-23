@@ -329,23 +329,6 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_v1(cls, model_config) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
-        return True
-
-    @classmethod
-    def default_v1(cls, model_config) -> bool:
-        """Returns whether the current platform can use v1 by default for the
-        supplied model configuration.
-        """
-        arch = cls.get_cpu_architecture()
-        return (cls.supports_v1(model_config)
-                and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC,
-                             CpuArchEnum.ARM, CpuArchEnum.S390X))
-
-    @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
 

@@ -1502,12 +1502,6 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False
 
-        # Platforms must decide if they can support v1 for this model
-        if not current_platform.supports_v1(model_config=model_config):
-            _raise_or_fallback(
-                feature_name=f"device type={current_platform.device_type}",
-                recommend_to_remove=False)
-            return False
         #############################################################
         # Experimental Features - allow users to opt in.
 
@@ -1523,12 +1517,6 @@ class EngineArgs:
                 _raise_or_fallback(feature_name=name,
                                    recommend_to_remove=False)
                 return False
-
-        # The platform may be supported on V1, but off by default for now.
-        if not current_platform.default_v1(  # noqa: SIM103
-                model_config=model_config) and _warn_or_fallback(
-                    current_platform.device_name):
-            return False
 
         if (current_platform.is_cpu()
                 and model_config.get_sliding_window() is not None):
@@ -1794,21 +1782,6 @@ def _raise_or_fallback(feature_name: str, recommend_to_remove: bool):
         msg += f"We recommend to remove {feature_name} from your config "
         msg += "in favor of the V1 Engine."
     logger.warning(msg)
-
-
-def _warn_or_fallback(feature_name: str) -> bool:
-    if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
-        logger.warning(
-            "Detected VLLM_USE_V1=1 with %s. Usage should "
-            "be considered experimental. Please report any "
-            "issues on Github.", feature_name)
-        should_exit = False
-    else:
-        logger.info(
-            "%s is experimental on VLLM_USE_V1=1. "
-            "Falling back to V0 Engine.", feature_name)
-        should_exit = True
-    return should_exit
 
 
 def human_readable_int(value):
