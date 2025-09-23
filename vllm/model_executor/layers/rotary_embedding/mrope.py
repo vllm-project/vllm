@@ -12,6 +12,7 @@ from vllm.triton_utils import tl, triton
 
 from .base import RotaryEmbedding
 from .common import apply_rotary_emb_dispatch
+from .yarn_scaling_rope import YaRNScalingRotaryEmbedding, yarn_get_mscale
 
 
 @triton.jit
@@ -213,7 +214,27 @@ class MRotaryEmbedding(RotaryEmbedding):
         dtype: torch.dtype,
         mrope_section: Optional[list[int]] = None,
         mrope_interleaved: bool = False,
+        # YaRN parameters.
+        *,
+        scaling_factor: Optional[float] = None,
+        extrapolation_factor: float = 1,
+        attn_factor: float = 1,
+        beta_fast: int = 32,
+        beta_slow: int = 1,
     ) -> None:
+
+        self.scaling_factor = scaling_factor
+        self.extrapolation_factor = extrapolation_factor
+        self.attn_factor = attn_factor
+        self.beta_fast = beta_fast
+        self.beta_slow = beta_slow
+        if self.scaling_factor is not None:
+            # Get n-d magnitude scaling corrected for interpolation
+            self.mscale = float(
+                yarn_get_mscale(self.scaling_factor) * attn_factor)
+        else:
+            self.mscale = 1.0
+
         # In Qwen2.5-VL, the maximum index value is related to the duration of
         # the input video. We enlarge max_position_embeddings to 4 times to get
         # a larger the cos and sin cache.
@@ -225,6 +246,16 @@ class MRotaryEmbedding(RotaryEmbedding):
         self.mrope_interleaved = mrope_interleaved
         if self.mrope_section:
             assert sum(self.mrope_section) == rotary_dim // 2
+
+    def _compute_inv_freq(self, base: float) -> torch.Tensor:
+        if self.scaling_factor is None:
+            return super()._compute_inv_freq(base)
+        return YaRNScalingRotaryEmbedding._compute_inv_freq(self, base)
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        if self.scaling_factor is None:
+            return super()._compute_cos_sin_cache()
+        return YaRNScalingRotaryEmbedding._compute_cos_sin_cache(self)
 
     def forward_native(
         self,
