@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention.layer import Attention
-from vllm.config import (CompilationLevel, VllmConfig,
+from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
@@ -81,6 +81,10 @@ class EagleProposer:
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
                                not self.vllm_config.model_config.enforce_eager)
+        self.cudagraph_runtime_mode = (CUDAGraphMode.PIECEWISE
+                                       if self.use_cuda_graph else
+                                       CUDAGraphMode.NONE)
+
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
@@ -224,9 +228,12 @@ class EagleProposer:
             inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
 
-        with set_forward_context(per_layer_attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens):
+        with set_forward_context(
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+        ):
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.positions[:num_input_tokens],
@@ -351,9 +358,12 @@ class EagleProposer:
                 input_ids = self.input_ids[:input_batch_size]
 
             # Run the model.
-            with set_forward_context(per_layer_attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=input_batch_size):
+            with set_forward_context(
+                    per_layer_attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch_size,
+                    cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+            ):
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self.positions[:input_batch_size],
@@ -658,9 +668,12 @@ class EagleProposer:
             else:
                 num_input_tokens = num_tokens
             # Run the model.
-            with set_forward_context(per_layer_attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=num_input_tokens):
+            with set_forward_context(
+                    per_layer_attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_input_tokens,
+                    cudagraph_runtime_mode=self.cudagraph_runtime_mode,
+            ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
                     positions=self.positions[:num_input_tokens],
@@ -863,9 +876,20 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        use_cudagraphs=True,
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
+        if use_cudagraphs:
+            num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            
+        print(f"Doing dummy run with {num_tokens} tokens")
+        
+        with set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=num_tokens,
+                cudagraph_runtime_mode=self.cudagraph_runtime_mode \
+                    if use_cudagraphs else CUDAGraphMode.NONE,
+        ):
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -879,6 +903,8 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
+            
+        print(f"Dummy run done with {num_tokens} tokens")
 
     def validate_same_kv_cache_group(self,
                                      kv_cache_config: KVCacheConfig) -> None:
