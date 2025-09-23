@@ -3,6 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable
+from contextlib import nullcontext
 from enum import Enum
 from typing import Callable, Literal, Optional, Union, get_args, overload
 
@@ -1904,7 +1905,10 @@ class FusedMoE(CustomOp):
             shared_output = None
 
         ctx = get_forward_context()
-        with ctx.dp_metadata.sp_local_sizes(self.sp_size):
+        sp_ctx = ctx.dp_metadata.sp_local_sizes(
+            self.sp_size) if ctx.dp_metadata else nullcontext()
+
+        with sp_ctx:
 
             if do_naive_dispatch_combine:
                 hidden_states, router_logits = get_ep_group().dispatch(
