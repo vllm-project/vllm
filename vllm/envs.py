@@ -191,6 +191,8 @@ if TYPE_CHECKING:
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
+    VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
+    VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
 
 
 def get_default_cache_root():
@@ -1399,6 +1401,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
                             ["container",
                             "code_interpreter",
                             "web_search_preview"]),
+
+    # Enable max_autotune & coordinate_descent_tuning in inductor_config
+    # to compile static shapes passed from compile_sizes in compilation_config
+    # If set to 1, enable max_autotune; By default, this is enabled (1)
+    "VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE", "1"))),
+    # If set to 1, enable coordinate_descent_tuning;
+    # By default, this is enabled (1)
+    "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
+        "1"))),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1491,6 +1504,8 @@ def compute_hash() -> str:
         "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16",
         "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB",
         "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
+        "VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE",
+        "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,
