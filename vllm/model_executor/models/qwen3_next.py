@@ -897,13 +897,8 @@ class Qwen3NextModel(nn.Module):
         super().__init__()
 
         config: Qwen3NextConfig = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
         lora_config = vllm_config.lora_config
-        speculative_config = vllm_config.speculative_config
-        enable_eplb = parallel_config.enable_eplb
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
@@ -920,14 +915,9 @@ class Qwen3NextModel(nn.Module):
 
         def get_layer(prefix: str):
             return Qwen3NextDecoderLayer(
-                config,
+                vllm_config,
                 layer_type=config.layer_types[extract_layer_index(prefix)],
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                speculative_config=speculative_config,
                 prefix=prefix,
-                enable_eplb=enable_eplb,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
