@@ -1447,17 +1447,24 @@ def LLMM1(a: torch.Tensor, b: torch.Tensor,
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
 
 
-def wvSplitK(a: torch.Tensor, b: torch.Tensor, cu_count: int) -> torch.Tensor:
-    return torch.ops._rocm_C.wvSplitK(a, b, cu_count)
+def wvSplitK(a: torch.Tensor,
+             b: torch.Tensor,
+             cu_count: int,
+             bias: torch.Tensor = None) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
-def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
-              scale_a: torch.Tensor, scale_b: torch.Tensor,
-              cu_count: int) -> torch.Tensor:
+def wvSplitKQ(a: torch.Tensor,
+              b: torch.Tensor,
+              out_dtype: torch.dtype,
+              scale_a: torch.Tensor,
+              scale_b: torch.Tensor,
+              cu_count: int,
+              bias: torch.Tensor = None) -> torch.Tensor:
     out = torch.empty((b.shape[0], a.shape[0]),
                       dtype=out_dtype,
                       device=b.device)
-    torch.ops._rocm_C.wvSplitKQ(a, b, out, scale_a, scale_b, cu_count)
+    torch.ops._rocm_C.wvSplitKQ(a, b, bias, out, scale_a, scale_b, cu_count)
     return out
 
 
