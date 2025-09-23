@@ -574,7 +574,6 @@ class NixlConnectorWorker:
                                    self.model_config.dtype,
                                    self.cache_config.cache_dtype,
                                    self.block_size,
-                                   self.model_config.is_attention_free,
                                    use_mla=self.use_mla)
         self.backend_name = backend.get_name()
         attn_backend = backend_name_to_enum(self.backend_name)
