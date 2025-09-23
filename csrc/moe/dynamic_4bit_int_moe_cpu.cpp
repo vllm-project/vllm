@@ -1,13 +1,24 @@
 #include <ATen/ATen.h>
 #include <ATen/Parallel.h>
-#include <ATen/ops/_dyn_quant_matmul_4bit.h>
 #include <torch/all.h>
+
+// _dyn_quant_matmul_4bit is only available on AArch64.
+#if defined(__aarch64__)
+#include <ATen/ops/_dyn_quant_matmul_4bit.h>
+#endif
 
 inline torch::Tensor mm(const torch::Tensor& a, const torch::Tensor& packed_w,
                         int64_t group_size_eff, int64_t in_features,
                         int64_t out_features) {
+#if defined(__aarch64__)
   return at::_ops::_dyn_quant_matmul_4bit::call(a, packed_w, group_size_eff,
                                                 in_features, out_features);
+#else
+  TORCH_CHECK(false,
+              "dynamic 4-bit int MoE path requires AArch64 (ARM64); "
+              "_dyn_quant_matmul_4bit is unavailable on this architecture");
+  return {};
+#endif
 }
 
 enum ActivationKind : int64_t {
