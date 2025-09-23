@@ -552,7 +552,8 @@ def set_inductor_config(config, runtime_shape):
         # for a specific batchsize, tuning triton kernel parameters
         # can be beneficial
         config["max_autotune"] = envs.VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE
-        config["coordinate_descent_tuning"] = envs.VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING
+        config["coordinate_descent_tuning"] = (
+            envs.VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING)
 
 
 class EagerAdaptor(CompilerInterface):

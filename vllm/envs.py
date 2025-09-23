@@ -1407,9 +1407,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, enable max_autotune; By default, this is enabled (1)
     "VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE", "1"))),
-    # If set to 1, enable coordinate_descent_tuning; By default, this is enabled (1)
+    # If set to 1, enable coordinate_descent_tuning;
+    # By default, this is enabled (1)
     "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING", "1"))),
+    lambda: bool(int(os.getenv("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
+        "1"))),
 }
 
 # --8<-- [end:env-vars-definition]
