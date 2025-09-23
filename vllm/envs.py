@@ -109,7 +109,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_CUSTOM_PAGED_ATTN: bool = True
-    VLLM_ROCM_TRITON_HIP_PRESHUFFLE_SCALES: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -889,12 +888,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION":
     env_with_choices("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE",
                             ["FP", "INT8", "INT6", "INT4", "NONE"]),
-
-    # Custom layout for weight swizzle mxfp4 moe
-    "VLLM_ROCM_TRITON_HIP_PRESHUFFLE_SCALES":
-    lambda: (os.getenv("VLLM_ROCM_TRITON_HIP_PRESHUFFLE_SCALES",
-                       "False").lower() in
-             ("true", "1")),
 
     # Custom quick allreduce kernel for MI3* cards
     # Due to the lack of the bfloat16 asm instruction, bfloat16
