@@ -175,11 +175,6 @@ class TpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        # V1 support on TPU is experimental
-        return True
-
-    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,

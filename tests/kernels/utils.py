@@ -959,7 +959,6 @@ def make_test_metadata(
         return attn_backend_obj.make_metadata(
             num_prefills=num_prefills,
             slot_mapping=(None if kv_mmap is None else kv_mmap.slot_mapping),
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -1009,7 +1008,6 @@ def make_test_metadata(
         return attn_backend_obj.make_metadata(
             num_prefills=num_prefills,
             slot_mapping=kv_mmap.slot_mapping,
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,

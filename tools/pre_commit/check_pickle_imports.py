@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import sys
 
 import regex as re
-
-try:
-    import pathspec
-except ImportError:
-    print(
-        "ERROR: The 'pathspec' library is required. "
-        "Install it with 'pip install pathspec'.",
-        file=sys.stderr)
-    sys.exit(2)
 
 # List of files (relative to repo root) that are allowed to import pickle or
 # cloudpickle
@@ -25,7 +15,7 @@ except ImportError:
 #  Before adding new uses of pickle/cloudpickle, please consider safer
 #  alternatives like msgpack or pydantic that are already in use in vLLM. Only
 #  add to this list if absolutely necessary and after careful security review.
-ALLOWED_FILES = set([
+ALLOWED_FILES = {
     # pickle
     'vllm/v1/serial_utils.py',
     'vllm/v1/executor/multiproc_executor.py',
@@ -36,11 +26,9 @@ ALLOWED_FILES = set([
     'tests/tokenization/test_cached_tokenizer.py',
     'vllm/distributed/utils.py',
     'vllm/distributed/parallel_state.py',
-    'vllm/engine/multiprocessing/client.py',
     'vllm/distributed/device_communicators/all_reduce_utils.py',
     'vllm/distributed/device_communicators/shm_broadcast.py',
     'vllm/distributed/device_communicators/shm_object_storage.py',
-    'vllm/engine/multiprocessing/engine.py',
     'benchmarks/kernels/graph_machete_bench.py',
     'benchmarks/kernels/benchmark_lora.py',
     'benchmarks/kernels/benchmark_machete.py',
@@ -55,65 +43,30 @@ ALLOWED_FILES = set([
     'tests/utils.py',
     # pickle and cloudpickle
     'vllm/utils/__init__.py',
-    'vllm/v1/serial_utils.py',
-    'vllm/v1/executor/multiproc_executor.py',
-    'vllm/transformers_utils/config.py',
-    'vllm/model_executor/models/registry.py',
-    'vllm/engine/multiprocessing/client.py',
-    'vllm/engine/multiprocessing/engine.py',
-])
+}
 
 PICKLE_RE = re.compile(r"^\s*(import\s+(pickle|cloudpickle)(\s|$|\sas)"
                        r"|from\s+(pickle|cloudpickle)\s+import\b)")
 
 
-def is_python_file(path):
-    return path.endswith('.py')
-
-
-def scan_file(path):
+def scan_file(path: str) -> int:
     with open(path, encoding='utf-8') as f:
-        for line in f:
+        for i, line in enumerate(f, 1):
             if PICKLE_RE.match(line):
-                return True
-    return False
-
-
-def load_gitignore(repo_root):
-    gitignore_path = os.path.join(repo_root, '.gitignore')
-    patterns = []
-    if os.path.exists(gitignore_path):
-        with open(gitignore_path, encoding='utf-8') as f:
-            patterns = f.read().splitlines()
-    # Always ignore .git directory
-    patterns.append('.git/')
-    return pathspec.PathSpec.from_lines('gitwildmatch', patterns)
+                print(f"{path}:{i}: "
+                      "\033[91merror:\033[0m "  # red color
+                      "Found pickle/cloudpickle import")
+                return 1
+    return 0
 
 
 def main():
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    spec = load_gitignore(repo_root)
-    bad_files = []
-    for dirpath, _, filenames in os.walk(repo_root):
-        for filename in filenames:
-            if not is_python_file(filename):
-                continue
-            abs_path = os.path.join(dirpath, filename)
-            rel_path = os.path.relpath(abs_path, repo_root)
-            # Skip ignored files
-            if spec.match_file(rel_path):
-                continue
-            if scan_file(abs_path) and rel_path not in ALLOWED_FILES:
-                bad_files.append(rel_path)
-    if bad_files:
-        print("\nERROR: The following files import 'pickle' or 'cloudpickle' "
-              "but are not in the allowed list:")
-        for f in bad_files:
-            print(f"  {f}")
-        print("\nIf this is intentional, update the allowed list in "
-              "tools/check_pickle_imports.py.")
-        sys.exit(1)
-    sys.exit(0)
+    returncode = 0
+    for filename in sys.argv[1:]:
+        if filename in ALLOWED_FILES:
+            continue
+        returncode |= scan_file(filename)
+    return returncode
 
 
 def test_regex():
@@ -149,4 +102,4 @@ if __name__ == '__main__':
     if '--test-regex' in sys.argv:
         test_regex()
     else:
-        main()
+        sys.exit(main())

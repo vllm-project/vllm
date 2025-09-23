@@ -209,7 +209,6 @@ def batch_make_video_embeddings(
             return visual(pixel_values_on_device,
                           grid_thw=video_grid_thw_on_device).cpu()
 
-    # V1 Test: this calls a V0 internal.
     video_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
