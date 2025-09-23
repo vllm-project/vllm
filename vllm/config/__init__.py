@@ -510,7 +510,7 @@ class VllmConfig:
                 if envs.VLLM_USE_V1 and self.compilation_config.level \
                     == CompilationLevel.PIECEWISE:
                     self.compilation_config.cudagraph_mode = \
-                        CUDAGraphMode.PIECEWISE
+                        CUDAGraphMode.FULL_AND_PIECEWISE
                 else:
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
