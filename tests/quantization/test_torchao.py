@@ -2,9 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.metadata
 import importlib.util
+import tempfile
 
 import pytest
 import torch
+
+from vllm.model_executor.layers.quantization.torchao_utils import (
+    maybe_get_torchao_config_for_moe_layer,
+)
 
 DTYPE = ["bfloat16"]
 
@@ -395,6 +400,145 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
         output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
 
         assert output
+
+
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skip(reason="requires latest transformers and torchao, not in CI yet")
+def test_qwen_moe(vllm_runner, monkeypatch):
+    """
+    1. Quantize a small QWen MoE model and save it to disk
+    2. Test vLLM inference on that model
+
+    Note: we quantize locally instead of saving the quantized model to
+    HuggingFace because of internal Meta requirements.
+    """
+    from torchao.quantization import (
+        Float8DynamicActivationFloat8WeightConfig,
+        FqnToConfig,
+        PerRow,
+    )
+    from transformers import AutoModelForCausalLM, AutoTokenizer, TorchAoConfig
+
+    model_name = "Qwen/Qwen1.5-MoE-A2.7B"
+
+    with tempfile.TemporaryDirectory() as model_dir:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        fqn_to_config = {}
+
+        # note: torchao FqnToConfig support in transformers was added by
+        # https://github.com/huggingface/transformers/pull/41894,
+        # so you need to ensure your versions of transformers has this PR
+        # in order to run this test
+        single_config = Float8DynamicActivationFloat8WeightConfig(
+            granularity=PerRow(),
+            activation_value_lb=1e-12,
+        )
+        fqn_to_config = FqnToConfig(
+            {
+                "re:.*experts.*proj": single_config,
+            }
+        )
+        quantization_config = TorchAoConfig(
+            quant_type=fqn_to_config,
+        )
+
+        quantized_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype="bfloat16",
+            quantization_config=quantization_config,
+        )
+        assert "Float8Tensor" in str(quantized_model)
+
+        tokenizer.save_pretrained(model_dir)
+        quantized_model.save_pretrained(model_dir, safe_serialization=False)
+
+        # load the locally quantized model with vLLM
+        with vllm_runner(
+            model_dir,
+            quantization="torchao",
+            dtype="bfloat16",
+            enforce_eager=True,
+        ) as llm:
+            output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
+        assert output
+
+
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+def test_maybe_get_torchao_config_for_moe_layer():
+    from torchao.quantization import (
+        Float8DynamicActivationFloat8WeightConfig,
+        FqnToConfig,
+    )
+
+    # example moe_prefix from Qwen/Qwen1.5-MoE-A2.7B
+    moe_prefix = "model.layers.1.mlp.experts"
+    single_config = Float8DynamicActivationFloat8WeightConfig()
+
+    # direct match of all three linears
+    fqn_to_config = FqnToConfig(
+        {
+            "model.layers.1.mlp.experts.gate_proj": single_config,
+            "model.layers.1.mlp.experts.up_proj": single_config,
+            "model.layers.1.mlp.experts.down_proj": single_config,
+        }
+    )
+    moe_layer_config = maybe_get_torchao_config_for_moe_layer(
+        fqn_to_config,
+        moe_prefix,
+    )
+    assert moe_layer_config == single_config
+
+    # no direct match
+    fqn_to_config = FqnToConfig({})
+    moe_layer_config = maybe_get_torchao_config_for_moe_layer(
+        fqn_to_config,
+        moe_prefix,
+    )
+    assert moe_layer_config is None
+
+    # directly specified configs with mismatch
+    fqn_to_config = FqnToConfig(
+        {
+            "model.layers.1.mlp.experts.gate_proj": single_config,
+            "model.layers.1.mlp.experts.up_proj": single_config,
+            "model.layers.1.mlp.experts.down_proj": None,
+        }
+    )
+    with pytest.raises(AssertionError) as exc:
+        moe_layer_config = maybe_get_torchao_config_for_moe_layer(
+            fqn_to_config,
+            moe_prefix,
+        )
+        assert "inconsistent configs" in exc
+
+    # regex match of all three linears
+    fqn_to_config = FqnToConfig(
+        {
+            "re:.*gate_proj": single_config,
+            "re:.*up_proj": single_config,
+            "re:.*down_proj": single_config,
+        }
+    )
+    moe_layer_config = maybe_get_torchao_config_for_moe_layer(
+        fqn_to_config,
+        moe_prefix,
+    )
+    assert moe_layer_config == single_config
+
+    # regex match with mismatch
+    fqn_to_config = FqnToConfig(
+        {
+            "re:.*gate_proj": single_config,
+            "re:.*up_proj": None,
+            "re:.*down_proj": single_config,
+        }
+    )
+    with pytest.raises(AssertionError) as exc:
+        moe_layer_config = maybe_get_torchao_config_for_moe_layer(
+            fqn_to_config,
+            moe_prefix,
+        )
+        assert "inconsistent configs" in exc
 
 
 if __name__ == "__main__":
