@@ -684,7 +684,7 @@ class MambaMixer2(MambaBase, CustomOp):
             if mamba2_metadata.cu_seqlen is None:
                 mamba2_metadata = update_metadata(x, query_start_loc_p,
                                                   mamba2_metadata)
-
+            assert isinstance(mamba2_metadata.nums_dict, dict)
             BLOCK_M = list(mamba2_metadata.nums_dict.keys())[0]
             if cache_enabled:
                 n_blocks_to_fill = current_last_idx_p - current_first_idx_p
