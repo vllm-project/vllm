@@ -95,21 +95,20 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         # MergedColumnParallelLinear.
         if self.is_merged_col_linear:
             shard_size = self.output_size // 2
-            offset = lora_b.shape[-1] // 2
+            offset = lora_b.shape[0] // 2
 
-            left_weight = lora_b[:, self.tp_rank *
-                                 shard_size:(self.tp_rank + 1) * shard_size]
-            right_weight = lora_b[:,
-                                  offset + self.tp_rank * shard_size:offset +
-                                  (self.tp_rank + 1) * shard_size]
-            lora_b = torch.cat([left_weight, right_weight], dim=1)
+            left_weight = lora_b[self.tp_rank * shard_size:(self.tp_rank + 1) *
+                                 shard_size, :]
+            right_weight = lora_b[offset + self.tp_rank * shard_size:offset +
+                                  (self.tp_rank + 1) * shard_size, :]
+            lora_b = torch.cat([left_weight, right_weight], dim=0)
         # Applicable to cases where the base_layer is
         # ColumnParallelLinear.
         else:
             shard_size = self.output_size
             start_idx = self.tp_rank * shard_size
             end_idx = (self.tp_rank + 1) * shard_size
-            lora_b = lora_b[:, start_idx:end_idx]
+            lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
@@ -244,9 +243,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         for i, (shard_id, shard_size) in enumerate(
                 zip(self.output_ids, self.output_slices)):
             if (lora_b_i := lora_b[i]) is not None:
-                sliced_lora_b[i] = lora_b_i[:,
-                                            shard_size * shard_id:shard_size *
-                                            (shard_id + 1)]
+                sliced_lora_b[i] = lora_b_i[shard_size * shard_id:shard_size *
+                                            (shard_id + 1), :]
         return sliced_lora_b
 
     def slice_bias(
@@ -278,12 +276,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
                 self.lora_a_stacked[i][
-                    index, 0, :lora_a_i.shape[1], :lora_a_i.shape[0]].copy_(
-                        lora_a_i.T, non_blocking=True)
+                    index, 0, :lora_a_i.shape[0], :lora_a_i.shape[1]].copy_(
+                        lora_a_i, non_blocking=True)
             if (lora_b_i := lora_b[i]) is not None:
                 self.lora_b_stacked[i][
-                    index, 0, :lora_b_i.shape[1], :lora_b_i.shape[0]].copy_(
-                        lora_b_i.T, non_blocking=True)
+                    index, 0, :lora_b_i.shape[0], :lora_b_i.shape[1]].copy_(
+                        lora_b_i, non_blocking=True)
 
         if lora_bias is not None:
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
@@ -292,7 +290,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 if (lora_bias_i := lora_bias[i]) is not None:
                     self.lora_bias_stacked[i][index,
                                               0, :lora_bias_i.shape[0]].copy_(
-                                                  lora_bias_i.T,
+                                                  lora_bias_i,
                                                   non_blocking=True)
 
     @classmethod
@@ -335,20 +333,21 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.n_slices = 1
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
+    
         self.q_shard_id = self.tp_rank
         self.kv_shard_id = self.tp_rank // self.base_layer.num_kv_head_replicas
-        lora_b_q = lora_b[:, self.q_proj_shard_size *
+        lora_b_q = lora_b[self.q_proj_shard_size *
                           self.q_shard_id:self.q_proj_shard_size *
-                          (self.q_shard_id + 1)]
+                          (self.q_shard_id + 1), :]
         k_offset = self.q_proj_total_size
-        lora_b_k = lora_b[:, k_offset +
+        lora_b_k = lora_b[k_offset +
                           self.kv_proj_shard_size * self.kv_shard_id:k_offset +
-                          self.kv_proj_shard_size * (self.kv_shard_id + 1)]
+                          self.kv_proj_shard_size * (self.kv_shard_id + 1), :]
         v_offset = k_offset + self.kv_proj_total_size
-        lora_b_v = lora_b[:, v_offset +
+        lora_b_v = lora_b[v_offset +
                           self.kv_proj_shard_size * self.kv_shard_id:v_offset +
-                          self.kv_proj_shard_size * (self.kv_shard_id + 1)]
-        lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=1)
+                          self.kv_proj_shard_size * (self.kv_shard_id + 1), :]
+        lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=0)
         return lora_b
 
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
@@ -454,7 +453,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
         shard_size = self.lora_a_stacked[0].shape[2]
         start_idx = self.tp_rank * shard_size
-        lora_a = lora_a[:, start_idx:start_idx + shard_size]
+        lora_a = lora_a[start_idx:start_idx + shard_size, :]
         return lora_a
 
     def apply(self,
@@ -497,10 +496,10 @@ class MergedColumnParallelLinearWithShardedLoRA(
         output_shard_size = self.lora_a_stacked[0].shape[2]
         output_start_idx = self.tp_rank * output_shard_size
         lora_a = [
-            lora_a[0][:, output_start_idx:output_start_idx +
-                      output_shard_size] if lora_a[0] is not None else None,
-            lora_a[1][:, output_start_idx:output_start_idx +
-                      output_shard_size] if lora_a[1] is not None else None,
+            lora_a[0][output_start_idx:output_start_idx +
+                      output_shard_size, :] if lora_a[0] is not None else None,
+            lora_a[1][output_start_idx:output_start_idx +
+                      output_shard_size, :] if lora_a[1] is not None else None,
         ]
         return lora_a
 
@@ -539,7 +538,7 @@ class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
         shard_size = self.lora_a_stacked[0].shape[2]
         start_idx = self.tp_rank * shard_size
-        lora_a = lora_a[:, start_idx:start_idx + shard_size]
+        lora_a = lora_a[start_idx:start_idx + shard_size, :]
         return lora_a
 
     def apply(self,
@@ -577,12 +576,12 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
         shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
         start_idx = [self.tp_rank * shard_size[i] for i in range(3)]
         lora_a = [
-            lora_a[0][:, start_idx[0]:start_idx[0] +
-                      shard_size[0]] if lora_a[0] is not None else None,
-            lora_a[1][:, start_idx[1]:start_idx[1] +
-                      shard_size[1]] if lora_a[1] is not None else None,
-            lora_a[2][:, start_idx[2]:start_idx[2] +
-                      shard_size[2]] if lora_a[2] is not None else None,
+            lora_a[0][start_idx[0]:start_idx[0] +
+                      shard_size[0], :] if lora_a[0] is not None else None,
+            lora_a[1][start_idx[1]:start_idx[1] +
+                      shard_size[1], :] if lora_a[1] is not None else None,
+            lora_a[2][start_idx[2]:start_idx[2] +
+                      shard_size[2], :] if lora_a[2] is not None else None,
         ]
         return lora_a
 
