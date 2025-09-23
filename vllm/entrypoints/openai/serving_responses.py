@@ -460,8 +460,12 @@ class OpenAIServingResponses(OpenAIServing):
 
         async with AsyncExitStack() as exit_stack:
             try:
+                mcp_tools = {
+                    tool.server_label: tool
+                    for tool in request.tools if tool.type == "mcp"
+                }
                 await context.init_tool_sessions(self.tool_server, exit_stack,
-                                                 request.request_id)
+                                                 request.request_id, mcp_tools)
                 async for _ in result_generator:
                     pass
             except asyncio.CancelledError:
@@ -475,9 +479,14 @@ class OpenAIServingResponses(OpenAIServing):
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
 
+        input_messages = None
+        output_messages = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
+            if request.enable_response_messages:
+                input_messages = context.messages[:context.num_init_messages]
+                output_messages = context.messages[context.num_init_messages:]
             num_tool_output_tokens = context.num_tool_output_tokens
             if len(output) > 0:
                 if context.finish_reason == "length":
@@ -496,6 +505,12 @@ class OpenAIServingResponses(OpenAIServing):
             output = self._make_response_output_items(request, final_output,
                                                       tokenizer)
 
+            # TODO: context for non-gptoss models doesn't use messages
+            # so we can't get them out yet
+            if request.enable_response_messages:
+                raise NotImplementedError(
+                    "enable_response_messages is currently"
+                    " only supported for gpt-oss")
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
@@ -519,6 +534,8 @@ class OpenAIServingResponses(OpenAIServing):
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
+            input_messages=input_messages,
+            output_messages=output_messages,
             model_name=model_name,
             created_time=created_time,
             output=output,
@@ -735,11 +752,16 @@ class OpenAIServingResponses(OpenAIServing):
             # New conversation.
             reasoning_effort = (request.reasoning.effort
                                 if request.reasoning else None)
-            # Temporary: OpenAI types doesn't have container tool
-            # so we used MCP to cover that, up for change
             tool_types = [tool.type for tool in request.tools]
-            if envs.VLLM_GPT_OSS_USE_CONTAINER_TOOL:
-                tool_types.append("container")
+
+            # Allow the MCP Tool type to enable built in tools if the
+            # server_label is allowlisted in
+            # envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
+            if envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
+                for tool in request.tools:
+                    if (tool.type == "mcp" and tool.server_label
+                            in envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS):
+                        tool_types.append(tool.server_label)
             enable_browser = ("web_search_preview" in tool_types
                               and self.tool_server is not None
                               and self.tool_server.has_tool("browser"))
@@ -1640,8 +1662,12 @@ class OpenAIServingResponses(OpenAIServing):
         async with AsyncExitStack() as exit_stack:
             processer = None
             if self.use_harmony:
+                mcp_tools = {
+                    tool.server_label: tool
+                    for tool in request.tools if tool.type == "mcp"
+                }
                 await context.init_tool_sessions(self.tool_server, exit_stack,
-                                                 request.request_id)
+                                                 request.request_id, mcp_tools)
                 processer = self._process_harmony_streaming_events
             else:
                 processer = self._process_simple_streaming_events
