@@ -25,8 +25,6 @@ total. And when deploying, we'll have 288 sets of linear layer weights for each
 MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
-import asyncio
-import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -46,9 +44,7 @@ from .rebalance_algo import rebalance_experts
 from .rebalance_execute import (move_from_buffer,
                                 rearrange_expert_weights_inplace,
                                 transfer_layer)
-
-logger = init_logger(__name__)
-
+from .async_worker import start_async_worker
 
 @dataclass
 class EplbState:
@@ -660,31 +656,10 @@ class EplbState:
                         rank_mapping: Optional[dict[int, int]] = None,
                         is_profile: bool = False):
 
-        ep_group = get_ep_group().device_group
-        rank = ep_group.rank()
-        device_index = self.cuda_device_index
-
-        def thread_target():
-            if device_index is not None:
-                torch.cuda.set_device(device_index)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(
-                    self.transfer_run_periodically(model=model,
-                                                   ep_group=ep_group,
-                                                   is_profile=is_profile,
-                                                   rank_mapping=rank_mapping,
-                                                   device_index=device_index))
-            except Exception as e:
-                logger.exception("async loop error (Rank %d): %s", rank,
-                                 str(e))
-            finally:
-                loop.close()
-
-        thread = threading.Thread(target=thread_target, daemon=True)
-        thread.start()
-        return thread
+        return start_async_worker(self,
+                                   model,
+                                   rank_mapping=rank_mapping,
+                                   is_profile=is_profile)
 
     def _update_layer_mapping_from_new(self, layer: int) -> None:
         if (self.new_physical_to_logical_map is None
@@ -735,59 +710,6 @@ class EplbState:
                             device=device)
         all_reduce(flag, group=device_group)
         return int(flag.item()) == device_group.size()
-
-    async def transfer_run_periodically(
-            self,
-            model,
-            ep_group: ProcessGroup,
-            is_profile: bool = False,
-            rank_mapping: Optional[dict[int, int]] = None,
-            device_index: Optional[int] = None):
-        experts_stream = (torch.cuda.Stream(device=device_index)
-                          if device_index is not None else torch.cuda.Stream())
-
-        while not self.shutdown_event.is_set():
-            # Wait for rearrangement signal or shutdown
-            await asyncio.to_thread(self.rearrange_event.wait)
-
-            if self.shutdown_event.is_set():
-                break
-
-            # Process all layers for this rearrangement
-            current_num_layers = model.num_moe_layers
-            while (self.layer_to_transfer < current_num_layers
-                   and not self.shutdown_event.is_set()):
-                if not self.ep_buffer_ready and self.rebalanced:
-                    assert self.new_physical_to_logical_map is not None
-                    await asyncio.to_thread(self.buffer_lock.acquire)
-                    try:
-                        if self.layer_to_transfer >= current_num_layers:
-                            break
-
-                        for i, w in enumerate(model.expert_weights[0]):
-                            self.expert_buffer[i] = torch.empty_like(w)
-                        (self.is_unchanged, self.is_received_locally,
-                         self.experts_recv_loc) = await transfer_layer(
-                             old_global_expert_indices=self.
-                             physical_to_logical_map,
-                             new_global_expert_indices=self.
-                             new_physical_to_logical_map,
-                             expert_weights=model.expert_weights,
-                             expert_weights_buffer=self.expert_buffer,
-                             ep_group=ep_group,
-                             is_profile=is_profile,
-                             layer=self.layer_to_transfer,
-                             cuda_stream=experts_stream,
-                             rank_mapping=rank_mapping,
-                         )
-                        self.ep_buffer_ready = 1
-                    finally:
-                        self.buffer_lock.release()
-                else:
-                    await asyncio.sleep(0.001)
-
-            # Reset for next rearrangement cycle
-            self.rearrange_event.clear()
 
     def move_to_workspace(self,
                           model: MixtureOfExperts,
