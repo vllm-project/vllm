@@ -8,6 +8,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import AttentionLayer, AttentionMetadata
+from vllm.attention.ops.flashmla import flash_mla_sparse_prefill
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
@@ -302,13 +303,6 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
                          logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **mla_args)
         self.topk_indices = None
-        # TODO(Chen): use the correct way to import. Now I just pip install
-        # the reference repo and use it.
-        try:
-            from sparse_topk_attn import sparse_topk_attn_fwd
-        except ImportError:
-            raise ImportError("sparse_topk_attn_fwd is not found")
-        self.sparse_topk_attn_fwd = sparse_topk_attn_fwd
 
     def set_topk_indices(self, topk_indices: torch.Tensor):
         self.topk_indices = topk_indices
@@ -404,8 +398,8 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
         topk_indices_global = topk_indices_global.view(num_tokens, 1, -1)
-        output = self.sparse_topk_attn_fwd(q, kv_c_and_k_pe_cache,
-                                           topk_indices_global, k_scale)[0]
+        output = flash_mla_sparse_prefill(q, kv_c_and_k_pe_cache,
+                                          topk_indices_global, k_scale)[0]
         output = output[:, :self.num_heads, :]
         return output
 
