@@ -148,11 +148,6 @@ def test_ngram_correctness(
             marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
         (("eagle", "eagle618/deepseek-v3-random",
           "eagle618/eagle-deepseek-v3-random", 1), False),
-        pytest.param(("eagle", "Qwen/Qwen2.5-VL-7B-Instruct",
-                      "Rayzl/qwen2.5-vl-7b-eagle3-sgl", 1),
-                     False,
-                     marks=pytest.mark.skip(
-                         reason="Skipping due to lack of eagle model")),
     ],
     ids=[
         # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
@@ -162,7 +157,6 @@ def test_ngram_correctness(
         "llama3_eagle3",
         "llama4_eagle",
         "llama4_eagle_mm",
-        "qwen2.5_vl_eagle",
         "deepseek_eagle"
     ])
 @pytest.mark.parametrize("attn_backend",

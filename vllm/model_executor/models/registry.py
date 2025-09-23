@@ -277,10 +277,6 @@ _SPECULATIVE_DECODING_MODELS = {
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
     # "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
-    "EagleQwen2_5_VLForCausalLM": ("qwen2_5_vl_eagle", \
-        "EagleQwen2_5_VLForCausalLM"),
-    "Eagle3Qwen2_5_VLForCausalLM": ("qwen2_5_vl_eagle3", \
-        "Eagle3Qwen2_5_VLForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),

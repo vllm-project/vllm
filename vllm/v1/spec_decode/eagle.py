@@ -18,8 +18,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.model_executor.models.qwen2_5_vl_eagle3 import (
-    Eagle3Qwen2_5_VLForCausalLM)
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -175,8 +173,7 @@ class EagleProposer:
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
-            assert isinstance(self.model, \
-            (Eagle3LlamaForCausalLM,Eagle3Qwen2_5_VLForCausalLM))
+            assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
@@ -421,65 +418,37 @@ class EagleProposer:
         draft_hidden_states = hidden_states.view(batch_size, 1, -1)
 
         # Initialize empty tensors for concatenation with the level outputs.
-        # M-RoPE
-        tree_input_ids = torch.empty((batch_size, 0),
+        tree_input_ids = torch.empty(0,
                                      device=self.input_ids.device,
                                      dtype=self.input_ids.dtype)
-        # M-RoPE
-        if self.uses_mrope:
-            tree_positions = torch.empty((3, 0),
-                                         device=self.positions.device,
-                                         dtype=self.positions.dtype)
-            assert positions.dim() in (2, 3)
-            # Precompute the draft token positions. -> (3, B, L)
-            flattened_draft_positions = (
-                positions.view(3, batch_size, 1) +
-                self.tree_draft_pos_offsets[:batch_size, :].unsqueeze(0))
-        else:
-            tree_positions = torch.empty((batch_size, 0),
-                                         device=self.positions.device,
-                                         dtype=self.positions.dtype)
-            # Precompute the draft token positions.
-            flattened_draft_positions = (
-                positions.view(batch_size, -1) +
-                self.tree_draft_pos_offsets[:batch_size, :])
-        tree_hidden_states = torch.empty((batch_size, 0, self.hidden_size),
+        tree_positions = torch.empty(0,
+                                     device=self.positions.device,
+                                     dtype=self.positions.dtype)
+        tree_hidden_states = torch.empty(0,
                                          device=self.hidden_states.device,
                                          dtype=self.hidden_states.dtype)
+        # Precompute the draft token positions.
+        flattened_draft_positions = (
+            positions.view(batch_size, -1) +
+            self.tree_draft_pos_offsets[:batch_size, :])
         tree_depth = len(self.cu_drafts_per_level)
         for level in range(tree_depth - 1):
-            # M-RoPE
-            if self.uses_mrope:
-                # Get draft positions for RoPE
-                draft_positions = positions + (level + 1)
-                exceeds_max_model_len = (
-                    positions[0] + total_num_drafts) >= self.max_model_len
-                # Mask out the position ids that exceed the max model length.
-                # Otherwise, we may get out-of-range error in RoPE.
-                draft_positions = torch.where(
-                    exceeds_max_model_len.unsqueeze(0),
-                    0,
-                    draft_positions,
-                ).view(3, batch_size, -1)
-            else:
-                draft_positions = positions + (level + 1)
-                exceeds_max_model_len = (
-                    positions + total_num_drafts) >= self.max_model_len
-                draft_positions = torch.where(
-                    exceeds_max_model_len,
-                    0,
-                    draft_positions,
-                ).view(batch_size, -1)
+            # Get draft positions for RoPE.
+            draft_positions = positions + (level + 1)
+            exceeds_max_model_len = (positions +
+                                     total_num_drafts) >= self.max_model_len
+            # Mask out the position ids that exceed the max model length.
+            # Otherwise, we may get out-of-range error in RoPE.
+            draft_positions = torch.where(
+                exceeds_max_model_len,
+                0,
+                draft_positions,
+            ).view(batch_size, -1)
 
             if level_num_drafts > 1:
                 # Repeat the positions for each draft at this level.
-                # M-RoPE
-                if self.uses_mrope:
-                    draft_positions = draft_positions.repeat_interleave(
-                        level_num_drafts, dim=2)
-                else:
-                    draft_positions = draft_positions.repeat_interleave(
-                        level_num_drafts, dim=1)
+                draft_positions = draft_positions.repeat_interleave(
+                    level_num_drafts, dim=1)
 
             if num_children > 1:
                 # Repeat draft hidden states for each child.
@@ -489,14 +458,8 @@ class EagleProposer:
             # Concatenate the draft tokens, positions, and hidden states.
             tree_input_ids = torch.cat([tree_input_ids, draft_token_ids],
                                        dim=1)
-            # M-RoPE
-            if self.uses_mrope:
-                tree_positions = torch.cat(
-                    [tree_positions,
-                     draft_positions.view(3, -1)], dim=1)
-            else:
-                tree_positions = torch.cat([tree_positions, draft_positions],
-                                           dim=1)
+            tree_positions = torch.cat([tree_positions, draft_positions],
+                                       dim=1)
             tree_hidden_states = torch.cat(
                 [tree_hidden_states, draft_hidden_states], dim=1)
 
@@ -528,23 +491,13 @@ class EagleProposer:
             attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
 
             # Compute the slot mapping.
-            # M-RoPE
-            if self.uses_mrope:
-                query_positions = flattened_draft_positions[:, :, \
-                                    level:level + query_len]
-                block_numbers = query_positions[0] // self.block_size
-                block_ids = attn_metadata.block_table.gather(
-                    dim=1, index=block_numbers)
-                slot_mapping = (block_ids * self.block_size +
-                                query_positions[0] % self.block_size)
-            else:
-                query_positions = flattened_draft_positions[:, level:level +
-                                                            query_len]
-                block_numbers = query_positions // self.block_size
-                block_ids = attn_metadata.block_table.gather(
-                    dim=1, index=block_numbers)
-                slot_mapping = (block_ids * self.block_size +
-                                query_positions % self.block_size)
+            query_positions = flattened_draft_positions[:, level:level +
+                                                        query_len]
+            block_numbers = query_positions // self.block_size
+            block_ids = attn_metadata.block_table.gather(dim=1,
+                                                         index=block_numbers)
+            slot_mapping = (block_ids * self.block_size +
+                            query_positions % self.block_size)
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
@@ -553,18 +506,11 @@ class EagleProposer:
 
             # Copy inputs to buffer for cudagraph.
             num_tokens = attn_metadata.num_actual_tokens
-            # M-RoPE
-            input_ids = tree_input_ids.view(-1)[-num_tokens:]  # [B*qlen]
+            input_ids = tree_input_ids.view(-1)
             self.input_ids[:num_tokens] = input_ids
-            # M-RoPE
-            if self.uses_mrope:
-                self.positions[:, :num_tokens] = \
-                    tree_positions.view(3, -1)[:,-num_tokens:]
-            else:
-                self.positions[:num_tokens] = tree_positions.view(
-                    -1)[-num_tokens:]
+            self.positions[:num_tokens] = tree_positions.view(-1)
             self.hidden_states[:num_tokens] = tree_hidden_states.view(
-                num_tokens, -1)[-num_tokens:, :]
+                num_tokens, -1)
 
             if self.use_cuda_graph and \
                     num_tokens <= self.cudagraph_batch_sizes[-1]:
@@ -576,14 +522,9 @@ class EagleProposer:
             with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=num_input_tokens):
-                # M-RoPE
-                if self.uses_mrope:
-                    forward_positions = self.positions[:, :num_input_tokens]
-                else:
-                    forward_positions = self.positions[:num_input_tokens]
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
-                    positions=forward_positions,
+                    positions=self.positions[:num_input_tokens],
                     hidden_states=self.hidden_states[:num_input_tokens],
                     inputs_embeds=None,
                 )
