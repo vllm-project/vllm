@@ -7,7 +7,6 @@ from typing import Optional
 import numpy as np
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
