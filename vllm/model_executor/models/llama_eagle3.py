@@ -6,6 +6,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -26,10 +27,13 @@ logger = init_logger(__name__)
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__(vllm_config, prefix=prefix)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 config: Optional[LlamaConfig] = None) -> None:
+        super().__init__(vllm_config, prefix=prefix, config=config)
 
-        config = vllm_config.model_config.hf_config
+        config = config or vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
         # override qkv

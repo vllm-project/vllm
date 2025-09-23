@@ -70,6 +70,7 @@ class LlamaModel(nn.Module):
             Llama4DecoderLayer(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                config=self.config,
             ) for i in range(self.config.num_hidden_layers)
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
