@@ -346,9 +346,17 @@ class GPT2ForSequenceClassification(nn.Module):
 
         self.pooler = DispatchPooler({
             "token_classify":
-            Pooler.for_token_classify(pooler_config, classifier=self.score),
+            Pooler.for_token_classify(pooler_config,
+                                      classifier=self.score,
+                                      act_fn="classify"),
             "classify":
-            Pooler.for_classify(pooler_config, classifier=self.score),
+            Pooler.for_classify(pooler_config,
+                                classifier=self.score,
+                                act_fn="classify"),
+            "score":
+            Pooler.for_classify(pooler_config,
+                                classifier=self.score,
+                                act_fn="score"),
         })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

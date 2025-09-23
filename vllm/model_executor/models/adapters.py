@@ -287,9 +287,7 @@ def as_seq_cls_model(cls: _T) -> _T:
 
     # Lazy import
     from vllm.model_executor.layers.linear import ReplicatedLinear
-    from vllm.model_executor.layers.pooler import (ClassifierPooler,
-                                                   DispatchPooler, Pooler,
-                                                   PoolingMethod, PoolingType)
+    from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
     from vllm.sequence import IntermediateTensors
 
@@ -316,26 +314,19 @@ def as_seq_cls_model(cls: _T) -> _T:
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            pooling_type_str = pooler_config.pooling_type
-            assert pooling_type_str is not None
-            pooling_type = PoolingType[pooling_type_str]
-
-            act_fn = ClassifierPooler.act_fn_for_seq_cls(
-                vllm_config.model_config)
-            classifie_pooler = ClassifierPooler(
-                pooling=PoolingMethod.from_pooling_type(pooling_type),
-                classifier=self.score,
-                act_fn=act_fn)
-
             self.pooler = DispatchPooler({
                 "token_classify":
-                Pooler.for_token_classify(pooler_config=pooler_config,
+                Pooler.for_token_classify(pooler_config,
                                           classifier=self.score,
-                                          act_fn=act_fn),
+                                          act_fn="classify"),
                 "classify":
-                classifie_pooler,
+                Pooler.for_classify(pooler_config,
+                                    classifier=self.score,
+                                    act_fn="classify"),
                 "score":
-                classifie_pooler
+                Pooler.for_classify(pooler_config,
+                                    classifier=self.score,
+                                    act_fn="score"),
             })
 
         def forward(

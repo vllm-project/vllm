@@ -195,19 +195,19 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        act_fn = ClassifierPooler.act_fn_for_seq_cls(vllm_config.model_config)
-        classifie_pooler = ClassifierPooler(pooling=CLSPool(),
-                                            classifier=self.classifier,
-                                            act_fn=act_fn)
         self.pooler = DispatchPooler({
             "token_classify":
             Pooler.for_token_classify(pooler_config=pooler_config,
                                       classifier=self.classifier,
-                                      act_fn=act_fn),
+                                      act_fn="classify"),
             "classify":
-            classifie_pooler,
+            ClassifierPooler(pooling=CLSPool(),
+                             classifier=self.classifier,
+                             act_fn="classify"),
             "score":
-            classifie_pooler
+            ClassifierPooler(pooling=CLSPool(),
+                             classifier=self.classifier,
+                             act_fn="score"),
         })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

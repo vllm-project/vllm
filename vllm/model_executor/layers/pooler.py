@@ -79,7 +79,7 @@ class Pooler(nn.Module, ABC):
     def for_token_classify(
         pooler_config: PoolerConfig,
         classifier: Optional[ClassifierFn] = None,
-        act_fn: Optional["PoolerActivation"] = None,
+        act_fn: Optional[Union["PoolerActivation", str]] = None,
     ):
         head = TokenClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
 
@@ -104,6 +104,7 @@ class Pooler(nn.Module, ABC):
     def for_classify(
         pooler_config: PoolerConfig,
         classifier: Optional[ClassifierFn],
+        act_fn: Optional[Union["PoolerActivation", str]] = None,
     ):
         resolved_config = ResolvedPoolingConfig.from_config(
             task="classify",
@@ -115,6 +116,7 @@ class Pooler(nn.Module, ABC):
         return ClassifierPooler(
             pooling=pooling,
             classifier=classifier,
+            act_fn=act_fn,
         )
 
     @abstractmethod
@@ -537,26 +539,41 @@ class ClassifierPooler(Pooler):
     """
 
     @staticmethod
-    def act_fn_for_seq_cls(config: ModelConfig):
-        return get_classification_activation_function(config.hf_config)
+    def act_fn_for_seq_cls(model_config: ModelConfig):
+        return get_classification_activation_function(model_config.hf_config)
 
     @staticmethod
-    def act_fn_for_cross_encoder(config: ModelConfig):
-        return get_cross_encoder_activation_function(config.hf_config)
+    def act_fn_for_cross_encoder(model_config: ModelConfig):
+        return get_cross_encoder_activation_function(model_config.hf_config)
+
+    @staticmethod
+    def resolve_act_fn(act_fn: Optional[Union[PoolerActivation, str]],
+                       model_config: ModelConfig):
+        if isinstance(act_fn, str):
+            if act_fn == "classify":
+                return ClassifierPooler.act_fn_for_seq_cls(model_config)
+            elif act_fn == "score":
+                return ClassifierPooler.act_fn_for_cross_encoder(model_config)
+            else:
+                raise ValueError(f"act_fn [{act_fn=}] not supported.")
+        elif act_fn is None:
+            return PoolerClassify()
+        else:
+            assert callable(act_fn)
+            return act_fn
 
     def __init__(
         self,
         pooling: PoolingFn,
         classifier: Optional[ClassifierFn],
-        act_fn: Optional[PoolerActivation] = None,
+        act_fn: Optional[Union[PoolerActivation, str]] = None,
     ) -> None:
         super().__init__()
 
         vllm_config = get_current_vllm_config()
-
         self.pooling = pooling
         self.classifier = classifier
-        self.act_fn = act_fn or PoolerClassify()
+        self.act_fn = self.resolve_act_fn(act_fn, vllm_config.model_config)
         self.logit_bias: Optional[
             float] = vllm_config.model_config.pooler_config.logit_bias
         self.head_dtype = vllm_config.model_config.head_dtype
@@ -614,7 +631,7 @@ class TokenEmbeddingPoolerHead(EmbeddingPoolerHead):
         pooled_data = pooled_data[..., :pooling_param.dimensions]
 
         # for normalize
-        if pooling_param.normalize or pooling_param.normalize is None:
+        if pooling_param.normalize:
             pooled_data = self.activation(pooled_data)
 
         # pooled_data shape: [n_tokens, embedding_dimension]
@@ -626,17 +643,17 @@ class TokenClassifierPoolerHead(nn.Module):
     def __init__(
         self,
         classifier: Optional[ClassifierFn],
-        act_fn: Optional[PoolerActivation] = None,
+        act_fn: Optional[Union[PoolerActivation, str]] = None,
     ) -> None:
         super().__init__()
         vllm_config = get_current_vllm_config()
 
         self.classifier = classifier
-        self.act_fn = act_fn or PoolerClassify()
+        self.act_fn = ClassifierPooler.resolve_act_fn(act_fn,
+                                                      vllm_config.model_config)
         self.logit_bias: Optional[
             float] = vllm_config.model_config.pooler_config.logit_bias
         self.head_dtype = vllm_config.model_config.head_dtype
-        self.act_fn = act_fn or PoolerClassify(static_num_labels=False)
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_classify"}
@@ -658,7 +675,7 @@ class TokenClassifierPoolerHead(nn.Module):
         if self.logit_bias is not None:
             scores -= self.logit_bias
 
-        if pooling_param.activation or pooling_param.activation is None:
+        if pooling_param.activation:
             scores = self.act_fn(scores)
 
         # scores shape: [n_token, num_labels]
