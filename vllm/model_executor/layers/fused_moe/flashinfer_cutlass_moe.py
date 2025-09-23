@@ -139,6 +139,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         apply_router_weight_on_input: Optional[bool],
     ):
 
+        assert expert_map is None, "expert_map is not supported in FlashInferExperts"
+
         if self.quant_dtype == torch.float8_e4m3fn:
             quant_scales = [
                 self.g1_alphas, self.a2_gscale, self.g2_alphas, self.a1_gscale
