@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import torch
 import torch.distributed as dist
 from flashinfer.comm.mnnvl import CommBackend as CommBackend
 
