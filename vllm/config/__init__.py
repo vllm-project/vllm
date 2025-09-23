@@ -509,8 +509,15 @@ class VllmConfig:
             if self.compilation_config.cudagraph_mode is None:
                 if envs.VLLM_USE_V1 and self.compilation_config.level \
                     == CompilationLevel.PIECEWISE:
+                    # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = \
-                        CUDAGraphMode.PIECEWISE
+                        CUDAGraphMode.FULL_AND_PIECEWISE
+
+                    # pooling model does not support full cudagraphs
+                    if self.model_config is not None and \
+                        self.model_config.pooler_config is not None:
+                        self.compilation_config.cudagraph_mode = \
+                            CUDAGraphMode.PIECEWISE
                 else:
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
