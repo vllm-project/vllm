@@ -54,7 +54,8 @@ from vllm.multimodal.utils import run_dp_sharded_vision_model
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (MixtureOfExperts, MultiModalEmbeddings,
+                         SupportsMultiModal, SupportsPP)
 from .llama4 import Llama4ForCausalLM
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -708,8 +709,8 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
     info=Mllama4ProcessingInfo,
     dummy_inputs=Mllama4DummyInputsBuilder,
 )
-class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                     SupportsPP):
+class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
+                                     MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -757,6 +758,31 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+
+        # Set MoE hyperparameters
+        self.num_expert_groups = 1
+        self.num_logical_experts = self.language_model.num_logical_experts
+        self.num_physical_experts = self.language_model.num_physical_experts
+        self.num_local_physical_experts = \
+            self.language_model.num_local_physical_experts
+        self.num_routed_experts = self.language_model.num_routed_experts
+        self.num_shared_experts = self.language_model.num_shared_experts
+        self.num_redundant_experts = self.language_model.num_redundant_experts
+        self.moe_layers = self.language_model.moe_layers
+        self.num_moe_layers = len(self.moe_layers)
+
+    def set_eplb_state(self, expert_load_view: torch.Tensor,
+                       logical_to_physical_map: torch.Tensor,
+                       logical_replica_count: torch.Tensor):
+        self.language_model.set_eplb_state(expert_load_view,
+                                           logical_to_physical_map,
+                                           logical_replica_count)
+        self.expert_weights = self.language_model.expert_weights
+
+    def update_physical_experts_metadata(self, num_physical_experts: int,
+                                         num_local_physical_experts: int):
+        self.language_model.update_physical_experts_metadata(
+            num_physical_experts, num_local_physical_experts)
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Llama4ImagePatchInputs]:

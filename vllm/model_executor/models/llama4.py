@@ -703,7 +703,6 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
 
         # Set MoE hyperparameters
         self.num_moe_layers = len(self.moe_layers)
-        print(f"num_moe_layers: {self.num_moe_layers}")
         self.num_expert_groups = 1
         self.num_logical_experts = example_moe.n_logical_experts
         self.num_physical_experts = example_moe.n_physical_experts
@@ -721,7 +720,6 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         for layer_idx, layer in enumerate(self.moe_layers):
             # Register the expert weights.
             self.expert_weights.append(layer.get_expert_weights())
-            print(f"set eplb state layer_idx: {layer_idx}")
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
