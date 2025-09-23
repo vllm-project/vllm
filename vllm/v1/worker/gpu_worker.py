@@ -21,6 +21,7 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -516,9 +517,8 @@ class Worker(WorkerBase):
             for old_ep_rank in range(old_ep_size)
         }
         assert self.model_runner.eplb_state is not None
-        self.model_runner.eplb_state.rearrange(self.model_runner.model,
-                                               execute_shuffle=True,
-                                               global_expert_load=None,
+        self.model_runner.eplb_state.rearrange(execute_shuffle=True,
+                                               global_expert_loads=None,
                                                rank_mapping=rank_mapping)
         torch.cuda.synchronize()
         if get_ep_group().rank == 0:
@@ -526,7 +526,7 @@ class Worker(WorkerBase):
 
     def _eplb_after_scale_up(
             self, old_ep_size: int, new_ep_size: int,
-            global_expert_load: Optional[torch.Tensor]) -> None:
+            global_expert_loads: Optional[list[torch.Tensor]]) -> None:
         from vllm.distributed.parallel_state import get_ep_group
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding "
@@ -537,9 +537,8 @@ class Worker(WorkerBase):
         }
         assert self.model_runner.eplb_state is not None
         self.model_runner.eplb_state.rearrange(
-            self.model_runner.model,
             execute_shuffle=True,
-            global_expert_load=global_expert_load,
+            global_expert_loads=global_expert_loads,
             rank_mapping=rank_mapping)
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed!")
@@ -604,8 +603,8 @@ class Worker(WorkerBase):
 
         update_moe_modules(model_moe_modules)
         if hasattr(self.model_runner, "drafter") and hasattr(
-                self.model_runner, "drafter_eplb_state") and \
-            hasattr(self.model_runner.drafter, "model"):
+            self.model_runner.drafter, "model") and \
+            is_mixture_of_experts(self.model_runner.drafter.model):
             drafter_moe_modules = [
                 module for module in self.model_runner.drafter.model.modules()
                 if (module.__class__.__name__ == "FusedMoE"
@@ -625,7 +624,7 @@ class Worker(WorkerBase):
             parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts -
                 self.model_runner.eplb_state.logical_replica_count.shape[1])
-            global_expert_load = None
+            global_expert_loads = None
         else:
             num_local_physical_experts = torch.tensor([num_local_experts],
                                                       dtype=torch.int32,
@@ -636,10 +635,10 @@ class Worker(WorkerBase):
             num_local_physical_experts = num_local_physical_experts.item()
             new_physical_experts = num_local_physical_experts * new_ep_size
             assert self.model_runner.eplb_state is not None
-            global_expert_load = self.model_runner.eplb_state.rearrange(
-                self.model_runner.model, execute_shuffle=False)
+            global_expert_loads = self.model_runner.eplb_state.rearrange(
+                execute_shuffle=False)
             parallel_config.eplb_config.num_redundant_experts = (
-                new_physical_experts - global_expert_load.shape[1])
+                new_physical_experts - global_expert_loads[0].shape[1])
         prepare_communication_buffer_for_model(self.model_runner.model)
         if hasattr(self.model_runner, "drafter") and \
             hasattr(self.model_runner.drafter, "model"):
@@ -648,7 +647,7 @@ class Worker(WorkerBase):
         self.model_runner.model.update_physical_experts_metadata(
             num_physical_experts=new_physical_experts,
             num_local_physical_experts=num_local_physical_experts)
-        return global_expert_load
+        return global_expert_loads
 
     def reinitialize_distributed(
             self, reconfig_request: ReconfigureDistributedRequest) -> None:
@@ -678,12 +677,12 @@ class Worker(WorkerBase):
                                                 self.distributed_init_method,
                                                 self.local_rank)
 
-        global_expert_load = self._reconfigure_moe(old_ep_size, new_ep_size)
+        global_expert_loads = self._reconfigure_moe(old_ep_size, new_ep_size)
 
         if new_ep_size > old_ep_size:
-            assert global_expert_load is not None
+            assert global_expert_loads is not None
             self._eplb_after_scale_up(old_ep_size, new_ep_size,
-                                      global_expert_load)
+                                      global_expert_loads)
 
     def save_sharded_state(
         self,
