@@ -188,7 +188,7 @@ def test_env(
                             # FlashMLA only supports block_size == 64
                             pytest.skip("FlashMLA only supports block_size 64")
                         else:
-                            from vllm.attention.backends.flashmla import (
+                            from vllm.v1.attention.backends.mla.flashmla import (  # noqa: E501
                                 is_flashmla_supported)
                             is_supported, _ = is_flashmla_supported()
                             if not is_supported:
