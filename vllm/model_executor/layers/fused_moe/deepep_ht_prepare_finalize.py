@@ -81,8 +81,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         has_scales = token_scales is not None
 
         # We yield before launching the dispatch kernel since the dispatch
-        # kernel will block the CPU so we want to queue up all the compute for the
-        # other ubatch before the dispatch kernel starts.
+        # kernel will block the CPU so we want to queue up all the compute
+        # for the other ubatch before the dispatch kernel starts.
         dbo_yield_and_switch_from_compute_to_comm()
 
         (num_tokens_per_rank, num_tokens_per_rdma_rank,
