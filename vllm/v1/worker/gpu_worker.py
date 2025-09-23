@@ -487,7 +487,7 @@ class Worker(WorkerBase):
                     sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        self.model_runner._dummy_run(1, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
