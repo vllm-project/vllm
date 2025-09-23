@@ -182,7 +182,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
-    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
@@ -193,6 +193,8 @@ if TYPE_CHECKING:
     VLLM_DBO_COMM_SMS: int = 20
     GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
+    VLLM_USE_NCCL_SYMM_MEM: bool = False
+    VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -1368,7 +1370,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM":
-    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
+    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))),
 
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
@@ -1410,6 +1412,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
                             ["container",
                             "code_interpreter",
                             "web_search_preview"]),
+
+    # Flag to enable NCCL symmetric memory allocation and registration
+    "VLLM_USE_NCCL_SYMM_MEM":
+    lambda: bool(int(os.getenv("VLLM_USE_NCCL_SYMM_MEM", "0"))),
+
+    # NCCL header path
+    "VLLM_NCCL_INCLUDE_PATH":
+    lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
+
 }
 
 # --8<-- [end:env-vars-definition]
