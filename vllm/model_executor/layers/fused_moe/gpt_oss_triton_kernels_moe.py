@@ -23,7 +23,7 @@ if has_triton_kernels():
         from triton_kernels.routing import (RoutingData, routing,
                                             routing_from_bitmatrix)
         from triton_kernels.tensor import Bitmatrix
-    except (ModuleNotFoundError, AttributeError) as e:
+    except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
             "version is compatible. Error: %s", e)
