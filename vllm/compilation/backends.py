@@ -347,8 +347,8 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_dynamic_shape, self.vllm_backend)
 
-            if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                    and
+            if (self.compilation_config.cudagraph_mode.\
+                    has_piecewise_cudagraphs() and
                     not self.compilation_config.use_inductor_graph_partition):
                 # We're using Dynamo-based piecewise splitting, so we wrap
                 # the whole subgraph with a static graph wrapper.
