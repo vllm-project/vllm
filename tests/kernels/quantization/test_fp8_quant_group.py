@@ -55,6 +55,8 @@ def test_quantfp8_group_functionality(batch_size: int, hidden_dim: int,
                             use_ue8m0=use_ue8m0)
     _, scales_col = quant_op_col.forward_native(x.clone())
     assert scales_col.shape == (batch_size, expected_num_groups)
+    assert scales_col.stride(0) == 1
+    assert scales_col.stride(1) == batch_size
 
     # Test column-major scales consistency
     assert torch.allclose(scales_col, scales_native, rtol=1e-9, atol=1e-8)

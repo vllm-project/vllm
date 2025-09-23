@@ -752,6 +752,7 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
     with vllm_runner(model_path) as llm:
 
         is_sm90 = current_platform.has_device_capability(90)
+        fp8_dtype = current_platform.fp8_dtype()
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -763,10 +764,17 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             assert isinstance(qkv_proj.scheme.w8a8_block_fp8_linear,
                               W8A8BlockFp8LinearOp)
 
+            assert qkv_proj.weight.dtype is fp8_dtype
+            assert qkv_proj.weight_scale.dtype is torch.float32
+            assert len(qkv_proj.weight.shape) == 2
+            assert len(qkv_proj.weight_scale.shape) == 2
+
             input_quant_op = \
                 qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
             assert isinstance(input_quant_op, QuantFP8)
-            assert input_quant_op.enabled() == is_sm90
+            quant_enabled = \
+                input_quant_op._forward_method == input_quant_op.forward_cuda
+            assert quant_enabled == is_sm90
 
         llm.apply_model(check_model)
 
