@@ -436,6 +436,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
     reorder_batch_threshold: ClassVar[int] = 1
 
+    _CHUNKED_PREFILL_WORKSPACE_SIZE: ClassVar[int] = -1
+
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
                  layer_names: list[str],
@@ -468,7 +470,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if self.aot_schedule:
             self.page_size = self.kv_cache_spec.block_size
 
-        self.chunked_prefill_workspace_size = min(
+        self.CHUNKED_PREFILL_WORKSPACE_SIZE = min(
             # Try for 8 full length request or at least 4 pages per-request
             max(8 * self.model_config.max_model_len,
                 4 * scheduler_config.max_num_seqs * cache_config.block_size),
@@ -483,8 +485,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             64 * 1024)
 
         # Enforce that we enough for at least 1 page per request
-        self.chunked_prefill_workspace_size = max(
-            self.chunked_prefill_workspace_size,
+        self.CHUNKED_PREFILL_WORKSPACE_SIZE = max(
+            self.CHUNKED_PREFILL_WORKSPACE_SIZE,
             scheduler_config.max_num_seqs * cache_config.block_size)
 
         if self.dcp_world_size > 1:
@@ -492,18 +494,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # an additional kvcache allgather across the DCP group is therefore
             # required, so the workspace has to be enlarged by 1/DCP relative
             # to the original TP allocation.
-            assert self.chunked_prefill_workspace_size % \
+            assert self.CHUNKED_PREFILL_WORKSPACE_SIZE % \
                 self.dcp_world_size == 0
             self.chunked_prefill_workspace = torch.empty(
-                (self.chunked_prefill_workspace_size +
-                 self.chunked_prefill_workspace_size // self.dcp_world_size,
+                (self.CHUNKED_PREFILL_WORKSPACE_SIZE +
+                 self.CHUNKED_PREFILL_WORKSPACE_SIZE // self.dcp_world_size,
                  self.model_config.get_head_size()),
                 dtype=self.model_config.dtype,
                 device=device,
             )
         else:
             self.chunked_prefill_workspace = torch.empty(
-                (self.chunked_prefill_workspace_size,
+                (self.CHUNKED_PREFILL_WORKSPACE_SIZE,
                  self.model_config.get_head_size()),
                 dtype=self.model_config.dtype,
                 device=device,
@@ -1516,6 +1518,17 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 " for MLACommonImpl")
 
         if attn_metadata is None:
+            assert MLACommonMetadataBuilder.CHUNKED_PREFILL_WORKSPACE_SIZE > 0
+            # During the profile run try to simulate to worse case output size
+            # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
+            # since this can be large
+            _ = torch.empty(
+                (MLACommonMetadataBuilder.CHUNKED_PREFILL_WORKSPACE_SIZE,
+                 self.num_heads, self.qk_nope_head_dim + self.v_head_dim),
+                device=k_c_normed.device,
+                dtype=k_c_normed.dtype,
+            )
+
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
             # same expert outputs.
