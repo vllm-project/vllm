@@ -41,11 +41,10 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
+from .async_worker import start_async_worker
 from .rebalance_algo import rebalance_experts
 from .rebalance_execute import (move_from_buffer,
-                                rearrange_expert_weights_inplace,
-                                transfer_layer)
-from .async_worker import start_async_worker
+                                rearrange_expert_weights_inplace)
 
 logger = init_logger(__name__)
 
@@ -661,9 +660,9 @@ class EplbState:
                         is_profile: bool = False):
 
         return start_async_worker(self,
-                                   model,
-                                   rank_mapping=rank_mapping,
-                                   is_profile=is_profile)
+                                  model,
+                                  rank_mapping=rank_mapping,
+                                  is_profile=is_profile)
 
     def _update_layer_mapping_from_new(self, layer: int) -> None:
         if (self.new_physical_to_logical_map is None

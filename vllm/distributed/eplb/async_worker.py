@@ -5,7 +5,7 @@ The async worker that transfers experts in the background.
 """
 import asyncio
 import threading
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
@@ -13,18 +13,15 @@ from torch.distributed import ProcessGroup
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import init_logger
 
+from .eplb_state import EplbState
 from .rebalance_execute import transfer_layer
-
-if TYPE_CHECKING:
-    from .eplb_state import EplbState
 
 logger = init_logger(__name__)
 
 
 def start_async_worker(state: "EplbState",
                        model,
-                      rank_mapping: Optional[
-                      dict[int, int]] = None,
+                       rank_mapping: Optional[dict[int, int]] = None,
                        is_profile: bool = False) -> threading.Thread:
     ep_group = get_ep_group().device_group
     rank = ep_group.rank()
@@ -84,16 +81,18 @@ async def transfer_run_periodically(
 
                     (state.is_unchanged, state.is_received_locally,
                      state.experts_recv_loc) = await transfer_layer(
-                     old_global_expert_indices=state.physical_to_logical_map,
-                     new_global_expert_indices=
-                     state.new_physical_to_logical_map,
-                     expert_weights=model.expert_weights,
-                     expert_weights_buffer=state.expert_buffer,
-                     ep_group=ep_group,
-                     is_profile=is_profile,
-                     layer=state.layer_to_transfer,
-                     cuda_stream=experts_stream,
-                     rank_mapping=rank_mapping,)
+                         old_global_expert_indices=state.
+                         physical_to_logical_map,
+                         new_global_expert_indices=state.
+                         new_physical_to_logical_map,
+                         expert_weights=model.expert_weights,
+                         expert_weights_buffer=state.expert_buffer,
+                         ep_group=ep_group,
+                         is_profile=is_profile,
+                         layer=state.layer_to_transfer,
+                         cuda_stream=experts_stream,
+                         rank_mapping=rank_mapping,
+                     )
                     state.ep_buffer_ready = 1
                 finally:
                     state.buffer_lock.release()
