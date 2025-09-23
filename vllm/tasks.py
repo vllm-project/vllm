@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Literal, get_args
+from typing import Literal, Union, get_args
 
 GenerationTask = Literal["generate", "transcription"]
 GENERATION_TASKS = get_args(GenerationTask)
@@ -12,7 +12,9 @@ POOLING_TASKS = get_args(PoolingTask)
 SupportedTask = Literal[GenerationTask, PoolingTask]
 
 
-def encode2pooling_task(supported_tasks: list[PoolingTask]) -> PoolingTask:
+def encode2pooling_task(
+    supported_tasks: Union[tuple[SupportedTask, ...], list[PoolingTask]]
+) -> PoolingTask:
     # Currently no model supports both token_embed and token_classify.
     if "token_embed" in supported_tasks:
         return "token_embed"
