@@ -436,7 +436,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
     reorder_batch_threshold: ClassVar[int] = 1
 
-    _CHUNKED_PREFILL_WORKSPACE_SIZE: ClassVar[int] = -1
+    CHUNKED_PREFILL_WORKSPACE_SIZE: ClassVar[int] = -1
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
