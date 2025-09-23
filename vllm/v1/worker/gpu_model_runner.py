@@ -3047,8 +3047,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 BatchDescriptor(num_tokens=num_tokens,
                                 uniform_decode=uniform_decode))
             if cudagraph_runtime_mode is not None:
-                # sanity check
-                assert cudagraph_runtime_mode == _cg_mode, (
+                # we allow forcing NONE when the dispatcher disagrees to support
+                # warm ups for cudagraph capture
+                assert cudagraph_runtime_mode == CUDAGraphMode.NONE or \
+                    cudagraph_runtime_mode == _cg_mode, (
                     f"Cudagraph runtime mode mismatch at dummy_run. "
                     f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}.")
             else:
