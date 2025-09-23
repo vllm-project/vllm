@@ -169,6 +169,20 @@ class Worker(WorkerBase):
             current_platform.set_device(self.device)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
+
+            # Initialize the distributed environment BEFORE taking
+            # memory snapshot
+            # This ensures NCCL buffers are allocated before we measure
+            # available memory
+            init_worker_distributed_environment(self.vllm_config, self.rank,
+                                                self.distributed_init_method,
+                                                self.local_rank,
+                                                current_platform.dist_backend)
+
+            # Set random seed.
+            set_random_seed(self.model_config.seed)
+
+            # Now take memory snapshot after NCCL is initialized
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -190,13 +204,6 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
-        # Initialize the distributed environment.
-        init_worker_distributed_environment(self.vllm_config, self.rank,
-                                            self.distributed_init_method,
-                                            self.local_rank,
-                                            current_platform.dist_backend)
-        # Set random seed.
-        set_random_seed(self.model_config.seed)
 
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
