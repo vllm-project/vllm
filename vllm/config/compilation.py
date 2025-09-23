@@ -299,7 +299,7 @@ class CompilationConfig:
     minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
     """
 
-    use_inductor_graph_partition: bool = True
+    use_inductor_graph_partition: bool = False
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
