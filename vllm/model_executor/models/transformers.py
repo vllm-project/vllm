@@ -755,11 +755,44 @@ class TransformersMoEBase(TransformersBase):
             if (experts := module.experts).tp_size > 1 or experts.ep_size > 1:
                 return experts.maybe_all_reduce_tensor_model_parallel(output)
 
-        # Grouped topk kwargs. If either config is set, enable grouped topk
-        # and let FusedMoE handle any errors from misconfiguration
+        # Grouped topk kwargs. We hardcode use_grouped_topk = False so that
+        # FusedMoE will use the custom_routing_function, which is necessary
+        # because the routing happens on the Transformers side
         num_expert_group = getattr(text_config, "n_group", None)
         topk_group = getattr(text_config, "topk_group", None)
-        use_grouped_topk = bool(num_expert_group or topk_group)
+        use_grouped_topk = False
+
+        class CustomFusedMoE(FusedMoE):
+
+            def forward(self, hidden_states: torch.Tensor,
+                        top_k_index: torch.Tensor,
+                        top_k_weights: torch.Tensor):
+                """Custom forward which allows us to bypass the routing inside
+                FusedMoE. Instead, we use the top_k_index and top_k_weights
+                computed on the Transformers side.
+                
+                On the Transformers side the schema for `args` is
+                `[hidden_states, top_k_index, top_k_weights]`.
+                
+                On the vLLM side these correspond to
+                `[hidden_states, topk_ids, topk_weights]` respectively."""
+
+                def custom_routing_function(
+                    hidden_states: torch.Tensor,
+                    gating_output: torch.Tensor,
+                    topk: int,
+                    renormalize: bool,
+                ) -> tuple[torch.Tensor, torch.Tensor]:
+                    # gating_output is actually topk_weights
+                    topk_weights = gating_output
+                    # Use the saved topk_ids
+                    return topk_weights, top_k_index
+
+                self.custom_routing_function = custom_routing_function
+
+                # Call the parent forward method with hidden_states and
+                # topk_weights as gating_output
+                return super().forward(hidden_states, top_k_weights)
 
         # Expert parallel load balancing kwargs
         parallel_config = self.parallel_config
@@ -779,7 +812,7 @@ class TransformersMoEBase(TransformersBase):
                     e_score_correction_bias = getattr(
                         gate, "e_score_correction_bias", None)
                     # Replace experts module with FusedMoE
-                    new_module = FusedMoE(
+                    new_module = CustomFusedMoE(
                         num_experts=num_experts,
                         top_k=top_k,
                         hidden_size=hidden_size,
@@ -791,7 +824,6 @@ class TransformersMoEBase(TransformersBase):
                         topk_group=topk_group,
                         quant_config=self.quant_config,
                         prefix=qual_name,
-                        # TODO: custom_routing_function - llama4, phimoe
                         # TODO: scoring_func - deepseek_v2, dots1, glm4_moe
                         e_score_correction_bias=e_score_correction_bias,
                         # TODO: apply_router_weight_on_input - llama4
