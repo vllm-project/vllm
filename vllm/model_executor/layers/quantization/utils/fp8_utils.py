@@ -1014,3 +1014,9 @@ def apply_fp8_block_linear(layer: torch.nn.Module, input: torch.Tensor,
         cutlass_block_fp8_supported=cutlass_block_fp8_supported,
         use_aiter_and_is_supported=use_aiter_and_is_supported,
     )
+
+
+def expert_weight_is_col_major(x: torch.Tensor) -> bool:
+    assert x.dim() == 3
+    b, m, n = x.shape
+    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
