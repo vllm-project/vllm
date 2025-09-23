@@ -1068,3 +1068,9 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module,
                                                      layer.weight)):
         layer.weight_scale = torch.nn.Parameter(
             layer.weight_scale.data.T.contiguous(), requires_grad=False)
+
+
+def expert_weight_is_col_major(x: torch.Tensor) -> bool:
+    assert x.dim() == 3
+    b, m, n = x.shape
+    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
