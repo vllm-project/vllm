@@ -550,8 +550,6 @@ class NixlConnectorWorker:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
         # Background thread for initializing new NIXL handshakes.
-        self._handshake_initiation_executor: Optional[
-            ThreadPoolExecutor] = None
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # NIXL is not guaranteed to be thread-safe, limit 1 worker.
             max_workers=1,
@@ -698,7 +696,6 @@ class NixlConnectorWorker:
         # Do NIXL handshake in background and add to _ready_requests when done.
         fut = self._handshake_futures.get(remote_engine_id)
         if fut is None:
-            assert self._handshake_initiation_executor is not None
             fut = self._handshake_initiation_executor.submit(
                 self._nixl_handshake, meta.remote_host, meta.remote_port,
                 meta.tp_size, remote_engine_id)
@@ -1348,11 +1345,9 @@ class NixlConnectorWorker:
 
     def shutdown(self):
         """Shutdown the connector worker."""
-        if executor := getattr(self, "_handshake_initiation_executor", None):
-            executor.shutdown(wait=False)
-            self._handshake_initiation_executor = None
-        if listener_t := getattr(self, "_nixl_handshake_listener_t", None):
-            listener_t.join(timeout=0)
+        self._handshake_initiation_executor.shutdown(wait=False)
+        if self._nixl_handshake_listener_t is not None:
+            self._nixl_handshake_listener_t.join(timeout=0)
             self._nixl_handshake_listener_t = None
         for handles in self._recving_transfers.values():
             for handle, _ in handles:
