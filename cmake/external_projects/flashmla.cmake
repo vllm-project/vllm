@@ -139,7 +139,7 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.3 AND FLASH_MLA_ARCHS)
         ARCHITECTURES ${VLLM_GPU_ARCHES}
         # Only the common/public includes here; do NOT add decode/prefill folders
         INCLUDE_DIRECTORIES
-            csrc/
+            ${flashmla_SOURCE_DIR}/csrc/
             ${CUTLASS_INCLUDE_DIR}
             ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
         USE_SABI 3
