@@ -469,8 +469,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.page_size = self.kv_cache_spec.block_size
 
         self.chunked_prefill_workspace_size = min(
-            # Max sure there is enough for 8 full length request or at least
-            # 4 pages of cache per request
+            # Try for full length request or at least 4 pages per-request
             max(8 * self.model_config.max_model_len,
                 4 * scheduler_config.max_num_seqs * cache_config.block_size),
             # For long-context models try not to over-allocate limiting
@@ -482,8 +481,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             #   2*(192*128)*(64*1024) = 3gb
             # (assuming 192 QK head dim, 128 heads, and fp16)
             64 * 1024)
-        assert self.chunked_prefill_workspace_size >= \
-            scheduler_config.max_num_seqs * cache_config.block_size
+
+        # Enforce that we enough for at least 1 page per request
+        self.chunked_prefill_workspace_size = max(
+            self.chunked_prefill_workspace_size,
+            scheduler_config.max_num_seqs * cache_config.block_size)
         if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP is triggered,
             # an additional kvcache allgather across the DCP group is therefore
