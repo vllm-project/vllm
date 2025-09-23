@@ -359,8 +359,8 @@ class StopChecker:
             # Reasoning not ended => do not check stop strings.
             if not self.reasoning_ended:
                 self.reasoning_ended = rp.is_reasoning_end(token_ids)
-                if not self.reasoning_ended:
-                    return None
+            if self.reasoning_parser and not self.reasoning_ended:
+                return None
 
         for stop_str in stop:
             stop_string_len = len(stop_str)
