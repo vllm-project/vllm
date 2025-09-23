@@ -916,7 +916,7 @@ class EagleProposer:
                 break
 
         assert builder is not None, (
-            "Failed to find attention metadata builders for EAGLE layers.")
+            "Failed to find attention metadata builder for EAGLE layers.")
         return builder
 
     def validate_same_kv_cache_group(self,
