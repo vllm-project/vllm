@@ -17,7 +17,6 @@ from .mamba_ssm import softplus
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_H': 1}),
         triton.Config({'BLOCK_SIZE_H': 2}),
         triton.Config({'BLOCK_SIZE_H': 4}),
         triton.Config({'BLOCK_SIZE_H': 8}),
