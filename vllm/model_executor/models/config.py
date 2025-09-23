@@ -266,24 +266,24 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         if structured_outputs_config.reasoning_parser == "":
             structured_outputs_config.reasoning_parser = "openai_gptoss"
 
-        # Increase the max capture size from 512 to 1024 for performance.
+        # Increase the max capture size from 512 to 992 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
-        # from 67 to 83.
+        # from 67 to 81.
         scheduler_config = vllm_config.scheduler_config
         if len(scheduler_config.cuda_graph_sizes) == 1:
             max_capture_size = scheduler_config.cuda_graph_sizes[0]
             # FIXME(woosuk): When using full cuda graph with FA3, the max
             # supported size is 992.
-            if max_capture_size < 1024:
+            if max_capture_size < 992:
                 cuda_graph_sizes = [1, 2, 4]
                 # Step size 8 for small batch sizes
                 cuda_graph_sizes += [i for i in range(8, 256, 8)]
                 # Step size 16 for larger batch sizes
-                cuda_graph_sizes += [i for i in range(256, 1025, 16)]
+                cuda_graph_sizes += [i for i in range(256, 993, 16)]
                 scheduler_config.cuda_graph_sizes = cuda_graph_sizes
                 logger.info(
                     "Overriding max cuda graph capture size to "
-                    "%d for performance.", 1024)
+                    "%d for performance.", 992)
 
 
 class MambaModelConfig(VerifyAndUpdateConfig):
