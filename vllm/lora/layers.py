@@ -41,7 +41,7 @@ import functools
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    get_config_dtype_str, modular_triton_fused_moe, try_get_optimal_moe_config)
+    get_config_dtype_str, modular_triton_fused_moe, try_get_optimal_moe_config, inplace_fused_experts)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_lora_align_block_size)
 
@@ -1472,6 +1472,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
                 max_lora_rank = w1_lora_a_stacked.shape[-2]
 
+                # print(layer._lora.keys())
                 sorted_token_ids_lora = layer._lora["sorted_token_ids_lora"]
                 expert_ids_lora = layer._lora["expert_ids_lora"]
                 num_tokens_post_padded_lora = layer._lora[
@@ -1496,7 +1497,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             return wrapper
 
-        m_fused_moe_fn = modular_triton_fused_moe(use_fp8_w8a8=True if quant_config and quant_config.get_name()=="fp8" else False,
+        # TODO: replace this call need to rplace this function call for the one with gpt-oss!
+        m_fused_moe_fn = modular_triton_fused_moe(use_fp8_w8a8=True if quant_config and quant_config.get_name()=="fp8" else False, # TODO: Check datatype
                                                   use_int8_w8a8=False,
                                                   use_int8_w8a16=False,
                                                   use_int4_w4a16=False,
@@ -1507,6 +1509,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         m_fused_moe_fn.forward = fwd_decorator(base_layer,
                                                m_fused_moe_fn.forward)
+        #print("base_layer", base_layer)
         fused_experts.activation = act_decorator(base_layer,
                                                  fused_experts.activation)
         fused_experts.moe_sum = moe_sum_decorator(base_layer,

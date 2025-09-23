@@ -8,6 +8,8 @@ import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
 
+
+from vllm.distributed.eplb.eplb_state import EplbState  
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -157,7 +159,7 @@ class MLPBlock(torch.nn.Module):
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.experts",
                                 apply_router_weight_on_input=False,
-                                has_bias=True,
+                                has_bias=False,
                                 activation="swigluoai")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -619,6 +621,11 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
                                 "q_a_proj",
                                 "kv_a_proj_with_mqa"
                                 ],
+                            #     "gate_up_proj": ["gate_proj", "up_proj"],
+                            #   "fused_qkv_a_proj": [ # Add LoRA Projection
+                            #     "q_a_proj",
+                            #     "kv_a_proj_with_mqa"
+                            #     ],
                             }
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -638,9 +645,9 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             ".gate_up_proj": ".w13_weight",
             ".down_proj": ".w2_weight",
 
-            # MoE Bias
-            ".gate_up_proj_bias": ".w13_bias",
-            ".down_proj_bias": ".w2_bias",
+            # #MoE Bias # FIXME: Lora doesn't finetune bias term
+            # ".gate_up_proj_bias": ".w13_bias",
+            # ".down_proj_bias": ".w2_bias",
         },
     )
 
@@ -654,12 +661,21 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         expert_params_mapping = self.get_expert_mapping()
 
         packed_modules_mapping = self.packed_modules_mapping.copy()
+        packed_modules_mapping["experts"] = []
 
-        packed_modules_mapping["experts"] = [
-            weight_name.rstrip(".")
-            for _, weight_name, _, _ in expert_params_mapping
-        ]
+        # FIXME: Updated to match lora adapter syntax but may not be necessary
+        for _, weight_name, _, _ in expert_params_mapping:
+            weight_str = weight_name.split('.')
+            weight_name = weight_str[1] + ".mlp." + weight_str[0] + "." + weight_str[2] 
+            packed_modules_mapping["experts"].append(weight_name)
+        print(len(expert_params_mapping))
 
+        # packed_modules_mapping["experts"] = [
+        #     #weight_name.rstrip(".")
+        #     #for _, weight_name, _, _ in expert_params_mapping
+        #     for weight_name in expert_params_mapping
+        # ]
+        print(packed_modules_mapping)
         return packed_modules_mapping
 
     def __init__(
@@ -700,14 +716,16 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
                                        sampling_metadata)
         return logits
 
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        # FIXME: bf16 and gate_up_proj, down_proj only
         return FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_local_experts,
+            num_experts=self.config.num_local_experts, # 24, # FIXME: should be 24 since there are only 24 layers num_hidden_layers
             num_redundant_experts=0)
 
     def load_weights(self, weights: Iterable[tuple[str,
