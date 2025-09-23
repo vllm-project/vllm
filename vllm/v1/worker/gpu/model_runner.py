@@ -293,7 +293,7 @@ class GPUModelRunner:
         query_start_loc_gpu = query_start_loc.gpu[:num_reqs + 1]
         query_start_loc_cpu = query_start_loc.cpu[:num_reqs + 1]
         seq_lens_gpu = self.input_buffers.seq_lens.gpu[:num_reqs]
-        seq_lens_cpu = self.input_buffers.seq_lens.np[:num_reqs]
+        seq_lens_cpu = self.input_buffers.seq_lens.cpu[:num_reqs]
         seq_lens_np = self.input_buffers.seq_lens.np[:num_reqs]
 
         # Some input token ids are directly read from the last sampled tokens.
