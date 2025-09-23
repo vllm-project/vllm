@@ -1,5 +1,5 @@
 [run]
-source = vllm
+source = /vllm-workspace/vllm
 omit =
     */tests/*
     */test_*
