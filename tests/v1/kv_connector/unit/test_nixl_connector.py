@@ -57,7 +57,7 @@ class FakeNixlWrapper:
     def get_reg_descs(self, caches_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in caches_data]
 
-    def register_memory(self, descs) -> None:
+    def register_memory(self, descs, backends) -> None:
         pass
 
     def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
