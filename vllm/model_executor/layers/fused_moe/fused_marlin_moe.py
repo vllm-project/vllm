@@ -11,8 +11,10 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    marlin_make_workspace_new, maybe_warn_marlin_atomic_add)
+    marlin_make_workspace_new, marlin_moe_intermediate_size,
+    maybe_warn_marlin_atomic_add)
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils import direct_register_custom_op
 
@@ -100,11 +102,9 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     assert num_bits in [4, 8]
     assert topk_weights.dtype == torch.float32
 
-    #print (f"w1 - {w1.shape} | w2 - {w2.shape}")
-
     M, K = hidden_states.shape
     E = w1.shape[0]
-    N = w2.shape[1] * 16
+    N = marlin_moe_intermediate_size(w1, w2)
     topk = topk_ids.shape[1]
 
     # M block size selection logic
@@ -122,31 +122,24 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     if workspace is None:
         workspace = marlin_make_workspace_new(hidden_states.device, 4)
 
-    #print (f"ic2 shape : M={M} Topk={topk_ids.shape[1]}, N={N}")
-    ic2_shape = (M * topk_ids.shape[1], N)
     if intermediate_cache2 is None:
         intermediate_cache2 = torch.empty(
-            ic2_shape,
+            (M * topk, N),
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
-    assert intermediate_cache2.shape == ic2_shape, (
-        f"Expected {ic2_shape}, got {intermediate_cache2.shape}")
 
-    ic13_shape = (M * topk_ids.shape[1] * max(2 * N, K), )
     if intermediate_cache13 is None:
         intermediate_cache13 = torch.empty(
-            ic13_shape,
+            (M * topk * max(2 * N, K), ),
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
-    assert intermediate_cache13.shape == ic13_shape, (
-        f"Expected {ic13_shape}, got {intermediate_cache13.shape}")
 
-    intermediate_cache1 = intermediate_cache13[:M * topk_ids.shape[1] * 2 * N]
-    intermediate_cache1 = intermediate_cache1.view(-1, 2 * N)
-    intermediate_cache3 = intermediate_cache13[:M * topk_ids.shape[1] * K]
-    intermediate_cache3 = intermediate_cache3.view(-1, K)
+    intermediate_cache1 = _resize_cache(intermediate_cache13,
+                                        (M * topk, 2 * N))
+    intermediate_cache3 = _resize_cache(intermediate_cache13, (M * topk, K))
+    intermediate_cache2 = _resize_cache(intermediate_cache2, (M * topk, N))
 
     maybe_warn_marlin_atomic_add(hidden_states.device, hidden_states.dtype)
     use_atomic_add = hidden_states.dtype == torch.half or \
@@ -224,9 +217,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
 
     if output is None:
         output = hidden_states if inplace else torch.empty_like(hidden_states)
-    return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                     dim=1,
-                     out=output)
+    return torch.sum(intermediate_cache3.view(-1, topk, K), dim=1, out=output)
 
 
 def fused_marlin_moe_fake(hidden_states: torch.Tensor,
@@ -293,17 +284,23 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int, global_num_experts: int, local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata]
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        # TODO (varun): Check actual workspace size
-        # TODO (varun) : There is a case where output is used as workspace1
-        #  - needs handling
-        #print (f"workspace_shapes M={M}, N={N}, K={K}, topk={topk} ...")
+        # Modular Kernel provisions output buffer from workspace1. However in
+        # the fused_marlin_moe() function, the final torch.sum(), is defined
+        # essentially as,
+        # `torch.sum(workspace1, dim=1, out=output)`
+        # Having overlapping input and output tensors for torch.sum seems
+        # error prone and depends on how the torch.sum is implemented.
+        # For this reason we swap let the output buffer provision from
+        # workspace2.
 
-        # TODO (varun) : Pass in workspaces
+        # Workspace/IntermediateCache allocation matching fused_marlin_moe()
         #workspace1 = (M * topk * max(2 * N, K),)
         #workspace2 = (M * topk, N)
 
-        workspace1 = (M, K)
-        workspace2 = (0, 0)
+        # Workspace/IntermediateCache allocation accounting for output buffer
+        # provisioning
+        workspace1 = (M * topk, max(N, K))
+        workspace2 = (M * topk * max(2 * N, K), )
         output = (M, K)
 
         return (workspace1, workspace2, output, a.dtype)
@@ -342,6 +339,8 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
             global_num_experts=global_num_experts,
             activation=activation,
             expert_map=expert_map,
-            output=output)
-        #intermediate_cache13 = workspace13,
-        #intermediate_cache2 = workspace2)
+            output=output,
+            # Workspaces are swapped in workspace_shapes() to account for proper
+            # output buffer allocation. Please refer to workspace_shapes().
+            intermediate_cache13=workspace2,
+            intermediate_cache2=workspace13)
