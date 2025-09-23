@@ -228,7 +228,8 @@ class RocmPlatform(Platform):
         if envs.VLLM_USE_V1:
             if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and
                     on_gfx9()) or selected_backend == _Backend.ROCM_AITER_FA:
-                logger.info("Using Flash Attention backend on V1 engine.")
+                logger.info(
+                    "Using Aiter Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "rocm_aiter_fa.AiterFlashAttentionBackend")
             if ((envs.VLLM_ROCM_USE_AITER
