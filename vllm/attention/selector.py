@@ -189,9 +189,9 @@ def _cached_get_attn_backend(
             if backend_by_env_var.endswith("_VLLM_V1"):
                 logger.warning(
                     "The suffix '_VLLM_V1' in the environment variable "
-                    "%s is deprecated and will be removed in a future release. "
-                    "Please remove it from your environment variable setting.",
-                    STR_BACKEND_ENV_VAR)
+                    "%s is no longer necessary as V0 backends have been "
+                    "deprecated. Please remove this suffix from your "
+                    "environment variable setting.", STR_BACKEND_ENV_VAR)
                 backend_by_env_var = backend_by_env_var.removesuffix(
                     "_VLLM_V1")
             selected_backend = backend_name_to_enum(backend_by_env_var)
