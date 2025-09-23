@@ -9,7 +9,7 @@ from transformers import AriaConfig, AriaTextConfig, BatchFeature
 from transformers.models.aria.modeling_aria import AriaCrossAttention
 from transformers.models.aria.processing_aria import AriaProcessor
 
-from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
+from vllm.config import QuantizationConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -298,14 +298,12 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
     Experts (MoE) Layer.
     """
 
-    def __init__(
-        self,
-        config: AriaTextConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config, cache_config, quant_config, prefix)
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config, prefix)
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+
         self.mlp = AriaTextMoELayer(config,
                                     quant_config=quant_config,
                                     prefix=f"{prefix}.mlp")

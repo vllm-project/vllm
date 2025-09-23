@@ -6,7 +6,6 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -28,11 +27,11 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        vllm_config: VllmConfig,
         disable_input_layernorm: bool,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, prefix=prefix)
+        super().__init__(vllm_config, prefix=prefix)
 
         # Skip the input_layernorm
         # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427
@@ -64,7 +63,7 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
-                self.config,
+                vllm_config,
                 i == 0,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
             ) for i in range(self.config.num_hidden_layers)
