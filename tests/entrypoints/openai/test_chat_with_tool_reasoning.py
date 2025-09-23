@@ -8,7 +8,7 @@ import pytest_asyncio
 from ...utils import RemoteOpenAIServer
 
 # a reasoning and tool calling model
-MODEL_NAME = "/home/jovyan/qwen3-8b"
+MODEL_NAME = "Qwen/QwQ-32B"
 
 
 @pytest.fixture(scope="module")
