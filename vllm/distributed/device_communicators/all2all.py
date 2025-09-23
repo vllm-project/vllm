@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
 
-from vllm.distributed import get_ep_group
+import vllm.envs as envs
+from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import has_deep_ep, has_pplx
@@ -108,8 +109,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         sizes = get_forward_context(
         ).dp_metadata.get_chunk_sizes_across_dp_rank()
 
-        dist_group = get_ep_group() if is_sequence_parallel else self.dp_group
-
+        dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
         hidden_states, router_logits = dist_group.all_gatherv(
             [hidden_states, router_logits],
@@ -126,7 +126,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         sizes = get_forward_context(
         ).dp_metadata.get_chunk_sizes_across_dp_rank()
-        dist_group = get_ep_group() if is_sequence_parallel else self.dp_group
+
+        dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
         hidden_states = dist_group.reduce_scatterv(hidden_states,
                                                    dim=0,
                                                    sizes=sizes)
@@ -240,12 +241,12 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
     def _make_all2all_kwargs(self) -> dict[Any, Any]:
         # Defaults for internode and intranode are taken from DeepEP tests.
-        num_nvl_bytes = 1024 * 1024 * 1024
+        num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
         num_rdma_bytes = None
         num_qps_per_rank = None
 
         if self.internode:
-            num_rdma_bytes = 1024 * 1024 * 1024
+            num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
             num_qps_per_rank = self.num_sms // 2
         else:
             num_rdma_bytes = 0
@@ -270,12 +271,17 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer)
-        # It is dangerous to set num sms outside this function. num_sms is not
-        # a part of the hash-key that identifies this object. If we are in a
-        # situation where we make objects with different num_sms, the hash key
-        # in get_or_create must be updated.
-        handle.set_num_sms(self.num_sms)
         return handle
+
+    def set_num_sms(self, num_sms: int):
+        import deep_ep
+
+        # Right now the buffers are sized for only what the kernels were
+        # created with. So we can only reduce the number of SMS used
+        # but not increase it.
+        if num_sms > self.num_sms:
+            num_sms = self.num_sms
+        deep_ep.Buffer.set_num_sms(num_sms)
 
 
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
@@ -305,7 +311,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         import deep_ep
 
         # Defaults for internode and intranode are taken from DeepEP tests.
-        num_nvl_bytes = 1024 * 1024 * 1024
+        num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
         num_qps_per_rank = num_local_experts
         num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
             num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
@@ -331,3 +337,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer)
         return handle
+
+    # DeepEP LL uses RDMA so no SMs are used for communication
+    def max_sms_used(self) -> Optional[int]:
+        return 0

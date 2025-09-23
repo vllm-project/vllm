@@ -67,6 +67,12 @@ class All2AllManagerBase:
                  is_sequence_parallel: bool = False):
         raise NotImplementedError
 
+    def set_num_sms(self, num_sms: int):
+        pass
+
+    def max_sms_used(self) -> Optional[int]:
+        return None  # None means it could use the whole GPU
+
     def combine(self,
                 hidden_states: torch.Tensor,
                 is_sequence_parallel: bool = False):
