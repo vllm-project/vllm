@@ -484,20 +484,6 @@ class Platform:
                 == "external_launcher")
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
-        return False
-
-    @classmethod
-    def default_v1(cls, model_config: ModelConfig) -> bool:
-        """
-        Returns whether the current platform supports v1 by default.
-        """
-        return cls.supports_v1(model_config)
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         """
         Returns if custom allreduce is supported on the current platform
@@ -618,6 +604,21 @@ class Platform:
             return out
 
         return _synced_weight_loader
+
+    @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        """
+        Returns a mapping from device_type to a tuple of supported 
+        kv_buffer_device for nixl.
+        """
+        return {}
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> Optional[str]:
+        """
+        Returns the nixl memory type for the current platform.
+        """
+        return None
 
 
 class UnspecifiedPlatform(Platform):

@@ -6,15 +6,16 @@ from typing import Optional
 import pytest
 import torch._dynamo
 
-from tests.compile.backend import TestBackend
+from tests.compile.backend import LazyInitPass, TestBackend
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata)
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
+from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (CacheConfig, CompilationConfig, CompilationLevel,
                          ModelConfig, PassConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
@@ -77,7 +78,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
         )
 
     def build_attn_metadata(self, batch_size: int, use_hnd: bool,
-                            kv_first: bool):
+                            kv_first: bool) \
+            -> AttentionMetadata:
         """Initialize attention metadata."""
 
         # Create common attn metadata
@@ -96,24 +98,34 @@ class AttentionQuantPatternModel(torch.nn.Module):
         # Create dummy KV cache for FlashInfer TRTLLM
         #   - NHD: [num_blocks, block_size, num_kv_heads, head_size]
         #   - HND: [num_blocks, num_kv_heads, block_size, head_size]
-        kv_cache = torch.zeros(num_blocks,
-                               2,
-                               self.num_kv_heads,
-                               self.block_size,
-                               self.head_size,
-                               dtype=self.kv_cache_dtype,
-                               device=self.device)
         if kv_first:
             # k/v as 1st dimention
             if use_hnd:
-                kv_cache = kv_cache.permute(1, 0, 2, 3, 4)
+                kv_cache = torch.zeros(2,
+                                       num_blocks,
+                                       self.num_kv_heads,
+                                       self.block_size,
+                                       self.head_size,
+                                       dtype=self.kv_cache_dtype,
+                                       device=self.device)
             else:
-                kv_cache = kv_cache.permute(1, 0, 3, 2, 4)
+                kv_cache = torch.zeros(2,
+                                       num_blocks,
+                                       self.block_size,
+                                       self.num_kv_heads,
+                                       self.head_size,
+                                       dtype=self.kv_cache_dtype,
+                                       device=self.device)
         else:
             # k/v as 2nd dimention
-            # Create kv_cache in HND layout and permute to NHD layout
-            # (later will be permuted back to HND layout in forward pass)
-            kv_cache = kv_cache.permute(0, 1, 3, 2, 4)
+            # Create kv_cache in NHD layout
+            kv_cache = torch.zeros(num_blocks,
+                                   2,
+                                   self.num_kv_heads,
+                                   self.block_size,
+                                   self.head_size,
+                                   dtype=self.kv_cache_dtype,
+                                   device=self.device)
         self.attn.kv_cache = [kv_cache]
 
         # Build attn metadata
@@ -335,9 +347,10 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
         # Create test backend with fusion passes enabled
         noop_pass = NoOpEliminationPass(vllm_config)
-        attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw
-                                                                    )
-        test_backend = TestBackend(noop_pass, attn_pass)
+        attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
 
         # Compile model with fusion enabled
         model_compiled = torch.compile(model_fused,
@@ -372,6 +385,9 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         # Check quantization ops in the graph before and after fusion
         test_backend.check_before_ops([QUANT_OPS[quant_key]],
                                       fully_replaced=True)
+
+    # access the underlying `AttnFusionPass` on the `LazyInitPass`
+    assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 
     # Check attention ops in the graph before and after fusion
     attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))

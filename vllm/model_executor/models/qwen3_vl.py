@@ -83,7 +83,7 @@ from .qwen2_vl import Qwen2VLProcessingInfo
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import get_vit_attn_backend
+from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
 
@@ -1214,8 +1214,6 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
-                from vllm.multimodal.utils import (
-                    run_dp_sharded_mrope_vision_model)
                 return run_dp_sharded_mrope_vision_model(self.visual,
                                                          pixel_values,
                                                          grid_thw_list,
@@ -1245,8 +1243,6 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
             if self.use_data_parallel:
-                from vllm.multimodal.utils import (
-                    run_dp_sharded_mrope_vision_model)
                 return run_dp_sharded_mrope_vision_model(self.visual,
                                                          pixel_values_videos,
                                                          grid_thw_list,

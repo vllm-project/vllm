@@ -1383,6 +1383,38 @@ def find_nccl_library() -> str:
     return so_file
 
 
+def find_nccl_include_paths() -> Optional[list[str]]:
+    """
+    We either use the nccl.h specified by the `VLLM_NCCL_INCLUDE_PATH`
+    environment variable, or we find the library file brought by 
+    nvidia-nccl-cuXX. load_inline by default uses 
+    torch.utils.cpp_extension.include_paths
+    """
+    paths: list[str] = []
+    inc = envs.VLLM_NCCL_INCLUDE_PATH
+    if inc and os.path.isdir(inc):
+        paths.append(inc)
+
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("nvidia.nccl")
+        if spec and getattr(spec, "submodule_search_locations", None):
+            for loc in spec.submodule_search_locations:
+                inc_dir = os.path.join(loc, "include")
+                if os.path.exists(os.path.join(inc_dir, "nccl.h")):
+                    paths.append(inc_dir)
+    except Exception:
+        pass
+
+    seen = set()
+    out: list[str] = []
+    for p in paths:
+        if p and p not in seen:
+            out.append(p)
+            seen.add(p)
+    return out or None
+
+
 prev_set_stream = torch.cuda.set_stream
 
 _current_stream_tls = threading.local()
@@ -3392,7 +3424,7 @@ def length_from_prompt_token_ids_or_embeds(
     prompt_token_ids: Optional[list[int]],
     prompt_embeds: Optional[torch.Tensor],
 ) -> int:
-    """Calculate the request length (in number of tokens) give either 
+    """Calculate the request length (in number of tokens) give either
     prompt_token_ids or prompt_embeds.
     """
     prompt_token_len = None if prompt_token_ids is None else len(
@@ -3413,3 +3445,16 @@ def length_from_prompt_token_ids_or_embeds(
                 f" prompt_token_ids={prompt_token_len}"
                 f" prompt_embeds={prompt_embeds_len}")
         return prompt_token_len
+
+
+@contextlib.contextmanager
+def set_env_var(key, value):
+    old = os.environ.get(key)
+    os.environ[key] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            del os.environ[key]
+        else:
+            os.environ[key] = old
