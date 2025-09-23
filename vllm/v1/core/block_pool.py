@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import defaultdict
 from collections.abc import Iterable
-from typing import Optional
+from typing import Any, Optional, Union
 
 from vllm.distributed.kv_events import (MEDIUM_GPU, AllBlocksCleared,
                                         BlockRemoved, BlockStored,
@@ -17,6 +16,103 @@ from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+class BlockHashToBlockMap:
+    """
+    Cache of blocks that are used for prefix caching. It caches blocks 
+    from hash directly to a block or multiple blocks
+    (i.e. {block_hash: KVCacheBlocks})
+    - Mostly block_hash maps to a single KVCacheBlock, and KVCacheBlocks
+        would simply be a KVCacheBlock.
+    - Otherwise, KVCacheBlocks is a dict from {block_id: KVCacheBlock}
+
+    A cached block is a full block with a block hash that can be used
+    for prefix caching.
+    The cached block may be used by running requests or in the
+    free_block_queue that could potentially be evicted.
+
+    NOTE #1: We currently don't de-duplicate the blocks in the cache,
+    meaning that if a block becomes full and is cached, we don't check
+    if there is already an identical block in the cache. This is because
+    we want to make sure the allocated block IDs won't change so that
+    block tables are append-only.
+    NOTE #2: The union type is introduced in order to reduce GC costs
+    from the inner dict.
+    """
+
+    def __init__(self):
+        self._cache: dict[BlockHashWithGroupId,
+                          Union[KVCacheBlock, dict[int, KVCacheBlock]]] = {}
+
+    def get_one_block(self,
+                      key: BlockHashWithGroupId) -> Optional[KVCacheBlock]:
+        """
+        Gets any block with the given block hash key.
+        """
+        blocks = self._cache.get(key)
+        if blocks is not None:
+            if isinstance(blocks, KVCacheBlock):
+                return blocks
+            if isinstance(blocks, dict):
+                return next(iter(blocks.values()))
+            self._unexpected_blocks_type(blocks)
+        return None
+
+    def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
+        """
+        Inserts the KVCacheBlock to the cache
+        """
+        blocks = self._cache.get(key)
+        if blocks is None:
+            # When key is not found, attach a single block to the key
+            self._cache[key] = block
+        elif isinstance(blocks, KVCacheBlock):
+            # If there's a block with the same key, merge the original block
+            # and the new block into a dict
+            self._cache[key] = {blocks.block_id: blocks, block.block_id: block}
+        elif isinstance(blocks, dict):
+            # If it's already a dict, simply insert the block
+            blocks[block.block_id] = block
+        else:
+            self._unexpected_blocks_type(blocks)
+
+    def pop(self, key: BlockHashWithGroupId,
+            block_id: int) -> Optional[KVCacheBlock]:
+        """
+        Checks if block_hash exists and pop block_id from the cache
+        """
+        blocks = self._cache.pop(key, None)
+        if blocks is None:
+            # block_hash not found in the cache
+            return None
+        # TODO(Jialin): If key is found, block_id should always present
+        # in blocks. We currently keep the original behaviour for safety.
+        #
+        # Will add block_id == blocks.block_id assertion and
+        # use del blocks[block_id] instead as followup.
+        if isinstance(blocks, KVCacheBlock):
+            if blocks.block_id == block_id:
+                return blocks
+            # If the single block ID doesn't match, we should put the
+            # block back (it should happen rarely)
+            self._cache[key] = blocks
+            return None
+        if isinstance(blocks, dict):
+            # Try to pop block_id from the block dict, and if dict still
+            # contain blocks, put back to the cache.
+            block = blocks.pop(block_id, None)
+            if len(blocks) > 0:
+                self._cache[key] = blocks
+            return block
+        self._unexpected_blocks_type(blocks)
+        return None
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def _unexpected_blocks_type(self, blocks: Any) -> None:
+        raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
 
 
 class BlockPool:
@@ -51,17 +147,9 @@ class BlockPool:
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
-        # {block_hash: {block ID: block}}. A cached block is
-        # a full block with a block hash that can be used for prefix caching.
-        # The cached block may be used by running requests or in the
-        # free_block_queue that could potentially be evicted.
-        # NOTE: We currently don't de-duplicate the blocks in the cache,
-        # meaning that if a block becomes full and is cached, we don't check
-        # if there is already an identical block in the cache. This is because
-        # we want to make sure the allocated block IDs won't change so that
-        # block tables are append-only.
-        self.cached_block_hash_to_block: dict[BlockHashWithGroupId, dict[
-            int, KVCacheBlock]] = defaultdict(dict)
+        # Cache for block lookup
+        self.cached_block_hash_to_block: BlockHashToBlockMap = \
+            BlockHashToBlockMap()
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -90,12 +178,11 @@ class BlockPool:
         for group_id in kv_cache_group_ids:
             block_hash_with_group_id = make_block_hash_with_group_id(
                 block_hash, group_id)
-            cached_blocks_one_group = self.cached_block_hash_to_block.get(
+            block = self.cached_block_hash_to_block.get_one_block(
                 block_hash_with_group_id)
-            if not cached_blocks_one_group:
+            if not block:
                 return None
-            first_block = next(iter(cached_blocks_one_group.values()))
-            cached_blocks.append(first_block)
+            cached_blocks.append(block)
         return cached_blocks
 
     def cache_full_blocks(
@@ -140,8 +227,8 @@ class BlockPool:
             block_hash_with_group_id = make_block_hash_with_group_id(
                 block_hash, kv_cache_group_id)
             blk.block_hash = block_hash_with_group_id
-            self.cached_block_hash_to_block[block_hash_with_group_id][
-                blk.block_id] = blk
+            self.cached_block_hash_to_block.insert(block_hash_with_group_id,
+                                                   blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
@@ -211,15 +298,14 @@ class BlockPool:
         if block_hash is None:
             # The block doesn't have hash, eviction is not needed
             return False
-        blocks_by_id = self.cached_block_hash_to_block.get(block_hash)
-        if blocks_by_id is None:
-            # block_hash not found in cached_block_hash_to_block,
+
+        if self.cached_block_hash_to_block.pop(block_hash,
+                                               block.block_id) is None:
+            # block not found in cached_block_hash_to_block,
             # eviction is not needed
             return False
+
         block.reset_hash()
-        blocks_by_id.pop(block.block_id, None)
-        if len(blocks_by_id) == 0:
-            del self.cached_block_hash_to_block[block_hash]
 
         if self.enable_kv_cache_events:
             # FIXME (Chen): Not sure whether we should return `hash_value`
@@ -283,7 +369,7 @@ class BlockPool:
             return False
 
         # Remove all hashes so that no new blocks will hit.
-        self.cached_block_hash_to_block = defaultdict(dict)
+        self.cached_block_hash_to_block = BlockHashToBlockMap()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
