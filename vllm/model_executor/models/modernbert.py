@@ -317,8 +317,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self.pooler = DispatchPooler({
             "token_classify":
             Pooler.for_token_classify(pooler_config,
-                                      classifier=self.classifier,
-                                      act_fn="classify"),
+                                      classifier=self.classifier),
             "classify":
             ClassifierPooler(pooling=self.pooling,
                              classifier=self.classifier,

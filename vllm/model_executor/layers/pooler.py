@@ -548,7 +548,7 @@ class ClassifierPooler(Pooler):
 
     @staticmethod
     def resolve_act_fn(act_fn: Optional[Union[PoolerActivation, str]],
-                       model_config: ModelConfig):
+                       model_config: ModelConfig, static_num_labels: bool):
         if isinstance(act_fn, str):
             if act_fn == "classify":
                 return ClassifierPooler.act_fn_for_seq_cls(model_config)
@@ -557,7 +557,7 @@ class ClassifierPooler(Pooler):
             else:
                 raise ValueError(f"act_fn [{act_fn=}] not supported.")
         elif act_fn is None:
-            return PoolerClassify()
+            return PoolerClassify(static_num_labels=static_num_labels)
         else:
             assert callable(act_fn)
             return act_fn
@@ -573,7 +573,9 @@ class ClassifierPooler(Pooler):
         vllm_config = get_current_vllm_config()
         self.pooling = pooling
         self.classifier = classifier
-        self.act_fn = self.resolve_act_fn(act_fn, vllm_config.model_config)
+        self.act_fn = self.resolve_act_fn(act_fn,
+                                          vllm_config.model_config,
+                                          static_num_labels=True)
         self.logit_bias: Optional[
             float] = vllm_config.model_config.pooler_config.logit_bias
         self.head_dtype = vllm_config.model_config.head_dtype
@@ -650,7 +652,8 @@ class TokenClassifierPoolerHead(nn.Module):
 
         self.classifier = classifier
         self.act_fn = ClassifierPooler.resolve_act_fn(act_fn,
-                                                      vllm_config.model_config)
+                                                      vllm_config.model_config,
+                                                      static_num_labels=False)
         self.logit_bias: Optional[
             float] = vllm_config.model_config.pooler_config.logit_bias
         self.head_dtype = vllm_config.model_config.head_dtype

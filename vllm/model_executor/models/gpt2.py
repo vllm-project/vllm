@@ -346,9 +346,7 @@ class GPT2ForSequenceClassification(nn.Module):
 
         self.pooler = DispatchPooler({
             "token_classify":
-            Pooler.for_token_classify(pooler_config,
-                                      classifier=self.score,
-                                      act_fn="classify"),
+            Pooler.for_token_classify(pooler_config, classifier=self.score),
             "classify":
             Pooler.for_classify(pooler_config,
                                 classifier=self.score,

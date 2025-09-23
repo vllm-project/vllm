@@ -317,8 +317,7 @@ def as_seq_cls_model(cls: _T) -> _T:
             self.pooler = DispatchPooler({
                 "token_classify":
                 Pooler.for_token_classify(pooler_config,
-                                          classifier=self.score,
-                                          act_fn="classify"),
+                                          classifier=self.score),
                 "classify":
                 Pooler.for_classify(pooler_config,
                                     classifier=self.score,
