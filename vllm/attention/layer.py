@@ -278,7 +278,7 @@ class Attention(nn.Module, AttentionLayerBase):
                                  device=query.device)
             hidden_size = output_shape[-1]
 
-            if envs.VLLM_FUSE_QUERY_QUANT:
+            if envs.VLLM_FUSE_QUERY_QUANT and self.kv_cache_dtype != "auto":
                 # quantizing with a simple torch operation enables
                 # torch.compile to fuse this into previous ops
                 # which reduces overheads during decoding.
