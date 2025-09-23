@@ -22,6 +22,7 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
         self.input_size = base_layer.input_size
         self._label_slot: list = []
         self.device = _get_layer_device(base_layer)
+        self.lora_type = _get_layer_dtype(self.base_layer)
 
     def create_lora_weights(
         self,
@@ -38,7 +39,7 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
             1,
             self.max_class_label,
             self.input_size,
-            dtype=_get_layer_dtype(self.base_layer),
+            dtype=self.lora_type,
             device=self.device,
         )
 
@@ -56,6 +57,8 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
     ):
         self.reset_lora(index)
 
+        if lora_a.dtype != self.lora_type:
+            lora_a = lora_a.to(self.lora_type)
         self.lora_a_stacked[index,
                             0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
                                 lora_a.T, non_blocking=True)
@@ -88,7 +91,7 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
                                        scale=1.0)
         #TODO Cast y using self._label_slot
         # Keep consistent with the base_layer output
-        return y, None
+        return org_output, None
 
     # ReplicatedLinear should always be replaced, regardless of the fully
     # sharded LoRAs setting, because it is, by definition, copied per GPU.

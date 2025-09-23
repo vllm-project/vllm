@@ -129,11 +129,24 @@ class LoRAModel:
         embedding_modules: Optional[dict[str, str]] = None,
         embedding_padding_modules: Optional[list[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
+        classifier_lora_name: Optional[str] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
+            # Case for classify head
+            if classifier_lora_name and tensor_name.endswith(
+                    classifier_lora_name):
+                loras[tensor_name] = ClassifierLoRALayerWeights.from_config(
+                    tensor_name, peft_helper, None)
+                loras[tensor_name].lora_a = tensor.to(device=device,
+                                                      dtype=dtype).t()
+                if pin_memory:
+                    loras[tensor_name].lora_a = loras[
+                        tensor_name].lora_a.pin_memory()
+                continue
+
             module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper)
             if module_name not in loras:
@@ -200,7 +213,8 @@ class LoRAModel:
             embedding_modules: Optional[dict[str, str]] = None,
             embedding_padding_modules: Optional[list[str]] = None,
             weights_mapper: Optional[WeightsMapper] = None,
-            tensorizer_config_dict: Optional[dict] = None) -> "LoRAModel":
+            tensorizer_config_dict: Optional[dict] = None,
+            classifier_lora_name: Optional[str] = None) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
 
         Args:
@@ -228,6 +242,10 @@ class LoRAModel:
 
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
+
+                if classifier_lora_name and lora_module.endswith(
+                        classifier_lora_name):
+                    continue
                 module_name, _, _ = parse_fine_tuned_lora_name(
                     lora_module, weights_mapper)
                 part_name = module_name.split(".")[-1]
@@ -276,6 +294,9 @@ class LoRAModel:
             if not isinstance(target_modules, list):
                 target_modules = [target_modules]
             for module in target_modules:
+                if classifier_lora_name and module.endswith(
+                        classifier_lora_name):
+                    continue
                 # Compatible with more modules,
                 # such as:layers.11.self_attn.k_proj
                 part_name = module.split(".")[-1]
@@ -321,7 +342,8 @@ class LoRAModel:
             target_embedding_padding=target_embedding_padding,
             embedding_modules=embedding_modules,
             embedding_padding_modules=embedding_padding_modules,
-            weights_mapper=weights_mapper)
+            weights_mapper=weights_mapper,
+            classifier_lora_name=classifier_lora_name)
 
 
 class LoRAModelManager:
@@ -420,6 +442,7 @@ class LoRAModelManager:
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
+
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
                 module_lora.optimize()
