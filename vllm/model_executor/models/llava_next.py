@@ -13,7 +13,6 @@ from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 
 from vllm.config import VllmConfig
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import ImageSize
@@ -527,7 +526,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         Unlike in LLaVA-1.5, the number of image tokens inputted to the language
         model depends on the original size of the input image. Including the
         original image token in the input, the required number of image tokens
-        is given by [get_llava_next_image_feature_size][].
+        is given by [`LlavaNextProcessingInfo.get_num_image_tokens`][vllm.\
+model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
 
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
@@ -535,11 +535,12 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
-            pixel_values: The pixels in each grid patch for each input image.
-            image_sizes: The original `(height, width)` for each input image.
+            positions: Position indices for the input tokens.
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
         Info:
-            [LlavaNextImageInputs][]
+            [`LlavaNextImageInputs`][vllm.model_executor.models.llava_next.LlavaNextImageInputs]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -561,10 +562,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import copy
 import logging
 import math
 import queue
@@ -11,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import msgspec
 import numpy as np
@@ -23,6 +24,8 @@ from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorStats)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -33,7 +36,6 @@ from vllm.platforms import _Backend, current_platform
 from vllm.utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -56,13 +58,21 @@ except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
 
-# Supported xPUs and types of kv transfer buffer.
-# {xPU: tuple of supported kv buffer types}
-_NIXL_SUPPORTED_XPUS = {
+try:
+    from nixl._api import nixl_agent_config
+except ImportError:
+    nixl_agent_config = None
+    logger.warning("NIXL agent config is not available")
+
+# Supported platforms and types of kv transfer buffer.
+# {device: tuple of supported kv buffer types}
+_NIXL_SUPPORTED_DEVICE = {
     "cuda": ("cuda", ),
     "tpu": ("cpu", ),
     "xpu": ("cpu", ),
 }
+# support for oot platform by providing mapping in current_platform
+_NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 
 class NixlAgentMetadata(
@@ -205,6 +215,18 @@ class NixlConnector(KVConnectorBase_V1):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+            cls,
+            data: Optional[dict[str,
+                                Any]] = None) -> Optional[KVConnectorStats]:
+        return NixlKVConnectorStats(data=data) if data is not None \
+            else NixlKVConnectorStats()
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -377,6 +399,7 @@ class NixlConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        from vllm.v1.request import RequestStatus
 
         params = request.kv_transfer_params
         logger.debug(
@@ -433,8 +456,15 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
+        self.nixl_backends = \
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "backends", ["UCX"])
         # Agent.
-        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
+        non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
+        config = nixl_agent_config(backends=self.nixl_backends) if len(
+            non_ucx_backends) > 0 and nixl_agent_config is not None else None
+
+        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
@@ -458,9 +488,9 @@ class NixlConnectorWorker:
         self.device_type = current_platform.device_type
         self.kv_buffer_device: str = \
             vllm_config.kv_transfer_config.kv_buffer_device
-        if self.device_type not in _NIXL_SUPPORTED_XPUS:
+        if self.device_type not in _NIXL_SUPPORTED_DEVICE:
             raise RuntimeError(f"{self.device_type} is not supported.")
-        elif self.kv_buffer_device not in _NIXL_SUPPORTED_XPUS[
+        elif self.kv_buffer_device not in _NIXL_SUPPORTED_DEVICE[
                 self.device_type]:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
@@ -468,14 +498,18 @@ class NixlConnectorWorker:
         self.device_kv_caches: dict[str, torch.Tensor] = {}
 
         # cpu kv buffer for xfer
-        # used when xPU memory can not be registered under nixl
+        # used when device memory can not be registered under nixl
         self.host_xfer_buffers: dict[str, torch.Tensor] = {}
         self.use_host_buffer = self.kv_buffer_device == "cpu"
-        if self.kv_buffer_device == "cuda":
-            self.nixl_memory_type = "VRAM"
-        elif self.kv_buffer_device == "cpu":
-            self.nixl_memory_type = "DRAM"
-        else:
+        # support for oot platform which can't register nixl memory
+        # type based on kv_buffer_device
+        self.nixl_memory_type = current_platform.get_nixl_memory_type()
+        if self.nixl_memory_type is None:
+            if self.kv_buffer_device == "cuda":
+                self.nixl_memory_type = "VRAM"
+            elif self.kv_buffer_device == "cpu":
+                self.nixl_memory_type = "DRAM"
+        if self.nixl_memory_type is None:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported.")
@@ -550,12 +584,14 @@ class NixlConnectorWorker:
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+        self.xfer_stats = NixlKVConnectorStats()
 
     def __del__(self):
         """Cleanup background threads on destruction."""
-        self._handshake_initiation_executor.shutdown(wait=False)
-        if self._nixl_handshake_listener_t:
-            self._nixl_handshake_listener_t.join(timeout=0)
+        if executor := getattr(self, "_handshake_initiation_executor", None):
+            executor.shutdown(wait=False)
+        if listener_t := getattr(self, "_nixl_handshake_listener_t", None):
+            listener_t.join(timeout=0)
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
@@ -708,8 +744,6 @@ class NixlConnectorWorker:
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses = []
-        xfer_buffers = (self.host_xfer_buffers
-                        if self.use_host_buffer else kv_caches)
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
@@ -751,7 +785,7 @@ class NixlConnectorWorker:
         descs = self.nixl_wrapper.get_reg_descs(caches_data,
                                                 self.nixl_memory_type)
         logger.debug("Registering descs: %s", caches_data)
-        self.nixl_wrapper.register_memory(descs)
+        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
 
@@ -929,6 +963,9 @@ class NixlConnectorWorker:
             if tp_ratio > 1:
                 # Heterogeneous TP expects same kv_cache_layout.
                 assert nixl_agent_meta.kv_cache_layout == self.kv_cache_layout
+                if self.device_type == "xpu":
+                    raise ValueError(
+                        "Heterogeneous TP is not supported on XPU")
 
             assert nixl_agent_meta.block_len == self.block_len * tp_ratio, (
                 "Remote P worker KV layer cache must be of shape [2, N, "
@@ -1096,6 +1133,8 @@ class NixlConnectorWorker:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
+                    # TODO (NickLucche) Get from NIXL telemetry once integrated
+                    self.xfer_stats.record_transfer()
                 elif xfer_state == "PROC":
                     in_progress = True
                     continue
@@ -1247,7 +1286,6 @@ class NixlConnectorWorker:
         self.nixl_wrapper.transfer(handle)
 
         # Use handle to check completion in future step().
-        # TODO (NickLucche) surface xfer elapsed time
         self._recving_transfers[request_id].append(
             (handle, time.perf_counter()))
 
@@ -1299,6 +1337,15 @@ class NixlConnectorWorker:
             block_len = self.block_len
         return block_len
 
+    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
+        """
+        Get the KV transfer stats for the connector.
+        """
+        # Clear stats for next iteration
+        if not self.xfer_stats.is_empty():
+            return self.xfer_stats.clone_and_reset()
+        return None
+
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
@@ -1317,3 +1364,39 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+
+
+@dataclass
+class NixlKVConnectorStats(KVConnectorStats):
+    """Container for transfer performance metrics"""
+
+    def __post_init__(self):
+        if "num_successful_transfers" not in self.data:
+            self.data["num_successful_transfers"] = 0
+
+    def reset(self):
+        self.data = {"num_successful_transfers": 0}
+
+    def record_transfer(self):
+        # TODO: record actual transfer stats when available
+        self.data["num_successful_transfers"] += 1
+
+    def clone_and_reset(self) -> "NixlKVConnectorStats":
+        old = copy.copy(self)
+        self.reset()
+        return old
+
+    def is_empty(self) -> bool:
+        return self.data["num_successful_transfers"] == 0
+
+    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        if not other.is_empty():
+            self.data["num_successful_transfers"] += other.data[
+                "num_successful_transfers"]
+        return self
+
+    def reduce(self) -> dict[str, Union[int, float]]:
+        # TODO: reduce stats to a single value, calculate latency/throughput
+        return {
+            "num_successful_transfers": self.data["num_successful_transfers"]
+        }
