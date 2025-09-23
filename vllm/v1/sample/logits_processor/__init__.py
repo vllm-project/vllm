@@ -15,11 +15,11 @@ from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
                                                      MinPLogitsProcessor,
-                                                     MinTokensLogitsProcessor,
-                                                     process_dict_updates)
+                                                     MinTokensLogitsProcessor)
 from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
                                                        LogitsProcessor,
-                                                       MoveDirectionality)
+                                                       MoveDirectionality,
+                                                       process_dict_updates)
 from vllm.v1.sample.logits_processor.state import (BatchUpdateBuilder,
                                                    LogitsProcessors)
 

@@ -43,7 +43,7 @@ from vllm.v1.sample.logits_processor import (
     BatchUpdate,
     LogitsProcessor,
 )
-from vllm.v1.sample.logits_processor.builtin import process_dict_updates
+from vllm.v1.sample.logits_processor.interface import process_dict_updates
 
 
 # Hypothetical custom logits processor
