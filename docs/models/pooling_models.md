@@ -30,11 +30,11 @@ If `--runner pooling` has been set (manually or automatically) but the model doe
 vLLM will attempt to automatically convert the model according to the architecture names
 shown in the table below.
 
-| Architecture                                    | `--convert` | Supported pooling tasks       |
-|-------------------------------------------------|-------------|-------------------------------|
-| `*ForTextEncoding`, `*EmbeddingModel`, `*Model` | `embed`     | `encode`, `embed`             |
-| `*For*Classification`, `*ClassificationModel`   | `classify`  | `encode`, `classify`, `score` |
-| `*ForRewardModeling`, `*RewardModel`            | `reward`    | `encode`                      |
+| Architecture                                    | `--convert` | Supported pooling tasks               |
+|-------------------------------------------------|-------------|---------------------------------------|
+| `*ForTextEncoding`, `*EmbeddingModel`, `*Model` | `embed`     | `token_embed`, `embed`                |
+| `*For*Classification`, `*ClassificationModel`   | `classify`  | `token_classify`, `classify`, `score` |
+| `*ForRewardModeling`, `*RewardModel`            | `reward`    | `token_classify`                      |
 
 !!! tip
     You can explicitly set `--convert <type>` to specify how to convert the model.
