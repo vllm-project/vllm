@@ -136,9 +136,7 @@ def rocm_unquantized_gemm(layer: torch.nn.Module,
 direct_register_custom_op(
     op_name="rocm_unquantized_gemm_impl",
     op_func=rocm_unquantized_gemm_impl,
-    mutates_args=[],
     fake_impl=rocm_unquantized_gemm_impl_fake,
-    dispatch_key=current_platform.dispatch_key,
 )
 
 
