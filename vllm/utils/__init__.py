@@ -2546,10 +2546,10 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 def direct_register_custom_op(
         op_name: str,
         op_func: Callable,
-        mutates_args: list[str],
+        mutates_args: Optional[list[str]] = None,
         fake_impl: Optional[Callable] = None,
         target_lib: Optional[Library] = None,
-        dispatch_key: str = "CUDA",
+        dispatch_key: Optional[str] = None,
         tags: tuple[torch.Tag, ...] = (),
 ):
     """
@@ -2576,6 +2576,13 @@ def direct_register_custom_op(
             "use vLLM in a fresh new environment and let it install "
             "the required dependencies.")
         return
+
+    if mutates_args is None:
+        mutates_args = []
+
+    if dispatch_key is None:
+        from vllm.platforms import current_platform
+        dispatch_key = current_platform.dispatch_key
 
     import torch.library
     if hasattr(torch.library, "infer_schema"):
