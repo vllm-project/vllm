@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker, NixlKVConnectorStats)
 from vllm.forward_context import ForwardContext
+from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
@@ -56,7 +57,7 @@ class FakeNixlWrapper:
     def get_reg_descs(self, caches_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in caches_data]
 
-    def register_memory(self, descs) -> None:
+    def register_memory(self, descs, backends) -> None:
         pass
 
     def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
@@ -855,3 +856,52 @@ def test_register_kv_caches(dist_init):
             assert block_len == expected_block_len, \
                 f"Block entry {i}: Expected block len {expected_block_len}, " \
                 f"got {block_len}"
+
+
+class FakePlatform(Platform):
+    device_type: str = "oot"
+
+    @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        """
+        Returns a mapping from device_type to a tuple of supported 
+        kv_buffer_device for nixl.
+        """
+        return {'oot': ('oot', )}
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> Optional[str]:
+        """
+        Returns the nixl memory type for the current platform.
+        """
+        return 'VRAM'
+
+
+@pytest.mark.parametrize("kv_buffer_device, nixl_memory_type", [
+    ("oot", "VRAM"),
+])
+def test_kv_buffer_to_nixl_memory_types(dist_init, kv_buffer_device,
+                                        nixl_memory_type):
+    """
+    Test that register_kv_caches() passes the correct memory types from the
+    config to the nixl_wrapper.
+    """
+    vllm_config = create_vllm_config()
+    # Override the default memory types in the config
+    vllm_config.kv_transfer_config.kv_buffer_device = kv_buffer_device
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        _NIXL_SUPPORTED_DEVICE)
+    _NIXL_SUPPORTED_DEVICE.update(FakePlatform.get_nixl_supported_devices())
+
+    with patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper"), \
+         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Event"), \
+         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Thread"), \
+         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform", FakePlatform), \
+         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector._NIXL_SUPPORTED_DEVICE", _NIXL_SUPPORTED_DEVICE):  # noqa: E501
+
+        # Create connector and replace its worker with a fake one for isolation
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+
+        # Verify get_reg_descs was called with the correct memory_type
+        assert connector.connector_worker.kv_buffer_device == kv_buffer_device
+        assert connector.connector_worker.nixl_memory_type == nixl_memory_type
