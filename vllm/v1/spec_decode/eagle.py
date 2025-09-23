@@ -3,17 +3,16 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 from vllm.attention.layer import Attention
-from vllm.config import (CompilationLevel, VllmConfig,
-                         get_layers_from_vllm_config)
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
@@ -25,6 +24,7 @@ from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -78,12 +78,9 @@ class EagleProposer:
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
 
-        self.use_cuda_graph = (self.vllm_config.compilation_config.level
-                               == CompilationLevel.PIECEWISE and
-                               not self.vllm_config.model_config.enforce_eager)
-        self.cudagraph_batch_sizes = list(
-            reversed(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+        self.use_cuda_graph = (
+            self.vllm_config.compilation_config.cudagraph_mode
+            != CUDAGraphMode.NONE)
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(self.max_num_tokens,
@@ -155,6 +152,11 @@ class EagleProposer:
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
 
+        # Cudagraph dispatcher for runtime cudagraph dispatching of drafter,
+        # which is independent of the dispatcher of the model runner.
+        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config,
+                                                        is_drafter=True)
+
     def propose(
         self,
         # [num_tokens]
@@ -175,6 +177,7 @@ class EagleProposer:
 
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+        max_query_len = common_attn_metadata.max_query_len
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -203,11 +206,12 @@ class EagleProposer:
         per_layer_attn_metadata = {}
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
-        if self.use_cuda_graph and \
-                num_tokens <= self.cudagraph_batch_sizes[-1]:
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
-        else:
-            num_input_tokens = num_tokens
+        # dispatcher planning for drafter
+        cudagraph_runtime_mode, batch_descriptor, num_input_tokens, _ = \
+            self.cudagraph_dispatcher.plan(
+                num_scheduled_tokens=num_tokens,
+                num_reqs=batch_size,
+                max_query_len=max_query_len)
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
@@ -226,7 +230,9 @@ class EagleProposer:
 
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
-                                 num_tokens=num_input_tokens):
+                                 num_tokens=num_input_tokens,
+                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                 batch_descriptor=batch_descriptor):
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.positions[:num_input_tokens],
@@ -273,15 +279,16 @@ class EagleProposer:
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
-        if self.use_cuda_graph and \
-                batch_size <= self.cudagraph_batch_sizes[-1]:
-            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
-        else:
-            input_batch_size = batch_size
+        # dispatcher plans only once for the remaining loop
+        cudagraph_runtime_mode, batch_descriptor, input_batch_size, _ = \
+            self.cudagraph_dispatcher.plan(
+                num_scheduled_tokens=batch_size,
+                num_reqs=batch_size,
+                max_query_len=1)
 
-        common_attn_metadata.num_actual_tokens = batch_size
-        common_attn_metadata.max_query_len = 1
-        common_attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+        attn_metadata.num_actual_tokens = batch_size
+        attn_metadata.max_query_len = 1
+        attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
             self.token_arange_np[:batch_size + 1]).clone()
         for token_index in range(self.num_speculative_tokens - 1):
@@ -351,9 +358,12 @@ class EagleProposer:
                 input_ids = self.input_ids[:input_batch_size]
 
             # Run the model.
-            with set_forward_context(per_layer_attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=input_batch_size):
+            with set_forward_context(
+                    per_layer_attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch_size,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    batch_descriptor=batch_descriptor):
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self.positions[:input_batch_size],
@@ -651,16 +661,23 @@ class EagleProposer:
             self.hidden_states[:num_tokens] = tree_hidden_states.view(
                 num_tokens, -1)
 
-            if self.use_cuda_graph and \
-                    num_tokens <= self.cudagraph_batch_sizes[-1]:
-                num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                    num_tokens)
-            else:
-                num_input_tokens = num_tokens
+            # Note: decode phase of TreeAttentionBackend does not have an
+            # unique uniform decode query length (1 for the root level and
+            # total_num_drafts for subsequent levels). Here we may support
+            # this situation once full cudagraph of TreeAttention is supported.
+            cudagraph_runtime_mode, batch_descriptor, num_input_tokens, _ = \
+            self.cudagraph_dispatcher.plan(
+                num_scheduled_tokens=num_tokens,
+                num_reqs=batch_size,
+                max_query_len=attn_metadata.max_query_len)
+
             # Run the model.
-            with set_forward_context(per_layer_attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=num_input_tokens):
+            with set_forward_context(
+                    per_layer_attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_input_tokens,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    batch_descriptor=batch_descriptor):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
                     positions=self.positions[:num_input_tokens],
@@ -863,9 +880,79 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        force_attention: bool = False,
+        batch_descriptor: Optional[BatchDescriptor] = None,
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
+        assert cudagraph_runtime_mode != CUDAGraphMode.FULL, \
+            "Eagle drafter doesn't support full cudagraphs at this moment"
+
+        uniform_decode = False
+        if batch_descriptor is not None and batch_descriptor.uniform_decode:
+            assert batch_descriptor.num_tokens == num_tokens, \
+                "num_tokens mismatch"
+            uniform_decode = True
+            max_query_len = batch_descriptor.uniform_query_len
+        else:
+            max_query_len = num_tokens
+
+        max_num_reqs = self.vllm_config.scheduler_config.max_num_seqs
+        if uniform_decode:
+            assert num_tokens % max_query_len == 0, \
+                "num_tokens must be divisible by max_query_len for uniform " \
+                "decode"
+            num_reqs = min(num_tokens // max_query_len, max_num_reqs)
+        else:
+            num_reqs = min(num_tokens, max_num_reqs)
+
+        per_layer_attn_metadata: Optional[dict[str, Any]] = None
+        if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            per_layer_attn_metadata = {}
+
+            common_attn_metadata = CommonAttentionMetadata(
+                query_start_loc=self.runner.query_start_loc[:num_reqs + 1],
+                query_start_loc_cpu=self.runner.query_start_loc_cpu[:num_reqs +
+                                                                    1],
+                seq_lens=self.runner.seq_lens[:num_reqs],
+                seq_lens_cpu=self.runner.seq_lens_cpu[:num_reqs],
+                num_computed_tokens_cpu=self.runner.input_batch.
+                num_computed_tokens_cpu_tensor[:num_reqs],
+                num_reqs=num_reqs,
+                num_actual_tokens=num_tokens,
+                max_query_len=max_query_len,
+                max_seq_len=self.max_model_len,
+                block_table_tensor=self.runner.input_batch.block_table[0].
+                get_device_tensor()[:num_reqs],
+                slot_mapping=self.runner.input_batch.block_table[0].
+                slot_mapping[:num_tokens],
+                causal=True)
+            # FIXME: need to consider multiple kv_cache_groups
+            attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
+                .build_for_drafting(common_attn_metadata=common_attn_metadata,
+                                    draft_index=0)
+            # At this moment, we assume all eagle layers belong to the same KV
+            # cache group, thus using the same attention metadata.
+
+            for layer_name in self.attn_layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+
+        if cudagraph_runtime_mode == CUDAGraphMode.NONE:
+            batch_descriptor = None
+        else:
+            assert batch_descriptor is not None, \
+                "batch_descriptor should be provided for cudagraph capture"
+            # sanity check
+            _cg_mode, batch_descriptor = \
+                self.cudagraph_dispatcher.dispatch(batch_descriptor)
+            assert cudagraph_runtime_mode == _cg_mode, (
+                f"Cudagraph runtime mode mismatch at dummy_run. "
+                f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}.")
+
+        with set_forward_context(per_layer_attn_metadata,
+                                 self.vllm_config,
+                                 num_tokens=num_tokens,
+                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                 batch_descriptor=batch_descriptor):
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
