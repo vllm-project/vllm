@@ -21,7 +21,6 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -108,7 +107,7 @@ class EagleProposer:
             with_numpy=True)
 
         # Determine allowed attention backends once during initialization.
-        self.allowed_attn_types: tuple
+        self.allowed_attn_types: Optional[tuple] = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
             # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
@@ -117,10 +116,6 @@ class EagleProposer:
                     AiterFlashAttentionMetadata)
                 rocm_types.append(AiterFlashAttentionMetadata)
             self.allowed_attn_types = tuple(rocm_types)
-        else:
-            self.allowed_attn_types = (FlashAttentionMetadata,
-                                       TreeAttentionMetadata,
-                                       FlashInferMetadata)
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
@@ -254,7 +249,8 @@ class EagleProposer:
 
         draft_token_ids = logits.argmax(dim=-1)
 
-        if not isinstance(attn_metadata, self.allowed_attn_types):
+        if self.allowed_attn_types is not None and \
+            not isinstance(attn_metadata, self.allowed_attn_types):
             raise ValueError(
                 f"Unsupported attention metadata type for speculative "
                 "decoding with num_speculative_tokens > 1: "
