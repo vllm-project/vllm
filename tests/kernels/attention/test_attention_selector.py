@@ -67,7 +67,6 @@ def generate_params():
     return params
 
 
-@pytest.mark.skip(reason="Skipped for now. Should be revisited.")
 @pytest.mark.parametrize("device, name, use_mla, block_size",
                          generate_params())
 def test_env(
@@ -189,7 +188,7 @@ def test_env(
                             # FlashMLA only supports block_size == 64
                             pytest.skip("FlashMLA only supports block_size 64")
                         else:
-                            from vllm.attention.backends.flashmla import (
+                            from vllm.v1.attention.backends.mla.flashmla import (  # noqa: E501
                                 is_flashmla_supported)
                             is_supported, _ = is_flashmla_supported()
                             if not is_supported:
