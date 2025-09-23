@@ -123,6 +123,7 @@ class KVConnectorModelRunnerMixin:
 
             output.kv_connector_stats = KVConnectorModelRunnerMixin.\
             get_kv_connector_stats()
+            kv_connector.clear_connector_metadata()
 
     @staticmethod
     def get_kv_connector_stats() -> Optional[KVConnectorStats]:
