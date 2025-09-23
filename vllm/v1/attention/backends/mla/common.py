@@ -469,7 +469,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.page_size = self.kv_cache_spec.block_size
 
         self.chunked_prefill_workspace_size = min(
-            # Try for full length request or at least 4 pages per-request
+            # Try for 8 full length request or at least 4 pages per-request
             max(8 * self.model_config.max_model_len,
                 4 * scheduler_config.max_num_seqs * cache_config.block_size),
             # For long-context models try not to over-allocate limiting
