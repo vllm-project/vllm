@@ -86,8 +86,8 @@ def create_lora(lora_id: int, model: nn.Module, sub_modules: list[str],
             name,
             8,
             16,
-            torch.rand([8,w.shape[1]], device=device),
-            torch.rand([w.shape[0],8], device=device),
+            torch.rand([8, w.shape[1]], device=device),
+            torch.rand([w.shape[0], 8], device=device),
         )
     return LoRAModel(lora_id, 8, loras)
 
@@ -109,8 +109,8 @@ def create_packed_lora(
             replaced_module_name,
             8,
             16,
-            torch.rand([8,w.shape[1]], device=device),
-            torch.rand([w.shape[0] // len(replaced_module_names),8],
+            torch.rand([8, w.shape[1]], device=device),
+            torch.rand([w.shape[0] // len(replaced_module_names), 8],
                        device=device),
         )
     return LoRAModel(lora_id, 8, loras)
