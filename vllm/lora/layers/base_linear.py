@@ -24,11 +24,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
         self.input_size = self.base_layer.input_size
+        # Ensure tp_size and tp_rank consistency with the base_layer.
+        self.tp_size = self.base_layer.tp_size
+        self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(self.base_layer)
         self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = None
-
         self.output_slices: tuple[int, ...]
-        self.tp_size: int
         self.output_size: int
         self.n_slices: int
 
