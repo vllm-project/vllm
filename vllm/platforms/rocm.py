@@ -226,8 +226,8 @@ class RocmPlatform(Platform):
                 f"is not MLA type while requested for MLA backend.")
 
         if envs.VLLM_USE_V1:
-            if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
-                    and on_gfx9()):
+            if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and
+                    on_gfx9()) or selected_backend == _Backend.ROCM_AITER_FA:
                 logger.info("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "rocm_aiter_fa.AiterFlashAttentionBackend")
@@ -235,7 +235,7 @@ class RocmPlatform(Platform):
                  and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION)
                     or selected_backend == _Backend.ROCM_AITER_UNIFIED_ATTN):
                 logger.info(
-                    "Using Rocm/Aiter Unified Attention backend on V1 engine.")
+                    "Using Aiter Unified Attention backend on V1 engine.")
                 return (
                     "vllm.v1.attention.backends."
                     "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend")
@@ -243,7 +243,7 @@ class RocmPlatform(Platform):
                     or selected_backend == _Backend.ROCM_ATTN_VLLM_V1):
                 # rocm specific backend, with aiter and/or
                 #   triton prefix-prefill
-                logger.info("Using Rocm/Aiter Attention backend on V1 engine.")
+                logger.info("Using Rocm Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "rocm_attn.RocmAttentionBackend")
             # default case, using triton unified attention

@@ -7,13 +7,10 @@ import pytest
 import torch._dynamo
 
 from tests.compile.backend import TestBackend
-from tests.models.utils import check_outputs_equal
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata)
-from vllm import LLM, SamplingParams
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention import Attention
-from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
@@ -23,11 +20,11 @@ from vllm.config import (CacheConfig, CompilationConfig, CompilationLevel,
                          set_current_vllm_config)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey, kFp8StaticTensorSym, kNvfp4Quant)
+    kFp8StaticTensorSym, kNvfp4Quant)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -36,124 +33,6 @@ FP4_DTYPE = torch.uint8
 # globals needed for string-import custom Dynamo backend field
 backend: Optional[TestBackend] = None
 backend_unfused: Optional[TestBackend] = None
-
-
-@pytest.mark.parametrize(
-    "model, quant_key",
-    [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)])
-@pytest.mark.parametrize("use_triton_fa", [True, False])
-@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="V0 attn quant fusion only on ROCm")
-def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
-                             quant_key: QuantKey, use_triton_fa: bool):
-    # Clean Dynamo cache to avoid reusing other test cases
-    # (for some reason the reset at the end is not enough)
-    torch._dynamo.reset()
-
-    # Use global backends
-    global backend, backend_unfused
-
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-    monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
-
-    # Prompt 4 seems too open-ended, differs between fused and unfused
-    # (both outputs look reasonable though)
-    prompts = example_prompts[:4] + example_prompts[5:]
-
-    compile_config = CompilationConfig(
-        # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
-        # DYNAMO_ONCE does not properly propagate shapes.
-        level=CompilationLevel.DYNAMO_AS_IS,
-        backend="tests.compile.test_fusion_attn.backend_unfused",
-        custom_ops=["+quant_fp8"],
-    )
-    vllm_config = VllmConfig(compilation_config=compile_config,
-                             model_config=ModelConfig(
-                                 model=model,
-                                 dtype=torch.bfloat16,
-                             ))
-    backend_unfused = TestBackend(NoOpEliminationPass(vllm_config))
-
-    llm = LLM(model,
-              enforce_eager=True,
-              compilation_config=compile_config,
-              gpu_memory_utilization=0.5,
-              max_model_len=2048)
-
-    sampling_params = SamplingParams(temperature=0.0,
-                                     max_tokens=10,
-                                     top_p=0.95)
-
-    unfused_output = llm.generate(prompts, sampling_params)
-    backend_unfused = None  # Reset backend to make sure llm gets released
-    del llm
-
-    compile_config = CompilationConfig(
-        # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
-        # DYNAMO_ONCE does not properly propagate shapes.
-        level=CompilationLevel.DYNAMO_AS_IS,
-        backend="tests.compile.test_fusion_attn.backend",
-        custom_ops=["+quant_fp8"],
-    )
-    vllm_config = VllmConfig(compilation_config=compile_config,
-                             model_config=ModelConfig(
-                                 model=model,
-                                 dtype=torch.bfloat16,
-                             ))
-
-    # AttnFusionPass needs attention layers to be registered in config upon init
-    # so we initialize it during compilation.
-    attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw)
-    backend = TestBackend(NoOpEliminationPass(vllm_config), attn_pass)
-    llm2 = LLM(model,
-               enforce_eager=True,
-               compilation_config=compile_config,
-               gpu_memory_utilization=0.5,
-               max_model_len=2048)
-
-    # check support
-    attn_fusion_supported = [
-        layer.impl.fused_output_quant_supported(quant_key)
-        for key, layer in compile_config.static_forward_context.items()
-    ]
-
-    print(f"{attn_fusion_supported=}")
-    if any(attn_fusion_supported):
-        # Check quant ops
-        backend.check_before_ops([QUANT_OPS[quant_key]], fully_replaced=False)
-
-    # attention ops present in both, just output_scale param changes
-    attn_nodes_pre = list(find_op_nodes(ATTN_OP, backend.graph_pre_pass))
-    attn_nodes_post = list(find_op_nodes(ATTN_OP, backend.graph_post_pass))
-    assert len(attn_nodes_pre) == len(attn_nodes_post)
-
-    for i in range(len(attn_nodes_pre)):
-        assert attn_nodes_pre[i].kwargs["output_scale"] is None
-        fused = attn_nodes_post[i].kwargs["output_scale"] is not None
-        assert fused == attn_fusion_supported[i], \
-            f"Node {i} {'' if fused else 'not '} expected " \
-            f"to have fused output quant"
-
-    # check outputs
-    fused_output = llm2.generate(prompts, sampling_params)
-
-    # transform outputs to format expected by check_outputs_equal
-    sample_outs = lambda s: (list(s.token_ids), s.text)
-    outs_lst = lambda ros: [sample_outs(ro.outputs[0]) for ro in ros]
-
-    check_outputs_equal(
-        outputs_0_lst=outs_lst(unfused_output),
-        outputs_1_lst=outs_lst(fused_output),
-        name_0="unfused",
-        name_1="fused",
-    )
-
-    # Clean Dynamo cache to avoid polluting other case(s)
-    torch._dynamo.reset()
-
-    # Reset backend to make sure llm2 gets released
-    backend = None
 
 
 class AttentionQuantPatternModel(torch.nn.Module):
@@ -197,7 +76,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-    def build_attn_metadata(self, batch_size: int, use_hnd: bool):
+    def build_attn_metadata(self, batch_size: int, use_hnd: bool,
+                            kv_first: bool):
         """Initialize attention metadata."""
 
         # Create common attn metadata
@@ -223,7 +103,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
                                self.head_size,
                                dtype=self.kv_cache_dtype,
                                device=self.device)
-        if current_platform.is_rocm():
+        if kv_first:
             # k/v as 1st dimention
             if use_hnd:
                 kv_cache = kv_cache.permute(1, 0, 2, 3, 4)
@@ -334,12 +214,12 @@ else:
                          [7, 256, 533] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("model_name, model_class", MODELS)
-@pytest.mark.parametrize("backend",
-                         [_Backend.FLASHINFER] if current_platform.is_cuda()
-                         else [_Backend.TRITON_ATTN_VLLM_V1])
 @pytest.mark.parametrize(
-    "split_attention",
-    [False, True] if current_platform.is_rocm() else [False])
+    "backend",
+    ["flashinfer.FlashInferBackend"] if current_platform.is_cuda() else [
+        "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend",
+        "rocm_attn.RocmAttentionBackend", "triton_attn.TritonAttentionBackend"
+    ])
 # TODO(boyuan): test inductor graph partition on rocm
 @pytest.mark.parametrize(
     "use_inductor_graph_partition",
@@ -356,7 +236,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                                  head_size: int, batch_size: int,
                                  dtype: torch.dtype, model_name: str,
                                  model_class: type[AttentionQuantPatternModel],
-                                 backend: _Backend, split_attention: bool,
+                                 backend: _Backend,
                                  use_inductor_graph_partition: bool,
                                  monkeypatch, dist_init, caplog_vllm):
     """Test AttentionStaticQuantPattern fusion pass"""
@@ -367,8 +247,13 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                     "in PyTorch 2.9+")
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    if split_attention:
-        monkeypatch.setenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "1")
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    # Mock the _cached_get_attn_backend function to avoid cached results
+    monkeypatch.setattr(
+        "vllm.attention.selector._cached_get_attn_backend",
+        lambda *args, **kwargs: resolve_obj_by_qualname(
+            "vllm.v1.attention.backends." + backend))
 
     device = torch.device("cuda:0")
     torch.manual_seed(42)
@@ -406,11 +291,16 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
     torch._dynamo.mark_dynamic(k, 0)
     torch._dynamo.mark_dynamic(v, 0)
 
+    use_hnd = backend in ("rocm_attn.RocmAttentionBackend", )
+    kv_first = backend in (
+        "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend",
+        "rocm_attn.RocmAttentionBackend",
+    )
+
     # Run model directly without compilation and fusion
     vllm_config_unfused = copy.deepcopy(vllm_config)
     with set_current_vllm_config(vllm_config_unfused), set_forward_context(
-            attn_metadata=None, vllm_config=vllm_config_unfused
-    ), global_force_attn_backend_context_manager(backend):
+            attn_metadata=None, vllm_config=vllm_config_unfused):
         model_unfused = model_class(num_qo_heads=num_qo_heads,
                                     num_kv_heads=num_kv_heads,
                                     head_size=head_size,
@@ -421,7 +311,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
         forward_ctx = get_forward_context()
         forward_ctx.attn_metadata = model_unfused.build_attn_metadata(
-            batch_size, use_hnd=split_attention)
+            batch_size, use_hnd=use_hnd, kv_first=kv_first)
 
         # Run model directly without compilation and fusion
         result_unfused = model_unfused(q, k, v)
@@ -430,8 +320,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
     vllm_config.compilation_config.pass_config = PassConfig(
         enable_attn_fusion=True, enable_noop=True)
     with set_current_vllm_config(vllm_config), set_forward_context(
-            attn_metadata=None, vllm_config=vllm_config
-    ), global_force_attn_backend_context_manager(backend):
+            attn_metadata=None, vllm_config=vllm_config):
         model_fused = model_class(num_qo_heads=num_qo_heads,
                                   num_kv_heads=num_kv_heads,
                                   head_size=head_size,
@@ -443,7 +332,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
         forward_ctx = get_forward_context()
         forward_ctx.attn_metadata = model_fused.build_attn_metadata(
-            batch_size, use_hnd=split_attention)
+            batch_size, use_hnd=use_hnd, kv_first=kv_first)
 
         # Create test backend with fusion passes enabled
         noop_pass = NoOpEliminationPass(vllm_config)
@@ -459,7 +348,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
         result_fused_1 = model_compiled(q, k, v)
 
-        if backend == _Backend.FLASHINFER:
+        if backend == "flashinfer.FlashInferBackend":
             # With the Flashinfer backend after the 1st round of the forward
             # pass, output quant scale should be loaded into the attn layer's
             # _o_scale_float, the 2nd round should reuse the loaded
