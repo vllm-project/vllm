@@ -485,9 +485,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       if (threadIdx.x == 63) {
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
-            scalar_t out = __float2s<scalar_t>(sum[n][i]);
-            C[m + i + n * M] =
-                BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
+            if constexpr (std::is_same_v<scalar_t, half>) {
+              if (BIAS)
+                sum[n][i] += __half2float(BIAS[(m + i) % Bx + (n % By) * M]);
+            } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              if (BIAS)
+                sum[n][i] +=
+                    __bfloat162float(BIAS[(m + i) % Bx + (n % By) * M]);
+            }
+            C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
           }
         }
       }
@@ -531,9 +537,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       if (threadIdx.x == 63) {
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
-            scalar_t out = __float2bfloat16(sum4[n][i][0]);
-            C[m + i + n * M] =
-                BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
+            if (BIAS)
+              sum4[n][i][0] +=
+                  __bfloat162float(BIAS[(m + i) % Bx + (n % By) * M]);
+            C[m + i + n * M] = __float2bfloat16(sum4[n][i][0]);
           }
         }
       }
@@ -779,9 +786,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
-              scalar_t out = __float2s<scalar_t>(sum[n][i]);
-              C[m + i + n * M] =
-                  BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
+              if constexpr (std::is_same_v<scalar_t, half>) {
+                if (BIAS)
+                  sum[n][i] += __half2float(BIAS[(m + i) % Bx + (n % By) * M]);
+              } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+                if (BIAS)
+                  sum[n][i] +=
+                      __bfloat162float(BIAS[(m + i) % Bx + (n % By) * M]);
+              }
+              C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
             }
           }
         }
@@ -828,9 +841,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
-              scalar_t out = __float2bfloat16(sum4[n][i][0]);
-              C[m + i + n * M] =
-                  BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
+              if (BIAS)
+                sum4[n][i][0] +=
+                    __bfloat162float(BIAS[(m + i) % Bx + (n % By) * M]);
+              C[m + i + n * M] = __float2bfloat16(sum4[n][i][0]);
             }
           }
         }
@@ -1140,9 +1154,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
-              scalar_t out = __float2s<scalar_t>(sum[n][i]);
-              C[m + i + n * M] =
-                  BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
+              if constexpr (std::is_same_v<scalar_t, half>) {
+                if (BIAS)
+                  sum[n][i] += __half2float(BIAS[(m + i) % Bx + (n % By) * M]);
+              } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+                if (BIAS)
+                  sum[n][i] +=
+                      __bfloat162float(BIAS[(m + i) % Bx + (n % By) * M]);
+              }
+              C[m + i + n * M] = __float2s<scalar_t>(sum[n][i]);
             }
           }
         }
@@ -1185,9 +1205,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
-              scalar_t out = __float2bfloat16(sum4[n][i][0]);
-              C[m + i + n * M] =
-                  BIAS ? out + BIAS[(m + i) % Bx + (n % By) * M] : out;
+              if (BIAS)
+                sum4[n][i][0] +=
+                    __bfloat162float(BIAS[(m + i) % Bx + (n % By) * M]);
+              C[m + i + n * M] = __float2bfloat16(sum4[n][i][0]);
             }
           }
         }
@@ -1490,10 +1511,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (threadIdx.x == 0) {
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
-          // TODO: Determine data type conversion of bias for fp8
-          scalar_t out = __float2s<scalar_t>(sum[n][y][0] * sA * sB);
-          C[m + y + n * M] =
-              BIAS ? (out + BIAS[(m + y) % Bx + (n % By) * M]) : out;
+          if (y + m >= M) break;  // To avoid mem access fault.
+          sum[n][y][0] *= sA * sB;
+          if constexpr (std::is_same_v<scalar_t, half>) {
+            if (BIAS)
+              sum[n][y][0] += __half2float(BIAS[(m + y) % Bx + (n % By) * M]);
+          } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+            if (BIAS)
+              sum[n][y][0] +=
+                  __bfloat162float(BIAS[(m + y) % Bx + (n % By) * M]);
+          }
+          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0]);  // * sA * sB);
         }
       }
     }
@@ -1669,9 +1697,16 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
-          scalar_t out = __float2s<scalar_t>(sum[n][y][0] * sA * sB);
-          C[m + y + n * M] =
-              BIAS ? (out + BIAS[(m + y) % Bx + (n % By) * M]) : out;
+          sum[n][y][0] *= sA * sB;
+          if constexpr (std::is_same_v<scalar_t, half>) {
+            if (BIAS)
+              sum[n][y][0] += __half2float(BIAS[(m + y) % Bx + (n % By) * M]);
+          } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+            if (BIAS)
+              sum[n][y][0] +=
+                  __bfloat162float(BIAS[(m + y) % Bx + (n % By) * M]);
+          }
+          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0]);
         }
       }
     }
