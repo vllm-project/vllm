@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 import vllm
 from vllm.compilation.fusion_mul_pad import MulPadFusionPass
@@ -26,8 +27,8 @@ def test_mul_pad_fusion(shape, dtype):
         def forward(self, a, b):
             # mul + pad pattern
             x = a * b
-            y = torch.constant_pad_and(
-                x, (0, round_up(a.shape[-1], 256) - a.shape[-1]), 0.0)
+            y = F.pad(x, (0, round_up(a.shape[-1], 256) - a.shape[-1]),
+                      value=0.0)
             return y
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
@@ -48,7 +49,7 @@ def test_mul_pad_fusion(shape, dtype):
         ATOL, RTOL = (2e-3, 2e-3)
         torch.testing.assert_close(ref, out, atol=ATOL, rtol=RTOL)
     assert backend.op_count(torch.ops.aten.mul.Tensor) == 1
-    assert backend.op_count(torch.ops.aten.constant_pad_and.default) == 0
+    assert backend.op_count(torch.ops.aten.constant_pad_nd.default) == 0
 
 
 def test_non_fusion_pad_preserved():
@@ -60,12 +61,12 @@ def test_non_fusion_pad_preserved():
     class Model(torch.nn.Module):
 
         def forward(self, a, b):
-            y = torch.constant_pad_and(a, (0, 2), 1.0)
+            y = F.pad(a, (0, 2), value=1.0)
             return y
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
-        pass_config=PassConfig(enable_fusion_pad=True),
+        pass_config=PassConfig(enable_fusion=True),
     ))
     with vllm.config.set_current_vllm_config(vllm_config):
         fusion_pass = MulPadFusionPass(vllm_config)
@@ -75,4 +76,4 @@ def test_non_fusion_pad_preserved():
         compiled = torch.compile(model, backend=backend)
         out = compiled(a, b)
         torch.testing.assert_close(ref, out)
-        assert backend.op_count(torch.ops.aten.constant_pad_and.default) == 1
+        assert backend.op_count(torch.ops.aten.constant_pad_nd.default) == 1

@@ -18,7 +18,7 @@ logger = init_logger(__name__)
 
 
 class PadPattern:
-    """Fuse mul + constant_pad_and for last-dim zero padding.
+    """Fuse mul + constant_pad_nd for last-dim zero padding.
     eg.
         x = a * b
         y = F.pad(x, (0, 192), 0.0)
@@ -32,7 +32,7 @@ class PadPattern:
 
         def pattern(a, b):
             mul = torch.ops.aten.mul.Tensor(a, b)
-            return torch.ops.aten.constant_pad_and.default(
+            return torch.ops.aten.constant_pad_nd.default(
                 self=mul,
                 pad=[0, self.roundup(mul.shape[-1]) - mul.shape[-1]],
                 value=0.0,
