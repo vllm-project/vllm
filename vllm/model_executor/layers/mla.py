@@ -154,15 +154,10 @@ class MultiHeadLatentAttention(CustomOp):
 
         q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
             positions, q[..., self.qk_nope_head_dim:], k_pe)
-        
-        if self.indexer:
-            topk_indices = self.indexer(hidden_states, q_c, positions, self.rotary_emb)
-            # if topk_indices is not None:
-                # print(topk_indices)
 
-        if self.use_sparse:
-            topk_indices = torch.zeros(q.shape[0], self.topk_tokens)
-
+        if self.indexer and self.use_sparse:
+            topk_indices = self.indexer(hidden_states, q_c, positions,
+                                        self.rotary_emb)
             # NOTE(Chen): a bit hacky, but need to modify Attention.forward
             # otherwise. Try to refactor this later.
             self.mla_attn.impl.set_topk_indices(topk_indices)
