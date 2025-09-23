@@ -48,11 +48,11 @@ class LoRALayerWeights:
 
     @property
     def input_dim(self) -> int:
-        return self.lora_a.shape[0]
+        return self.lora_a.shape[1]
 
     @property
     def output_dim(self) -> int:
-        return self.lora_b.shape[1]
+        return self.lora_b.shape[0]
 
     @property
     def is_packed(self) -> bool:
