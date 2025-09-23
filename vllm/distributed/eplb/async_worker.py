@@ -5,7 +5,7 @@ The async worker that transfers experts in the background.
 """
 import asyncio
 import threading
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import torch
 from torch.distributed import ProcessGroup
@@ -13,8 +13,10 @@ from torch.distributed import ProcessGroup
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import init_logger
 
-from .eplb_state import EplbState
 from .rebalance_execute import transfer_layer
+
+if TYPE_CHECKING:
+    from .eplb_state import EplbState
 
 logger = init_logger(__name__)
 
