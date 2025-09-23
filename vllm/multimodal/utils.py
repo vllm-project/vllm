@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 
+import os
 import numpy as np
 import numpy.typing as npt
 import torch
@@ -66,6 +67,7 @@ class MediaConnector:
         self,
         url_spec: ParseResult,
         media_io: MediaIO[_M],
+        load_type: str = "PIL",
     ) -> _M:
         data_spec, data = url_spec.path.split(",", 1)
         media_type, data_type = data_spec.split(";", 1)
@@ -74,7 +76,10 @@ class MediaConnector:
             msg = "Only base64 data URLs are supported for now."
             raise NotImplementedError(msg)
 
-        return media_io.load_base64(media_type, data)
+        if load_type == "bytes":
+            return media_io.load_base64_bytes(media_type, data)
+        else:
+            return media_io.load_base64(media_type, data)
 
     def _load_file_url(
         self,
@@ -100,6 +105,7 @@ class MediaConnector:
         media_io: MediaIO[_M],
         *,
         fetch_timeout: Optional[int] = None,
+        load_type: str = "bytes",
     ) -> _M:
         url_spec = urlparse(url)
 
@@ -107,13 +113,24 @@ class MediaConnector:
             connection = self.connection
             data = connection.get_bytes(url, timeout=fetch_timeout)
 
-            return media_io.load_bytes(data)
+            if load_type == "bytes":
+                msg = "Only data URLs are currently supported for raw bytes loading."
+                raise NotImplementedError(msg)
+            else:
+                connection = self.connection
+                data = connection.get_bytes(url, timeout=fetch_timeout)
+
+                return media_io.load_bytes(data)
 
         if url_spec.scheme == "data":
-            return self._load_data_url(url_spec, media_io)
+            return self._load_data_url(url_spec, media_io, load_type)
 
         if url_spec.scheme == "file":
-            return self._load_file_url(url_spec, media_io)
+            if load_type == "bytes":
+                msg = "Only data URLs are currently supported for raw bytes loading."
+                raise NotImplementedError(msg)
+            else:
+                return self._load_file_url(url_spec, media_io)
 
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
@@ -124,20 +141,29 @@ class MediaConnector:
         media_io: MediaIO[_M],
         *,
         fetch_timeout: Optional[int] = None,
+        load_type: str = "bytes",
     ) -> _M:
         url_spec = urlparse(url)
 
         if url_spec.scheme.startswith("http"):
-            connection = self.connection
-            data = await connection.async_get_bytes(url, timeout=fetch_timeout)
+            if load_type == "bytes":
+                msg = "Only data URLs are currently supported for raw bytes loading."
+                raise NotImplementedError(msg)
+            else:
+                connection = self.connection
+                data = await connection.async_get_bytes(url, timeout=fetch_timeout)
 
-            return media_io.load_bytes(data)
+                return media_io.load_bytes(data)
 
         if url_spec.scheme == "data":
-            return self._load_data_url(url_spec, media_io)
+            return self._load_data_url(url_spec, media_io, load_type)
 
         if url_spec.scheme == "file":
-            return self._load_file_url(url_spec, media_io)
+            if load_type == "bytes":
+                msg = "Only data URLs are currently supported for raw bytes loading."
+                raise NotImplementedError(msg)
+            else:
+                return self._load_file_url(url_spec, media_io)
 
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
@@ -179,17 +205,20 @@ class MediaConnector:
         image_mode: str = "RGB",
     ) -> Image.Image:
         """
-        Load a PIL image from a HTTP or base64 data URL.
+        Load a PIL image (or raw bytes) from a HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
         """
         image_io = ImageMediaIO(image_mode=image_mode)
+        use_mediapipe = os.getenv("VLLM_USE_MEDIA_PIPELINE", "false").lower() in ("1", "true", "yes")
+        load_type = "bytes" if use_mediapipe else "PIL"
 
         try:
             return self.load_from_url(
                 image_url,
                 image_io,
                 fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+                load_type=load_type,
             )
         except UnidentifiedImageError as e:
             # convert to ValueError to be properly caught upstream
@@ -202,17 +231,20 @@ class MediaConnector:
         image_mode: str = "RGB",
     ) -> Image.Image:
         """
-        Asynchronously load a PIL image from a HTTP or base64 data URL.
+        Asynchronously load a PIL image (or raw bytes) from a HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
         """
         image_io = ImageMediaIO(image_mode=image_mode)
+        use_mediapipe = os.getenv("VLLM_USE_MEDIA_PIPELINE", "false").lower() in ("1", "true", "yes")
+        load_type = "bytes" if use_mediapipe else "PIL"
 
         try:
             return await self.load_from_url_async(
                 image_url,
                 image_io,
                 fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+                load_type=load_type,
             )
         except UnidentifiedImageError as e:
             # convert to ValueError to be properly caught upstream

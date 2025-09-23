@@ -19,6 +19,19 @@ import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchEncoding, PretrainedConfig, TensorType
 
+from habana_frameworks.mediapipe import fn
+from habana_frameworks.mediapipe.mediapipe import MediaPipe
+from habana_frameworks.mediapipe.media_types import dtype as dt
+from habana_frameworks.mediapipe.media_types import imgtype as it
+from habana_frameworks.mediapipe.media_types import readerOutType as ro
+from habana_frameworks.mediapipe.operators.reader_nodes.reader_nodes import media_ext_reader_op_impl
+from habana_frameworks.mediapipe.operators.reader_nodes.reader_nodes import media_ext_reader_op_tensor_info
+from habana_frameworks.mediapipe.plugins.iterator_pytorch import MediaGenericPytorchIterator
+import numpy as np
+from queue import Queue
+import io
+import time
+
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
@@ -295,6 +308,244 @@ def video_to_pixel_values_internvl(
     pixel_values = torch.stack([transform(image) for image in frames_list])
     return pixel_values
 
+# Handle MediaPipe pipe_manager destructor
+from habana_frameworks.mediapipe.backend.cal import pipe_manager, cpp_pipe_manager_list
+
+def _patched_close(self):
+    """Patched close method that handles None cpp_pipe_manager_list during shutdown"""
+    try:
+        # Check if cpp_pipe_manager_list exists and is not None
+        if cpp_pipe_manager_list is not None and self._pm_ in cpp_pipe_manager_list:
+            cpp_pipe_manager_list.remove(self._pm_)
+    except (TypeError, AttributeError):
+        # Handle case where cpp_pipe_manager_list is None or not iterable
+        pass
+
+    # Clean up the pipe manager
+    if self._pm_ is not None:
+        self._pm_.close()
+        self._pm_ = None
+
+pipe_manager.close = _patched_close
+
+# Queue shared between external reader and mediapipe call
+shared_q = Queue()
+
+
+class MediaPytorchIterator(MediaGenericPytorchIterator):
+    def __init__(self, mediapipe):
+        super().__init__(mediapipe=mediapipe, device="hpu", fw_type="PYT_FW")
+
+
+class external_reader(media_ext_reader_op_impl):
+    def __init__(self, params, fw_params):
+        self.batch_size = fw_params.batch_size
+        self.max_file = ""
+        self.num_batches = 1
+
+    def __iter__(self):
+        return self
+
+    def __len__(self):
+        return self.num_batches
+
+    def __next__(self):
+        img_list = shared_q.get()
+        for i in range(len(img_list)):
+            # NOTE: this padding is needed because of HW alignmnet requirment
+            img_list[i] = np.pad(img_list[i],
+                                       (0, 64 - len(img_list[i]) % 64),
+                                       'constant')
+        return img_list
+
+    def get_media_output_type(self):
+        return ro.BUFFER_LIST
+
+    def get_largest_file(self):
+        return self.max_file
+
+    def gen_output_info(self):
+        out_info = []
+        o = media_ext_reader_op_tensor_info(
+            dt.NDT, np.array([self.batch_size], dtype=np.uint32), "")
+        out_info.append(o)
+        return out_info
+
+
+class hpuMediaPipe(MediaPipe):
+    def __init__(self, device, queue_depth, batch_size,
+                 num_threads, op_device,
+                 img_height, img_width):
+        super(
+            hpuMediaPipe,
+            self).__init__(
+            device,
+            queue_depth,
+            batch_size,
+            num_threads,
+            self.__class__.__name__)
+
+        mediapipe_seed = int(time.time_ns() % (2**31 - 1))
+
+        self.input = fn.MediaExtReaderOp(impl=external_reader,
+                                         num_outputs=1,
+                                         seed=mediapipe_seed,
+                                         device=op_device)
+        self.decode = fn.ImageDecoder(
+            device="hpu", output_format=it.RGB_I, resize=[img_width, img_height])
+
+        self.mean_node = fn.MediaConst(
+            data=np.array([127.5, 127.5, 127.5], dtype=dt.FLOAT32),
+            shape=[1, 1, 3],
+            dtype=dt.FLOAT32
+        )
+        self.std_node = fn.MediaConst(
+            data=np.array([1/127.5, 1/127.5, 1/127.5], dtype=dt.FLOAT32),
+            shape=[1, 1, 3],
+            dtype=dt.FLOAT32
+        )
+
+        self.cmn = fn.CropMirrorNorm(crop_w=img_width, crop_h=img_height, dtype=dt.FLOAT32, device="hpu")
+
+        self.transpose = fn.Transpose(
+            device="hpu",
+            tensorDim=4,
+            permutation=[1, 2, 0, 3] #NCHW
+        )
+
+    def definegraph(self):
+        images = self.input()
+        images = self.decode(images)
+        mean = self.mean_node()
+        std = self.std_node()
+        images = self.cmn(images, mean, std)
+        images = self.transpose(images)
+
+        # Return the full processed image - we'll do tiling in Python
+        return images
+
+def get_image_info(data):
+    # Get image info using PIL without decoding
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            return {
+                'format': img.format,
+                'size': img.size,
+                'mode': img.mode
+            }
+    except Exception as e:
+        raise ValueError(f"Input image bitstream is not in supported format: {str(e)}")
+
+def preprocess_images(
+    images,
+    target_ratios: list[tuple[int, int]],
+    patch_size=448,
+    use_thumbnail=False,
+):
+    batch_size = 0
+    queue_depth = 0
+    num_threads = 1
+
+    # validate images and create batches
+    img_size = None
+    img_sizes = []
+    batch_sizes = []
+    for img in images:
+        img_info = get_image_info(img)
+        if img_info['format'] != 'JPEG' and img_info['mode'] != 'RGB':
+            raise ValueError(f"HPU media pipeline only supports JPEG images in RGB mode. Detected format={img_info['format']}, mode={img_info['mode']}")
+        if img_size==None:
+            img_size = img_info['size']
+        else:
+            if img_info['size'] != img_size:
+                img_sizes.append(img_size)
+                batch_sizes.append(batch_size)
+                batch_size = 0
+                img_size = img_info['size']
+        batch_size += 1
+    img_sizes.append(img_size)
+    batch_sizes.append(batch_size)
+
+    thumbs = None
+    if use_thumbnail and len(images) > 0:
+        batch_size = len(images)
+        pipe = hpuMediaPipe("legacy", queue_depth, batch_size,
+                        num_threads, "cpu",
+                        patch_size, patch_size)
+        pipe.build()
+        data_loader = MediaPytorchIterator(pipe)
+        data_loader = iter(data_loader)
+
+        img_list = np.empty(shape=[batch_size, ], dtype=object)
+        for i in range(batch_size):
+            img_list[i] = np.frombuffer(images[i], np.uint8)
+
+        shared_q.put(img_list)
+        thumbs = next(data_loader)[0]
+
+        shared_q.task_done()
+        pipe.close()
+        del pipe
+
+    image_num_patches = torch.zeros(len(images), dtype=torch.int64)
+
+    patches = []
+    thumb_idx = 0
+    image_num_patches_idx = 0
+    for batch_size, img_size in zip(batch_sizes, img_sizes):
+        # calculate the number of blocks without thumbnail
+        blocks, target_width, target_height = calculate_internvl_targets(
+            orig_width=img_size[0],
+            orig_height=img_size[1],
+            target_ratios=target_ratios,
+            image_size=patch_size,
+            use_thumbnail=False,
+        )
+
+        num_patches = blocks + 1 if use_thumbnail and thumbs is not None and blocks > 1 else blocks
+        image_num_patches[image_num_patches_idx:image_num_patches_idx+batch_size] = num_patches
+
+        pipe = hpuMediaPipe("legacy", queue_depth, batch_size,
+                        num_threads, "cpu",
+                        target_height, target_width)
+        pipe.build()
+        data_loader = MediaPytorchIterator(pipe)
+        data_loader = iter(data_loader)
+
+        img_list = np.empty(shape=[batch_size, ], dtype=object)
+        for i in range(batch_size):
+            img_list[i] = np.frombuffer(images[i], np.uint8)
+
+        shared_q.put(img_list)
+        processed_images = next(data_loader)[0]
+
+        shared_q.task_done()
+        pipe.close()
+        del pipe
+
+        # Extract tiles
+        tiles = []
+        H, W = target_height, target_width
+        for h_idx in range(H // patch_size):
+            for w_idx in range(W // patch_size):
+                h_start = h_idx * patch_size
+                h_end = h_start + patch_size
+                w_start = w_idx * patch_size
+                w_end = w_start + patch_size
+
+                tile = processed_images[:, :, h_start:h_end, w_start:w_end]
+                tiles.append(tile)
+
+        for i in range(batch_size):
+            for t in tiles:
+                patches.append(t[i])
+            if use_thumbnail and thumbs is not None and len(tiles) > 1:
+                patches.append(thumbs[thumb_idx])
+            thumb_idx += 1
+
+    patches_flat = torch.stack(patches, dim=0)
+    return patches_flat, image_num_patches
+
 
 class BaseInternVLProcessor(ABC):
     """
@@ -451,25 +702,58 @@ class BaseInternVLProcessor(ABC):
         if len(images) == 0:
             image_inputs = {}
         else:
-            pixel_values_lst = self._images_to_pixel_values_lst(
-                images,
-                min_dynamic_patch=min_dynamic_patch,
-                max_dynamic_patch=max_dynamic_patch,
-                dynamic_image_size=dynamic_image_size,
-            )
-            image_inputs: dict[str, NestedTensors] = {
-                "pixel_values_flat":
-                torch.cat(pixel_values_lst),
-                "image_num_patches":
-                torch.tensor([len(item) for item in pixel_values_lst]),
-            }
+            use_mediapipe = os.getenv("VLLM_USE_MEDIA_PIPELINE", "false").lower() in ("1", "true", "yes")
+            if use_mediapipe:
+                # Use HPU media pipeline for image preprocessing
+                min_num, max_num = self.resolve_min_max_num(
+                    min_dynamic_patch=min_dynamic_patch,
+                    max_dynamic_patch=max_dynamic_patch,
+                    dynamic_image_size=dynamic_image_size,
+                    use_thumbnail=False,  # Applied in image_to_pixel_values
+                )
 
-            for pixel_values in pixel_values_lst:
-                num_patches = pixel_values.shape[0]
-                feature_size = num_patches * self.num_image_token
+                target_ratios = get_internvl_target_ratios(min_num, max_num)
 
-                image_repl = self.get_image_repl(feature_size, num_patches)
-                text = [t.replace('<image>', image_repl.full, 1) for t in text]
+                pixel_values_flat, image_num_patches = preprocess_images(
+                    images,
+                    target_ratios=target_ratios,
+                    patch_size=self.image_size,
+                    use_thumbnail=self.use_thumbnail,
+                )
+
+                image_inputs = {
+                    "pixel_values_flat": pixel_values_flat,
+                    "image_num_patches": image_num_patches,
+                }
+
+                for i in range(len(images)):
+                    num_patches = image_num_patches[i].item()
+                    feature_size = num_patches * self.num_image_token
+
+                    image_repl = self.get_image_repl(feature_size, num_patches)
+                    text = [t.replace('<image>', image_repl.full, 1) for t in text]
+
+            else:
+                pixel_values_lst = self._images_to_pixel_values_lst(
+                    images,
+                    min_dynamic_patch=min_dynamic_patch,
+                    max_dynamic_patch=max_dynamic_patch,
+                    dynamic_image_size=dynamic_image_size,
+                )
+                image_inputs: dict[str, NestedTensors] = {
+                    "pixel_values_flat":
+                    torch.cat(pixel_values_lst),
+                    "image_num_patches":
+                    torch.tensor([len(item) for item in pixel_values_lst]),
+                }
+
+                for pixel_values in pixel_values_lst:
+                    num_patches = pixel_values.shape[0]
+                    feature_size = num_patches * self.num_image_token
+
+                    image_repl = self.get_image_repl(feature_size, num_patches)
+                    text = [t.replace('<image>', image_repl.full, 1) for t in text]
+
         return text, image_inputs
 
     def _make_batch_input(self,
@@ -483,7 +767,7 @@ class BaseInternVLProcessor(ABC):
     def __call__(
         self,
         text: Optional[Union[str, list[str]]] = None,
-        images: Optional[Union[Image.Image, list[Image.Image]]] = None,
+        images: Optional[Union[Image.Image, list[Image.Image], bytes, list[bytes]]] = None,
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
@@ -602,7 +886,7 @@ class InternVLProcessor(BaseInternVLProcessor):
     def __call__(
         self,
         text: Optional[Union[str, list[str]]] = None,
-        images: Optional[Union[Image.Image, list[Image.Image]]] = None,
+        images: Optional[Union[Image.Image, list[Image.Image], bytes, list[bytes]]] = None,
         videos: Optional[Union[npt.NDArray, list[npt.NDArray]]] = None,
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,

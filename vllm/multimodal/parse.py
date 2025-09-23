@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import (TYPE_CHECKING, Any, Generic, Literal, NamedTuple, Optional,
                     TypeVar, Union)
 
+import io
 import numpy as np
 import torch
 from typing_extensions import TypeAlias, TypeGuard, assert_never
@@ -209,6 +210,9 @@ class ImageProcessorItems(ProcessorBatchItems[HfImageItem]):
 
         if isinstance(image, PILImage.Image):
             return ImageSize(*image.size)
+        if isinstance(image, (bytes, bytearray)):
+            with PILImage.open(io.BytesIO(image)) as img:
+                return ImageSize(*img.size)
         if isinstance(image, (np.ndarray, torch.Tensor)):
             _, h, w = image.shape
             return ImageSize(w, h)
@@ -407,6 +411,7 @@ class MultiModalDataParser:
             return ImageEmbeddingItems(data)
 
         if (isinstance(data, PILImage.Image)
+                or isinstance(data, (bytes, bytearray))
                 or isinstance(data,
                               (np.ndarray, torch.Tensor)) and data.ndim == 3):
             data_items = [data]

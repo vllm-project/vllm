@@ -57,6 +57,9 @@ class ImageMediaIO(MediaIO[Image.Image]):
     def load_base64(self, media_type: str, data: str) -> Image.Image:
         return self.load_bytes(base64.b64decode(data))
 
+    def load_base64_bytes(self, media_type: str, data: str) -> bytes:
+        return base64.b64decode(data, validate=True)
+
     def load_file(self, filepath: Path) -> Image.Image:
         image = Image.open(filepath)
         image.load()
