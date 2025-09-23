@@ -47,12 +47,13 @@ unless otherwise specified, backends are controlled via `VLLM_ALL2ALL_BACKEND`. 
 | Per tensor                  | T      |
 
 Modular kernels are supported by the following `FusedMoEMethodBase` classes.
- - [`ModelOptFp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/modelopt.py)
- - [`Fp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/fp8.py)
- - [`CompressedTensorsW4A4MoeMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py)
- - [`CompressedTensorsW8A8Fp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py)
- - [`Mxfp4MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/mxfp4.py)
- - [`UnquantizedFusedMoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/layer.py)
+
+- [`ModelOptFp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/modelopt.py)
+- [`Fp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/fp8.py)
+- [`CompressedTensorsW4A4MoeMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py)
+- [`CompressedTensorsW8A8Fp8MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe.py)
+- [`Mxfp4MoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/mxfp4.py)
+- [`UnquantizedFusedMoEMethod`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/layer.py)
 
 ## Fused MoE Experts Kernels
 
