@@ -138,10 +138,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # 2) Evaluate stop strings.
         stop_string = None
         if self.stop and len(self.output_token_ids) > self.min_tokens:
-            if (rp := self.reasoning_parser) and not rp.is_reasoning_end(
-                    self.token_ids):
-                return None
             stop = check_stop_strings(
+                token_ids=self.token_ids,
+                reasoning_parser=self.reasoning_parser,
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
                 stop=self.stop,
@@ -334,10 +333,12 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
 
 def check_stop_strings(
+    token_ids: list[int],
     output_text: str,
     new_char_count: int,
     stop: list[str],
     include_in_output: bool,
+    reasoning_parser: Optional[ReasoningParser] = None,
 ) -> Optional[tuple[str, int]]:
     """Check if any stop strings are matched and truncate sequence
     output text accordingly.
@@ -348,6 +349,8 @@ def check_stop_strings(
     length to which output_text should be truncated, or -1 for no
     truncation.
     """
+    if (rp := reasoning_parser) and not rp.is_reasoning_end(token_ids):
+        return None
     if not new_char_count or not stop:
         return None
 
