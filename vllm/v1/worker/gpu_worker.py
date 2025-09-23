@@ -32,6 +32,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
@@ -428,10 +429,19 @@ class Worker(WorkerBase):
     ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        num_input_tokens = self.model_runner._get_num_input_tokens(
+            num_scheduled_tokens)
+        all_gather_tensors = {
+            "residual":
+            not is_residual_scattered_for_sp(self.vllm_config,
+                                             num_input_tokens)
+        }
         if forward_pass and not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group()))
+                    all_gather_group=get_tp_group(),
+                    all_gather_tensors=all_gather_tensors))
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
@@ -444,7 +454,8 @@ class Worker(WorkerBase):
             "external_launcher") and not get_pp_group().is_last_rank
 
         get_pp_group().send_tensor_dict(output.tensors,
-                                        all_gather_group=get_tp_group())
+                                        all_gather_group=get_tp_group(),
+                                        all_gather_tensors=all_gather_tensors)
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
@@ -476,7 +487,7 @@ class Worker(WorkerBase):
                     sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        self.model_runner._dummy_run(1, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
@@ -672,7 +683,8 @@ class Worker(WorkerBase):
             tensorizer_config=tensorizer_config, )
 
     def shutdown(self) -> None:
-        self.model_runner.ensure_kv_transfer_shutdown()
+        if runner := getattr(self, "model_runner", None):
+            runner.ensure_kv_transfer_shutdown()
 
 
 def init_worker_distributed_environment(

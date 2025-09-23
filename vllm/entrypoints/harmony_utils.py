@@ -126,8 +126,10 @@ def get_developer_message(
         function_tools: list[Union[Tool, ChatCompletionToolsParam]] = []
         for tool in tools:
             if tool.type in ("web_search_preview", "code_interpreter",
-                             "container"):
+                             "container", "mcp"):
                 # These are built-in tools that are added to the system message.
+                # Adding in MCP for now until we support MCP tools executed
+                # server side
                 pass
 
             elif tool.type == "function":
@@ -387,7 +389,9 @@ def parse_remaining_state(
             id=f"msg_{random_uuid()}",
             content=[output_text],
             role="assistant",
-            status="completed",
+            # if the parser still has messages (ie if the generator got cut
+            # abruptly), this should be incomplete
+            status="incomplete",
             type="message",
         )
         return [text_item]
