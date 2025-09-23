@@ -205,7 +205,6 @@ from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig, get_current_vllm_config
-
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -437,15 +436,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
     reorder_batch_threshold: ClassVar[int] = 1
 
-    chunked_prefill_workspace_size: ClassVar[int] = -1
-    
     @staticmethod
     def determine_chunked_prefill_workspace_size(
             vllm_config: VllmConfig) -> int:
         scheduler_config = vllm_config.scheduler_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        
+
         chunked_prefill_workspace_size = min(
             # Try for 8 full length request or at least 4 pages per-request
             max(8 * model_config.max_model_len,
@@ -464,7 +461,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         chunked_prefill_workspace_size = max(
             chunked_prefill_workspace_size,
             scheduler_config.max_num_seqs * cache_config.block_size)
-        
+
         return chunked_prefill_workspace_size
 
     def __init__(self,
@@ -479,7 +476,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         scheduler_config = vllm_config.scheduler_config
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
-        cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
         self.device = device
 
@@ -1016,10 +1012,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 and current_platform.get_device_capability()[0] == 9)
 
         self.dcp_world_size: Optional[int] = None
-        
-        self.chunked_prefill_workspace_size = MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
-                get_current_vllm_config()
-            )
+
+        self.chunked_prefill_workspace_size = \
+            MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
+            get_current_vllm_config())
 
     def _flash_attn_varlen_diff_headdims(self,
                                          q,
@@ -1539,8 +1535,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
             # since this can be large
             _ = torch.empty(
-                (self.chunked_prefill_workspace_size,
-                 self.num_heads, self.qk_nope_head_dim + self.v_head_dim),
+                (self.chunked_prefill_workspace_size, self.num_heads,
+                 self.qk_nope_head_dim + self.v_head_dim),
                 device=k_c_normed.device,
                 dtype=k_c_normed.dtype,
             )
