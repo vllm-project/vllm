@@ -23,7 +23,6 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     from triton_kernels.tensor_details import layout
     from triton_kernels.tensor_details.layout import StridedLayout
 
-
     value_layout_opts: dict[str, Any] = {}
     scale_layout_opts: dict[str, Any] = {}
 
