@@ -234,6 +234,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.backbone.make_empty_intermediate_tensors)
 
+        self.use_vllm_v1 = envs.VLLM_USE_V1
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.backbone.get_input_embeddings(input_ids)
 
@@ -245,7 +247,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
                 **kwargs):
 
         mamba_cache_params = None
-        if not envs.VLLM_USE_V1:
+        if not self.use_vllm_v1:
             if self.mamba_cache is None:
                 num_layers = self.model_config.get_num_layers_by_block_type(
                     self.vllm_config.parallel_config, LayerBlockType.mamba)
