@@ -12,7 +12,7 @@ POOLING_TASKS = get_args(PoolingTask)
 SupportedTask = Literal[GenerationTask, PoolingTask]
 
 
-def encode2pooling_task(supported_tasks):
+def encode2pooling_task(supported_tasks: list[PoolingTask]) -> PoolingTask:
     # Currently no model supports both token_embed and token_classify.
     if "token_embed" in supported_tasks:
         return "token_embed"
