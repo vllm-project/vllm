@@ -103,17 +103,13 @@ if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_aiter_rms_norm",
         op_func=rocm_aiter_rms_norm_impl,
-        mutates_args=[],
         fake_impl=rocm_aiter_rms_norm_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
         op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
         op_func=rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-        mutates_args=[],
         fake_impl=rocm_aiter_rmsnorm2d_fwd_with_add_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
 

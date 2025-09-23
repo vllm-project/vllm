@@ -113,7 +113,6 @@ try:
     direct_register_custom_op(
         op_name="dequant_mxfp4",
         op_func=_dequant_mxfp4,
-        mutates_args=[],
         fake_impl=_dequant_mxfp4_fake,
     )
     dequant_mxfp4 = torch.ops.vllm.dequant_mxfp4
@@ -124,7 +123,6 @@ try:
     direct_register_custom_op(
         op_name="quant_dequant_mxfp4",
         op_func=_quant_dequant_mxfp4,
-        mutates_args=[],
         fake_impl=_quant_dequant_mxfp4_fake,
     )
     quant_dequant_mxfp4 = torch.ops.vllm.quant_dequant_mxfp4

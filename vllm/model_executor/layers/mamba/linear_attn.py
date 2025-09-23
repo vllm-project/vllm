@@ -31,7 +31,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
@@ -401,5 +400,4 @@ direct_register_custom_op(
     op_func=linear_attention,
     mutates_args=["output"],
     fake_impl=linear_attention_fake,
-    dispatch_key=current_platform.dispatch_key,
 )
