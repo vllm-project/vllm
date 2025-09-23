@@ -3581,14 +3581,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     CUDAGraphMode.NONE
             logger.warning(msg)
 
-        # pooling model does not support full cudagraphs
-        if cudagraph_mode.has_full_cudagraphs() and self.is_pooling_model:
-            msg = (f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
-                   "with pooling model; setting cudagraph_mode=PIECEWISE")
-            cudagraph_mode = self.compilation_config.cudagraph_mode = \
-                CUDAGraphMode.PIECEWISE
-            logger.warning(msg)
-
         # check that if we are doing spec-decode + decode full-cudagraphs it is
         # supported
         if (cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
