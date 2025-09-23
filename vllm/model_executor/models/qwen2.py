@@ -35,6 +35,7 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -313,14 +314,17 @@ class Qwen2Model(nn.Module):
 
         # Use the provided decoder layer type or default to Qwen2DecoderLayer
         decoder_layer_type = decoder_layer_type or Qwen2DecoderLayer
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            lambda prefix: decoder_layer_type(config=config,
-                                              cache_config=cache_config,
-                                              quant_config=quant_config,
-                                              prefix=prefix),
-            prefix=f"{prefix}.layers",
-        )
+        if has_ec_transfer() and get_ec_transfer().is_producer:
+            self.layers = None
+        else:
+            self.start_layer, self.end_layer, self.layers = make_layers(
+                config.num_hidden_layers,
+                lambda prefix: decoder_layer_type(config=config,
+                                                  cache_config=cache_config,
+                                                  quant_config=quant_config,
+                                                  prefix=prefix),
+                prefix=f"{prefix}.layers",
+            )
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
