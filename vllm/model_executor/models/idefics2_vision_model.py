@@ -34,7 +34,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal.utils import run_dp_sharded_vision_model
+
+from .vision import run_dp_sharded_vision_model
 
 
 class Idefics2VisionEmbeddings(nn.Module):
