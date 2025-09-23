@@ -142,10 +142,10 @@ class QuantFP8(CustomOp):
 
         x_grouped = x.view(-1, num_groups, self.group_size)
         absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
-        scale_raw = absmax / _FP8_MAX
+        scales_raw = absmax / _FP8_MAX
         if self.use_ue8m0:
-            scale_raw = torch.exp2(torch.ceil(torch.log2(scale_raw)))
-        scales = (scale_raw).clamp(min=_FP8_MIN_SCALING_FACTOR)
+            scales_raw = torch.exp2(torch.ceil(torch.log2(scales_raw)))
+        scales = (scales_raw).clamp(min=_FP8_MIN_SCALING_FACTOR)
 
         x_scaled = x_grouped / scales
         x_quant = x_scaled.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)

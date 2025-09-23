@@ -685,15 +685,19 @@ class VllmConfig:
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
-        # Enable quant_fp8 CUDA ops when we do block-wise quantization
-        # due to an incorrect group shape issue when compiling native
-        # https://github.com/vllm-project/vllm/issues/25382
-        #
-        # Also, on H100 since it's faster than native implementation
+        def has_blocked_weights():
+            if self.quant_config is not None:
+                if hasattr(self.quant_config, "weight_block_size"):
+                    return self.quant_config.weight_block_size is not None
+                elif hasattr(self.quant_config, "has_blocked_weights"):
+                    return self.quant_config.has_blocked_weights()
+            return False
+
+        # Enable quant_fp8 CUDA ops on H100 since it's faster than
+        # native implementation
         # https://github.com/vllm-project/vllm/issues/25094
-        if (self.quant_config is not None
-                and hasattr(self.quant_config, "weight_block_size")
-                and self.quant_config.weight_block_size is not None):
+        if current_platform.has_device_capability(
+                90) and has_blocked_weights():
             custom_ops = self.compilation_config.custom_ops
             if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
