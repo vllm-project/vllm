@@ -42,7 +42,7 @@ def main(args: Namespace):
         print(len(embeds))
 
     # Generate embedding for each token. The output is a list of PoolingRequestOutput.
-    outputs = llm.encode(prompts, pooling_task="encode")
+    outputs = llm.encode(prompts, pooling_task="token_embed")
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)

@@ -1725,11 +1725,13 @@ async def init_app_state(
         engine_client,
         vllm_config,
         state.openai_serving_models,
+        supported_tasks,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         log_error_stack=args.log_error_stack,
-    ) if "encode" in supported_tasks else None
+    ) if ("token_embed" in supported_tasks
+          or "token_classify" in supported_tasks) else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
