@@ -63,9 +63,6 @@ class FakeNixlWrapper:
     def deregister_memory(self, descs) -> None:
         pass
 
-    def deregister_memory(self, descs) -> None:
-        pass
-
     def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in blocks_data]
 

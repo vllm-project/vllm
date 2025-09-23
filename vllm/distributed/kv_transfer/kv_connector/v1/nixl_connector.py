@@ -697,7 +697,7 @@ class NixlConnectorWorker:
                                    remote_engine_id: EngineId, meta: ReqMeta):
         # Do NIXL handshake in background and add to _ready_requests when done.
         fut = self._handshake_futures.get(remote_engine_id)
-        if fut is None:
+        if fut is None and self._handshake_initiation_executor is not None:
             fut = self._handshake_initiation_executor.submit(
                 self._nixl_handshake, meta.remote_host, meta.remote_port,
                 meta.tp_size, remote_engine_id)
