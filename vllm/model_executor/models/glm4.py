@@ -141,13 +141,14 @@ class Glm4DecoderLayer(nn.Module):
                  prefix: str = "",
                  config: Optional[Glm4Config] = None) -> None:
         super().__init__()
-        self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 1000000)
-        rope_scaling = getattr(config, "rope_scaling", None)
 
         config = config or vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+
+        self.hidden_size = config.hidden_size
+        rope_theta = getattr(config, "rope_theta", 1000000)
+        rope_scaling = getattr(config, "rope_scaling", None)
 
         self.self_attn = Glm4Attention(
             config=config,
