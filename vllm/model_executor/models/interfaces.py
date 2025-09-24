@@ -23,7 +23,6 @@ from vllm.utils import supports_kw
 from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
-    from vllm.attention import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.sequence import IntermediateTensors
@@ -97,33 +96,10 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    # Only for models that support v0 chunked prefill
-    # TODO(ywang96): Remove this overload once v0 is deprecated
-    @overload
     def get_input_embeddings(
         self,
         input_ids: Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-        attn_metadata: Optional["AttentionMetadata"] = None,
-    ) -> Tensor:
-        ...
-
-    # TODO: Remove this overload once v0 is deprecated
-    @overload
-    def get_input_embeddings(
-        self,
-        input_ids: Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> Tensor:
-        ...
-
-    def get_input_embeddings(
-        self,
-        input_ids: Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-        # Only necessary so that the v0 overload is valid
-        # TODO: Remove attn_metadata once v0 is deprecated
-        attn_metadata: Optional["AttentionMetadata"] = None,
     ) -> Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 

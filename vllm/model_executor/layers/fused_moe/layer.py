@@ -43,7 +43,8 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
-    from .fused_moe import TritonExperts, fused_experts
+    from .fused_moe import (TritonExperts, eplb_map_to_physical_and_record,
+                            fused_experts)
     if has_pplx():
         from .pplx_prepare_finalize import (PplxPrepareAndFinalize,
                                             pplx_hidden_dim_scale_bytes)
@@ -55,6 +56,16 @@ else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
     FusedMoEPrepareAndFinalize = None  # type: ignore
+
+    def eplb_map_to_physical_and_record(
+            topk_ids: torch.Tensor, expert_load_view: torch.Tensor,
+            logical_to_physical_map: torch.Tensor,
+            logical_replica_count: torch.Tensor,
+            indices_type: Optional[torch.dtype]) -> torch.Tensor:
+        # CPU fallback: no EPLB so just return as is
+        return topk_ids
+
+
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
         rocm_aiter_grouped_topk as grouped_topk)
@@ -789,6 +800,49 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
         for local_index, global_index in zip(local_indices, global_indices))
 
 
+def maybe_roundup_hidden_size(
+        hidden_size: int, act_dtype: torch.dtype,
+        quant_config: Optional[QuantizationConfig],
+        moe_parallel_config: FusedMoEParallelConfig) -> int:
+    """
+    Given layer hidden size and MoE configurations, round up hidden_size
+    if necessary.
+    
+    Args:
+        hidden_size(int): Layer hidden-size
+        act_dtype: Data type of the layer activations.
+        quant_config(FusedMoEQuantConfig): Fused MoE quantization configuration.
+        moe_parallel_config(FusedMoEParallelConfig): Fused MoE parallelization
+            strategy configuration.
+    
+    Return:
+        Rounded up hidden_size if rounding up is required based on the configs.
+        Original hidden size otherwise.
+    """
+
+    if (moe_parallel_config.use_deepep_ht_kernels):
+        hidden_size = (
+            DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+                hidden_size, act_dtype))
+
+    # we are padding globally so EP buffer allocation works
+    if quant_config and quant_config.get_name() == "mxfp4":
+
+        from vllm.model_executor.layers.quantization.mxfp4 import (
+            Mxfp4Backend, get_mxfp4_backend)
+        current_mxfp4_backend = get_mxfp4_backend()
+        if (current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+                or current_mxfp4_backend
+                == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS):
+            hidden_size = round_up(hidden_size, 128)
+        elif (current_platform.is_rocm() or current_mxfp4_backend
+              == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+              or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
+            hidden_size = round_up(hidden_size, 256)
+
+    return hidden_size
+
+
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -845,6 +899,18 @@ class FusedMoE(CustomOp):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
+        vllm_config = get_current_vllm_config()
+
+        # FIXME (varun): We should have a better way of inferring the activation
+        # datatype. This works for now as the tensor datatype entering the MoE
+        # operation is typically unquantized (i.e. float16/bfloat16).
+        if vllm_config.model_config is not None:
+            moe_in_dtype = vllm_config.model_config.dtype
+        else:
+            # TODO (bnell): This is a hack to get test_mixtral_moe to work
+            # since model_config is not set in the pytest test.
+            moe_in_dtype = params_dtype
+
         tp_size_ = (tp_size if tp_size is not None else
                     get_tensor_model_parallel_world_size())
         dp_size_ = (dp_size
@@ -854,7 +920,6 @@ class FusedMoE(CustomOp):
         if self.is_sequence_parallel:
             self.sp_size = tp_size_
 
-        vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
             FusedMoEParallelConfig.make(
                 tp_size_=tp_size_,
@@ -863,19 +928,10 @@ class FusedMoE(CustomOp):
 
         self.global_num_experts = num_experts + num_redundant_experts
 
-        # we are padding globally so EP buffer allocation works
-        if quant_config and quant_config.get_name() == "mxfp4":
-            from vllm.model_executor.layers.quantization.mxfp4 import (
-                Mxfp4Backend, get_mxfp4_backend)
-            current_mxfp4_backend = get_mxfp4_backend()
-            if (current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-                    or current_mxfp4_backend
-                    == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS):
-                hidden_size = round_up(hidden_size, 128)
-            elif (current_platform.is_rocm() or current_mxfp4_backend
-                  == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM or
-                  current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
-                hidden_size = round_up(hidden_size, 256)
+        # Round up hidden size if needed.
+        hidden_size = maybe_roundup_hidden_size(hidden_size, moe_in_dtype,
+                                                quant_config,
+                                                self.moe_parallel_config)
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -916,12 +972,15 @@ class FusedMoE(CustomOp):
                         "experts. Falling back to linear expert placement.")
                     expert_placement_strategy = "linear"
 
-            self.local_num_experts, self.expert_map = determine_expert_map(
+            self.expert_map: Optional[torch.Tensor]
+            local_num_experts, expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=expert_placement_strategy,
             )
+            self.local_num_experts = local_num_experts
+            self.register_buffer("expert_map", expert_map)
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
                 "placement strategy: %s. Local/global"
@@ -956,20 +1015,13 @@ class FusedMoE(CustomOp):
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
 
-        if vllm_config.model_config is not None:
-            model_dtype = vllm_config.model_config.dtype
-        else:
-            # TODO (bnell): This is a hack to get test_mixtral_moe to work
-            # since model_config is not set in the pytest test.
-            model_dtype = params_dtype
-
         moe = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
-            in_dtype=model_dtype,
+            in_dtype=moe_in_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
         )
@@ -1105,10 +1157,12 @@ class FusedMoE(CustomOp):
         # ep_size and ep_rank should already be updated
         assert self.expert_map is not None
         with self.expert_map.device:
-            self.local_num_experts, self.expert_map = determine_expert_map(
+            local_num_experts, expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
+            self.local_num_experts = local_num_experts
+            self.register_buffer("expert_map", expert_map)
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
@@ -1616,55 +1670,13 @@ class FusedMoE(CustomOp):
             assert logical_to_physical_map is not None
             assert logical_replica_count is not None
 
-            # 1. Convert the logical expert ids to physical expert ids
-            # Directly select a random replica for each logical expert
-
-            # TODO: maybe optimize this by using specified kernels,
-            # or compute pseudo-random indices by modulo
-
-            # In case `indices_type` is not `torch.long` or `torch.int`,
-            # e.g. `torch.uint32` as required by dispatch/combine kernels
-            topk_ids_long = topk_ids.long()
-            replica_indices = (
-                torch.rand_like(topk_ids, dtype=torch.float) *
-                logical_replica_count[topk_ids_long]).long().unsqueeze(-1)
-            physical_ids = logical_to_physical_map[topk_ids_long].gather(
-                -1, replica_indices).squeeze(-1)
-
-            topk_ids = physical_ids
-
-            # 2. Record expert load metrics.
-
-            # TODO(bowen): When using `FusedMoEModularKernel`, this
-            # can be done in a more unified way, since
-            # `FusedMoEPrepareAndFinalize` will return the expert
-            # token count, in some cases directly from the kernel.
-            # However, now there are many code paths not using
-            # the modular kernel, e.g. calling `fused_experts`,
-            # so we decide to keep the logic here.
-            #
-            # If later refactor moved all the MoE kernel calls
-            # to the modular kernel, we can move this logic there
-            # to achieve better efficiency.
-
-            # `expert_load_view`: (num_physical_experts,)
-
-            topk_ids_flatten = topk_ids.flatten()
-
-            # Performance optimization:
-            # `masked_fill` is significantly faster than `masked_select`
-            invalid_mask = topk_ids_flatten < 0
-            # Replace invalid expert ids with 0 (just a dummy position)
-            # to avoid out-of-bounds errors in scatter_add_
-            index = topk_ids_flatten.masked_fill_(invalid_mask, 0)
-            # `src` is the valid mask, which is 1 for valid and 0 for invalid
-            src = ~invalid_mask
-
-            expert_load_view.scatter_add_(dim=0,
-                                          index=index.long(),
-                                          src=src.to(expert_load_view))
-
-            topk_ids = topk_ids.to(dtype=indices_type)
+            topk_ids = eplb_map_to_physical_and_record(
+                topk_ids=topk_ids,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+                indices_type=indices_type,
+            )
 
         assert topk_ids.dtype == indices_type or indices_type is None
 
@@ -2028,7 +2040,6 @@ direct_register_custom_op(
     op_func=moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
@@ -2059,7 +2070,6 @@ direct_register_custom_op(
     op_func=moe_forward_shared,
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_shared_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
