@@ -54,7 +54,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsEagle3,
+                         SupportsMultiModal, SupportsPP)
 from .llama4 import Llama4ForCausalLM
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -710,7 +711,7 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
     dummy_inputs=Mllama4DummyInputsBuilder,
 )
 class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                     SupportsPP):
+                                     SupportsPP, SupportsEagle3):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -758,6 +759,17 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """Set which layers should output auxiliary hidden states for EAGLE3."""
+        # Delegate to underlying language model (Llama4ForCausalLM)
+        if hasattr(self.language_model, 'set_aux_hidden_state_layers'):
+            self.language_model.set_aux_hidden_state_layers(layers)
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """Get the layer indices for auxiliary hidden state outputs."""
+        # Return custom layers for this model - will be overridden by config
+        return (1, 23, 44)
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Llama4ImagePatchInputs]:
