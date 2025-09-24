@@ -24,7 +24,7 @@ class Step3ReasoningParser(ReasoningParser):
     text. This parser extracts all content before </think> as reasoning content.
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer)
         self.think_end_token = "</think>"
 
