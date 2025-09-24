@@ -705,7 +705,7 @@ class VllmConfig:
         # Enable quant_fp8 CUDA ops on H100. On H100 the CUDA kernel is faster
         # than the native implementation
         # https://github.com/vllm-project/vllm/issues/25094
-        if current_platform.has_device_capability(
+        if current_platform.is_device_capability(
                 90) and has_blocked_weights():
             custom_ops = self.compilation_config.custom_ops
             if "none" not in custom_ops and "-quant_fp8" not in custom_ops:

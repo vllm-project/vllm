@@ -752,7 +752,7 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
     with vllm_runner(model_path) as llm:
 
         fp8_dtype = current_platform.fp8_dtype()
-        is_sm90 = current_platform.has_device_capability(90)
+        is_sm90 = current_platform.is_device_capability(90)
 
         def check_model(model):
             layer = model.model.layers[0]
