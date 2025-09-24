@@ -715,7 +715,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 regex=self.guided_regex,
                 choice=self.guided_choice,
                 grammar=self.guided_grammar,
-                backend=self.guided_decoding_backend,
                 whitespace_pattern=self.guided_whitespace_pattern,
                 structural_tag=self.structural_tag,
             )
@@ -1260,7 +1259,6 @@ class CompletionRequest(OpenAIBaseModel):
                 regex=self.guided_regex,
                 choice=self.guided_choice,
                 grammar=self.guided_grammar,
-                backend=self.guided_decoding_backend,
                 whitespace_pattern=self.guided_whitespace_pattern,
             )
             kwargs = {k: v for k, v in kwargs.items() if v is not None}
