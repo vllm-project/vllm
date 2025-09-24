@@ -935,6 +935,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
+            num_frames=1,
             image_processor=image_processor,
         )
         return num_image_tokens
