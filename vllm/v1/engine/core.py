@@ -304,7 +304,6 @@ class EngineCore:
             self._profiler_running = False
         self._perf_iter += 1
 
-
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
