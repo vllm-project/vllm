@@ -621,11 +621,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
                                 "q_a_proj",
                                 "kv_a_proj_with_mqa"
                                 ],
-                            #     "gate_up_proj": ["gate_proj", "up_proj"],
-                            #   "fused_qkv_a_proj": [ # Add LoRA Projection
-                            #     "q_a_proj",
-                            #     "kv_a_proj_with_mqa"
-                            #     ],
+                                 "gate_up_proj": ["gate_proj", "up_proj"],
                             }
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -722,10 +718,10 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         # (param_name, weight_name, expert_id, shard_id)
         # FIXME: bf16 and gate_up_proj, down_proj only
         return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_up_proj",
+            ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
-            #ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_local_experts, # 24, # FIXME: should be 24 since there are only 24 layers num_hidden_layers
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_local_experts, # self.config.n_routed_experts
             num_redundant_experts=0)
 
     def load_weights(self, weights: Iterable[tuple[str,
