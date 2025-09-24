@@ -60,6 +60,12 @@ class All2AllManagerBase:
         # and reuse it for the same config.
         raise NotImplementedError
 
+    def set_num_sms(self, num_sms: int):
+        pass
+
+    def max_sms_used(self) -> Optional[int]:
+        return None  # None means it could use the whole GPU
+
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
         raise NotImplementedError
@@ -252,7 +258,10 @@ class DeviceCommunicatorBase:
 
         moe_modules = [
             module for module in model.modules()
-            if module.__class__.__name__ == "FusedMoE"
+            # TODO(bnell): Should use isinstance but can't.  Maybe search for
+            # presence of quant_method.init_prepare_finalize?
+            if (module.__class__.__name__ == "FusedMoE"
+                or module.__class__.__name__ == "SharedFusedMoE")
         ]
         for module in moe_modules:
             module.quant_method.init_prepare_finalize(module)

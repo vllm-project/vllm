@@ -5,8 +5,8 @@ import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, fields, make_dataclass
-from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Optional, Protocol,
-                    TypeVar)
+from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional,
+                    Protocol, TypeVar, Union, get_args)
 
 import numpy as np
 import torch
@@ -28,9 +28,17 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.ubatch_utils import UBatchSlice
 
 logger = init_logger(__name__)
-_KV_CACHE_LAYOUT_OVERRIDE = None
+KVCacheLayoutType = Literal["NHD", "HND"]
+_KV_CACHE_LAYOUT_OVERRIDE: Union[KVCacheLayoutType, None] = None
+
+PAD_SLOT_ID = -1
+
+
+def is_valid_kv_cache_layout(value: str) -> bool:
+    return value in get_args(KVCacheLayoutType)
 
 
 @dataclass
@@ -72,11 +80,8 @@ class CommonAttentionMetadata:
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
 
-
-@dataclass
-class UbatchSlice:
-    request_slice: slice
-    token_slice: slice
+    # Needed by CrossAttentionBuilder
+    encoder_seq_lens: Optional[np.ndarray] = None
 
 
 def slice_query_start_locs(
@@ -95,26 +100,64 @@ def slice_query_start_locs(
 
 
 def _make_metadata_with_slice(
-        ubatch_slice: UbatchSlice,
+        ubatch_slice: UBatchSlice,
         attn_metadata: CommonAttentionMetadata) -> CommonAttentionMetadata:
     """
     This function creates a new CommonAttentionMetadata that corresponds to 
     the requests included in ubatch_slice
     """
 
+    assert not ubatch_slice.is_empty(), (
+        f"Ubatch slice {ubatch_slice} is empty")
+
     request_slice = ubatch_slice.request_slice
     token_slice = ubatch_slice.token_slice
 
+    start_locs = attn_metadata.query_start_loc_cpu
+    first_req = request_slice.start
+    first_tok = token_slice.start
+    last_req = request_slice.stop - 1
+    last_tok = token_slice.stop - 1
+
+    assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], \
+        "Token slice start outside of first request"
+    assert start_locs[last_req] <= last_tok < start_locs[last_req+1], \
+        "Token slice end outside of last request"
+
+    # If the "middle" request has tokens in both ubatches, we have to split it.
+    # If ubatch_slice is the first ubatch then we will be splitting the last
+    # request. If it's the second microbatch, then we will be splitting the
+    # first request
+    splits_first_request = first_tok > start_locs[first_req]
+    splits_last_request = last_tok < start_locs[last_req + 1] - 1
+
+    query_start_loc_cpu = slice_query_start_locs(start_locs, request_slice)
     query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc,
                                              request_slice)
+
     assert len(query_start_loc) >= 2, (
         f"query_start_loc must have at least 2 elements, "
         f"got {len(query_start_loc)}")
-    query_start_loc_cpu = slice_query_start_locs(
-        attn_metadata.query_start_loc_cpu, request_slice)
 
+    if splits_first_request:
+        tokens_skipped = first_tok - start_locs[first_req]
+        query_start_loc[1:] -= tokens_skipped
+        query_start_loc_cpu[1:] -= tokens_skipped
     seq_lens = attn_metadata.seq_lens[request_slice]
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
+
+    if splits_last_request:
+        tokens_skipped = query_start_loc_cpu[-1] - token_slice.stop
+        query_start_loc[-1] -= tokens_skipped
+        query_start_loc_cpu[-1] -= tokens_skipped
+
+        # Make sure we don't modify the seq_lens tensors
+        #  (not cudagraph compatible)
+        seq_lens = seq_lens.clone()
+        seq_lens_cpu = seq_lens_cpu.clone()
+        seq_lens[-1] -= tokens_skipped
+        seq_lens_cpu[-1] -= tokens_skipped
+
     max_seq_len = int(seq_lens_cpu.max())
     num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
         request_slice]
@@ -124,6 +167,11 @@ def _make_metadata_with_slice(
     max_query_len = int(
         torch.max(torch.abs(query_start_loc_cpu[1:] -
                             query_start_loc_cpu[:-1])).item())
+
+    # This is to account for the case where we are in a dummy
+    # run and query_start_loc_cpu is full of 0s
+    if max_query_len == 0:
+        max_query_len = attn_metadata.max_query_len
 
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
@@ -144,12 +192,12 @@ def _make_metadata_with_slice(
 
 
 def split_attn_metadata(
-    ubatch_slices: list[UbatchSlice],
+    ubatch_slices: list[UBatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     """
     Creates a new CommonAttentionMetadata instance that corresponds to the 
-    requests for each UbatchSlice in ubatch_slices.
+    requests for each UBatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata
     """
@@ -157,6 +205,7 @@ def split_attn_metadata(
     for ubatch_slice in ubatch_slices:
         results.append(
             _make_metadata_with_slice(ubatch_slice, common_attn_metadata))
+
     return results
 
 
@@ -193,6 +242,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.kv_cache_spec = kv_cache_spec
+        self.layer_names = layer_names
+        self.vllm_config = vllm_config
+        self.device = device
 
     @abstractmethod
     def build(self,
@@ -290,12 +342,13 @@ def get_kv_cache_layout():
     if cache_layout is None:
         cache_layout = get_kv_connector_cache_layout()
     else:
+        assert is_valid_kv_cache_layout(cache_layout)
         logger.info_once("`VLLM_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
     return cache_layout
 
 
-def set_kv_cache_layout(cache_layout: str):
+def set_kv_cache_layout(cache_layout: KVCacheLayoutType):
     global _KV_CACHE_LAYOUT_OVERRIDE
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
 
@@ -542,7 +595,14 @@ def make_local_attention_virtual_batches(
                                                    1)
     batch_indices = np.repeat(np.arange(actual_batch_size, dtype=np.int32),
                               local_blocks * pages_per_local_batch)
-    block_table_local = block_table[batch_indices, block_indices]\
+
+    # NOTE: https://github.com/pytorch/pytorch/pull/160256 causes performance
+    # regression when using numpy arrays (batch and block indices) to index into
+    # torch tensor (block_table). As a workaround, convert numpy arrays to torch
+    # tensor first, which recovers perf.
+    batch_indices_torch = torch.from_numpy(batch_indices)
+    block_indices_torch = torch.from_numpy(block_indices)
+    block_table_local = block_table[batch_indices_torch, block_indices_torch]\
         .view(virtual_batches, -1)
 
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
@@ -675,7 +735,6 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    assert torch.all(query_lens[first_prefill:] > decode_threshold)
     assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
@@ -709,7 +768,7 @@ def reorder_batch_to_split_decodes_and_prefills(
 
     for i, req_id in enumerate(input_batch.req_ids):
         num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        # for now treat 1 scheduled token as "decode" even if its not,
+        # for now treat 1 scheduled token as "decode" even if it's not,
         # we should update this to something like < 8 in the future but
         # currently the TritonMLA._forward_decode only supports
         # num_tokens = 1
@@ -819,3 +878,52 @@ def create_fast_prefill_custom_backend(
         builder_cls=FastPrefillAttentionBuilder)
 
     return attn_backend
+
+
+def compute_causal_conv1d_metadata(query_start_loc_p: torch.Tensor):
+
+    # Needed for causal_conv1d
+    seqlens = query_start_loc_p.diff().to('cpu')
+    nums_dict = {}  # type: ignore
+    batch_ptr = None
+    token_chunk_offset_ptr = None
+    for BLOCK_M in [8]:  # cover all BLOCK_M values
+        nums = -(-seqlens // BLOCK_M)
+        nums_dict[BLOCK_M] = {}
+        nums_dict[BLOCK_M]['nums'] = nums
+        nums_dict[BLOCK_M]['tot'] = nums.sum().item()
+        mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums))
+        nums_dict[BLOCK_M]['mlist'] = mlist
+        mlist_len = len(nums_dict[BLOCK_M]['mlist'])
+        nums_dict[BLOCK_M]['mlist_len'] = mlist_len
+        MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
+        offsetlist = []  # type: ignore
+        for idx, num in enumerate(nums):
+            offsetlist.extend(range(num))
+        offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+        nums_dict[BLOCK_M]['offsetlist'] = offsetlist
+
+        if batch_ptr is None:
+            # Update default value after class definition
+            batch_ptr = torch.full((MAX_NUM_PROGRAMS, ),
+                                   PAD_SLOT_ID,
+                                   dtype=torch.int32,
+                                   device='cuda')
+            token_chunk_offset_ptr = torch.full((MAX_NUM_PROGRAMS, ),
+                                                PAD_SLOT_ID,
+                                                dtype=torch.int32,
+                                                device='cuda')
+        else:
+            if batch_ptr.nelement() < MAX_NUM_PROGRAMS:
+                batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+                token_chunk_offset_ptr.resize_(  # type: ignore
+                    MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+
+        batch_ptr[0:mlist_len].copy_(mlist)
+        token_chunk_offset_ptr[  # type: ignore
+            0:mlist_len].copy_(offsetlist)
+        nums_dict[BLOCK_M]['batch_ptr'] = batch_ptr
+        nums_dict[BLOCK_M]['token_chunk_offset_ptr'] = (token_chunk_offset_ptr
+                                                        )  # type: ignore
+
+    return nums_dict, batch_ptr, token_chunk_offset_ptr

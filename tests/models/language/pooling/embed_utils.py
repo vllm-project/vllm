@@ -35,10 +35,7 @@ def correctness_test_embed_models(hf_runner,
                                   example_prompts,
                                   vllm_extra_kwargs=None,
                                   hf_model_callback=None):
-    if not model_info.enable_test:
-        # A model family has many models with the same architecture,
-        # and we don't need to test each one.
-        pytest.skip("Skipping test.")
+    pytest.skip("Debug only, ci prefers to use mteb test.")
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
@@ -62,7 +59,7 @@ def correctness_test_embed_models(hf_runner,
 
     with hf_runner(
             model_info.name,
-            dtype="float32",
+            dtype=model_info.hf_dtype,
             is_sentence_transformer=True,
     ) as hf_model:
 

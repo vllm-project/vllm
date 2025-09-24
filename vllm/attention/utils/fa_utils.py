@@ -68,5 +68,18 @@ def flash_attn_supports_fp8() -> bool:
         current_platform.get_device_capability().major == 9
 
 
+def flash_attn_supports_mla():
+    from vllm.platforms import current_platform
+    if current_platform.is_cuda():
+        try:
+            from vllm.vllm_flash_attn.flash_attn_interface import (
+                is_fa_version_supported)
+            return is_fa_version_supported(3) \
+                and current_platform.get_device_capability()[0] == 9
+        except (ImportError, AssertionError):
+            pass
+    return False
+
+
 def is_flash_attn_varlen_func_available() -> bool:
     return current_platform.is_cuda() or current_platform.is_xpu()

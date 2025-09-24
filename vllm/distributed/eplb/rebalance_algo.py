@@ -102,20 +102,23 @@ def rebalance_experts_hierarchical(
     num_groups: int,
     num_nodes: int,
     num_gpus: int,
-):
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Parameters:
         weight: [num_moe_layers, num_logical_experts]
         num_physical_experts: number of physical experts after replication
         num_groups: number of expert groups
-        num_nodes: number of server nodes, where the intra-node network
-        (e.g, NVLink) is faster
+        num_nodes: number of server nodes, where the intra-node network 
+            (e.g., NVLink) is faster
         num_gpus: number of GPUs, must be a multiple of `num_nodes`
 
     Returns:
-        physical_to_logical_map: [num_moe_layers, num_physical_experts]
-        logical_to_physical_map: [num_moe_layers, num_logical_experts, X]
-        logical_count: [num_moe_layers, num_logical_experts]
+        physical_to_logical_map (torch.Tensor):
+            [num_moe_layers, num_physical_experts]
+        logical_to_physical_map (torch.Tensor):
+            [num_moe_layers, num_logical_experts, X]
+        logical_count (torch.Tensor):
+            [num_moe_layers, num_logical_experts]
     """
     num_layers, num_logical_experts = weight.shape
     assert num_logical_experts % num_groups == 0
@@ -197,11 +200,13 @@ def rebalance_experts(
         num_gpus: number of GPUs, must be a multiple of `num_nodes`
 
     Returns:
-        physical_to_logical_map: [layers, num_replicas], the expert index of
-            each replica
-        logical_to_physical_map: [layers, num_logical_experts, X], the replica
-            indices for each expert
-        expert_count: [layers, num_logical_experts], number of physical
+        physical_to_logical_map:
+            [layers, num_replicas], the expert index of each replica
+        logical_to_physical_map:
+            [layers, num_logical_experts, X], the replica indices for each
+            expert
+        expert_count:
+            [layers, num_logical_experts], number of physical
             replicas for each logical expert
     """
     num_layers, num_logical_experts = weight.shape

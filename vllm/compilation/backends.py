@@ -31,8 +31,11 @@ logger = init_logger(__name__)
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     if compilation_config.use_inductor:
-        if envs.VLLM_USE_STANDALONE_COMPILE and is_torch_equal_or_newer(
-                "2.8.0.dev"):
+        # Use standalone compile only if requested, version is new enough,
+        # and the symbol actually exists in this PyTorch build.
+        if (envs.VLLM_USE_STANDALONE_COMPILE
+                and is_torch_equal_or_newer("2.8.0.dev")
+                and hasattr(torch._inductor, "standalone_compile")):
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor()
         else:
@@ -326,6 +329,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
             global compilation_start_time
+
             compiled_graph_for_dynamic_shape = self.vllm_backend.\
                 compiler_manager.compile(
                 submod,
@@ -336,7 +340,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None)
             # Lazy import here to avoid circular import
-            from .cuda_graph import CUDAGraphOptions
             from .cuda_piecewise_backend import PiecewiseBackend
 
             piecewise_backend = PiecewiseBackend(
@@ -344,7 +347,13 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_dynamic_shape, self.vllm_backend)
 
-            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                    and
+                    not self.compilation_config.use_inductor_graph_partition):
+                # We're using Dynamo-based piecewise splitting, so we wrap
+                # the whole subgraph with a static graph wrapper.
+                from .cuda_graph import CUDAGraphOptions
+
                 # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
                 # class) as platform dependent.
                 static_graph_wrapper_class = resolve_obj_by_qualname(
@@ -454,11 +463,12 @@ class VllmBackend:
         inductor_config = config.inductor_compile_config
         PASS_KEY = "post_grad_custom_post_pass"
         if PASS_KEY in inductor_config:
-            # Config should automatically wrap all inductor passes
             if isinstance(inductor_config[PASS_KEY], PostGradPassManager):
+                # PassManager already added to config, make sure it's correct
                 assert (inductor_config[PASS_KEY].uuid() ==
                         self.post_grad_pass_manager.uuid())
             else:
+                # Config should automatically wrap all inductor passes
                 assert isinstance(inductor_config[PASS_KEY], InductorPass)
                 self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
