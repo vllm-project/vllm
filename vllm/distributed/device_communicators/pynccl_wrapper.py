@@ -226,7 +226,7 @@ class NCCLLibrary:
         Function("ncclGroupEnd", ncclResult_t, []),
     ]
 
-    exported_functions_cuda_specfic = [
+    exported_functions_cuda_specific = [
         # ncclResult_t ncclCommWindowRegister(
         #   ncclComm_t comm, void* buff, size_t size,
         #   ncclWindow_t* win, int winFlags);
@@ -277,7 +277,7 @@ class NCCLLibrary:
             raise e
         function_specs = list(NCCLLibrary.exported_functions)
         if current_platform.is_cuda():
-            function_specs.extend(NCCLLibrary.exported_functions_cuda_specfic)
+            function_specs.extend(NCCLLibrary.exported_functions_cuda_specific)
         if so_file not in NCCLLibrary.path_to_dict_mapping:
             _funcs: dict[str, Any] = {}
             for func in function_specs:
