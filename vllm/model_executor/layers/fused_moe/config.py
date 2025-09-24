@@ -413,8 +413,10 @@ class FusedMoEQuantConfig:
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
         """
-        assert (not isinstance(quant_dtype, str) or quant_dtype in {"nvfp4", "fp4", "fp6_e3m2", "fp6_e2m3"})
-        assert (not isinstance(weight_dtype, str) or weight_dtype in {"nvfp4", "fp4", "fp6_e3m2", "fp6_e2m3"})
+        assert (not isinstance(quant_dtype, str)
+                or quant_dtype in {"nvfp4", "fp4", "fp6_e3m2", "fp6_e2m3"})
+        assert (not isinstance(weight_dtype, str)
+                or weight_dtype in {"nvfp4", "fp4", "fp6_e3m2", "fp6_e2m3"})
 
         if weight_dtype is None:
             weight_dtype = quant_dtype

@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
     quant_dequant_mxfp6)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize)
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import nvfp4_quantize
@@ -232,7 +231,8 @@ def moe_kernel_quantize_input(
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "fp8":
         # TODO: `quant_dtype == "fp8"` is ambiguous, should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
-        return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
+        return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant,
+                                    block_shape)
     elif quant_dtype in {"fp6_e3m2", "fp6_e2m3"}:
         return _mxfp6_quantize(A, quant_dtype, A_scale, per_act_token_quant,
                                block_shape)
