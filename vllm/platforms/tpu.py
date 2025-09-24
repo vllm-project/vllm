@@ -76,10 +76,6 @@ class TpuPlatform(Platform):
         raise NotImplementedError
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
-
-    @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
 
@@ -176,11 +172,6 @@ class TpuPlatform(Platform):
 
     @classmethod
     def use_all_gather(cls) -> bool:
-        return True
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        # V1 support on TPU is experimental
         return True
 
     @classmethod

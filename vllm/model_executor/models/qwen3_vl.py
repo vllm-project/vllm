@@ -45,7 +45,6 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -84,7 +83,7 @@ from .qwen2_vl import Qwen2VLProcessingInfo
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import get_vit_attn_backend
+from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
 
@@ -270,6 +269,7 @@ class Qwen3_VisionTransformer(nn.Module):
         self.temporal_patch_size = vision_config.temporal_patch_size
         self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
         self.use_data_parallel = use_data_parallel
+        self.num_grid_per_side = int(self.num_position_embeddings**0.5)
 
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
@@ -377,82 +377,82 @@ class Qwen3_VisionTransformer(nn.Module):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
-    def fast_pos_embed_interpolate(self, grid_thw):
-        num_grid_per_side = int(self.num_position_embeddings**0.5)
+    def fast_pos_embed_interpolate(self,
+                                   grid_thw: list[list[int]]) -> torch.Tensor:
 
-        idx_list = [[] for _ in range(4)]
-        weight_list = [[] for _ in range(4)]
+        num_grid_per_side = self.num_grid_per_side
+        m_size = self.spatial_merge_size
+        hidden_dim = self.pos_embed.embedding_dim
 
+        outputs = []
         for t, h, w in grid_thw:
             h_idxs = torch.linspace(0,
                                     num_grid_per_side - 1,
                                     h,
-                                    dtype=torch.float32)
+                                    dtype=torch.float32,
+                                    device=self.device)
             w_idxs = torch.linspace(0,
                                     num_grid_per_side - 1,
                                     w,
-                                    dtype=torch.float32)
+                                    dtype=torch.float32,
+                                    device=self.device)
 
-            h_idxs_floor = h_idxs.to(torch.long)
-            w_idxs_floor = w_idxs.to(torch.long)
-            h_idxs_ceil = torch.clamp(h_idxs.to(torch.long) + 1,
-                                      max=num_grid_per_side - 1)
-            w_idxs_ceil = torch.clamp(w_idxs.to(torch.long) + 1,
-                                      max=num_grid_per_side - 1)
+            h_floor = h_idxs.to(torch.long)
+            w_floor = w_idxs.to(torch.long)
+            h_ceil = torch.clamp(h_floor + 1, max=num_grid_per_side - 1)
+            w_ceil = torch.clamp(w_floor + 1, max=num_grid_per_side - 1)
 
-            dh = h_idxs - h_idxs_floor
-            dw = w_idxs - w_idxs_floor
+            dh = h_idxs - h_floor
+            dw = w_idxs - w_floor
 
-            idx_list[0].extend(((h_idxs_floor * num_grid_per_side)[None].T +
-                                w_idxs_floor[None]).flatten().tolist() * t)
-            idx_list[1].extend(((h_idxs_floor * num_grid_per_side)[None].T +
-                                w_idxs_ceil[None]).flatten().tolist() * t)
-            idx_list[2].extend(((h_idxs_ceil * num_grid_per_side)[None].T +
-                                w_idxs_floor[None]).flatten().tolist() * t)
-            idx_list[3].extend(((h_idxs_ceil * num_grid_per_side)[None].T +
-                                w_idxs_ceil[None]).flatten().tolist() * t)
+            # Create meshgrid view for all h, w vars
+            dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing='ij')
+            h_floor_grid, w_floor_grid = torch.meshgrid(h_floor,
+                                                        w_floor,
+                                                        indexing='ij')
+            h_ceil_grid, w_ceil_grid = torch.meshgrid(h_ceil,
+                                                      w_ceil,
+                                                      indexing='ij')
+            h_floor_grid_idx = h_floor_grid * num_grid_per_side
+            h_ceil_grid_idx = h_ceil_grid * num_grid_per_side
 
-            weight_list[0].extend(
-                ((1 - dh)[None].T * (1 - dw)[None]).flatten().tolist() * t)
-            weight_list[1].extend(
-                ((1 - dh)[None].T * dw[None]).flatten().tolist() * t)
-            weight_list[2].extend(
-                (dh[None].T * (1 - dw)[None]).flatten().tolist() * t)
-            weight_list[3].extend(
-                (dh[None].T * dw[None]).flatten().tolist() * t)
+            # original computation of weights
+            # w00 = (1 - dh_grid) * (1 - dw_grid)
+            # w01 = (1 - dh_grid) * dw_grid
+            # w10 = dh_grid * (1 - dw_grid)
+            # w11 = dh_grid * dw_grid
+            # we reuse w11 here to avoid duplicate
+            # dh_grid * dw_grid computation
+            w11 = dh_grid * dw_grid
+            w10 = dh_grid - w11
+            w01 = dw_grid - w11
+            w00 = 1 - dh_grid - dw_grid + w11
 
-        device = self.pos_embed.weight.device
-        dtype = self.pos_embed.weight.dtype
+            idx00 = h_floor_grid_idx + w_floor_grid
+            idx01 = h_floor_grid_idx + w_ceil_grid
+            idx10 = h_ceil_grid_idx + w_floor_grid
+            idx11 = h_ceil_grid_idx + w_ceil_grid
 
-        p0 = self.pos_embed(
-            torch.tensor(
-                idx_list[0], dtype=torch.long, device=device)) * torch.tensor(
-                    weight_list[0], dtype=dtype, device=device)[:, None]
-        p1 = self.pos_embed(
-            torch.tensor(
-                idx_list[1], dtype=torch.long, device=device)) * torch.tensor(
-                    weight_list[1], dtype=dtype, device=device)[:, None]
-        p2 = self.pos_embed(
-            torch.tensor(
-                idx_list[2], dtype=torch.long, device=device)) * torch.tensor(
-                    weight_list[2], dtype=dtype, device=device)[:, None]
-        p3 = self.pos_embed(
-            torch.tensor(
-                idx_list[3], dtype=torch.long, device=device)) * torch.tensor(
-                    weight_list[3], dtype=dtype, device=device)[:, None]
+            indices = torch.stack([idx00, idx01, idx10, idx11],
+                                  dim=0).reshape(4, -1)
+            weights = torch.stack([w00, w01, w10, w11],
+                                  dim=0).reshape(4, -1, 1)
+            weights = weights.to(dtype=self.dtype, device=self.device)
 
-        patch_pos_embeds = p0 + p1 + p2 + p3
-        patch_pos_embeds = patch_pos_embeds.split(
-            [t * h * w for t, h, w in grid_thw])
-        patch_pos_embeds_permute = []
-        m_size = self.spatial_merge_size
-        for pos_embed, (t, h, w) in zip(patch_pos_embeds, grid_thw):
-            pos_embed = pos_embed.view(t, h // m_size, m_size, w // m_size,
-                                       m_size, -1).permute(0, 1, 3, 2, 4,
-                                                           5).flatten(0, 4)
-            patch_pos_embeds_permute.append(pos_embed)
-        patch_pos_embeds = torch.cat(patch_pos_embeds_permute)
-        return patch_pos_embeds
+            embeds = self.pos_embed(indices)
+            weighted_embeds = embeds * weights
+            p0, p1, p2, p3 = weighted_embeds.unbind(dim=0)
+            combined = p0 + p1 + p2 + p3
+
+            combined = combined.view(h * w, hidden_dim)
+            repeated = combined.unsqueeze(0).expand(t, -1, -1).contiguous()
+            repeated = repeated.view(t, h // m_size, m_size, w // m_size,
+                                     m_size, hidden_dim)
+            repeated = repeated.permute(0, 1, 3, 2, 4,
+                                        5).reshape(-1, hidden_dim)
+            outputs.append(repeated)
+
+        return torch.cat(outputs, dim=0)
 
     def compute_attn_mask_seqlen(
         self,
@@ -477,12 +477,9 @@ class Qwen3_VisionTransformer(nn.Module):
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        if isinstance(grid_thw, list):
-            grid_thw_tensor = torch.tensor(grid_thw,
-                                           device=hidden_states.device,
-                                           dtype=torch.int32)
-        else:
-            grid_thw_tensor = grid_thw
+        grid_thw_tensor = torch.tensor(grid_thw,
+                                       device=self.device,
+                                       dtype=torch.int32)
 
         cu_seqlens = torch.repeat_interleave(
             grid_thw_tensor[:, 1] * grid_thw_tensor[:, 2],
@@ -1217,14 +1214,13 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
-                from vllm.multimodal.utils import (
-                    run_dp_sharded_mrope_vision_model)
                 return run_dp_sharded_mrope_vision_model(self.visual,
                                                          pixel_values,
                                                          grid_thw_list,
                                                          rope_type="rope_3d")
             else:
-                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+                image_embeds = self.visual(pixel_values,
+                                           grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
@@ -1247,8 +1243,6 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
             if self.use_data_parallel:
-                from vllm.multimodal.utils import (
-                    run_dp_sharded_mrope_vision_model)
                 return run_dp_sharded_mrope_vision_model(self.visual,
                                                          pixel_values_videos,
                                                          grid_thw_list,
@@ -1508,10 +1502,8 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
