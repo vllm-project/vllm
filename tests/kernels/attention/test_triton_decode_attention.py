@@ -77,7 +77,6 @@ def test_decode_attention(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE):
     o1 = torch.zeros_like(o)
     lse1 = torch.zeros_like(lse)
 
-
     decode_attention_fwd(
         q,
         k_buffer,
