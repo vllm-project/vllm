@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
 from typing import (TYPE_CHECKING, Any, Generic, NamedTuple, Optional,
-                    Protocol, Union, cast)
+                    Protocol, Union, cast, overload)
 
 import regex as re
 import torch
@@ -898,11 +898,23 @@ class InputProcessingContext:
     tokenizer: AnyTokenizer
     """The tokenizer used to tokenize the inputs."""
 
+    @overload
+    def get_hf_config(self, /) -> "PretrainedConfig":
+        ...
+
+    @overload
     def get_hf_config(
         self,
-        typ: Union[type[_C], tuple[type[_C], ...]] = PretrainedConfig,
+        typ: Union[type[_C], tuple[type[_C], ...]],
         /,
     ) -> _C:
+        ...
+
+    def get_hf_config(
+        self,
+        typ: Optional[Union[type[Any], tuple[type[Any], ...]]] = None,
+        /,
+    ) -> Any:
         """
         Get the HuggingFace configuration
         (`transformers.PretrainedConfig`) of the model,
@@ -911,6 +923,11 @@ class InputProcessingContext:
         Raises:
             TypeError: If the configuration is not of the specified type.
         """
+        if typ is None:
+            from transformers.configuration_utils import PretrainedConfig
+
+            typ = PretrainedConfig
+
         hf_config = self.model_config.hf_config
         if not isinstance(hf_config, typ):
             raise TypeError("Invalid type of HuggingFace config. "
@@ -938,12 +955,25 @@ class InputProcessingContext:
 
         return mm_config
 
+    @overload
+    def get_hf_processor(self, /, **kwargs: object) -> "ProcessorMixin":
+        ...
+
+    @overload
     def get_hf_processor(
         self,
-        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+        typ: Union[type[_P], tuple[type[_P], ...]],
         /,
         **kwargs: object,
     ) -> _P:
+        ...
+
+    def get_hf_processor(
+        self,
+        typ: Optional[Union[type[Any], tuple[type[Any], ...]]] = None,
+        /,
+        **kwargs: object,
+    ) -> Any:
         """
         Get the HuggingFace processor
         (`transformers.ProcessorMixin`) of the model,
@@ -952,6 +982,11 @@ class InputProcessingContext:
         Raises:
             TypeError: If the processor is not of the specified type.
         """
+        if typ is None:
+            from transformers.processing_utils import ProcessorMixin
+
+            typ = ProcessorMixin
+
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
@@ -995,7 +1030,7 @@ class InputProcessingContext:
 
     def call_hf_processor(
         self,
-        hf_processor: ProcessorMixin,
+        hf_processor: "ProcessorMixin",
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
         *,
