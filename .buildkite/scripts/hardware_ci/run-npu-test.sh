@@ -4,6 +4,52 @@
 # It serves a sanity check for compilation and basic model usage.
 set -ex
 
+# Base ubuntu image with basic ascend development libraries and python installed
+TEST_RUN_CONFIG_URL="https://raw.githubusercontent.com/vllm-project/vllm-ascend/refs/heads/main/tests/e2e/vllm_interface/vllm_test.cfg"
+TEST_RUN_CONFIG_FILE="vllm_test.cfg"
+
+# This function checks for and installs 'curl' on Ubuntu if it's not found.
+install_curl() {
+  if ! command -v curl &> /dev/null; then
+    sudo yum update
+    if sudo yum install -y curl; then
+      echo "'curl' was installed successfully."
+    else
+      echo "Error: Failed to install 'curl'. Please check your network connection and package repositories."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Downloads test run configuration file from a remote URL.
+# Loads the configuration into the current script environment.
+get_config() {
+  # Call the helper function to ensure curl is installed.
+  install_curl
+  if [ $? -ne 0 ]; then
+    return 1
+  fi
+  
+  # Use curl to download the configuration file and check if the download was successful.
+  if curl -s -o "${TEST_RUN_CONFIG_FILE}" "${TEST_RUN_CONFIG_URL}"; then
+    echo "Configuration file downloaded successfully."
+    source "$TEST_RUN_CONFIG_FILE"
+    echo "Base docker image name that get from configuration: ${BASE_IMAGE_NAME}"
+    return 0
+  else
+    echo "Error: Failed to download configuration from ${TEST_RUN_CONFIG_URL}."
+    return 1
+  fi
+}
+
+# get test running configuration.
+get_config
+# Check if the function call was successful. If not, exit the script.
+if [ $? -ne 0 ]; then
+  exit 1
+fi
+
 image_name="npu/vllm-ci:${BUILDKITE_COMMIT}_${EPOCHSECONDS}"
 container_name="npu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
@@ -13,7 +59,7 @@ cat <<EOF | DOCKER_BUILDKIT=1 docker build \
     --builder cachebuilder --cache-from type=local,src=/mnt/docker-cache \
                            --cache-to type=local,dest=/mnt/docker-cache,mode=max \
     --progress=plain --load -t ${image_name} -f - .
-FROM quay.io/ascend/cann:8.3.rc1.alpha002-910b-ubuntu22.04-py3.11
+FROM ${BASE_IMAGE_NAME}
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
@@ -45,10 +91,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Install vllm-ascend
 WORKDIR /workspace
-ARG VLLM_REPO=https://github.com/vllm-project/vllm-ascend.git
-ARG VLLM_TAG=main
+ARG VLLM_ASCEND_REPO=https://github.com/vllm-project/vllm-ascend.git
+ARG VLLM_ASCEND_TAG=main
 RUN git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/" && \
-    git clone --depth 1 \$VLLM_REPO --branch \$VLLM_TAG /workspace/vllm-ascend
+    git clone --depth 1 \$VLLM_ASCEND_REPO --branch \$VLLM_ASCEND_TAG /workspace/vllm-ascend
 
 # Install vllm dependencies in advance. Effect: As long as common.txt remains unchanged, the docker cache layer will be valid.
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -67,6 +113,7 @@ ENV VLLM_USE_MODELSCOPE=True
 WORKDIR /workspace/vllm-ascend
 
 CMD ["/bin/bash"]
+
 EOF
 
 # Setup cleanup
@@ -127,5 +174,5 @@ docker run \
     "${image_name}" \
     bash -c '
     set -e
-    pytest -v -s tests/e2e/singlecard/test_sampler.py::test_models_topk
+    pytest -v -s tests/e2e/vllm_interface/
 '
