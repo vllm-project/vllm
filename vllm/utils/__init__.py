@@ -2857,6 +2857,54 @@ def memory_profiling(
     result.non_kv_cache_memory = non_torch_memory + peak_activation_memory + result.weights_memory  # noqa
 
 
+@contextlib.contextmanager
+def phase_memory_profiling(
+        phase_name: str,
+        logger_instance=None,
+        enabled: bool = True
+) -> Generator[None, None, None]:
+    """Memory profiling context manager for specific execution phases.
+
+    Args:
+        phase_name: Name of the phase being profiled
+        logger_instance: Logger to use for output (optional)
+        enabled: Whether profiling is enabled
+    """
+    if not enabled:
+        yield
+        return
+
+    if logger_instance is None:
+        logger_instance = init_logger(__name__)
+
+    # Take snapshot before phase
+    before_snapshot = MemorySnapshot()
+    torch.cuda.reset_peak_memory_stats()
+
+    start_time = time.time()
+
+    try:
+        yield
+    finally:
+        # Take snapshot after phase
+        torch.cuda.synchronize()
+        after_snapshot = MemorySnapshot()
+        end_time = time.time()
+
+        # Calculate phase-specific metrics
+        peak_increase = after_snapshot.torch_peak - before_snapshot.torch_peak
+        memory_diff = after_snapshot.cuda_memory - before_snapshot.cuda_memory
+        duration = end_time - start_time
+
+        logger_instance.info(
+            f"[MEMORY-PHASE] {phase_name}: "
+            f"peak_increase={peak_increase / (1024**3):.3f}GiB, "
+            f"memory_diff={memory_diff / (1024**3):.3f}GiB, "
+            f"duration={duration:.3f}s, "
+            f"current_allocated={after_snapshot.cuda_memory / (1024**3):.3f}GiB"
+        )
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
 def set_ulimit(target_soft_limit=65535):
     if sys.platform.startswith('win'):
