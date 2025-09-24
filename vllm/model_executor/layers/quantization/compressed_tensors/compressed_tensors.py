@@ -644,6 +644,14 @@ class CompressedTensorsConfig(QuantizationConfig):
         # If no matches, return None
         return None
 
+    def has_blocked_weights(self) -> bool:
+        for scheme in self.target_scheme_map.values():
+            weight_quant = scheme.get("weights")
+            if (weight_quant is not None
+                    and weight_quant.strategy == QuantizationStrategy.BLOCK):
+                return True
+        return False
+
     @staticmethod
     def supports_cutlass_24(
             weight_quant: Optional[QuantizationArgs],
