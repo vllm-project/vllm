@@ -54,7 +54,8 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
-from vllm.utils.flashinfer import has_flashinfer_moe
+from vllm.utils.flashinfer import (has_flashinfer_moe,
+                                   register_flashinfer_kernel_autotune)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -450,6 +451,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
             )
+            register_flashinfer_kernel_autotune(reason="Fp8MoEMethod")
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.use_marlin = (not current_platform.has_device_capability(89)

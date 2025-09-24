@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.flashinfer import flashinfer_autotune_needed, has_flashinfer
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -34,7 +34,9 @@ def kernel_warmup(worker: "Worker"):
         deep_gemm_warmup(model, max_tokens)
 
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
-    if has_flashinfer() and current_platform.has_device_capability(90):
+    # Only run if we detected that FlashInfer autotune-able kernels will be used
+    if (has_flashinfer() and current_platform.has_device_capability(90)
+            and flashinfer_autotune_needed()):
         flashinfer_autotune(worker.model_runner)
 
     # FlashInfer attention warmup

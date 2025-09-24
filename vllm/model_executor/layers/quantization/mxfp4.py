@@ -34,7 +34,8 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import (has_triton_kernels, is_torch_equal_or_newer,
                         next_power_of_2, round_up)
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.flashinfer import (has_flashinfer,
+                                   register_flashinfer_kernel_autotune)
 
 logger = init_logger(__name__)
 
@@ -166,6 +167,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "No MXFP4 MoE backend (FlashInfer/Marlin/Triton) available."
             "Please check your environment and try again.")
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+
+        # If using any FlashInfer MXFP4 backend, register for autotune warmup
+        if self.mxfp4_backend in (Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM,
+                                  Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS,
+                                  Mxfp4Backend.SM100_FI_MXFP4_BF16,
+                                  Mxfp4Backend.SM90_FI_MXFP4_BF16):
+            register_flashinfer_kernel_autotune(
+                reason=f"MXFP4 MoE ({self.mxfp4_backend.name})")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,

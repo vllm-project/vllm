@@ -30,6 +30,10 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
 )
 
+# Global flag to indicate whether any FlashInfer autotune-able kernels
+# (e.g. MoE or dense GEMMs) are expected to be used by the current model.
+_AUTOTUNE_KERNELS_WILL_BE_USED: bool = False
+
 
 @functools.cache
 def has_flashinfer() -> bool:
@@ -37,6 +41,24 @@ def has_flashinfer() -> bool:
     # Use find_spec to check if the module exists without importing it
     # This avoids potential CUDA initialization side effects
     return importlib.util.find_spec("flashinfer") is not None
+
+
+def register_flashinfer_kernel_autotune(reason: str) -> None:
+    """Mark that FlashInfer autotune-able kernels will be used.
+
+    This allows the warmup path to only run FlashInfer autotuner when
+    at least one kernel that benefits from autotuning is expected to run.
+    Safe to call multiple times.
+    """
+    global _AUTOTUNE_KERNELS_WILL_BE_USED
+    if not _AUTOTUNE_KERNELS_WILL_BE_USED:
+        _AUTOTUNE_KERNELS_WILL_BE_USED = True
+        logger.debug_once("Registered FlashInfer autotune usage: %s", reason)
+
+
+def flashinfer_autotune_needed() -> bool:
+    """Return True if any FlashInfer autotune-able kernel is registered."""
+    return _AUTOTUNE_KERNELS_WILL_BE_USED
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -440,4 +462,6 @@ __all__ = [
     "flashinfer_disable_q_quantization",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
+    "register_flashinfer_kernel_autotune",
+    "flashinfer_autotune_needed",
 ]

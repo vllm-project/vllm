@@ -14,7 +14,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
-from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
+from vllm.utils.flashinfer import (flashinfer_scaled_fp8_mm, has_flashinfer,
+                                   register_flashinfer_kernel_autotune)
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
@@ -363,6 +364,8 @@ class Fp8LinearOp:
             if has_flashinfer() and current_platform.has_device_capability(
                     100):
                 self.preferred_backend = "flashinfer"
+                register_flashinfer_kernel_autotune(
+                    reason="FP8 dense GEMM (Fp8LinearOp)")
             else:
                 self.preferred_backend = "cutlass"
         else:

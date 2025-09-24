@@ -45,7 +45,8 @@ from vllm.model_executor.parameter import (ModelWeightParameter,
 from vllm.scalar_type import scalar_types
 from vllm.utils import next_power_of_2
 from vllm.utils.flashinfer import (flashinfer_scaled_fp4_mm, has_flashinfer,
-                                   has_flashinfer_moe)
+                                   has_flashinfer_moe,
+                                   register_flashinfer_kernel_autotune)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -310,6 +311,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
             )
+            register_flashinfer_kernel_autotune(
+                reason="ModelOpt FP8 MoE (ModelOptFp8MoEMethod)")
 
     def maybe_make_prepare_finalize(
         self, ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
@@ -851,8 +854,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         if envs.VLLM_USE_TRTLLM_FP4_GEMM:
             assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
             self.backend = "flashinfer-trtllm"
+            register_flashinfer_kernel_autotune(
+                reason="ModelOpt NVFP4 dense GEMM (TRT-LLM)")
         elif has_flashinfer():
             self.backend = "flashinfer-cutlass"
+            register_flashinfer_kernel_autotune(
+                reason="ModelOpt NVFP4 dense GEMM (CUTLASS)")
         elif cutlass_fp4_supported():
             self.backend = "cutlass"
         elif is_fp4_marlin_supported():
@@ -1066,6 +1073,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
                 " for ModelOptNvFp4FusedMoE.")
+            register_flashinfer_kernel_autotune(
+                reason="ModelOpt NVFP4 MoE (ModelOptNvFp4FusedMoE)")
 
     def maybe_make_prepare_finalize(
             self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
