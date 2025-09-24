@@ -281,6 +281,7 @@ class Attention(nn.Module, AttentionLayerBase):
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
 
+        output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
             # torch.compile to fuse this into previous ops
@@ -293,7 +294,7 @@ class Attention(nn.Module, AttentionLayerBase):
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
             output = torch.zeros(output_shape,
-                                 dtype=query.dtype,
+                                 dtype=output_dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
 
