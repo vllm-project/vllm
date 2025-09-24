@@ -11,7 +11,7 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional,
 import numpy as np
 import torch
 from typing_extensions import runtime_checkable
-from vllm.platforms import current_platform
+
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils import cdiv
 
@@ -968,11 +968,12 @@ def compute_causal_conv1d_metadata(query_start_loc_p: torch.Tensor):
             batch_ptr = torch.full((MAX_NUM_PROGRAMS, ),
                                    PAD_SLOT_ID,
                                    dtype=torch.int32,
-                                   device=current_platform.current_device())
-            token_chunk_offset_ptr = torch.full((MAX_NUM_PROGRAMS, ),
-                                                PAD_SLOT_ID,
-                                                dtype=torch.int32,
-                                                device=current_platform.current_device())
+                                   device=query_start_loc_p.device)
+            token_chunk_offset_ptr = torch.full(
+                (MAX_NUM_PROGRAMS, ),
+                PAD_SLOT_ID,
+                dtype=torch.int32,
+                device=query_start_loc_p.device)
         else:
             if batch_ptr.nelement() < MAX_NUM_PROGRAMS:
                 batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
