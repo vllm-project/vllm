@@ -25,6 +25,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             device=device,
             pass_hidden_states_to_model=False,
             pass_cudagraph_args_to_forward_ctx=True,
+            one_extra_forward_pass=True,
             # the first draft_token_ids are identical to next_token_ids, so
             # they don't need to be returned as proposed tokens
             drop_first_drafted_tokens=True,
@@ -69,7 +70,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                                  last_token_indices: torch.Tensor) -> None:
         self.input_ids[:num_tokens] = target_token_ids
 
-    def load_model(self) -> None:
+    def load_model(self, target_model: Any) -> None:
         draft_model_config: ModelConfig = (
             self.vllm_config.speculative_config.draft_model_config)
         vllm_config_draft: VllmConfig = replace(
