@@ -5,9 +5,10 @@ import hashlib
 import os
 import shutil
 import signal
-import tempfile
 from typing import Optional
 
+from vllm import envs
+from vllm.assets.base import get_cache_dir
 from vllm.logger import init_logger
 from vllm.utils import PlaceholderModule
 
@@ -58,20 +59,19 @@ class ObjectStorageModel:
     """
 
     def __init__(self, url: str) -> None:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            existing_handler = signal.getsignal(sig)
-            signal.signal(sig, self._close_by_signal(existing_handler))
+        if envs.VLLM_ASSETS_CACHE_MODEL_CLEAN:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                existing_handler = signal.getsignal(sig)
+                signal.signal(sig, self._close_by_signal(existing_handler))
 
         dir_name = os.path.join(
-            tempfile.gettempdir(),
+            get_cache_dir(), "model_streamer",
             hashlib.sha256(str(url).encode()).hexdigest()[:8])
         if os.path.exists(dir_name):
             shutil.rmtree(dir_name)
         os.makedirs(dir_name)
         self.dir = dir_name
-
-    def __del__(self):
-        self._close()
+        logger.debug("Init object storage, model cache path is: %s", dir_name)
 
     def _close(self) -> None:
         if os.path.exists(self.dir):
