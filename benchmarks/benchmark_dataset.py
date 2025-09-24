@@ -354,6 +354,14 @@ class RandomDataset(BenchmarkDataset):
             ]
             prompt = tokenizer.decode(re_encoded_sequence)
             total_input_len = prefix_len + int(input_lens[i])
+            # Ensure the final prompt length matches exactly what was requested
+            # by encoding with special tokens and truncating if necessary
+            final_encoded = tokenizer.encode(prompt, add_special_tokens=True)
+            if len(final_encoded) > total_input_len:
+                # Truncate and decode again to get exact length
+                final_encoded = final_encoded[:total_input_len]
+                prompt = tokenizer.decode(final_encoded)
+
             requests.append(
                 SampleRequest(
                     prompt=prompt,
