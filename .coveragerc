@@ -1,5 +1,5 @@
 [run]
-source = /vllm-workspace/vllm
+source = vllm
 omit =
     */tests/*
     */test_*
@@ -30,3 +30,4 @@ directory = htmlcov
 
 [xml]
 output = coverage.xml
+
