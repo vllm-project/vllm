@@ -27,6 +27,7 @@ from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      CUDAGraphMode, PassConfig)
+from vllm.config.device import Device, DeviceConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
@@ -38,11 +39,13 @@ from vllm.config.model import (ConvertOption, HfOverrides, LogprobsMode,
                                try_match_architecture_defaults)
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
+from vllm.config.observability import DetailedTraceModules, ObservabilityConfig
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType, SchedulerConfig, SchedulerPolicy
 from vllm.config.speculative import SpeculativeConfig
+from vllm.config.speech_to_text import SpeechToTextConfig
 from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.config.utils import ConfigType, config, get_attr_docs, is_init_field
 from vllm.logger import init_logger
