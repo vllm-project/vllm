@@ -21,7 +21,7 @@ from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import assert_hashable, config, getattr_iter
+from vllm.config.utils import assert_hashable, config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
@@ -687,9 +687,8 @@ class ModelConfig:
             self.runner = runner
         # If the user didn't specify convert, use architecture default
         if self.runner == "pooling" and self.convert == "auto":
-            logger.info(
-                "Resolved `--convert auto` to `--convert none`. "
-                "Pass the value explicitly to silence this message.")
+            logger.info("Resolved `--convert auto` to `--convert none`. "
+                        "Pass the value explicitly to silence this message.")
             self.convert = "none"
         # Resolve Transformers backend pooling classes
         if runner == "pooling":
@@ -708,7 +707,9 @@ class ModelConfig:
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers backend class."""
-        return self._model_info.architecture == self._get_transformers_backend_cls()
+        used_cls = self._model_info.architecture
+        transformers_backend_cls = self._get_transformers_backend_cls()
+        return used_cls == transformers_backend_cls
 
     @property
     def registry(self):

@@ -23,8 +23,8 @@ from typing import Literal, Optional, Union
 import regex as re
 import torch
 from torch import nn
-from transformers import (AutoModel, BatchFeature, PretrainedConfig, AutoModelForSequenceClassification,
-                          PreTrainedModel)
+from transformers import (AutoModel, AutoModelForSequenceClassification,
+                          BatchFeature, PretrainedConfig, PreTrainedModel)
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.attention import Attention, AttentionType
@@ -640,7 +640,9 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 attn_type=attn_type)
         return attention_instances
 
-    def init_parameters(self, module: nn.Module, dtype: Optional[torch.dtype] = None):
+    def init_parameters(self,
+                        module: nn.Module,
+                        dtype: Optional[torch.dtype] = None):
         """
         If a `parameter` is on the `meta` device, then its parent
         `module` is the original module created by:
@@ -731,10 +733,8 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
 
         # Skip unsupported/unwanted output embeddings layers
         self.skip_prefixes.extend([
-            "model.lm_head.",
-            "model.predictions.",
-            "model.embeddings_project.",
-            "model.discriminator_predictions."
+            "model.lm_head.", "model.predictions.",
+            "model.embeddings_project.", "model.discriminator_predictions."
         ])
 
         # Some encoder models have the position_ids buffer in the checkpoint.
@@ -820,12 +820,14 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
 
         # Unlike `lm_head`, `classifier` is not always `nn.Linear`.
         self.classifier = seq_cls_model.classifier
-        self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
+        self.init_parameters(self.classifier,
+                             dtype=self.model_config.head_dtype)
 
         # CLSPool has already been applied in `pooling`.
         # Add dim to match expected input shape of `classifier.forward`.
         def classifier_pre_hook(module, args):
             return args[0].unsqueeze(1), *args[1:]
+
         self.classifier.register_forward_pre_hook(classifier_pre_hook)
 
         self.pooler = DispatchPooler({
@@ -840,7 +842,7 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
             ),
             "score":
             ClassifierPooler(
-                pooling=pooling,
+                pooling=CLSPool(),
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_cross_encoder(
                     vllm_config.model_config),
