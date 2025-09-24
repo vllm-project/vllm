@@ -31,34 +31,35 @@ class PadPattern:
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(a, b):
-            mul = torch.ops.aten.mul.Tensor(a, b)
-            return torch.ops.aten.constant_pad_nd.default(
-                self=mul,
-                pad=[0, self.roundup(mul.shape[-1]) - mul.shape[-1]],
+            at1 = torch.ops.aten.mul.Tensor(a, b)
+            at2 = torch.ops.aten.constant_pad_nd.default(
+                self=at1,
+                pad=[0, self.roundup(at1.shape[-1]) - at1.shape[-1]],
                 value=0.0,
             )
+            return (at1, at2)
 
         def replacement(a, b):
             new_shape = list(a.shape)
             shape = [0, self.roundup(a.shape[-1]) - a.shape[-1]]
             new_shape[-1] += shape[-1]
 
-            result = torch.full(new_shape,
-                                fill_value=0.0,
-                                dtype=a.dtype,
-                                device=a.device)
-            result = torch.slice_scatter(result,
-                                         a * b,
-                                         dim=-1,
-                                         start=0,
-                                         end=a.shape[-1])
-
-            return result
+            at1 = torch.full(new_shape,
+                             fill_value=0.0,
+                             dtype=a.dtype,
+                             device=a.device)
+            at1 = torch.slice_scatter(at1,
+                                      a * b,
+                                      dim=-1,
+                                      start=0,
+                                      end=a.shape[-1])
+            return (at1[..., :a.shape[-1]], at1)
 
         inputs = [
             torch.empty(3, 12, device=self.device, dtype=torch.bfloat16),
             torch.empty(1, 12, device=self.device, dtype=torch.bfloat16),
         ]
+
         register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
 
 

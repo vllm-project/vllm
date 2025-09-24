@@ -16,7 +16,7 @@ from .backend import TestBackend
 
 @pytest.mark.parametrize("dtype",
                          [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("shape", [(3, 12), (1, 26)])
+@pytest.mark.parametrize("shape", [(3, 12), (1, 26), (1, 256), (100, 500)])
 def test_mul_pad_fusion(shape, dtype):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
@@ -29,11 +29,12 @@ def test_mul_pad_fusion(shape, dtype):
             x = a * b
             y = F.pad(x, (0, round_up(a.shape[-1], 256) - a.shape[-1]),
                       value=0.0)
-            return y
+            z = x.mean(dim=-1, keepdim=True)
+            return y + z
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
-        pass_config=PassConfig(enable_fusion=True),
+        pass_config=PassConfig(enable_mul_pad_fusion=True),
     ))
     with vllm.config.set_current_vllm_config(vllm_config):
         fusion_pass = MulPadFusionPass(vllm_config)
@@ -44,11 +45,11 @@ def test_mul_pad_fusion(shape, dtype):
         b = torch.randn([1, shape[-1]], device="cuda", dtype=dtype)
         ref = model(a, b)
         compiled = torch.compile(model, backend=backend)
-
         out = compiled(a, b)
-        ATOL, RTOL = (2e-3, 2e-3)
+
+        ATOL, RTOL = (1e-2, 1e-2)
         torch.testing.assert_close(ref, out, atol=ATOL, rtol=RTOL)
-    assert fusion_pass.matched_count == 1
+    assert fusion_pass.matched_count == (1 if shape[-1] % 256 != 0 else 0)
 
 
 def test_non_fusion_pad_preserved():

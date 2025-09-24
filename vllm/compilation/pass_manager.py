@@ -15,8 +15,8 @@ from .vllm_inductor_pass import VllmInductorPass
 
 if current_platform.is_cuda_alike():
     from .activation_quant_fusion import ActivationQuantFusionPass
-    from .fusion import RMSNormQuantFusionPass
     from .fusion_attn import AttnFusionPass
+    from .fusion_rmsnorm_quant import RMSNormQuantFusionPass
 
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
@@ -101,6 +101,7 @@ class PostGradPassManager(CustomGraphPass):
         if self.pass_config.enable_fusion:
             self.passes += [RMSNormQuantFusionPass(config)]
             self.passes += [ActivationQuantFusionPass(config)]
+        if self.pass_config.enable_mul_pad_fusion:
             self.passes += [MulPadFusionPass(config)]
 
         if self.pass_config.enable_attn_fusion:

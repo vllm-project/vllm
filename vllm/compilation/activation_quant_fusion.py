@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey, kFp8StaticTensorSym, kNvfp4Quant, kStaticTensorScale)
 from vllm.platforms import current_platform
 
-from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
+from .fusion_rmsnorm_quant import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
