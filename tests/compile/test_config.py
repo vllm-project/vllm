@@ -4,7 +4,7 @@ import pytest
 
 import vllm
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.utils import _is_torch_equal_or_newer
 
 
@@ -24,6 +24,14 @@ def test_use_cudagraphs_dynamic(monkeypatch):
     monkeypatch.setenv('VLLM_USE_V1', '0')
     vllm_config = VllmConfig()
     assert not vllm_config.compilation_config.use_cudagraph
+
+
+def test_custom_op():
+    # proper syntax
+    _ = CompilationConfig(custom_ops=["+quant_fp8", "-silu_and_mul"])
+
+    with pytest.raises(ValueError, match="Invalid syntax '"):
+        _ = CompilationConfig(custom_ops=["quant_fp8"])
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
