@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    FlashInferCutlassMoEPrepareAndFinalize)
+    create_flashinfer_prepare_finalize)
 
 logger = init_logger(__name__)
 
@@ -173,7 +173,7 @@ def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
     moe: Optional[FusedMoEConfig], ) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
-    return FlashInferCutlassMoEPrepareAndFinalize(use_dp)
+    return create_flashinfer_prepare_finalize(use_dp)
 
 
 def select_cutlass_fp8_gemm_impl(
