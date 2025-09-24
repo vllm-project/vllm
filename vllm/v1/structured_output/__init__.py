@@ -15,6 +15,7 @@ from weakref import finalize
 import numpy as np
 
 from vllm.config import VllmConfig
+from vllm.distributed.utils import sched_yield
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
@@ -597,8 +598,6 @@ class GrammarBitmaskPlaceholder:
         pass
 
     def result(self) -> np.ndarray:
-        import time
-
         import numpy as np
 
         # Poll the shared memory flag until it's set
@@ -609,7 +608,7 @@ class GrammarBitmaskPlaceholder:
             if flag_value == 1:  # Flag is set, bitmask is ready
                 break
 
-            time.sleep(0.001)  # Short sleep to avoid busy waiting
+            sched_yield()  # Short sleep to avoid busy waiting
 
         flag_shm.close()
 
