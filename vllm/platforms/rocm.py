@@ -346,7 +346,7 @@ class RocmPlatform(Platform):
             compilation_config.custom_ops.append("+rms_norm")
 
         if (use_v1 and use_aiter_linear
-             and "-quant_fp8" not in compilation_config.custom_ops):
+                and "-quant_fp8" not in compilation_config.custom_ops):
             compilation_config.custom_ops.append("+quant_fp8")
 
     @classmethod
