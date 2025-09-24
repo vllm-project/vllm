@@ -26,7 +26,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
                      bias2: Optional[torch.Tensor],
                      w1_scale: torch.Tensor,
                      w2_scale: torch.Tensor,
-                     gating_output: torch.Tensor,
+                     gating_output: Optional[torch.Tensor],
                      topk_weights: torch.Tensor,
                      topk_ids: torch.Tensor,
                      quant_type_id: int,
@@ -58,8 +58,8 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     - w2 (torch.Tensor): The second set of expert weights.
     - w1_scale (torch.Tensor): Scale to be used for w1.
     - w2_scale (torch.Tensor): Scale to be used for w2.
-    - gating_output (torch.Tensor): The output of the gating operation
-        (before softmax).
+    - gating_output (Optional[torch.Tensor]): The output of the gating
+        operation (before softmax).
     - g_idx1 (Optional[torch.Tensor]): The first set of act_order indices.
     - g_idx2 (Optional[torch.Tensor]): The second set of act_order indices.
     - sort_indices1 (Optional[torch.Tensor]): The first act_order input
@@ -86,7 +86,6 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     ]
     num_bits = 4 if quant_type in bit4_scalar_types else 8
 
-    # TODO (Varun) : make gating output optional.
     # Check constraints.
     if gating_output is not None:
         assert hidden_states.shape[0] == gating_output.shape[
@@ -225,7 +224,7 @@ def fused_marlin_moe_fake(hidden_states: torch.Tensor,
                           w2: torch.Tensor,
                           w1_scale: torch.Tensor,
                           w2_scale: torch.Tensor,
-                          gating_output: torch.Tensor,
+                          gating_output: Optional[torch.Tensor],
                           topk_weights: torch.Tensor,
                           topk_ids: torch.Tensor,
                           quant_type_id: int,
