@@ -31,6 +31,7 @@ import torch
 from torch.distributed import ReduceOp
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import find_nccl_library
 
 logger = init_logger(__name__)
@@ -275,10 +276,18 @@ class NCCLLibrary:
         if so_file not in NCCLLibrary.path_to_dict_mapping:
             _funcs: dict[str, Any] = {}
             for func in NCCLLibrary.exported_functions:
-                f = getattr(self.lib, func.name)
-                f.restype = func.restype
-                f.argtypes = func.argtypes
-                _funcs[func.name] = f
+                try:
+                    f = getattr(self.lib, func.name)
+                    f.restype = func.restype
+                    f.argtypes = func.argtypes
+                    _funcs[func.name] = f
+                except:
+                    if current_platform.is_rocm() and func.name in [
+                            "ncclCommWindowRegister",
+                            "ncclCommWindowDeregister"
+                    ]:
+                        continue
+                    raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
 
