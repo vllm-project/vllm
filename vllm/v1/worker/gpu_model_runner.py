@@ -268,9 +268,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
+        self.suffix_cache = None
         if self.speculative_config and get_pp_group().is_last_rank:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "suffix":
+                try:
+                    from arctic_inference.suffix_decoding import (
+                        SuffixDecodingCache)
+                except ImportError:
+                    raise ImportError(
+                        "Arctic Inference is required for suffix decoding. "
+                        "Please install via `pip install arctic-inference`.")
+                self.suffix_cache = SuffixDecodingCache(
+                    self.speculative_config.suffix_decoding_max_tree_depth,
+                    self.speculative_config.suffix_decoding_max_cached_requests)
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -2121,6 +2133,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
+        if self.suffix_cache is not None:
+            self._update_suffix_cache(valid_sampled_token_ids)
+
         return (
             num_nans_in_logits,
             logprobs_lists,
@@ -2145,6 +2160,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             yield
         finally:
             self.prepare_inputs_event.record()
+
+    def _update_suffix_cache(self, sampled_token_ids: list[list[int]]) -> None:
+        seen_req_ids = set()
+        for i, sampled_ids in enumerate(sampled_token_ids):
+            req_id = self.input_batch.req_ids[i]
+            seen_req_ids.add(req_id)
+
+            if not sampled_ids:
+                continue
+
+            index = self.input_batch.req_id_to_index[req_id]
+            if req_id not in self.suffix_cache.active_requests:
+                if req_id in self.suffix_cache.cached_requests:
+                    # Reset the suffix cache for this request.
+                    self.suffix_cache.evict_cached_response(req_id)
+                num_prompt_tokens = self.input_batch.num_prompt_tokens[index]
+                prompt_token_ids = (
+                    self.input_batch.token_ids_cpu[index, :num_prompt_tokens])
+                self.suffix_cache.start_request(req_id, prompt_token_ids)
+
+            self.suffix_cache.add_active_response(req_id, sampled_ids)
+
+        # Stop requests that are not seen
+        for req_id in list(self.suffix_cache.active_requests):
+            if req_id not in seen_req_ids:
+                self.suffix_cache.stop_request(req_id)
 
     @torch.inference_mode()
     def execute_model(
@@ -2377,6 +2418,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.propose_ngram_draft_token_ids(
                 sampled_token_ids)
+        elif self.speculative_config.method == "suffix":
+            results = self.propose_suffix_draft_token_ids(sampled_token_ids)
+            draft_token_ids = [result.token_ids for result in results]
         elif self.speculative_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)
@@ -2520,6 +2564,55 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
+
+    def propose_suffix_draft_token_ids(
+        self,
+        sampled_token_ids: list[list[int]],
+    ) -> list[list[int]]:
+        from arctic_inference.suffix_decoding import SuffixDecodingDraft
+        config = self.speculative_config
+        results = []
+        for i, sampled_ids in enumerate(sampled_token_ids):
+            num_sampled_ids = len(sampled_ids)
+            if not num_sampled_ids:
+                # Skip speculative decoding.
+                results.append(SuffixDecodingDraft())
+                continue
+
+            req_id = self.input_batch.req_ids[i]
+
+            # Add sampled_token_ids to token_ids_cpu.
+            start_idx = self.input_batch.num_tokens_no_spec[i]
+            end_idx = start_idx + len(sampled_ids)
+
+            if end_idx >= self.max_model_len:
+                results.append(SuffixDecodingDraft())
+                self.input_batch.token_ids_cpu[
+                    i, start_idx:self.
+                    max_model_len] = sampled_ids[:self.max_model_len -
+                                                 start_idx]
+                continue
+
+            self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
+
+            size = min(end_idx, config.suffix_decoding_max_tree_depth)
+            pattern = self.input_batch.token_ids_cpu[i, end_idx - size:end_idx]
+            pattern = pattern.tolist()
+            if len(pattern) > config.suffix_decoding_max_tree_depth:
+                pattern = pattern[-config.suffix_decoding_max_tree_depth:]
+
+            result = self.suffix_cache.speculate(
+                req_id,
+                pattern,
+                max_spec_tokens=min(config.num_speculative_tokens,
+                                    self.max_model_len - end_idx - 1),
+                max_spec_factor=config.suffix_decoding_max_spec_factor,
+                max_spec_offset=config.suffix_decoding_max_spec_offset,
+                min_token_prob=config.suffix_decoding_min_token_prob)
+
+            results.append(result)
+
+        return results
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         allowed_config_names = {"load_config", "model_config"}
