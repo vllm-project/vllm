@@ -307,8 +307,7 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
 def _topk_kernel(LOGITS, PROBS, K, B, 
                  N: tl.constexpr,
                  BLOCK_SIZE: tl.constexpr,
-                 NUM_TILES: tl.constexpr,
-                 NUM_PIVOTS: tl.constexpr):
+                 NUM_TILES: tl.constexpr):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
     for row_id in tl.range(pid, B, num_programs):
@@ -330,36 +329,27 @@ def _topk_kernel(LOGITS, PROBS, K, B,
 
             # Fourth passes: Search for pivots
             num_iters = 0
-            k_pivot = -float('inf')
-            k_pivots = tl.full((NUM_PIVOTS,), -float('inf'), dtype=tl.float32)
+            pivot_found = False
+            k_pivot = 0.0
             
-            while (k_pivot == -float('inf')) and num_iters < 32:
-                k_pivots = (max_logit - min_logit) * tl.arange(1, NUM_PIVOTS + 1) / NUM_PIVOTS + min_logit
-                
-                k_pivots_num = tl.full((NUM_PIVOTS,), 0, dtype=tl.uint32)
+            while not pivot_found and num_iters < 32:
+                k_pivot = (max_logit - min_logit) / 2.0
+                k_pivots_num = 0.0
+
                 for i in range(0, NUM_TILES):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < N
                     logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float('inf'))
 
-                    logits_expanded = logits_blk[None, :] # shape: 1 x BLOCK_SIZE
-                    k_pivots_expanded = k_pivots[:, None] # shape: NUM_PIVOTS x 1
-                    larger_mask = logits_expanded > k_pivots_expanded # shape: NUM_PIVOTS x BLOCK_SIZE
-                    k_pivots_num += tl.sum(larger_mask, axis=1) # shape: NUM_PIVOTS
+                    larger_mask = logits_blk > k_pivot 
+                    k_pivots_num += tl.sum(larger_mask)
 
-                exact_match_k = k_pivots_num == k
-                if tl.sum(exact_match_k) > 0:
-                    matches = tl.where(exact_match_k, k_pivots, float('inf'))
-                    k_pivot = tl.min(matches)
+                if k_pivots_num == k:
+                    pivot_found = True
+                elif k_pivots_num < k:
+                    min_logit = k_pivot
                 else:
-                    smaller_mask = k_pivots_num < k
-                    if tl.sum(smaller_mask) > 0:
-                        matches = tl.where(smaller_mask, k_pivots, float('inf'))
-                        max_logit = tl.min(matches)
-                    larger_mask = k_pivots_num > k
-                    if tl.sum(larger_mask) > 0:
-                        matches = tl.where(larger_mask, k_pivots, -float('inf'))
-                        min_logit = tl.max(matches)
+                    max_logit = k_pivot
 
                 num_iters += 1
 
@@ -384,7 +374,7 @@ def triton_apply_top_k_top_p(
     probs = torch.zeros_like(logits)
     if p is None:
         _topk_kernel[(NUM_PROGRAMS,)](logits, probs, k, batch_size, 
-                                      vocab_size, BLOCK_SIZE, NUM_TILES, NUM_PIVOTS)
+                                      vocab_size, BLOCK_SIZE, NUM_TILES)
     else:
         _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
                                         vocab_size, BLOCK_SIZE, NUM_TILES, NUM_PIVOTS)
