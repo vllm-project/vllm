@@ -39,6 +39,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (cdiv, direct_register_custom_op, has_deep_ep, has_pplx,
                         round_up)
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
@@ -296,6 +297,40 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             self.rocm_aiter_fused_experts = None  # type: ignore
 
+        # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
+        self.flashinfer_cutlass_moe_enabled = (
+            has_flashinfer_cutlass_fused_moe()
+            and envs.VLLM_USE_FLASHINFER_MOE_FP16
+            and self.moe.moe_parallel_config.use_ep
+            and self.moe.moe_parallel_config.dp_size == 1
+            and current_platform.get_device_capability()[0] >= 9)
+        if self.flashinfer_cutlass_moe_enabled:
+            logger.info_once(
+                "Enabling FlashInfer CUTLASS MoE for UnquantizedFusedMoEMethod"
+            )
+            from functools import partial
+
+            from .flashinfer_cutlass_moe import flashinfer_cutlass_moe
+            self.flashinfer_cutlass_moe = partial(
+                flashinfer_cutlass_moe,
+                quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+                tp_rank=self.moe.moe_parallel_config.tp_rank,
+                tp_size=self.moe.moe_parallel_config.tp_size,
+                ep_rank=self.moe.moe_parallel_config.ep_rank,
+                ep_size=self.moe.moe_parallel_config.ep_size)
+        else:
+            if (self.moe.moe_parallel_config.use_ep
+                    and self.moe.moe_parallel_config.dp_size == 1):
+                logger.info_once(
+                    "FlashInfer CUTLASS MoE is available for EP"
+                    " but not enabled, consider setting"
+                    " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.")
+            elif self.moe.moe_parallel_config.dp_size > 1:
+                logger.info_once(
+                    "FlashInfer CUTLASS MoE is currently not available for DP."
+                )
+            self.flashinfer_cutlass_moe = None  # type: ignore
+
     def maybe_make_prepare_finalize(
             self) -> Optional[FusedMoEPrepareAndFinalize]:
         if self.rocm_aiter_moe_enabled:
@@ -367,6 +402,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_pad = 256 // weight.element_size()
             weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
             torch.cuda.empty_cache()
+
         return weight
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -385,6 +421,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
+
+        if self.flashinfer_cutlass_moe_enabled:
+            # Swap halves to arrange as [w3; w1] (kernel expectation)
+            w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
+            w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
+            layer.w13_weight.data = w13_weight_swapped.contiguous()
 
         if current_platform.is_xpu():
             import intel_extension_for_pytorch as ipex
@@ -534,6 +576,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 expert_map=expert_map,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input)
+        elif self.flashinfer_cutlass_moe_enabled:
+            return self.flashinfer_cutlass_moe(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         elif self.fused_experts is not None:

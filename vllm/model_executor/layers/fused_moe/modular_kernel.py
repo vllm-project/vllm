@@ -598,6 +598,8 @@ class SharedResizableBuffer:
 
     def get(self, shape: tuple[int, ...], device: torch.device,
             dtype: torch.dtype):
+        if shape == () or shape is None:
+            return None
         shape_numel = prod(shape)
         if (self.buffer is None or self.buffer.numel() < shape_numel
                 or self.buffer.device != device or self.buffer.dtype != dtype):
