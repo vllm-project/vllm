@@ -119,7 +119,7 @@ def attempt_to_make_names_unique(entries_and_traces):
              if not all_the_same(trace_eles)), None)
 
         if first_trace_difference is None:
-            # can't create a unique name, leave them names as the
+            # can't create a unique name, leave the names as they
             # are they will get aggregated by the pivot_table call
             continue
 

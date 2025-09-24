@@ -2,18 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+
+from .utils import maybe_prefix
 
 
 class ResidualBlock(nn.Module):
@@ -71,6 +70,7 @@ class Medusa(nn.Module):
                 config.hidden_size,
                 org_num_embeddings=self.truncated_vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.lm_heads = [
                 self.lm_head for _ in range(self.config.num_heads)
@@ -102,12 +102,13 @@ class Medusa(nn.Module):
         return [block(hidden_states) for block in self.blocks]
 
     def compute_logits(
-            self, hidden_states: list[torch.Tensor],
-            sampling_metadata: SamplingMetadata) -> list[torch.Tensor]:
+        self,
+        hidden_states: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
         logits_lst: list[torch.Tensor] = []
 
         for hs, lm_head in zip(hidden_states, self.lm_heads):
-            _logits = self.logits_processor(lm_head, hs, sampling_metadata)
+            _logits = self.logits_processor(lm_head, hs)
 
             if _logits is None:
                 # _logits should only be None on rank > 0, in which case
@@ -126,57 +127,6 @@ class Medusa(nn.Module):
                 logits_lst[-1][..., self.token_map] = _logits
 
         return logits_lst
-
-    def sample(
-        self,
-        logits: list[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> list[SamplerOutput]:
-        logits = torch.stack(logits, dim=0).float()
-        logprobs = torch.log_softmax(logits, dim=-1)
-        token_ids = logits.argmax(-1)  # support only top-1 for now
-        probs = torch.softmax(logits, dim=-1)
-
-        token_id_list = []
-        token_prob_list = []
-        token_logprob_list = []
-
-        for idx, seq_group in enumerate(sampling_metadata.seq_groups):
-            token_id_list.append(token_ids[:, seq_group.sample_indices])
-            token_prob_list.append(probs[:, seq_group.sample_indices])
-            token_logprob_list.append(logprobs[:, seq_group.sample_indices])
-
-        outputs: list[Optional[SamplerOutput]] = []
-        for idx in range(len(sampling_metadata.seq_groups)):
-            outputs.append(
-                SamplerOutput(
-                    outputs=None,
-                    sampled_token_probs=token_prob_list[idx].squeeze(1),
-                    logprobs=token_logprob_list[idx].squeeze(1),
-                    sampled_token_ids=token_id_list[idx].squeeze(1),
-                ))
-
-        return outputs
-
-    def generate_proposals(
-        self,
-        previous_hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[list[SamplerOutput]]:
-        # During preemption, we may receive an empty tensor (batch_size=0)
-        if previous_hidden_states.size(0) == 0:
-            # Return None to signal the Top1Proposer that no proposals
-            # were generated for this batch, allowing it to handle this
-            # special case appropriately
-            return None
-
-        return self.sample(
-            logits=self.compute_logits(
-                hidden_states=self.forward(previous_hidden_states),
-                sampling_metadata=sampling_metadata,
-            ),
-            sampling_metadata=sampling_metadata,
-        )
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

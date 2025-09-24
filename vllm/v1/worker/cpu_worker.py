@@ -19,6 +19,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import (Worker,
                                        init_worker_distributed_environment)
+from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
 logger = init_logger(__name__)
 
@@ -55,7 +56,14 @@ class CPUWorker(Worker):
             else:
                 self.local_omp_cpuid = "all"
         else:
-            self.local_omp_cpuid = omp_cpuids.split("|")[self.rank]
+            local_dp_rank = self.parallel_config.data_parallel_rank_local
+            omp_cpuids = omp_cpuids.split("|")
+            if local_dp_rank is not None:
+                world_size = self.parallel_config.world_size
+                omp_cpuids = omp_cpuids[local_dp_rank *
+                                        world_size:(local_dp_rank + 1) *
+                                        world_size]
+            self.local_omp_cpuid = omp_cpuids[self.rank]
 
         if self.local_omp_cpuid != "all":
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
@@ -100,18 +108,29 @@ class CPUWorker(Worker):
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         intermediate_tensors = None
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        num_input_tokens = self.model_runner._get_num_input_tokens(
+            num_scheduled_tokens)
+        all_gather_tensors = {
+            "residual":
+            not is_residual_scattered_for_sp(self.vllm_config,
+                                             num_input_tokens)
+        }
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group()))
+                    all_gather_group=get_tp_group(),
+                    all_gather_tensors=all_gather_tensors))
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
 
         if not get_pp_group().is_last_rank:
             assert isinstance(output, IntermediateTensors)
-            get_pp_group().send_tensor_dict(output.tensors,
-                                            all_gather_group=get_tp_group())
+            get_pp_group().send_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+                all_gather_tensors=all_gather_tensors)
             return None
 
         assert isinstance(output, ModelRunnerOutput)
@@ -162,7 +181,9 @@ class CPUWorker(Worker):
         # Reserve CPUs for other processes
         reserve_cpu_num = envs.VLLM_CPU_NUM_OF_RESERVED_CPU
         if reserve_cpu_num is None:
-            reserve_cpu_num = 1 if self.parallel_config.world_size > 1 else 0
+            need_reserve = (self.parallel_config.world_size > 1 or
+                            self.parallel_config.data_parallel_size_local > 1)
+            reserve_cpu_num = 1 if need_reserve else 0
         assert len(logical_cpu_list) > reserve_cpu_num, (
             f"VLLM_CPU_NUM_OF_RESERVED_CPU ({reserve_cpu_num}) "
             f"should less than {len(logical_cpu_list)}.")

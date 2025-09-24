@@ -20,6 +20,7 @@
 # limitations under the License.
 """Inference-only OPT model compatible with HuggingFace weights."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -40,7 +41,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
@@ -269,7 +269,7 @@ class OPTDecoder(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(hidden_states)
 
         if not get_pp_group().is_last_rank:
@@ -374,7 +374,9 @@ class OPTForCausalLM(nn.Module, SupportsPP):
             self.lm_head = self.model.decoder.embed_tokens
         else:
             self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.word_embed_proj_dim)
+                                          config.word_embed_proj_dim,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
@@ -396,10 +398,8 @@ class OPTForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

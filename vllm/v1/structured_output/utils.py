@@ -8,7 +8,9 @@ import importlib.metadata
 import os
 from typing import TYPE_CHECKING
 
+import numpy as np
 import regex as re
+import torch
 from cachetools import LRUCache
 from diskcache import Cache
 
@@ -20,9 +22,13 @@ if TYPE_CHECKING:
     import outlines_core as oc
     import transformers.file_utils as file_utils
     import transformers.models.gpt2.tokenization_gpt2 as tokenization_gpt2
+    import xgrammar as xgr
 
     from vllm.transformers_utils.tokenizer import AnyTokenizer
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu_input_batch import InputBatch
 else:
+    xgr = LazyLoader("xgr", globals(), "xgrammar")
     oc = LazyLoader("oc", globals(), "outlines_core")
     file_utils = LazyLoader("file_utils", globals(), "transformers.file_utils")
     tokenization_gpt2 = LazyLoader(
@@ -34,6 +40,81 @@ else:
 logger = init_logger(__name__)
 
 CACHE = None
+
+
+def apply_grammar_bitmask(
+    scheduler_output: SchedulerOutput,
+    input_batch: InputBatch,
+    logits: torch.Tensor,
+    device: torch.device,
+) -> None:
+    """
+    Apply grammar bitmask to output logits of the model with xgrammar function.
+
+    Args:
+        scheduler_output (SchedulerOutput): The result of engine scheduling.
+        input_batch (InputBatch): The input of model runner.
+        logits (torch.Tensor): The output logits of model forward.
+        device (torch.device): The device that model runner running on.
+    """
+    grammar_bitmask = scheduler_output.grammar_bitmask
+    if grammar_bitmask is None:
+        return
+
+    # We receive the structured output bitmask from the scheduler,
+    # compacted to contain bitmasks only for structured output requests.
+    # The order of the requests in the bitmask is not guaranteed to be the
+    # same as the order of the requests in the gpu runner's batch. We need
+    # to sort the bitmask to match the order of the requests used here.
+
+    # Get the batch indices of the structured output requests.
+    # Keep track of the number of speculative tokens scheduled for every
+    # request in the batch, as the logit indices are offset by this amount.
+    struct_out_req_batch_indices: dict[str, int] = {}
+    cumulative_offset = 0
+    seq = sorted(input_batch.req_id_to_index.items(), key=lambda x: x[1])
+    for req_id, batch_index in seq:
+        logit_index = batch_index + cumulative_offset
+        cumulative_offset += len(
+            scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+        if req_id in scheduler_output.structured_output_request_ids:
+            struct_out_req_batch_indices[req_id] = logit_index
+
+    out_indices = []
+
+    # Reorder the bitmask to match the order of the requests in the batch.
+    sorted_bitmask = np.full(shape=(logits.shape[0], grammar_bitmask.shape[1]),
+                             fill_value=-1,
+                             dtype=grammar_bitmask.dtype)
+    cumulative_index = 0
+    seq = sorted(scheduler_output.structured_output_request_ids.items(),
+                 key=lambda x: x[1])
+    for req_id, _ in seq:
+        num_spec_tokens = len(
+            scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+        if req_id in struct_out_req_batch_indices:
+            logit_index = struct_out_req_batch_indices[req_id]
+            for i in range(1 + num_spec_tokens):
+                sorted_bitmask[logit_index + i] = \
+                    grammar_bitmask[cumulative_index + i]
+                out_indices.append(logit_index + i)
+        cumulative_index += 1 + num_spec_tokens
+    grammar_bitmask = sorted_bitmask
+
+    # If the length of out indices and the logits have the same shape
+    # we don't need to pass indices to the kernel,
+    # since the bitmask is already aligned with the logits.
+    skip_out_indices = len(out_indices) == logits.shape[0]
+
+    # Serialization of np.ndarray is much more efficient than a tensor,
+    # so we receive it in that format.
+    grammar_bitmask = torch.from_numpy(grammar_bitmask).contiguous()
+
+    xgr.apply_token_bitmask_inplace(
+        logits,
+        grammar_bitmask.to(device, non_blocking=True),
+        indices=out_indices if not skip_out_indices else None,
+    )
 
 
 class OutlinesVocabulary:
@@ -65,9 +146,9 @@ def get_outlines_cache_path() -> str:
     elif xdg_cache_home:
         return os.path.join(xdg_cache_home, ".cache", "outlines")
     # If homedir is "/", we may be inside a container, and thus writing to
-    # root would be problematic, so we fallback to using a tempfile.
+    # root would be problematic, so we fall back to using a tempfile.
     # Also validate the path exists, since os.path.expanduser does
-    # not garuntee existence.
+    # not guarantee existence.
     elif os.path.isdir(home_dir) and home_dir != "/":
         # Default Unix fallback: ~/.cache/outlines
         return os.path.join(home_dir, ".cache", "outlines")

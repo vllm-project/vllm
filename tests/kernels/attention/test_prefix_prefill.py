@@ -11,7 +11,7 @@ import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
 
-from vllm.attention.backends.xformers import _make_alibi_bias
+from tests.kernels.utils import make_alibi_bias
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
@@ -470,7 +470,7 @@ def test_contexted_kv_attention_alibi(
     key = key.unsqueeze(0)
     value = value.unsqueeze(0)
 
-    attn_bias = _make_alibi_bias(alibi_slopes, num_kv_heads, dtype, seq_lens)
+    attn_bias = make_alibi_bias(alibi_slopes, num_kv_heads, dtype, seq_lens)
     output_ref = torch.empty_like(output)
     seq_start = 0
     query_start = 0
@@ -479,7 +479,7 @@ def test_contexted_kv_attention_alibi(
     # FIXME(DefTruth): Because xformers does not support dynamic sequence
     # lengths with custom attention bias, we process each prompt one by
     # one. This is inefficient, especially when we have many short prompts.
-    # modified from: vllm/attention/backends/xformers.py#L343
+    # modified from: vllm/v1/attention/backends/xformers.py#L343
     for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
         seq_end = seq_start + seq_len
         query_end = query_start + query_len

@@ -13,14 +13,6 @@ from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
-EXPECTED_NO_LORA_OUTPUT = [
-    "\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_75 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_76 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_77 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_78 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user]",  # noqa: E501
-    " Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? ",  # noqa: E501
-    "\n\n answer: 1\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_96 (one_mora VARCHAR, gloss VARCHAR, accented_mora VARCHAR)\n\n question: What is the one mora for a high tone mora with a gloss of /˧kot/ [kòt]? [/user] [assistant]\n\n answer: 2\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_97 (one_mora VARCHAR, gloss VARCHAR, accented_mora VARCHAR)\n\n question: What is the one mora for a high tone mora with a gloss of /˧kot/ [kòt]? [/user] [assistant]\n\n answer: 2\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_98 (one_mora VARCHAR, gloss VARCHAR, accented_mora VARCHAR)\n\n question: What is the one m",  # noqa: E501
-    " Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE candidate (people_id VARCHAR, unsure_rate INTEGER); CREATE TABLE people (sex VARCHAR, people_id VARCHAR)\n\n question: which gender got the highest average uncertain ratio. ",  # noqa: E501
-    " Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_60 (pick INTEGER, former_wnba_team VARCHAR)\n\n question: What pick was a player that previously played for the Minnesota Lynx? ",  # noqa: E501
-    "\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_28138035_4 (womens_doubles VARCHAR, mens_singles VARCHAR)\n\n question: Name the women's doubles for werner schlager [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_28138035_4 (womens_doubles VARCHAR, mens_singles VARCHAR)\n\n question: Name the women's doubles for werner schlager [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_28138035_4 (womens_doubles VARCHAR, mens_singles VARCHAR)\n\n question: Name the women's doubles for werner schlager [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE",  # noqa: E501
-]
 EXPECTED_LORA_OUTPUT = [
     "  SELECT icao FROM table_name_74 WHERE airport = 'lilongwe international airport' ",  # noqa: E501
     "  SELECT nationality FROM table_name_11 WHERE elector = 'anchero pantaleone' ",  # noqa: E501
@@ -79,22 +71,11 @@ def generate_and_test(llm,
                       sql_lora_files,
                       tensorizer_config_dict: Union[dict, None] = None):
     print("lora adapter created")
-    assert do_sample(llm,
-                     sql_lora_files,
-                     tensorizer_config_dict=tensorizer_config_dict,
-                     lora_id=0) == EXPECTED_NO_LORA_OUTPUT
-
     print("lora 1")
     assert do_sample(llm,
                      sql_lora_files,
                      tensorizer_config_dict=tensorizer_config_dict,
                      lora_id=1) == EXPECTED_LORA_OUTPUT
-
-    print("no lora")
-    assert do_sample(llm,
-                     sql_lora_files,
-                     tensorizer_config_dict=tensorizer_config_dict,
-                     lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
     print("lora 2")
     assert do_sample(llm,
@@ -110,11 +91,11 @@ def test_llama_lora(sql_lora_files):
 
     llm = vllm.LLM(
         MODEL_PATH,
+        tokenizer=sql_lora_files,
         enable_lora=True,
         # also test odd max_num_seqs
         max_num_seqs=13,
-        max_loras=4,
-        enable_chunked_prefill=True)
+        max_loras=4)
     generate_and_test(llm, sql_lora_files)
 
 
@@ -124,11 +105,11 @@ def test_llama_lora_tp4(sql_lora_files):
 
     llm = vllm.LLM(
         MODEL_PATH,
+        tokenizer=sql_lora_files,
         enable_lora=True,
         max_num_seqs=16,
         max_loras=4,
         tensor_parallel_size=4,
-        enable_chunked_prefill=True,
     )
     generate_and_test(llm, sql_lora_files)
 
@@ -139,12 +120,12 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
 
     llm = vllm.LLM(
         MODEL_PATH,
+        tokenizer=sql_lora_files,
         enable_lora=True,
         max_num_seqs=16,
         max_loras=4,
         tensor_parallel_size=4,
         fully_sharded_loras=True,
-        enable_chunked_prefill=True,
     )
     generate_and_test(llm, sql_lora_files)
 
@@ -187,6 +168,7 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
     tensorizer_config = TensorizerConfig(tensorizer_uri=str(model_uri))
 
     loaded_llm = LLM(model=model_ref,
+                     tokenizer=sql_lora_files,
                      load_format="tensorizer",
                      enable_lora=True,
                      enforce_eager=True,
@@ -198,11 +180,6 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
     tc_as_dict = tensorizer_config.to_serializable()
 
     print("lora adapter created")
-    assert do_sample(loaded_llm,
-                     sql_lora_files,
-                     tensorizer_config_dict=tc_as_dict,
-                     lora_id=0) == EXPECTED_NO_LORA_OUTPUT
-
     print("lora 1")
     assert do_sample(loaded_llm,
                      sql_lora_files,

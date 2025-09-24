@@ -464,7 +464,11 @@ class BenchmarkTensors:
         for field_name in LoRAKernelMeta.__dataclass_fields__:
             field = getattr(self.lora_kernel_meta, field_name)
             assert isinstance(field, torch.Tensor)
-            setattr(self.lora_kernel_meta, field_name, to_device(field))
+            setattr(
+                self.lora_kernel_meta,
+                field_name,
+                to_device(field) if field_name != "no_lora_flag_cpu" else field,
+            )
 
     def metadata(self) -> tuple[int, int, int]:
         """
@@ -512,6 +516,7 @@ class BenchmarkTensors:
             "lora_token_start_loc": self.lora_kernel_meta.lora_token_start_loc,
             "lora_ids": self.lora_kernel_meta.active_lora_ids,
             "scaling": 1.0,
+            "no_lora_flag_cpu": self.lora_kernel_meta.no_lora_flag_cpu,
         }
 
     def as_lora_expand_kwargs(self, add_inputs: bool) -> dict[str, Any]:
@@ -552,6 +557,7 @@ class BenchmarkTensors:
             "lora_ids": self.lora_kernel_meta.active_lora_ids,
             "offset_start": 0,
             "add_inputs": add_inputs,
+            "no_lora_flag_cpu": self.lora_kernel_meta.no_lora_flag_cpu,
         }
 
     def bench_fn_kwargs(
@@ -637,7 +643,7 @@ def bench_optype(
     # Clear LoRA optimization hash-maps.
     _LORA_A_PTR_DICT.clear()
     _LORA_B_PTR_DICT.clear()
-    # Run bench function so that _LORA_A_PTR_DICT and _LORA_B_PTR_DICT are setup
+    # Run bench function so that _LORA_A_PTR_DICT and _LORA_B_PTR_DICT are set up
     for kwargs in kwargs_list:
         op_type.bench_fn()(**kwargs)
     torch.cuda.synchronize()

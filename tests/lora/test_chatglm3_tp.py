@@ -87,6 +87,9 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
 @multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()
 def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
+    # https://github.com/NVIDIA/nccl/issues/1790, set a lower value for
+    # gpu_memory_utilization here because NCCL >= 2.26.3 seems to use
+    # more GPU memory causing vLLM to OOM
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
                    enable_lora=True,
@@ -95,7 +98,8 @@ def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
                    tensor_parallel_size=4,
                    trust_remote_code=True,
                    fully_sharded_loras=True,
-                   enable_chunked_prefill=True)
+                   enable_chunked_prefill=True,
+                   gpu_memory_utilization=0.85)
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output1[i] == EXPECTED_LORA_OUTPUT[i]

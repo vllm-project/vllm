@@ -19,7 +19,7 @@ When using `vllm bench serve`, you can enable profiling by passing the `--profil
 Traces can be visualized using <https://ui.perfetto.dev/>.
 
 !!! tip
-You can directly call bench module without installing vllm using `python -m vllm.entrypoints.cli.main bench`.
+    You can directly call bench module without installing vLLM using `python -m vllm.entrypoints.cli.main bench`.
 
 !!! tip
     Only send a few requests through vLLM when profiling, as the traces can get quite large. Also, no need to untar the traces, they can be viewed directly.
@@ -72,6 +72,8 @@ apt install nsight-systems-cli
 ```
 
 ### Example commands and usage
+
+When profiling with `nsys`, it is advisable to set the environment variable `VLLM_WORKER_MULTIPROC_METHOD=spawn`. The default is to use the `fork` method instead of `spawn`. More information on the topic can be found in the [Nsight Systems release notes](https://docs.nvidia.com/nsight-systems/ReleaseNotes/index.html#general-issues).
 
 #### Offline Inference
 

@@ -45,12 +45,15 @@ def run_awq_test(
     # will hurt multiprocessing backend with fork method (the default method).
 
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(source_model,
-                     max_model_len=4096,
-                     dtype=dtype,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+            source_model,
+            max_model_len=4096,
+            dtype=dtype,
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+            enforce_eager=True,
+            default_torch_num_threads=1,
+    ) as vllm_model:
         source_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
@@ -59,13 +62,16 @@ def run_awq_test(
             for prompts, images in inputs_per_image
         ]
 
-    with vllm_runner(quant_model,
-                     quantization="awq",
-                     max_model_len=4096,
-                     dtype=dtype,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+            quant_model,
+            quantization="awq",
+            max_model_len=4096,
+            dtype=dtype,
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+            enforce_eager=True,
+            default_torch_num_threads=1,
+    ) as vllm_model:
         quant_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
@@ -108,12 +114,8 @@ def run_awq_test(
 @pytest.mark.parametrize("num_logprobs", [5])
 @torch.inference_mode()
 def test_awq_models(vllm_runner, image_assets, source_model, quant_model,
-                    size_factors, dtype, max_tokens, num_logprobs,
-                    monkeypatch) -> None:
+                    size_factors, dtype, max_tokens, num_logprobs) -> None:
 
-    # Test V1: this test hangs during setup on single-scale input.
-    # TODO: fixure out why and re-enable this on V1.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
     run_awq_test(
         vllm_runner,
         image_assets,

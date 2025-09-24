@@ -201,7 +201,7 @@ def marlin_make_workspace(output_size_per_partition: int,
 def marlin_make_workspace_new(device: torch.device,
                               max_blocks_per_sm: int = 1) -> torch.Tensor:
     # In the new marlin kernel, we use the num of threadblocks as workspace
-    # size. The num of threadblocks is is sms_count * max_blocks_per_sm.
+    # size. The num of threadblocks is sms_count * max_blocks_per_sm.
     sms = torch.cuda.get_device_properties(device).multi_processor_count
     return torch.zeros(sms * max_blocks_per_sm,
                        dtype=torch.int,

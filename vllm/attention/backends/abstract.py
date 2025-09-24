@@ -4,19 +4,12 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
-                    Protocol, Set, Tuple, Type, TypeVar)
+from typing import (Any, Dict, Generic, List, Optional, Protocol, Set, Tuple,
+                    Type, TypeVar)
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
-from vllm.multimodal import MultiModalPlaceholderMap
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import (ModelRunnerBase,
-                                               ModelRunnerInputBase,
-                                               ModelRunnerInputBuilderBase)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
 class AttentionType:
@@ -24,14 +17,14 @@ class AttentionType:
     Attention type.
     Use string to be compatible with `torch.compile`.
     """
-    # Decoder attention between previous layer Q/K/V
     DECODER = "decoder"
-    # Encoder attention between previous layer Q/K/V for encoder-decoder
+    """Decoder attention between previous layer Q/K/V."""
     ENCODER = "encoder"
-    # Encoder attention between previous layer Q/K/V
+    """Encoder attention between previous layer Q/K/V for encoder-decoder."""
     ENCODER_ONLY = "encoder_only"
-    # Attention between dec. Q and enc. K/V for encoder-decoder
+    """Encoder attention between previous layer Q/K/V."""
     ENCODER_DECODER = "encoder_decoder"
+    """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
 class AttentionBackend(ABC):
@@ -122,15 +115,6 @@ class AttentionMetadata:
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
 
-    # The index maps that relate multi-modal embeddings to the corresponding
-    # placeholders.
-    #
-    # N.B. These aren't really related to attention and don't belong on this
-    # type -- this is just a temporary solution to make them available to
-    # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[Dict[
-        str, MultiModalPlaceholderMap.IndexMap]]
-
     # Enable/disable KV scales calculation. This is so that we can disable the
     # calculation until after prefill and cuda graph capture.
     enable_kv_scales_calculation: bool
@@ -171,7 +155,7 @@ class AttentionState(ABC, Generic[T]):
     lifetime of the model runner."""
 
     @abstractmethod
-    def __init__(self, runner: "ModelRunnerBase"):
+    def __init__(self, runner: Any):
         ...
 
     @abstractmethod
@@ -211,7 +195,7 @@ class AttentionState(ABC, Generic[T]):
         ...
 
     @abstractmethod
-    def begin_forward(self, model_input: "ModelRunnerInputBase") -> None:
+    def begin_forward(self, model_input) -> None:
         """Prepare state for forward pass."""
         ...
 
@@ -220,7 +204,7 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
     """Abstract class for attention metadata builders."""
 
     @abstractmethod
-    def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
+    def __init__(self, input_builder) -> None:
         """Create the builder, remember some configuration and parameters."""
         raise NotImplementedError
 
@@ -241,6 +225,7 @@ class AttentionLayer(Protocol):
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
+    _q_scale_float: float
     _k_scale_float: float
     _v_scale_float: float
     _prob_scale: torch.Tensor
@@ -257,6 +242,32 @@ class AttentionLayer(Protocol):
 
 
 class AttentionImpl(ABC, Generic[T]):
+
+    # Whether the attention impl can return the softmax lse for decode.
+    # Some features like decode context parallelism require the softmax lse.
+    can_return_lse_for_decode: bool = False
+
+    # some attention backends might not always want to return lse
+    # even if they can return lse (for efficiency reasons)
+    need_to_return_lse_for_decode: bool = False
+
+    dcp_world_size: int
+    dcp_rank: int
+
+    def __new__(cls, *args, **kwargs):
+        # use __new__ so that all subclasses will call this
+        self = super().__new__(cls)
+        try:
+            from vllm.distributed.parallel_state import get_dcp_group
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+        self.need_to_return_lse_for_decode = self.dcp_world_size > 1 \
+            and self.can_return_lse_for_decode
+        return self
 
     @abstractmethod
     def __init__(
@@ -285,20 +296,17 @@ class AttentionImpl(ABC, Generic[T]):
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
-                                     group_shape: GroupShape):
+    def fused_output_quant_supported(self, quant_key: QuantKey):
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
         onto implementations that support it.
 
-        TODO(luka) merge parameters into QuantDescriptor
-        :param dtype: quantized dtype
-        :param static: static or dynamic quantization
-        :param group_shape: quant group shape.
+        :param quant_key: QuantKey object that describes the quantization op
         :return: is fusion supported for this type of quantization
         """
         return False
@@ -317,6 +325,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 

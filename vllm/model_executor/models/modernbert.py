@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from transformers import ModernBertConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -22,11 +22,12 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
+from vllm.v1.pool.metadata import PoolingMetadata
 
-from .interfaces import SupportsCrossEncoding, default_pooling_type
+from .interfaces import SupportsCrossEncoding
+from .interfaces_base import default_pooling_type
 from .utils import WeightsMapper, maybe_prefix
 
 
@@ -104,12 +105,12 @@ class ModernBertAttention(nn.Module):
                                                     head_size=self.head_dim,
                                                     dim=self.head_dim,
                                                     base=rope_theta)
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              prefix=f"{layer_id}.attn",
-                              attn_type=AttentionType.ENCODER_ONLY,
-                              per_layer_sliding_window=sliding_window)
+        self.attn = EncoderOnlyAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            prefix=f"{layer_id}.attn",
+            per_layer_sliding_window=sliding_window)
         self.Wo = RowParallelLinear(config.hidden_size,
                                     config.hidden_size,
                                     bias=config.attention_bias)
@@ -305,7 +306,9 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self.config = config
         self.model = ModernBertModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "modernbert"))
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = nn.Linear(config.hidden_size,
+                                    config.num_labels,
+                                    dtype=vllm_config.model_config.head_dtype)
         self.pooling = ModernBertPooler(config)
 
         pooler_config = vllm_config.model_config.pooler_config

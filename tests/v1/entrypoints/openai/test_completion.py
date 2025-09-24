@@ -627,7 +627,9 @@ async def test_invalid_json_schema(client: openai.AsyncOpenAI,
         await client.completions.create(
             model=model_name,
             prompt=prompt,
-            extra_body={"guided_json": invalid_json_schema},
+            extra_body={"structured_outputs": {
+                "json": invalid_json_schema
+            }},
         )
 
 
@@ -646,7 +648,9 @@ async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
             model=model_name,
             prompt=prompt,
             extra_body={
-                "guided_regex": r"[.*",
+                "structured_outputs": {
+                    "regex": r"[.*"
+                },
                 "stop": ["\n"]
             },
         )
@@ -678,7 +682,11 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
         await client.completions.create(
             model=model_name,
             prompt=prompt,
-            extra_body={"guided_grammar": invalid_simplified_sql_grammar},
+            extra_body={
+                "structured_outputs": {
+                    "grammar": invalid_simplified_sql_grammar
+                }
+            },
         )
 
 
@@ -686,7 +694,7 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
 async def test_completion_with_empty_prompt_embeds(
         client: openai.AsyncOpenAI) -> None:
     """Test completion with empty prompt embeds."""
-    payload: dict[str, list] = {"prompt_embeds": []}
+    payload: dict[str, object] = {"prompt": "Hello", "prompt_embeds": []}
     headers: dict[str, str] = {"Content-Type": "application/json"}
     # base_url = http://localhost:8000/v1/completions
     response = requests.post(f"{client.base_url}completions",

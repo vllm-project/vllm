@@ -11,7 +11,6 @@ import torch
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
 
@@ -237,7 +236,6 @@ try:
         op_func=_lora_shrink,
         mutates_args=["output_tensor"],
         fake_impl=_lora_shrink_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
     lora_shrink = torch.ops.vllm.lora_shrink
 

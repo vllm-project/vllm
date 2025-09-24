@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from transformers import BertConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -24,12 +24,12 @@ from vllm.model_executor.layers.pooler import (ClassifierPooler,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
+from vllm.v1.pool.metadata import PoolingMetadata
 
-from .interfaces import (SupportsCrossEncoding, SupportsQuant,
-                         default_pooling_type)
+from .interfaces import SupportsCrossEncoding, SupportsQuant
+from .interfaces_base import default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -239,14 +239,13 @@ class BertSelfAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj")
 
-        self.attn = Attention(num_heads=self.num_heads,
-                              head_size=self.head_dim,
-                              scale=self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              attn_type=AttentionType.ENCODER_ONLY)
+        self.attn = EncoderOnlyAttention(num_heads=self.num_heads,
+                                         head_size=self.head_dim,
+                                         scale=self.scaling,
+                                         num_kv_heads=self.num_kv_heads,
+                                         cache_config=cache_config,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -528,9 +527,9 @@ def _encode_token_type_ids(input_ids: torch.Tensor,
 
 def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
 
-    ids_mask = torch.ones(input_ids.shape,
-                          dtype=torch.int32,
-                          device=input_ids.device) << TOKEN_TYPE_SHIFT
+    ids_mask = torch.ones_like(input_ids,
+                               dtype=torch.int32,
+                               device=input_ids.device) << TOKEN_TYPE_SHIFT
     tokens_mask = ids_mask.bitwise_not()
 
     token_type_ids = input_ids.bitwise_and(ids_mask) >> TOKEN_TYPE_SHIFT
@@ -563,7 +562,9 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
         self.bert = BertPoolingModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "bert"),
                                      embedding_class=BertEmbedding)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = nn.Linear(config.hidden_size,
+                                    config.num_labels,
+                                    dtype=vllm_config.model_config.head_dtype)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -610,3 +611,55 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                          positions=positions,
                          inputs_embeds=inputs_embeds,
                          intermediate_tensors=intermediate_tensors)
+
+
+@default_pooling_type("ALL")
+class BertForTokenClassification(nn.Module):
+    is_pooling_model = True
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        self.head_dtype = vllm_config.model_config.head_dtype
+        self.num_labels = config.num_labels
+        self.bert = BertModel(vllm_config=vllm_config,
+                              prefix=maybe_prefix(prefix, "bert"),
+                              embedding_class=BertEmbedding)
+        self.classifier = nn.Linear(config.hidden_size,
+                                    config.num_labels,
+                                    dtype=self.head_dtype)
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+        })
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(self)
+        loaded_params = loader.load_weights(weights)
+        return loaded_params
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+
+        if token_type_ids is not None:
+            assert self.bert.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
+            assert input_ids is not None
+            _encode_token_type_ids(input_ids, token_type_ids)
+
+        hidden_states = self.bert(input_ids=input_ids,
+                                  positions=positions,
+                                  inputs_embeds=inputs_embeds,
+                                  intermediate_tensors=intermediate_tensors)
+
+        hidden_states = hidden_states.to(self.head_dtype)
+        return self.classifier(hidden_states)

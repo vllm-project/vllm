@@ -99,21 +99,105 @@ class PoissonDistribution(Distribution):
 
 class LognormalDistribution(Distribution):
     def __init__(
-        self, mean: float, sigma: float, max_val: Optional[int] = None
+        self,
+        mean: Optional[float] = None,
+        sigma: Optional[float] = None,
+        average: Optional[int] = None,
+        median_ratio: Optional[float] = None,
+        max_val: Optional[int] = None,
     ) -> None:
+        self.average = average
+        self.median_ratio = median_ratio
+        self.max_val = max_val
+
+        if average is not None:
+            if average < 1:
+                raise ValueError("Lognormal average must be positive")
+
+            if mean or sigma:
+                raise ValueError(
+                    "When using lognormal average, you can't provide mean/sigma"
+                )
+
+            if self.median_ratio is None:
+                # Default value that provides relatively wide range of values
+                self.median_ratio = 0.85
+
+            # Calculate mean/sigma of np.random.lognormal based on the average
+            mean, sigma = self._generate_lognormal_by_median(
+                target_average=self.average, median_ratio=self.median_ratio
+            )
+        else:
+            if mean is None or sigma is None:
+                raise ValueError(
+                    "Must provide both mean and sigma if average is not used"
+                )
+
+            if mean <= 0 or sigma < 0:
+                raise ValueError(
+                    "Lognormal mean must be positive and sigma must be non-negative"
+                )
+
+        # Mean and standard deviation of the underlying normal distribution
+        # Based on numpy.random.lognormal
         self.mean = mean
         self.sigma = sigma
-        self.max_val = max_val
+
+    @staticmethod
+    def _generate_lognormal_by_median(
+        target_average: int, median_ratio: float
+    ) -> tuple[float, float]:
+        """
+        Compute (mu, sigma) for a lognormal distribution given:
+        - a target average (mean of the distribution)
+        - a ratio of median / mean (controls skewness), assume mean > median
+
+        Background:
+        If Z ~ Normal(mu, sigma^2), then X = exp(Z) ~ LogNormal(mu, sigma).
+        * mean(X)   = exp(mu + sigma^2 / 2)
+        * median(X) = exp(mu)
+
+        So:
+        median / mean = exp(mu) / exp(mu + sigma^2 / 2)
+                      = exp(-sigma^2 / 2)
+
+        Rearranging:
+        sigma^2 = 2 * ln(mean / median)
+        mu      = ln(median)
+
+        This gives a unique (mu, sigma) for any valid mean and median.
+        """
+        # Check input validity: median must be smaller than mean
+        if median_ratio <= 0 or median_ratio >= 1:
+            raise ValueError("median_ratio must be in range (0, 1)")
+
+        target_median = target_average * median_ratio
+
+        # Solve sigma^2 = 2 * ln(mean / median)
+        sigma = np.sqrt(2 * np.log(target_average / target_median))
+        mu = np.log(target_median)
+
+        return mu, sigma
 
     def sample(self, size: int = 1) -> np.ndarray:
         samples = np.random.lognormal(mean=self.mean, sigma=self.sigma, size=size)
+
+        if self.average is not None:
+            # Scale to average
+            samples *= self.average / samples.mean()
+
         if self.max_val:
             samples = np.minimum(samples, self.max_val)
 
         return np.round(samples).astype(int)
 
     def __repr__(self) -> str:
-        return f"LognormalDistribution[{self.mean}, {self.sigma}]"
+        if self.average:
+            return (
+                f"LognormalDistribution[{self.average}, "
+                f"{self.median_ratio}, {self.max_val}]"
+            )
+        return f"LognormalDistribution[{self.mean}, {self.sigma}, {self.max_val}]"
 
 
 class GenConvArgs(NamedTuple):
@@ -173,10 +257,21 @@ def get_random_distribution(
         return PoissonDistribution(conf["alpha"], max_val=max_val)
 
     elif distribution == "lognormal":
+        max_val = conf.get("max", None)
+
+        if "average" in conf:
+            # Infer lognormal mean/sigma (numpy) from input average
+            median_ratio = conf.get("median_ratio", None)
+            return LognormalDistribution(
+                average=conf["average"], median_ratio=median_ratio, max_val=max_val
+            )
+
+        # Use mean/sigma directly (for full control over the distribution)
         verify_field_exists(conf, "mean", section, subsection)
         verify_field_exists(conf, "sigma", section, subsection)
-        max_val = conf.get("max", None)
-        return LognormalDistribution(conf["mean"], conf["sigma"], max_val=max_val)
+        return LognormalDistribution(
+            mean=conf["mean"], sigma=conf["sigma"], max_val=max_val
+        )
 
     elif distribution == "uniform":
         verify_field_exists(conf, "min", section, subsection)

@@ -11,23 +11,23 @@ from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.fully_sharded_layers import (
-    ColumnParallelLinearWithShardedLoRA,
-    MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
-    RowParallelLinearWithShardedLoRA)
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              ColumnParallelLinearWithShardedLoRA,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
+                              MergedColumnParallelLinearWithShardedLoRA,
                               MergedQKVParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithShardedLoRA,
                               QKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithShardedLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
+                              RowParallelLinearWithShardedLoRA,
                               VocabParallelEmbeddingWithLoRA)
 from vllm.model_executor.layers.linear import LinearBase
 
@@ -239,7 +239,7 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     except (HfHubHTTPError, RepositoryNotFoundError, EntryNotFoundError,
             HFValidationError):
         # Handle errors that may occur during the download
-        # Return original path instead instead of throwing error here
+        # Return original path instead of throwing error here
         logger.exception("Error downloading the HuggingFace model")
         return lora_path
 

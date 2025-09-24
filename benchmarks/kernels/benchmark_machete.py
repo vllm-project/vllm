@@ -253,28 +253,7 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
     else:
         assert bt.a.dtype == torch.int8
         assert bt.wtype == scalar_types.uint4b8
-
-        if bt.w_ch_s is not None:
-            s_ch = bt.w_ch_s.to(torch.float32)
-        else:
-            s_ch = torch.ones(bt.w_ref.shape[1], dtype=torch.float32, device=device)
-
-        if bt.w_tok_s is not None:
-            s_tok = bt.w_tok_s.to(torch.float32)
-        else:
-            s_tok = torch.ones(bt.a.shape[0], dtype=torch.float32, device=device)
-
-        fn = lambda: ops.marlin_qqq_gemm(
-            a=bt.a,
-            b_q_weight=w_q,
-            s_group=w_s,
-            s_tok=s_tok,
-            s_ch=s_ch,
-            workspace=workspace.scratch,
-            size_m=bt.a.shape[0],
-            size_n=bt.w_ref.shape[1],
-            size_k=bt.w_ref.shape[0],
-        )
+        raise NotImplementedError("QQQ is not supported anymore")
 
     return fn
 
@@ -302,6 +281,25 @@ def machete_create_bench_fn(
         a_token_scales=bt.w_tok_s,
         out_type=out_type,
         schedule=schedule,
+    )
+
+
+def cutlass_w4a8_create_bench_fn(
+    bt: BenchmarkTensors, out_type=torch.dtype, schedule=None
+) -> Callable:
+    w_q = bt.w_q.t().contiguous().t()  # make col major
+    w_q = ops.cutlass_encode_and_reorder_int4b(w_q)
+    # expects fp8 scales
+    w_s = ops.cutlass_pack_scale_fp8(bt.w_g_s.to(torch.float8_e4m3fn))
+
+    return lambda: ops.cutlass_w4a8_mm(
+        a=bt.a,
+        b_q=w_q,
+        b_group_scales=w_s,
+        b_group_size=bt.group_size,
+        b_channel_scales=bt.w_ch_s,
+        a_token_scales=bt.w_tok_s,
+        maybe_schedule=schedule,
     )
 
 
@@ -405,6 +403,20 @@ def bench(
             ],
         )
     )
+
+    # cutlass w4a8
+    if types.act_type == torch.float8_e4m3fn and group_size == 128:
+        timers.append(
+            bench_fns(
+                label,
+                sub_label,
+                f"cutlass w4a8 ({name_type_string})",
+                [
+                    cutlass_w4a8_create_bench_fn(bt, out_type=types.output_type)
+                    for bt in benchmark_tensors
+                ],
+            )
+        )
 
     if sweep_schedules:
         global _SWEEP_SCHEDULES_RESULTS

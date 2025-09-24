@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import SamplingParams
-from vllm.config import LoadConfig
+from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
 
 load_format = "runai_streamer"

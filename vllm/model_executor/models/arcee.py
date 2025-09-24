@@ -9,6 +9,7 @@
 # activation.
 
 from collections.abc import Iterable
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -243,7 +244,7 @@ class ArceeModel(nn.Module):
 
         aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(
-                self.layers[self.start_layer:self.end_layer]):
+                islice(self.layers, self.start_layer, self.end_layer)):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(
                     hidden_states +
@@ -341,7 +342,7 @@ class ArceeModel(nn.Module):
 class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     """Arcee Model for causal language modeling, integrated with vLLM
     runtime."""
-    # Map fused module names to their sub-module components
+    # Map fused module names to their submodule components
     # (for quantization and LoRA)
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -398,11 +399,10 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                   inputs_embeds=inputs_embeds)
         return model_output
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata) -> Optional[torch.Tensor]:
+    def compute_logits(self,
+                       hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
         # Compute final logits from hidden states (last pipeline rank only)
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:

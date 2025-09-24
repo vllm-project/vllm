@@ -5,20 +5,20 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from functools import cached_property
-from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
-                    Union)
+from typing import Any, Awaitable, Callable, List, Optional, Set, Union
 
 import torch.nn as nn
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, deprecated
 
 import vllm.platforms
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.tasks import SupportedTask
 from vllm.utils import make_async
+from vllm.v1.outputs import SamplerOutput
 from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
@@ -54,6 +54,7 @@ class ExecutorBase(ABC):
         self._init_executor()
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
+        self.kv_output_aggregator = None
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -61,10 +62,10 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def collective_rpc(self,
-                       method: Union[str, Callable[..., _R]],
+                       method: Union[str, Callable[[WorkerBase], _R]],
                        timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict[str, Any]] = None) -> List[_R]:
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         """
         Execute an RPC call on all workers.
 
@@ -89,7 +90,7 @@ class ExecutorBase(ABC):
         """
         raise NotImplementedError
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
 
@@ -97,9 +98,10 @@ class ExecutorBase(ABC):
         ExecutorBase may require modification of the result, e.g. to ensure the
         selected cache sizes are compatible with all workers.
 
-        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
-        are blocks that are "active" on the device and can be appended to.
-        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
+        Returns a tuple `(num_gpu_blocks, num_cpu_blocks)`, where
+        `num_gpu_blocks` are blocks that are "active" on the device and can be
+        appended to. 
+        `num_cpu_blocks` refers to "swapped" blocks in CPU memory and cannot be
         appended to.
         """
         results = self.collective_rpc("determine_num_available_blocks")
@@ -125,16 +127,15 @@ class ExecutorBase(ABC):
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
+    @deprecated("`llm_engine.model_executor.apply_model` will no longer work "
+                "in V1 Engine. Please replace with `llm_engine.apply_model` "
+                "and set `VLLM_ALLOW_INSECURE_SERIALIZATION=1`.")
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
         Run a function directly on the model inside each worker,
         returning the result for each of them.
         """
-
-        def rpc_func(worker: WorkerBase) -> _R:
-            return func(worker.get_model())
-
-        return self.collective_rpc(rpc_func)
+        return self.collective_rpc("apply_model", args=(func, ))
 
     @cached_property  # Avoid unnecessary RPC calls
     def supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -231,10 +232,7 @@ class ExecutorBase(ABC):
 
     def shutdown(self) -> None:
         """Shutdown the executor."""
-        return
-
-    def __del__(self):
-        self.shutdown()
+        self.collective_rpc("shutdown")
 
     async def execute_model_async(
             self,
@@ -251,6 +249,11 @@ class ExecutorBase(ABC):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         self.check_health()
+
+    def init_kv_output_aggregator(self, finished_count: Optional[int]) -> None:
+        """Init KVOutputAggregator"""
+        self.kv_output_aggregator = KVOutputAggregator(
+            finished_count or self.parallel_config.world_size)
 
 
 class DistributedExecutorBase(ExecutorBase):
@@ -304,8 +307,8 @@ class DistributedExecutorBase(ExecutorBase):
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[Any]:
         return self._run_workers(method, *args, **(kwargs or {}))
 
     @abstractmethod

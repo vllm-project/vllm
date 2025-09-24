@@ -265,9 +265,9 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
             scales ('scales'), and zeros ('zeros').
 
         Raises:
-            ValueError: If `params_dtype` is not `torch.float16` or 
-            if the input size per partition is not divisible by the 
-            group size in `quant_config`.
+            ValueError: If `params_dtype` is not `torch.float16` or if the input
+                size per partition is not divisible by the group size
+                in `quant_config`.
         """
         if params_dtype != torch.float16:
             raise ValueError("Parameter data type must be torch.float16, "

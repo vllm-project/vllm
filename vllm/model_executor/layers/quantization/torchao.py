@@ -144,34 +144,36 @@ def torchao_quantize_param_data(param: torch.Tensor,
     """Quantize a Tensor with torchao quantization specified by torchao_config
 
     Args:
-       `param`: weight parameter of the linear module
-       `torchao_config`: type of quantization and their arguments we want to
-        use to quantize the Tensor
+        param: weight parameter of the linear module
+        torchao_config: type of quantization and their arguments we want to
+            use to quantize the Tensor
     """
     from torchao.core.config import AOBaseConfig
     from torchao.quantization import quantize_
 
     assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
-    """ 
-    Avoid real weight allocation for faster load, since we will 
+    """
+    Avoid real weight allocation for faster load, since we will
     end up setting it to param.
     """
     with torch.device("meta"):
-        dummy_linear = torch.nn.Linear(param.shape[1],
-                                       param.shape[0],
-                                       bias=False)
+        # linear can't be top level module since quantize_ is inplace
+        # while some of our configs need to do module swap, and only non-top
+        # level modules support module swap
+        dummy_linear = torch.nn.Sequential(
+            torch.nn.Linear(param.shape[1], param.shape[0], bias=False))
 
-    dummy_linear.weight = param
+    dummy_linear[0].weight = param
     quantize_(dummy_linear, torchao_config)
-    return dummy_linear.weight
+    return dummy_linear[0].weight
 
 
 class TorchAOLinearMethod(LinearMethodBase):
     """Linear method for torchao.
 
     Args:
-        torchao_config: The torchao quantization config, a string
-        that encodes the type of quantization and all relevant arguments.
+        quant_config: The torchao quantization config, a string that encodes 
+            the type of quantization and all relevant arguments.
     """
 
     def __init__(self, quant_config: TorchAOConfig):

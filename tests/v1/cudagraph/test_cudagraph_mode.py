@@ -47,7 +47,10 @@ backend_configs = {
     # FA3 on Hopper
     "FA3":
     BackendConfig(name="FA3",
-                  env_vars={"VLLM_FLASH_ATTN_VERSION": "3"},
+                  env_vars={
+                      "VLLM_FLASH_ATTN_VERSION": "3",
+                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
+                  },
                   comp_config={
                       "cudagraph_mode": "FULL",
                   },
@@ -62,10 +65,24 @@ backend_configs = {
                       "cudagraph_mode": "FULL_AND_PIECEWISE",
                   },
                   specific_gpu_arch=(9, 0)),
+    # FlashAttention MLA on Hopper
+    "FlashAttentionMLA":
+    BackendConfig(name="FlashAttentionMLA",
+                  env_vars={
+                      "VLLM_ATTENTION_BACKEND": "FLASH_ATTN_MLA",
+                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
+                  },
+                  comp_config={
+                      "cudagraph_mode": "FULL_DECODE_ONLY",
+                  },
+                  specific_gpu_arch=(9, 0)),
     # FA2
     "FA2":
     BackendConfig(name="FA2",
-                  env_vars={"VLLM_FLASH_ATTN_VERSION": "2"},
+                  env_vars={
+                      "VLLM_FLASH_ATTN_VERSION": "2",
+                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
+                  },
                   comp_config={
                       "cudagraph_mode": "FULL_AND_PIECEWISE",
                   }),

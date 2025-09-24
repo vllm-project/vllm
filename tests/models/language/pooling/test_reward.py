@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 
 import pytest
 import torch
@@ -11,14 +10,6 @@ from vllm.platforms import current_platform
 
 from ....conftest import HfRunner
 from ...utils import check_transformers_version
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 @pytest.fixture
@@ -90,7 +81,7 @@ def test_prm_models(
     check_transformers_version("Qwen/Qwen2.5-Math-PRM-7B",
                                max_transformers_version="4.53.2")
 
-    if current_platform.is_cpu() and os.environ.get("VLLM_USE_V1", "0") == "0":
+    if current_platform.is_cpu():
         pytest.skip("CPU only supports V1")
 
     if current_platform.is_rocm():
