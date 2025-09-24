@@ -13,7 +13,7 @@ class EAGLEConfig(PretrainedConfig):
         self,
         model: PretrainedConfig | dict | None = None,
         truncated_vocab_size: int | None = None,
-        method: str | None = "eagle",
+        method: str | None = None,
         **kwargs,
     ):
         model_config: PretrainedConfig | DeepseekV2Config | None
@@ -41,7 +41,9 @@ class EAGLEConfig(PretrainedConfig):
         # LlamaForCausalLM -> EagleLlamaForCausalLM
         # LlamaForCausalLM -> Eagle3LlamaForCausalLM
         # LlamaForCausalLMEagle3 -> LlamaForCausalLMEagle3
-        if method == "eagle":
+        if method is None:
+            pass
+        elif method == "eagle":
             assert self.model is not None, (
                 "model should not be None when method is eagle"
             )

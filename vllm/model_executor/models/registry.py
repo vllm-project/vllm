@@ -145,6 +145,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
+    "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
@@ -424,6 +425,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen2_5vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen3vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "EagleMistralLarge3ForCausalLM": (
+        "mistral_large_3_eagle",
+        "EagleMistralLarge3ForCausalLM",
+    ),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
