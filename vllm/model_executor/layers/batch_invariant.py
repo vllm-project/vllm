@@ -10,6 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
+import vllm.envs as envs
+
 
 def _matmul_launch_metadata(grid: Callable[..., Any], kernel: Any,
                             args: dict[str, Any]) -> dict[str, Any]:
@@ -557,5 +559,7 @@ def vllm_kernel_override_batch_invariant():
 def init_batch_invariance():
     # this will hit all the csrc overrides as well
     if vllm_kernel_override_batch_invariant():
-        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+        curr_attn_backend = envs.VLLM_ATTENTION_BACKEND
+        if curr_attn_backend not in ["FLEX_ATTENTION", "FLASHINFER"]:
+            os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
         enable_batch_invariant_mode()
