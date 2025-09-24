@@ -315,7 +315,8 @@ def test_experts_exchange():
         num_old_expert = torch.unique(expert_map[layer_id]).numel()
         num_new_expert = torch.unique(new_placement[layer_id]).numel()
         assert num_new_expert == num_old_expert, (
-            f"There exists expert not placed on any rank in layer {layer_id}"
+            f"There exists expert not placed on any rank "
+            f"in layer {layer_id}"
         )
 
         for gpu_id in range(num_gpus):
@@ -326,7 +327,8 @@ def test_experts_exchange():
             new_unique = torch.unique(new_placement_check)
             assert new_placement_check.numel() == new_unique.numel(), (
                 f"Replicated experts are placed on the same NPU, "
-                f"expert placement on layer {layer_id}, rank {gpu_id} is invalid"
+                f"expert placement on layer {layer_id}, "
+                f"rank {gpu_id} is invalid"
             )
 
             # Check if there is any experts movement inside one NPU
