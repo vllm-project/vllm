@@ -1045,3 +1045,15 @@ steps:
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
+
+##### RL Integration Tests #####
+- label: Prime-RL Integration Test # 15min
+  timeout_in_minutes: 30
+  optional: true
+  num_gpus: 2
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/
+  - .buildkite/scripts/run-prime-rl-test.sh
+  commands:
+    - bash .buildkite/scripts/run-prime-rl-test.sh
