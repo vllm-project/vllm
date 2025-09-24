@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Mapping
+import copy
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
@@ -18,6 +20,7 @@ if TYPE_CHECKING:
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 
+DYNAMIC_KEYS = {"fps"}
 
 class HashableDict(dict):
     """
@@ -47,6 +50,42 @@ def _get_processor_factory_fn(processor_cls: Union[type, tuple[type, ...]]):
 
     return processor_cls
 
+def split_and_quantize(
+   allowed_kwargs: dict[str, Any]     
+):
+    static_kwargs = {}
+    dynamic_kwargs = {}
+
+    for key, value in allowed_kwargs.items():
+        if key in DYNAMIC_KEYS:
+            # TODO: quantize value
+            dynamic_kwargs[key] = value
+        elif isinstance(value, dict):
+            static_kwargs[key] = HashableDict(value)
+        elif isinstance(value, list):
+            static_kwargs[key] = HashableList(value)
+        else:
+            static_kwargs[key] = value
+    return static_kwargs, dynamic_kwargs
+
+def _prepare_static_kwargs_for_cache(
+    model_config: "ModelConfig",
+    processor_cls: Union[type, tuple[type, ...]],
+    /,
+    **kwargs,
+):
+    mm_config = model_config.get_multimodal_config()
+    merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+    factory = _get_processor_factory_fn(processor_cls)
+    allowed_kwargs = get_allowed_kwarg_only_overrides(
+        factory,
+        merged_kwargs,
+        requires_kw_only=False,
+        allow_var_kwargs=True,
+    )
+    # quantize and split allowed_kwargs into static and dynamic parts
+    static_kwargs, dynamic_kwargs = split_and_quantize(allowed_kwargs)
+    return static_kwargs, dynamic_kwargs
 
 def _merge_mm_kwargs(
     model_config: "ModelConfig",
@@ -134,20 +173,51 @@ def get_processor(
 
 cached_get_processor = lru_cache(get_processor)
 
+@lru_cache
+def cached_static_processor(
+    processor_name: str,
+    *args: Any,
+    revision: Optional[str] = None,
+    trust_remote_code: bool = False,
+    processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+    **static_kwargs: Any,
+):
+    get_processor(
+        processor_name,
+        *args,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+        processor_cls=processor_cls,
+        **static_kwargs,
+    )
 
 def cached_processor_from_config(
     model_config: "ModelConfig",
     processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
-    return cached_get_processor(
+
+    static_kwargs, dynamic_kwargs = _prepare_static_kwargs_for_cache(
+        model_config, processor_cls, **kwargs
+    )
+
+    base = cached_static_processor(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
-        **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
+        **static_kwargs,
     )
 
+    # if there are dynamic kwargs, we need to create a new processor
+    # instance with the dynamic kwargs
+    if dynamic_kwargs:
+        # TODO: deepcopy may be too heavy, consider using copy.copy
+        base_copy = copy.copy(base)
+        setattr(base_copy, "_vllm_dynamic_mm_kwargs", dynamic_kwargs)
+        return base_copy
+    else:
+        return base
 
 def get_feature_extractor(
     processor_name: str,

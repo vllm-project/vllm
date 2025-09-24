@@ -62,6 +62,7 @@ from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
+from vllm.transformers_utils.processor import DYNAMIC_KEYS
 from vllm.utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -904,6 +905,40 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
             second_per_grid_ts=MultiModalFieldConfig.batched("video"),
         )
+    
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ):
+        """
+        在调用 HF Processor 前后，对 video 数据注入动态的 fps / max_duration。
+        逻辑：
+          1. 先照常拿到 processor（此时已包含 _vllm_dynamic_mm_kwargs）。
+          2. 抽取动态视频 overrides。
+          3. 如果使用的是 opencv_dynamic 后端且 overrides 非空，则对
+             原始视频字节重新抽帧；如果 mm_data 里已经是帧数组，只能记录提示。
+        """
+        mm_data = dict(mm_data)
+        processor = self.info.get_hf_processor(**mm_kwargs)
+        video_overrides = getattr(processor, "_vllm_dynamic_mm_kwargs", {})
+        video_overrides = {k: v for k, v in video_overrides.items() if k in DYNAMIC_KEYS}
+        if video_overrides:
+            logger.debug("Qwen2.5-VL dynamic video overrides: %s",
+                         video_overrides)
+        # Separate video processing from image processing. Because the videos
+        # are processed into serval image patches
+        if ("videos" in mm_data and isinstance(mm_data["videos"], list)
+                and len(mm_data["videos"]) > 0):
+            video_grid_thw_lst = []
+            pixel_values_videos_lst = []
+
+            for item_idx, item in enumerate(mm_data["videos"]):
+                video_array, metadata = item
+            # TODO：重新抽帧
+
 
 
 @MULTIMODAL_REGISTRY.register_processor(
