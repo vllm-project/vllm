@@ -696,7 +696,7 @@ class ModelConfig:
             if convert == "embed":
                 return "TransformersEmbeddingModel"
             if convert == "classify":
-                return "TransformersForClassification"
+                return "TransformersForSequenceClassification"
             if convert == "reward":
                 return "TransformersForReward"
         # Resolve Transformers backend generate classes
