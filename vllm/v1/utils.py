@@ -118,6 +118,11 @@ class CpuGpuBuffer:
                                device="cpu",
                                pin_memory=pin_memory)
         self.gpu = torch.empty_like(self.cpu, device=device)
+        # Many callers (e.g. dummy warmup paths) assume the buffers start zeroed.
+        # We still allocate with empty() for performance, but sanitize here to
+        # preserve the previous semantics.
+        self.cpu.zero_()
+        self.gpu.zero_()
         self.np: np.ndarray
         # To keep type hints simple (avoiding generics and subclasses), we
         # only conditionally create the numpy array attribute. This can cause
