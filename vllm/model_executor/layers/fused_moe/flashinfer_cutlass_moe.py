@@ -8,7 +8,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    FlashInferCutlassMoEPrepareAndFinalize)
+    create_flashinfer_prepare_finalize)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.utils.flashinfer import (flashinfer_cutlass_fused_moe,
@@ -108,7 +108,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
           of each tuple must be the number of tokens.
         """
         aq_m, aq_n = aq.shape
-        workspace2 = ()
+        workspace2 = (0, )
         output_shape = (aq_m, aq_n * 2) if self.quant_dtype != \
             torch.float8_e4m3fn else (aq_m, aq_n)
         workspace_dtype = a.dtype
@@ -192,9 +192,8 @@ def flashinfer_cutlass_moe_fp4(
     expert_map: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
-
     fused_experts = mk.FusedMoEModularKernel(
-        FlashInferCutlassMoEPrepareAndFinalize(use_dp=False),
+        create_flashinfer_prepare_finalize(use_dp=False),
         FlashInferExperts(
             out_dtype=hidden_states.dtype,
             quant_config=quant_config,

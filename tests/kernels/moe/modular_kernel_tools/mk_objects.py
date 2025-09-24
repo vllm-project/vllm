@@ -222,7 +222,8 @@ if (has_flashinfer_cutlass_fused_moe()
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
         FlashInferExperts)
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-        FlashInferCutlassMoEPrepareAndFinalize)
+        FlashInferCutlassMoEPrepareAndFinalize,
+        create_flashinfer_prepare_finalize)
 
     register_prepare_and_finalize(
         FlashInferCutlassMoEPrepareAndFinalize,
@@ -373,7 +374,7 @@ def make_prepare_finalize(
         assert prepare_finalize is not None
         return prepare_finalize
     elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
-        return FlashInferCutlassMoEPrepareAndFinalize(
+        return create_flashinfer_prepare_finalize(
             use_dp=moe.moe_parallel_config.dp_size > 1)
     else:
         return MoEPrepareAndFinalizeNoEP()
