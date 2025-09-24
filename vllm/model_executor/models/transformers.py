@@ -23,7 +23,7 @@ from typing import Literal, Optional, Union
 import regex as re
 import torch
 from torch import nn
-from transformers import (AutoModel, BatchFeature, PretrainedConfig,
+from transformers import (AutoModel, BatchFeature, PretrainedConfig, AutoModelForSequenceClassification,
                           PreTrainedModel)
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
@@ -39,7 +39,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import (ClassifierPooler,
+from vllm.model_executor.layers.pooler import (ClassifierPooler, CLSPool,
                                                DispatchPooler, Pooler)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -794,28 +794,53 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        self.classifier = nn.Linear(
-            self.text_config.hidden_size,
-            self.text_config.num_labels,
-            dtype=self.model_config.head_dtype,
-        )
-
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
+
+        # Certain information about the the model and classifier can only be
+        # inferred from the `ForSequenceClassification` class. Therefore, we
+        # instantiate it on the "meta" device to avoid allocating GPU memory.
+        with torch.device("meta"):
+            seq_cls_model = AutoModelForSequenceClassification.from_config(
+                self.config,
+                torch_dtype=self.model_config.dtype,
+                trust_remote_code=self.model_config.trust_remote_code,
+            )
+
+        # When used for sequence classification, some models have their
+        # pooling layers removed. Make sure this is reflected in vLLM.
+        for module in seq_cls_model.modules():
+            if hasattr(module, "pooler") and module.pooler is None:
+                self.model.pooler = None
+                break
+        if self.model.pooler is not None:
+            raise ValueError(
+                "Sequence classification models with pooling layers are not "
+                "supported yet in the Transformers backend.")
+
+        # Unlike `lm_head`, `classifier` is not always `nn.Linear`.
+        self.classifier = seq_cls_model.classifier
+        self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
+
+        # CLSPool has already been applied in `pooling`.
+        # Add dim to match expected input shape of `classifier.forward`.
+        def classifier_pre_hook(module, args):
+            return args[0].unsqueeze(1), *args[1:]
+        self.classifier.register_forward_pre_hook(classifier_pre_hook)
 
         self.pooler = DispatchPooler({
             "encode":
             Pooler.for_encode(pooler_config),
             "classify":
             ClassifierPooler(
-                pooling=self.model.pooler,
+                pooling=CLSPool(),
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_seq_cls(
                     vllm_config.model_config),
             ),
             "score":
             ClassifierPooler(
-                pooling=self.model.pooler,
+                pooling=pooling,
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_cross_encoder(
                     vllm_config.model_config),
