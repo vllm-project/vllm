@@ -11,8 +11,9 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ModelDType, RunnerOption
-from vllm.inputs import InputContext
-from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
+from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
+from vllm.multimodal.processing import InputProcessingContext
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .registry import HF_EXAMPLE_MODELS
 
@@ -264,7 +265,7 @@ def build_model_context(
     limit_mm_per_prompt: Optional[dict[str, int]] = None,
     mm_processor_cache_gb: int = 0,
 ):
-    """Creates an InputContext for a given model.
+    """Creates an InputProcessingContext for a given model.
 
     Args:
         model_id: ID of the model being considered.
@@ -273,7 +274,7 @@ def build_model_context(
         limit_mm_per_prompt: Multimodal limits.
 
     Returns:
-        InputContext for the model being considered.
+        InputProcessingContext for the model being considered.
     """
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
@@ -298,7 +299,11 @@ def build_model_context(
         enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )
-    return InputContext(model_config)
+
+    return InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
 
 
 def check_embeddings_close(
@@ -347,14 +352,15 @@ class ModelInfo:
     name: str
     architecture: str = ""
     dtype: str = "auto"
+    hf_dtype: str = "float32"
     hf_overrides: Optional[dict[str, Any]] = None
     default_pooling_type: str = ""
-    mteb_score: Optional[float] = None
     enable_test: bool = True
 
 
 @dataclass
 class EmbedModelInfo(ModelInfo):
+    mteb_score: Optional[float] = None
     is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
 
@@ -371,7 +377,7 @@ class LASTPoolingEmbedModelInfo(EmbedModelInfo):
 
 @dataclass
 class RerankModelInfo(ModelInfo):
-    pass
+    mteb_score: Optional[float] = None
 
 
 @dataclass
@@ -384,11 +390,18 @@ class LASTPoolingRerankModelInfo(RerankModelInfo):
     default_pooling_type: str = "LAST"
 
 
+@dataclass
+class GenerateModelInfo(ModelInfo):
+    hf_dtype: str = "auto"
+    hf_ppl: Optional[float] = None
+
+
 def dummy_hf_overrides(
     hf_config: PretrainedConfig,
     *,
     model_arch: str = "",
     exist_overrides: Optional[dict[str, Any]] = None,
+    use_original_num_layers: bool = False,
 ) -> PretrainedConfig:
     """
     Dummy HF overrides function used to create dummy model
@@ -405,10 +418,18 @@ def dummy_hf_overrides(
 
     # we use three layers for Gemma-3n to check
     # both normal layer and kv_shared_layer
-    num_hidden_layers = (3 if model_arch == "Gemma3nForConditionalGeneration"
-                         else 1)
+    if use_original_num_layers:
+        # Use the original number of layers from the config
+        num_layers = getattr(text_config, 'num_layers', 1)
+        num_hidden_layers = getattr(text_config, 'num_hidden_layers', 1)
+    else:
+        # Use minimal layers for testing
+        num_layers = 1
+        num_hidden_layers = (3 if model_arch
+                             == "Gemma3nForConditionalGeneration" else 1)
+
     text_config.update({
-        "num_layers": 1,
+        "num_layers": num_layers,
         "num_hidden_layers": num_hidden_layers,
         "num_experts": num_experts,
         "num_experts_per_tok": 2,

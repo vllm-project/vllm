@@ -6,7 +6,7 @@ KV cache helper for store.
 from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
-from typing import Optional, cast
+from typing import Literal, Optional, Union, cast
 
 import torch
 
@@ -44,7 +44,7 @@ class model_aware_kv_ops_helper:
         # When VLLM_MLA_DISABLE=1, standard FA is used instead, leading
         # to a kv_cache shape of [2, num_blks, blk_size,
         # num_key_value_heads / tp, qk_nope_head_dim + qk_rope_head_dim].
-        # For more details, see vllm/attention/backends/mla/common.py.
+        # For more details, see vllm/v1/attention/backends/mla/common.py.
         if self.is_deepseek_mla and self.use_mla_opt:
             head_size = model_config.kv_lora_rank + \
                 model_config.qk_rope_head_dim
@@ -129,7 +129,7 @@ class KVOutputAggregator:
     def aggregate(self,
                   outputs: list[ModelRunnerOutput],
                   output_rank: int = 0) -> ModelRunnerOutput:
-        # aggregate kv_connector_output from all workers
+        # Aggregate kv_connector_output from all workers
 
         def update_finished_set(req_ids: Optional[set[str]],
                                 remaining_count_dict: dict[str, int],
@@ -142,8 +142,9 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
-        for output in outputs:
-            output = output.kv_connector_output
+        aggregated_kv_connector_stats = None
+        for model_runner_output in outputs:
+            output = model_runner_output.kv_connector_output
             if not output:
                 continue
             update_finished_set(output.finished_sending,
@@ -151,12 +152,26 @@ class KVOutputAggregator:
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
 
+            # Aggregate kv_connector_stats from all workers.
+            if aggregated_kv_connector_stats is None:
+                # Use the first worker's kv_connector_stats as accumulator.
+                aggregated_kv_connector_stats = output.kv_connector_stats
+            elif kv_connector_stats := output.kv_connector_stats:
+                if aggregated_kv_connector_stats is None:
+                    aggregated_kv_connector_stats = kv_connector_stats
+                else:
+                    assert isinstance(aggregated_kv_connector_stats,
+                                      type(kv_connector_stats))
+                    aggregated_kv_connector_stats = \
+                        aggregated_kv_connector_stats.aggregate(kv_connector_stats)
+
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
 
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
+            kv_connector_stats=aggregated_kv_connector_stats or None,
         )
 
         return output
@@ -196,3 +211,51 @@ class KVOutputAggregator:
             output_future.add_done_callback(make_callback(i))
 
         return result_future
+
+
+def _make_src_and_dst_indices(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    src_device: Union[torch.device, str],
+    dst_device: Union[torch.device, str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    src_indices = torch.tensor(src_block_ids,
+                               device=src_device,
+                               dtype=torch.int64)
+    dst_indices = torch.tensor(dst_block_ids,
+                               device=dst_device,
+                               dtype=torch.int64)
+    return src_indices, dst_indices
+
+
+def copy_kv_blocks(
+    src_kv_caches: dict[str, torch.Tensor],
+    dst_kv_caches: dict[str, torch.Tensor],
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    direction: Literal["h2d", "d2h"],
+) -> None:
+    """Copy kv blocks between different buffers."""
+    if not src_kv_caches or not dst_kv_caches or \
+       not src_block_ids or not dst_block_ids or \
+       len(src_block_ids) != len(dst_block_ids):
+        return
+
+    src_device = next(iter(src_kv_caches.values())).device
+    dst_device = next(iter(dst_kv_caches.values())).device
+
+    src_indices, dst_indices = _make_src_and_dst_indices(
+        src_block_ids=src_block_ids,
+        dst_block_ids=dst_block_ids,
+        src_device=src_device,
+        dst_device=dst_device)
+
+    from vllm.platforms import current_platform
+    if direction == "h2d":
+        copy_fn = current_platform.insert_blocks_to_device
+    else:
+        copy_fn = current_platform.swap_out_blocks_to_host
+    for layer_name in src_kv_caches:
+        src_tensor = src_kv_caches[layer_name]
+        dst_tensor = dst_kv_caches[layer_name]
+        copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)

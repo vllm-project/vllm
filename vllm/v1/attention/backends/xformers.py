@@ -3,7 +3,7 @@
 """Attention layer with XFormersAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -197,7 +197,7 @@ class XFormersAttentionMetadata:
 class XFormersAttentionMetadataBuilder(
         AttentionMetadataBuilder[XFormersAttentionMetadata]):
 
-    reorder_batch_threshold: ClassVar[int] = 1
+    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -206,8 +206,9 @@ class XFormersAttentionMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         assert XFORMERS_AVAILABLE
-        self.kv_cache_spec = kv_cache_spec
         self.block_size = kv_cache_spec.block_size
         self._num_decodes = 0
         self._num_decode_tokens = 0

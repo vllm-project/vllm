@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from argparse import Namespace
 
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
 
@@ -86,64 +87,6 @@ logger = init_logger(__name__)
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
-
-# Exception strings for non-implemented encoder/decoder scenarios
-
-# Reminder: Please update docs/features/compatibility_matrix.md
-# If the feature combo become valid
-
-STR_NOT_IMPL_ENC_DEC_SWA = \
-    "Sliding window attention for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
-    "Prefix caching for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
-    "Chunked prefill for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
-    "Models with logits_soft_cap "
-    "require FlashInfer backend, which is "
-    "currently not supported for encoder/decoder "
-    "models.")
-
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
-                             "supported with encoder/decoder "
-                             "models.")
-
-STR_NOT_IMPL_ENC_DEC_PP = ("Pipeline parallelism is not "
-                           "currently supported with "
-                           "encoder/decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_MM = ("Multimodal is not currently "
-                           "supported with encoder/decoder "
-                           "models.")
-
-STR_NOT_IMPL_ENC_DEC_SPEC_DEC = ("Speculative decoding is not "
-                                 "currently supported with encoder/"
-                                 "decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
-                                "backends currently supported with encoder/"
-                                "decoder models.")
-
-# Efficiently import all enc/dec error strings
-# rather than having to import all of the above
-STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
-    "STR_NOT_IMPL_ENC_DEC_SWA": STR_NOT_IMPL_ENC_DEC_SWA,
-    "STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE": STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
-    "STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL":
-    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
-    "STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP": STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP,
-    "STR_NOT_IMPL_ENC_DEC_LORA": STR_NOT_IMPL_ENC_DEC_LORA,
-    "STR_NOT_IMPL_ENC_DEC_PP": STR_NOT_IMPL_ENC_DEC_PP,
-    "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
-    "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
-    "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-}
 
 # Constants related to forcing the attention backend selection
 
@@ -156,11 +99,15 @@ STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
 # register, corresponding to possible backends
 STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
 STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
-STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
-STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
+
+MB_bytes = 1_000_000
+"""The number of bytes in one megabyte (MB)."""
+
+MiB_bytes = 1 << 20
+"""The number of bytes in one mebibyte (MiB)."""
 
 GB_bytes = 1_000_000_000
 """The number of bytes in one gigabyte (GB)."""
@@ -604,9 +551,10 @@ class AsyncMicrobatchTokenizer:
                 # If every request uses identical kwargs we can run a single
                 # batched tokenizer call for a big speed-up.
                 if can_batch and len(prompts) > 1:
-                    encode_fn = partial(self.tokenizer, prompts, **kwargs)
+                    batch_encode_fn = partial(self.tokenizer, prompts,
+                                              **kwargs)
                     results = await self._loop.run_in_executor(
-                        self._executor, encode_fn)
+                        self._executor, batch_encode_fn)
 
                     for i, fut in enumerate(result_futures):
                         if not fut.done():
@@ -942,7 +890,7 @@ def get_open_port() -> int:
 
 def get_open_ports_list(count: int = 5) -> list[int]:
     """Get a list of open ports."""
-    ports = set()
+    ports = set[int]()
     while len(ports) < count:
         ports.add(get_open_port())
     return list(ports)
@@ -980,8 +928,10 @@ def find_process_using_port(port: int) -> Optional[psutil.Process]:
     if sys.platform.startswith("darwin"):
         return None
 
+    our_pid = os.getpid()
     for conn in psutil.net_connections():
-        if conn.laddr.port == port:
+        if conn.laddr.port == port and (conn.pid is not None
+                                        and conn.pid != our_pid):
             try:
                 return psutil.Process(conn.pid)
             except psutil.NoSuchProcess:
@@ -1330,7 +1280,7 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
 
 def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
     if isinstance(obj, str) or not isinstance(obj, Iterable):
-        obj = [obj]
+        return [obj]  # type: ignore[list-item]
     return obj
 
 
@@ -1433,6 +1383,38 @@ def find_nccl_library() -> str:
     return so_file
 
 
+def find_nccl_include_paths() -> Optional[list[str]]:
+    """
+    We either use the nccl.h specified by the `VLLM_NCCL_INCLUDE_PATH`
+    environment variable, or we find the library file brought by 
+    nvidia-nccl-cuXX. load_inline by default uses 
+    torch.utils.cpp_extension.include_paths
+    """
+    paths: list[str] = []
+    inc = envs.VLLM_NCCL_INCLUDE_PATH
+    if inc and os.path.isdir(inc):
+        paths.append(inc)
+
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("nvidia.nccl")
+        if spec and getattr(spec, "submodule_search_locations", None):
+            for loc in spec.submodule_search_locations:
+                inc_dir = os.path.join(loc, "include")
+                if os.path.exists(os.path.join(inc_dir, "nccl.h")):
+                    paths.append(inc_dir)
+    except Exception:
+        pass
+
+    seen = set()
+    out: list[str] = []
+    for p in paths:
+        if p and p not in seen:
+            out.append(p)
+            seen.add(p)
+    return out or None
+
+
 prev_set_stream = torch.cuda.set_stream
 
 _current_stream_tls = threading.local()
@@ -1472,7 +1454,8 @@ def current_stream() -> torch.cuda.Stream:
         # is hurting performance. Therefore creating a dedicated stream
         # per process
         if current_platform.is_rocm():
-            _current_stream_tls.value = torch.cuda.Stream()
+            # torch.cuda.set_stream here is the alias of _pathed_set_stream
+            torch.cuda.set_stream(torch.cuda.Stream())
         elif current_platform.is_cpu():
             _current_stream_tls.value = _StreamPlaceholder()
         else:
@@ -2074,6 +2057,7 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
+@lru_cache
 def supports_kw(
     callable: Callable[..., object],
     kw_name: str,
@@ -2278,7 +2262,8 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor],
+                   IntermediateTensors]
 ) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
     """
     Convenience function to create weak references to tensors,
@@ -2290,6 +2275,15 @@ def weak_ref_tensors(
         return [weak_ref_tensor(t) for t in tensors]
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
+
+    # For IntermediateTensors used in pipeline parallelism
+    from vllm.sequence import IntermediateTensors
+    if isinstance(tensors, IntermediateTensors):
+        ret = IntermediateTensors({
+            key: weak_ref_tensor(val)
+            for key, val in tensors.tensors.items()
+        })
+        return ret
     raise ValueError("Invalid type for tensors")
 
 
@@ -2552,10 +2546,10 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 def direct_register_custom_op(
         op_name: str,
         op_func: Callable,
-        mutates_args: list[str],
+        mutates_args: Optional[list[str]] = None,
         fake_impl: Optional[Callable] = None,
         target_lib: Optional[Library] = None,
-        dispatch_key: str = "CUDA",
+        dispatch_key: Optional[str] = None,
         tags: tuple[torch.Tag, ...] = (),
 ):
     """
@@ -2582,6 +2576,13 @@ def direct_register_custom_op(
             "use vLLM in a fresh new environment and let it install "
             "the required dependencies.")
         return
+
+    if mutates_args is None:
+        mutates_args = []
+
+    if dispatch_key is None:
+        from vllm.platforms import current_platform
+        dispatch_key = current_platform.dispatch_key
 
     import torch.library
     if hasattr(torch.library, "infer_schema"):
@@ -2779,7 +2780,10 @@ def memory_profiling(
     result.torch_peak_increase = diff_profile.torch_peak
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
-    result.non_kv_cache_memory = result.non_torch_increase + result.torch_peak_increase + result.weights_memory  # noqa
+
+    non_torch_memory = result.non_torch_increase
+    peak_activation_memory = result.torch_peak_increase
+    result.non_kv_cache_memory = non_torch_memory + peak_activation_memory + result.weights_memory  # noqa
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
@@ -3192,7 +3196,7 @@ def cprofile_context(save_file: Optional[str] = None):
 
     Args:
         save_file: path to save the profile result. "1" or
-          None will result in printing to stdout.
+            None will result in printing to stdout.
     """
     import cProfile
 
@@ -3249,7 +3253,7 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
                       and getattr(cfg.attn_config, "alibi", False)))))
 
 
-def sha256(input) -> int:
+def sha256(input: Any) -> bytes:
     """Hash any picklable Python object using SHA-256.
 
     The input is serialized using pickle before hashing, which allows
@@ -3260,16 +3264,15 @@ def sha256(input) -> int:
         input: Any picklable Python object.
 
     Returns:
-        An integer representing the SHA-256 hash of the serialized input.
+        Bytes representing the SHA-256 hash of the serialized input.
     """
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
-                          byteorder="big")
+    return hashlib.sha256(input_bytes).digest()
 
 
-def sha256_cbor_64bit(input) -> int:
+def sha256_cbor(input: Any) -> bytes:
     """
-    Hash objects using CBOR serialization and SHA-256, then truncate to 64bits.
+    Hash objects using CBOR serialization and SHA-256.
 
     This option is useful for non-Python-dependent serialization and hashing.
 
@@ -3280,17 +3283,13 @@ def sha256_cbor_64bit(input) -> int:
             Custom classes must implement CBOR serialization methods.
 
     Returns:
-        An integer in the range [0, 2^64-1] representing the lower 64 bits
-        of the SHA-256 hash of the CBOR serialized input.
+        Bytes representing the SHA-256 hash of the CBOR serialized input.
     """
     input_bytes = cbor2.dumps(input, canonical=True)
-    full_hash = int.from_bytes(hashlib.sha256(input_bytes).digest(),
-                               byteorder="big")
-
-    return full_hash & ((1 << 64) - 1)
+    return hashlib.sha256(input_bytes).digest()
 
 
-def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], int]:
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """Get a hash function by name, or raise an error if
     the function is not found.
     Args:
@@ -3300,10 +3299,8 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], int]:
     """
     if hash_fn_name == "sha256":
         return sha256
-    if hash_fn_name == "sha256_cbor_64bit":
-        return sha256_cbor_64bit
-    if hash_fn_name == "builtin":
-        return hash
+    if hash_fn_name == "sha256_cbor":
+        return sha256_cbor
 
     raise ValueError(f"Unsupported hash function: {hash_fn_name}")
 
@@ -3366,7 +3363,7 @@ def has_triton_kernels() -> bool:
 
 def set_process_title(name: str,
                       suffix: str = "",
-                      append: bool = False) -> None:
+                      prefix: str = envs.VLLM_PROCESS_NAME_PREFIX) -> None:
     """
     Set the current process title to a specific name with an
     optional suffix.
@@ -3374,15 +3371,11 @@ def set_process_title(name: str,
     Args:
         name: The title to assign to the current process.
         suffix: An optional suffix to append to the base name.
-        append: Whether to append to the existing process title.
+        prefix: A prefix to prepend to the front separated by `::`.
     """
     if suffix:
         name = f"{name}_{suffix}"
-    if append:
-        name = f"{setproctitle.getproctitle()}_{name}"
-    else:
-        name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
-    setproctitle.setproctitle(name)
+    setproctitle.setproctitle(f"{prefix}::{name}")
 
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
@@ -3432,3 +3425,43 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+def length_from_prompt_token_ids_or_embeds(
+    prompt_token_ids: Optional[list[int]],
+    prompt_embeds: Optional[torch.Tensor],
+) -> int:
+    """Calculate the request length (in number of tokens) give either
+    prompt_token_ids or prompt_embeds.
+    """
+    prompt_token_len = None if prompt_token_ids is None else len(
+        prompt_token_ids)
+    prompt_embeds_len = \
+        None if prompt_embeds is None else len(prompt_embeds)
+
+    if prompt_token_len is None:
+        if prompt_embeds_len is None:
+            raise ValueError(
+                "Neither prompt_token_ids nor prompt_embeds were defined.")
+        return prompt_embeds_len
+    else:
+        if (prompt_embeds_len is not None
+                and prompt_embeds_len != prompt_token_len):
+            raise ValueError(
+                "Prompt token ids and prompt embeds had different lengths"
+                f" prompt_token_ids={prompt_token_len}"
+                f" prompt_embeds={prompt_embeds_len}")
+        return prompt_token_len
+
+
+@contextlib.contextmanager
+def set_env_var(key, value):
+    old = os.environ.get(key)
+    os.environ[key] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            del os.environ[key]
+        else:
+            os.environ[key] = old

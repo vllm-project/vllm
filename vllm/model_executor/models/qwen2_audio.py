@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -34,7 +34,6 @@ from transformers.models.qwen2_audio import (Qwen2AudioConfig,
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (AudioItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
@@ -47,6 +46,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
@@ -54,21 +54,38 @@ from .utils import (AutoWeightsLoader, init_vllm_registered_model,
 
 
 # # === Audio Inputs === #
-class Qwen2AudioFeatureInputs(TypedDict):
-    type: Literal["audio_features"]
-    input_features: torch.Tensor
-    """Shape: `(num_audios, num_mel_bins, 3000)`"""
-
-    feature_attention_mask: torch.Tensor
-    """Shape: `(num_audios, 3000)`"""
-
-
-class Qwen2AudioEmbeddingInputs(TypedDict):
-    type: Literal["audio_embeds"]
-    audio_embeds: list[torch.Tensor]
-    """Shape: `(num_audio_features, hidden_size)`
-    `hidden_size` must match the hidden size of language model backbone.
+class Qwen2AudioFeatureInputs(TensorSchema):
     """
+    Dimensions:
+        - na: Number of audios
+        - nmb: Number of mel bins
+    """
+    type: Literal["audio_features"]
+    input_features: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("na", "nmb", 3000),
+    ]
+
+    feature_attention_mask: Annotated[
+        torch.Tensor,
+        TensorShape("na", 3000),
+    ]
+
+
+class Qwen2AudioEmbeddingInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size
+        - naf: Number of audio features
+        - hs: Hidden size (must match the hidden size of language model
+          backbone)
+    """
+    type: Literal["audio_embeds"] = "audio_embeds"
+
+    audio_embeds: Annotated[
+        list[torch.Tensor],
+        TensorShape("bn", "naf", "hs"),
+    ]
 
 
 Qwen2AudioInputs = Union[Qwen2AudioFeatureInputs, Qwen2AudioEmbeddingInputs]
@@ -324,7 +341,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError(f"Incorrect type of {name}. "
                              f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, *mm_input.shape[2:])
         else:
             return torch.concat(mm_input)
 
@@ -463,10 +480,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

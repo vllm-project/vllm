@@ -9,8 +9,10 @@ import torch
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEConfig, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
@@ -469,7 +471,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
-        # dont shard the w2 scales when running act order
+        # don't shard the w2 scales when running act order
         set_weight_attrs(w2_scales,
                          {"load_full_w2": self.quant_config.desc_act})
         # up_proj scales
@@ -493,7 +495,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
-        # dont shard the w2 scales when running act order
+        # don't shard the w2 scales when running act order
         set_weight_attrs(w2_qzeros,
                          {"load_full_w2": self.quant_config.desc_act})
         w13_g_idx = torch.nn.Parameter(
@@ -631,6 +633,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
         if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
             layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
+
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return None
 
     def apply(
         self,

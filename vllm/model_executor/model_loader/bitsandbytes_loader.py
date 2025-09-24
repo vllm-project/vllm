@@ -16,7 +16,8 @@ from packaging import version
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import LoadConfig, ModelConfig
+from vllm.config import ModelConfig
+from vllm.config.load import LoadConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 # yapf: enable
@@ -69,6 +70,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # Store all module names (from transformers) that support
         # BNB quantization.
         self.target_modules: list[str] = []
+        self.tp_disabled_modules: list[str] = []
         # Store the mapping of expert parameters for MoE models.
         self.expert_params_mapping: list[tuple[str, str, int, str]] = []
         # mapping weight names from transformers to vllm.
@@ -322,25 +324,36 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                quant_state_dict) -> Generator:
         from bitsandbytes.functional import quantize_4bit
 
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-
+        global_tp_size = get_tensor_model_parallel_world_size()
+        global_tp_rank = get_tensor_model_parallel_rank()
+        check_match = (lambda weight_name, module_name: weight_name.
+                       removesuffix(".weight") == module_name)
         for (
                 org_weight_name,
                 mapped_weight_name,
                 weight_tensor,
         ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
+
+            # override tp_size and tp_rank if the module has disabled TP
+            if any(tp_disabled_module in mapped_weight_name
+                   for tp_disabled_module in self.tp_disabled_modules):
+                tp_size = 1
+                tp_rank = 0
+            else:
+                tp_size = global_tp_size
+                tp_rank = global_tp_rank
+
             if any(target_module in mapped_weight_name
                    for target_module in self.target_modules
                    ) and mapped_weight_name.endswith(".weight"):
                 # Without sharding
                 if any(
-                        mapped_weight_name.startswith(module)
+                        check_match(mapped_weight_name, module)
                         for module in self.unsharded_weights_modules):
                     weight_sub_tensor = weight_tensor
                 # Shard by column
                 elif any(
-                        mapped_weight_name.startswith(module)
+                        check_match(mapped_weight_name, module)
                         for module in self.column_sharded_weights_modules):
                     total_size = weight_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
@@ -350,14 +363,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # Weights have fused on disk. In this case, we assume that the
                 # weight and module use same name.
                 elif any(
-                        mapped_weight_name.startswith(module)
+                        check_match(mapped_weight_name, module)
                         for module in self.maybe_fused_weights_modules):
                     # special case for fused weights
                     # get the size of each shard weight tensor
                     total_shard_sizes = next(
                         (sizes for module, sizes in
                          self.maybe_fused_weights_modules.items()
-                         if mapped_weight_name.startswith(module)))
+                         if check_match(mapped_weight_name, module)))
                     total_size = weight_tensor.size(0)
                     assert total_size == sum(total_shard_sizes)
                     # get the start/end index of each shard weight tensor
@@ -418,12 +431,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     # Map vllm's names to transformers's names.
                     rep_name, sub_modules = modules_info
                     for sub_name in sub_modules:
-                        self.target_modules.append(
-                            name.replace(rep_name, sub_name))
+                        new_name = name.replace(rep_name, sub_name)
+                        self.target_modules.append(new_name)
+                        if module.disable_tp:
+                            self.tp_disabled_modules.append(new_name)
                 # Add original module name even if the module has stacked map,
                 # in case model has a mixture of disk-merged and disk-split
                 # weights with same last name.
                 self.target_modules.append(name)
+                if module.disable_tp:
+                    self.tp_disabled_modules.append(name)
             elif isinstance(module, FusedMoE) and hasattr(
                     module.quant_method, "quant_config"):
                 # TODO: support FusedMoE with prequant and 8bit.

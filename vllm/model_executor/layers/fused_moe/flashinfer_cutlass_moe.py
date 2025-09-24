@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 
@@ -44,33 +44,20 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        g1_alphas: torch.Tensor,
-        g2_alphas: torch.Tensor,
-        a1_gscale: torch.Tensor,
-        a2_gscale: torch.Tensor,
         out_dtype: torch.dtype,
-        quant_dtype: Union[torch.dtype, str, None],
+        quant_config: FusedMoEQuantConfig,
         ep_rank: int = 0,
         ep_size: int = 1,
         tp_rank: int = 0,
         tp_size: int = 1,
     ):
-        super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=quant_dtype,
-                per_act_token_quant=False,
-                block_shape=None,
-            ))
-        assert quant_dtype in ("nvfp4", torch.float8_e4m3fn), (
+        super().__init__(quant_config)
+        assert quant_config.quant_dtype in ("nvfp4", torch.float8_e4m3fn), (
             "Only nvfp4,fp8 quantization are currently supported.")
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
         self.tp_size = tp_size
-        self.g1_alphas = g1_alphas
-        self.g2_alphas = g2_alphas
-        self.a1_gscale = a1_gscale
-        self.a2_gscale = a2_gscale
         self.out_dtype = out_dtype
 
     @property
@@ -141,12 +128,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],  # Not used
+        a2_scale: Optional[torch.Tensor],
         workspace13: Optional[torch.Tensor],
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
@@ -162,17 +145,17 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             fc2_expert_weights = w2
         else:
             # Ensure w1_scale and w2_scale are not None before calling view
-            assert w1_scale is not None and w2_scale is not None, (
+            assert self.w1_scale is not None and self.w2_scale is not None, (
                 "w1_scale and w2_scale must not "
                 "be None for FlashInferExperts")
             # Flashinfer CUTLASS kernel takes scalar global scales,
             # min because inv_scale.
             quant_scales = [
                 self.a1_gscale,
-                w1_scale.view(torch.int32),
+                self.w1_scale.view(torch.int32),
                 self.g1_alphas,
                 self.a2_gscale,
-                w2_scale.view(torch.int32),
+                self.w2_scale.view(torch.int32),
                 self.g2_alphas,
             ]
             # FlashInfer API requires weight to be long for nvfp4
@@ -202,12 +185,7 @@ def flashinfer_cutlass_moe_fp4(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    g1_alphas: torch.Tensor,
-    g2_alphas: torch.Tensor,
-    a1_gscale: torch.Tensor,
-    a2_gscale: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
     inplace: bool = False,
     activation: str = "silu",
     global_num_experts: int = -1,
@@ -216,15 +194,10 @@ def flashinfer_cutlass_moe_fp4(
 ) -> torch.Tensor:
 
     fused_experts = mk.FusedMoEModularKernel(
-        FlashInferCutlassMoEPrepareAndFinalize(use_dp=False,
-                                               a1_gscale=a1_gscale),
+        FlashInferCutlassMoEPrepareAndFinalize(use_dp=False),
         FlashInferExperts(
-            g1_alphas=g1_alphas,
-            g2_alphas=g2_alphas,
-            a1_gscale=a1_gscale,
-            a2_gscale=a2_gscale,
             out_dtype=hidden_states.dtype,
-            quant_dtype="nvfp4",
+            quant_config=quant_config,
         ))
 
     return fused_experts(
@@ -237,7 +210,5 @@ def flashinfer_cutlass_moe_fp4(
         activation=activation,
         global_num_experts=global_num_experts,
         expert_map=expert_map,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )

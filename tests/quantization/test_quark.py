@@ -7,11 +7,10 @@ Run `pytest tests/quantization/test_quark.py`.
 See also `tests/kernels/moe/test_mxfp4_moe.py`.
 """
 
-import importlib
 import importlib.metadata
 import os
 from dataclasses import dataclass
-from typing import Optional
+from importlib.util import find_spec
 
 import huggingface_hub
 import lm_eval
@@ -19,11 +18,14 @@ import pytest
 import torch
 from packaging import version
 
+from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+    QuarkLinearMethod, QuarkW8A8Fp8, QuarkW8A8Int8)
+from vllm.platforms import current_platform
+
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
-QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
-    "quark") is not None and version.parse(
-        importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
+QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
+    importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
 
 if QUARK_MXFP4_AVAILABLE:
     from quark.torch.export.nn.modules.realquantizer import (
@@ -39,6 +41,12 @@ except huggingface_hub.errors.RepositoryNotFoundError:
     HF_HUB_AMD_ORG_ACCESS = False
 
 
+@pytest.fixture(scope="function", autouse=True)
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
 @pytest.mark.parametrize('kv_cache_dtype', ['auto', 'fp8'])
 @pytest.mark.parametrize('tp', [1])
 def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
@@ -47,23 +55,45 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
                      kv_cache_dtype=kv_cache_dtype,
                      tensor_parallel_size=tp) as llm:
 
-        # TODO: llm.apply_model(check_model) currently relies on V0
-        # internals. Re-enable once
-        # https://github.com/vllm-project/vllm/pull/18465 is merged.
-        # def check_model(model):
-        #     layer = model.model.layers[0]
+        def check_model(model):
+            layer = model.model.layers[0]
 
-        #     qkv_proj = layer.self_attn.qkv_proj
+            qkv_proj = layer.self_attn.qkv_proj
 
-        #     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-        #     assert isinstance(qkv_proj.scheme, QuarkW8A8Fp8)
+            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Fp8)
 
-        #     if isinstance(qkv_proj.scheme, QuarkW8A8Fp8):
-        #         assert len(qkv_proj.input_scale.shape) == 0
-        #         assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
-        #         assert len(qkv_proj.weight_scale.shape) == 0
+            if isinstance(qkv_proj.scheme, QuarkW8A8Fp8):
+                assert len(qkv_proj.input_scale.shape) == 0
+                assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
+                assert len(qkv_proj.weight_scale.shape) == 0
 
-        # llm.apply_model(check_model)
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        assert output
+
+
+@pytest.mark.parametrize('tp', [1])
+def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
+    model_path = "amd/Qwen2.5-1.5B-Instruct-ptpc-Quark-ts"
+    with vllm_runner(model_path, tensor_parallel_size=tp) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+
+            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Fp8)
+
+            if isinstance(qkv_proj.scheme, QuarkW8A8Fp8):
+                assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
+                assert qkv_proj.weight_scale.shape[0] == qkv_proj.weight.shape[
+                    1]
+                assert qkv_proj.weight_scale.shape[1] == 1
+
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
@@ -74,49 +104,42 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
     model_path = "amd/Llama-3.1-8B-Instruct-w-int8-a-int8-sym-test"
     with vllm_runner(model_path, tensor_parallel_size=tp) as llm:
 
-        # TODO: llm.apply_model(check_model) currently relies on V0
-        # internals. Re-enable once
-        # https://github.com/vllm-project/vllm/pull/18465 is merged.
-        # def check_model(model):
-        #     layer = model.model.layers[0]
+        def check_model(model):
+            layer = model.model.layers[0]
 
-        #     qkv_proj = layer.self_attn.qkv_proj
+            qkv_proj = layer.self_attn.qkv_proj
 
-        #     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-        #     assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
 
-        # llm.apply_model(check_model)
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
 
 
-# TODO: this test currently relies on V0 internals.
-# Re-enable once it is made easier with V1 to access the `state_dict` of models.
-# def test_quark_fp8_parity(vllm_runner):
-#     quark_model_id = "amd-quark/llama-tiny-fp8-quark-quant-method"
-#     fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"
+def test_quark_fp8_parity(vllm_runner):
+    quark_model_id = "amd-quark/llama-tiny-fp8-quark-quant-method"
+    fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"
 
-#     llm_kwargs = {
-#         "tensor_parallel_size": 1,
-#         "enforce_eager": True,
-#         "gpu_memory_utilization": 0.1
-#     }
-#     with (vllm_runner(quark_model_id, **llm_kwargs) as
-#           quark_handle,
-#           vllm_runner(fp8_model_id, **llm_kwargs) as fp8_handle):
-#         quark_model = (quark_handle.llm.llm_engine.model_executor.
-#                        driver_worker.model_runner.model)
-#         quark_state_dict = quark_model.state_dict()
+    llm_kwargs = {
+        "tensor_parallel_size": 1,
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.1
+    }
+    with (vllm_runner(quark_model_id, **llm_kwargs) as
+          quark_handle, vllm_runner(fp8_model_id, **llm_kwargs) as fp8_handle):
 
-#         fp8_model = (fp8_handle.llm.llm_engine.model_executor.driver_worker.
-#                      model_runner.model)
-#         fp8_state_dict = fp8_model.state_dict()
+        def get_state_dict(model):
+            return {k: v.cpu() for k, v in model.state_dict().items()}
 
-#     assert fp8_state_dict.keys() == quark_state_dict.keys()
+        quark_state_dict, = quark_handle.apply_model(get_state_dict)
+        fp8_state_dict, = fp8_handle.apply_model(get_state_dict)
 
-#     for key in fp8_state_dict:
-#         assert torch.equal(fp8_state_dict[key], quark_state_dict[key])
+    assert fp8_state_dict.keys() == quark_state_dict.keys()
+
+    for key in fp8_state_dict:
+        assert torch.equal(fp8_state_dict[key], quark_state_dict[key])
 
 
 @dataclass

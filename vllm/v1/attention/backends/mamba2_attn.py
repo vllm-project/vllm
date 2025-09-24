@@ -7,18 +7,68 @@ from typing import Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadataBuilder)
-from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
+from vllm.v1.attention.backends.utils import (PAD_SLOT_ID,
+                                              CommonAttentionMetadata,
+                                              compute_causal_conv1d_metadata,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
-def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
-                                              chunk_size: int,
-                                              total_seqlens: int):
+def _query_start_loc_to_chunk_indices_offsets(
+        query_start_loc: torch.Tensor, chunk_size: int,
+        total_seqlens: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Args:
+        query_start_loc (torch.Tensor): 1D tensor of cumulative sequence 
+            lengths, shape (num_seqs + 1,).
+            The first element should be 0. Each entry represents the starting
+            index of a sequence in the flattened token array.
+        chunk_size (int): The size of each physical mamba chunk
+            (number of tokens per chunk).
+        total_seqlens (int): The total number of tokens in the batch.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - chunk_indices (torch.Tensor): 1D tensor of indices 
+                indicating the physical chunk for each logical chunk.
+            - chunk_offsets (torch.Tensor): 1D tensor of offsets
+                indicating the starting index of each logical chunk within
+                its physical chunk.
+
+    This function computes the chunk indices and offsets for the given
+    query_start_loc and chunk_size. Both are tensors of integers with length N,
+    where N is the number of logical (pseudo) chunks.
+    A logical chunk is a sequence of tokens that are all part of the same
+    sequence and are all in the same physical mamba chunk.
+    In other words, a logical chunk changes every time we cross a sequence
+    boundary or a physical mamba chunk boundary.
+    Logical chunks are needed to handle batched requests with initial states
+    (see _state_passing_fwd and _chunk_scan_fwd).
+    The chunk_indices tensor contains the index of the physical chunk for each
+    logical chunk.
+    The chunk_offsets tensor contains the offset (AKA starting index) of the
+    logical chunk in the physical chunk.
+
+    Example:
+    query_start_loc = [0, 5, 10]
+    chunk_size = 8
+    total_seqlens = 10
+    -> chunk_indices = [0, 0, 1]
+    -> chunk_offsets = [0, 5, 0]
+
+    In this example, we have 2 sequences, each with 5 tokens. The physical
+    chunk size is 8 tokens.
+    We have three logical chunks:
+    - the first logical chunk starts at token 0 in the first physical chunk
+        and contains all 5 tokens from the first sequence
+    - the second logical chunk starts at token 5 in the first physical chunk
+        and contains first 3 tokens from the second sequence
+    - the third logical chunk starts at token 0 in the second physical chunk
+        and contains the remaining 2 tokens from the second sequence
+    """
 
     cu_seqlens = query_start_loc[1:]  # remove prepended 0
 
@@ -82,9 +132,8 @@ class Mamba2AttentionMetadata:
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: Optional[dict] = None
-    cu_seqlen: Optional[int] = None
-    batch_ptr: Optional[torch.tensor] = None
-    token_chunk_offset_ptr: Optional[torch.tensor] = None
+    batch_ptr: Optional[torch.Tensor] = None
+    token_chunk_offset_ptr: Optional[torch.Tensor] = None
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -111,6 +160,9 @@ class Mamba2AttentionMetadataBuilder(
         # currently we really only support the FlashAttention backend
         has_initial_states_p = None
         prep_initial_states = False
+
+        # for causal_conv1d
+        nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
@@ -149,6 +201,9 @@ class Mamba2AttentionMetadataBuilder(
                         query_start_loc_p, self.chunk_size,
                         num_prefill_tokens))
 
+            nums_dict, batch_ptr, token_chunk_offset_ptr = \
+                compute_causal_conv1d_metadata(query_start_loc_p)
+
         elif num_decodes <= self.decode_cudagraph_max_bs:
             # Pad state tensor for CUDA graph
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
@@ -171,5 +226,8 @@ class Mamba2AttentionMetadataBuilder(
             chunk_indices_p=chunk_indices_p,
             chunk_offsets_p=chunk_offsets_p,
             state_indices_tensor=state_indices_tensor,
+            nums_dict=nums_dict,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         return attn_metadata

@@ -134,14 +134,13 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If specified, will run the OpenAI frontend server in the same process as
     the model serving engine."""
     enable_request_id_headers: bool = False
-    """If specified, API server will add X-Request-Id header to responses.
-    Caution: this hurts performance at high QPS."""
+    """If specified, API server will add X-Request-Id header to responses."""
     enable_auto_tool_choice: bool = False
-    """If specified, exclude tool definitions in prompts when
-    tool_choice='none'."""
-    exclude_tools_when_tool_choice_none: bool = False
     """Enable auto tool choice for supported models. Use `--tool-call-parser`
     to specify which parser to use."""
+    exclude_tools_when_tool_choice_none: bool = False
+    """If specified, exclude tool definitions in prompts when
+    tool_choice='none'."""
     tool_call_parser: Optional[str] = None
     """Select the tool call parser depending on the model that you're using.
     This is used to parse the model-generated tool call into OpenAI API format.
@@ -172,8 +171,8 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """Enable the /get_tokenizer_info endpoint. May expose chat
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
-    """If set to True, enable logging of model outputs (generations) 
-    in addition to the input logging that is enabled by default."""
+    """If True, log model outputs (generations).
+    Requires --enable-log-requests."""
     h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
     """Maximum size (bytes) of an incomplete HTTP event (header or body) for
     h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB)."""
@@ -204,7 +203,7 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         frontend_kwargs["lora_modules"]["type"] = optional_type(str)
         frontend_kwargs["lora_modules"]["action"] = LoRAParserAction
 
-        # Special case: Middleware needs append action
+        # Special case: Middleware needs to append action
         frontend_kwargs["middleware"]["action"] = "append"
         frontend_kwargs["middleware"]["type"] = str
         if "nargs" in frontend_kwargs["middleware"]:
@@ -274,6 +273,9 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
+    if args.enable_log_outputs and not args.enable_log_requests:
+        raise TypeError("Error: --enable-log-outputs requires "
+                        "--enable-log-requests")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

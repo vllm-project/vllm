@@ -27,7 +27,7 @@ from transformers import (AutoModel, BatchFeature, PretrainedConfig,
                           PreTrainedModel)
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, VllmConfig)
@@ -41,10 +41,10 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, PlaceholderRange)
+                                    MultiModalInputs, MultiModalUUIDDict,
+                                    PlaceholderRange)
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo)
@@ -228,7 +228,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         width, height = self.get_max_image_size()
         processor = self.get_hf_processor()
-        mm_processor_kwargs = self.ctx.model_config.mm_processor_kwargs or {}
+        multimodal_config = self.ctx.model_config.multimodal_config
+        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         mm_tokens = processor._get_num_multimodal_tokens(
             image_sizes=([height, width], ), **mm_processor_kwargs)
         image_tokens = mm_tokens["num_image_tokens"][0]
@@ -347,7 +348,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -379,8 +380,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         # Below tested on Llava. Prompts and `mm_token_type_ids` are always bs=1
         mm_positions = torch.where(mm_token_type_ids == 1)[1]
         images = mm_items.get_items("image", ImageProcessorItems)
-        mm_processor_kwargs = (self.info.ctx.model_config.mm_processor_kwargs
-                               or {})
+        multimodal_config = self.info.ctx.model_config.multimodal_config
+        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         image_sizes = []
         for item_idx in range(len(images)):
             image_size = images.get_image_size(item_idx)
@@ -415,9 +416,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                                        num_image_patches),
         )
         # Use overrides if provided; fallback to data-dependent hashing.
-        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
-                     self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
-                                         tokenization_kwargs))
+        mm_hashes = (mm_uuids if mm_uuids is not None else self._hash_mm_items(
+            mm_items, hf_processor_mm_kwargs, tokenization_kwargs))
 
         return MultiModalInputs(
             type="multimodal",
@@ -451,8 +451,9 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.pp_rank = self.pp_group.rank_in_group
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        # To be updated in child classes for use in `load_weights`
-        self.skip_prefixes: Optional[list[str]] = None
+        # Weights to skip in `self.load_weights`
+        self.skip_prefixes: list[str] = []
+        self.skip_substrs: list[str] = []
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         # TODO: @raushan, use the public `model.set_attn_implementation()`
@@ -595,7 +596,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         _tensor_parallel(self.model)
 
-    def create_attention_instances(self) -> dict[int, Attention]:
+    def create_attention_instances(
+        self,
+        attn_type: AttentionType = AttentionType.DECODER
+    ) -> dict[int, Attention]:
         """
         Create `Attention` instances to inform KV cache allocation.
         """
@@ -624,7 +628,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 per_layer_sliding_window=per_layer_sliding_window,
-                prefix=f"{i}.attn")
+                prefix=f"{i}.attn",
+                attn_type=attn_type)
         return attention_instances
 
     def init_parameters(self, module: nn.Module):
@@ -684,7 +689,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=self.skip_prefixes)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=self.skip_prefixes,
+            skip_substrs=self.skip_substrs,
+        )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
@@ -692,12 +701,67 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 class TransformersModel(TransformersBase):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # Handle BERT-like models
+            "bert": "model",
             # Add `model.` prefix for base model checkpoints
             "": "model.",
-            # Remove `model.` from places it should not be
+            # Remove `model.` prefix if it was already there
             "model.model.": "model.",
+            # Pooling adapters will be adjacent to `model`
+            "model.pooler": "pooler",
             "model.score": "score",
+            # Classifier adapter's classifier layer is renamed to score
+            "model.classifier": "score",
+        },
+        orig_to_new_suffix={
+            # Replace legacy suffixes used for norms
+            ".gamma": ".weight",
+            ".beta": ".bias",
         })
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        # After creating a pooling model, `pooler` will be duplicated.
+        # The one inside `model` comes from the Transformers modelling code.
+        # The one after `model` is an adapter from vLLM.
+        # We want to use the adapter so we nullify the original pooler.
+        if getattr(self.model, "pooler", None) is not None:
+            self.skip_prefixes.append("pooler.")
+            self.model.pooler = torch.nn.Identity()
+
+        # Some encoder models have the position_ids buffer in the checkpoint.
+        # vLLM will always pass position_ids as an argument, so we skip loading
+        # the buffer if it exists
+        self.skip_substrs.append("position_ids")
+
+        # Some encoder models have the bias of the final classifier layer
+        # in the checkpoint. vLLM does not use this bias, so we skip loading
+        # it if it exists
+        self.skip_substrs.append("score.bias")
+
+    def create_attention_instances(
+            self, attn_type: AttentionType = AttentionType.DECODER):
+        # TODO(hmellor): Better way to detect encoder models
+        # In encoder models, the attention layers will have `is_causal=False`
+        is_encoder = lambda m: not getattr(m, "is_causal", True)
+        # vLLM does not support encoder-decoder models, so if any encoder layer
+        # is found, we assume the whole model is an encoder model
+        if any(is_encoder(m) for m in self.model.modules()):
+            attn_type = AttentionType.ENCODER_ONLY
+
+        # Check minimum transformers version for encoder models support
+        if attn_type == AttentionType.ENCODER_ONLY:
+            import transformers
+            from packaging.version import Version
+            installed = Version(transformers.__version__)
+            required = Version("4.57.0.dev0")
+            if installed < required:
+                raise ValueError(
+                    "Encoder models with the Transformers backend require "
+                    f"transformers>={required}, but got {installed}")
+
+        return super().create_attention_instances(attn_type)
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
@@ -709,7 +773,7 @@ class TransformersForCausalLM(TransformersBase):
         # Tell `TransformersBase.load_weights` to skip
         # `lm_head` if the model has tied word embeddings
         if self.text_config.tie_word_embeddings:
-            self.skip_prefixes = ["lm_head."]
+            self.skip_prefixes.append("lm_head.")
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = self.text_config.vocab_size
@@ -733,10 +797,8 @@ class TransformersForCausalLM(TransformersBase):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
 

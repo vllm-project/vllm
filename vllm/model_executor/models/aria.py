@@ -19,7 +19,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -143,16 +142,8 @@ class AriaProjector(nn.Module):
     projects ViT's outputs into MoE's inputs.
 
     Args:
-        patch_to_query_dict (dict): Maps patch numbers to their corresponding
-        query numbers,
-            e.g., {1225: 128, 4900: 256}. This allows for different query sizes
-            based on image resolution.
-        embed_dim (int): Embedding dimension.
-        num_heads (int): Number of attention heads.
-        kv_dim (int): Dimension of key and value.
-        ff_dim (int): Hidden dimension of the feed-forward network.
-        output_dim (int): Output dimension.
-        norm_layer (nn.Module): Normalization layer. Default is nn.LayerNorm.
+        config: [AriaConfig](https://huggingface.co/docs/transformers/main/model_doc/aria#transformers.AriaConfig)
+            containing projector configuration parameters.
 
     Outputs:
         A tensor with the shape of (batch_size, query_number, output_dim)
@@ -282,8 +273,8 @@ class AriaTextMoELayer(nn.Module):
         Forward pass of the MoE Layer.
 
         Args:
-            hidden_states (torch.Tensor): Input tensor of shape (batch_size,
-            sequence_length, hidden_size).
+            hidden_states: Input tensor of shape
+                (batch_size, sequence_length, hidden_size).
 
         Returns:
             torch.Tensor: Output tensor after passing through the MoE layer.
@@ -547,6 +538,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             config.text_config.hidden_size,
             org_num_embeddings=self.language_model.org_vocab_size,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
@@ -651,10 +643,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

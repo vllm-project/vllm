@@ -10,8 +10,9 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEConfig,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
@@ -160,7 +161,6 @@ try:
     direct_register_custom_op(
         op_name="_fused_mul_mat_gguf",
         op_func=_fused_mul_mat_gguf,
-        mutates_args=[],
         fake_impl=_fused_mul_mat_gguf_fake,
     )
     fused_mul_mat_gguf = torch.ops.vllm._fused_mul_mat_gguf
@@ -272,7 +272,6 @@ try:
     direct_register_custom_op(
         op_name="_fused_moe_gguf",
         op_func=_fused_moe_gguf,
-        mutates_args=[],
         fake_impl=_fused_moe_gguf_fake,
     )
     fused_moe_gguf = torch.ops.vllm._fused_moe_gguf
@@ -318,7 +317,6 @@ try:
     direct_register_custom_op(
         op_name="_apply_gguf_embedding",
         op_func=_apply_gguf_embedding,
-        mutates_args=[],
         fake_impl=_apply_gguf_embedding_fake,
     )
     apply_gguf_embedding = torch.ops.vllm._apply_gguf_embedding
@@ -517,6 +515,10 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
         set_weight_attrs(w2_qweight_type, extra_weight_attrs)
         layer.register_parameter("w2_qweight_type", w2_qweight_type)
+
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return None
 
     def apply(
         self,

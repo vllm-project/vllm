@@ -4,7 +4,9 @@
 Whenever you add an architecture to this page, please also update
 `tests/models/registry.py` with example HuggingFace models for it.
 """
+import hashlib
 import importlib
+import json
 import os
 import pickle
 import subprocess
@@ -12,16 +14,19 @@ import sys
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Set
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
+from pathlib import Path
 from typing import Callable, Optional, TypeVar, Union
 
 import torch.nn as nn
 import transformers
 
-from vllm.config import (ModelConfig, ModelImpl, iter_architecture_defaults,
+from vllm import envs
+from vllm.config import (ModelConfig, iter_architecture_defaults,
                          try_match_architecture_defaults)
 from vllm.logger import init_logger
+from vllm.logging_utils import logtime
 from vllm.transformers_utils.dynamic_module import (
     try_get_class_from_dynamic_module)
 
@@ -52,6 +57,7 @@ _TEXT_GENERATION_MODELS = {
     # baichuan-13b, lower case 'c' in the class name
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
+    "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
     "BambaForCausalLM": ("bamba", "BambaForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
@@ -74,6 +80,7 @@ _TEXT_GENERATION_MODELS = {
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
     "Gemma3nForCausalLM": ("gemma3n", "Gemma3nForCausalLM"),
+    "Qwen3NextForCausalLM": ("qwen3_next", "Qwen3NextForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
     "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),
@@ -110,7 +117,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
-    "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
+    "MotifForCausalLM": ("motif", "MotifForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
@@ -119,6 +126,7 @@ _TEXT_GENERATION_MODELS = {
     "NemotronHForCausalLM": ("nemotron_h", "NemotronHForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "Olmo2ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
+    "Olmo3ForCausalLM": ("olmo2", "Olmo2ForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
@@ -126,7 +134,6 @@ _TEXT_GENERATION_MODELS = {
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
-    "Phi4FlashForCausalLM": ("phi4flash", "Phi4FlashForCausalLM"),
     "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
@@ -144,10 +151,6 @@ _TEXT_GENERATION_MODELS = {
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
-    # [Encoder-decoder]
-    "BartModel": ("bart", "BartForConditionalGeneration"),
-    "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
-    "MBartForConditionalGeneration": ("bart", "MBartForConditionalGeneration"),
 }
 
 _EMBEDDING_MODELS = {
@@ -155,6 +158,7 @@ _EMBEDDING_MODELS = {
     "BertModel": ("bert", "BertEmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
+    "Gemma3TextModel": ("gemma3", "Gemma3Model"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GritLM": ("gritlm", "GritLM"),
@@ -193,6 +197,7 @@ _EMBEDDING_MODELS = {
 
 _CROSS_ENCODER_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "BertForTokenClassification": ("bert", "BertForTokenClassification"),
     "GteNewForSequenceClassification": ("bert_with_rope",
                                         "GteNewForSequenceClassification"),
     "ModernBertForSequenceClassification": ("modernbert",
@@ -213,6 +218,7 @@ _MULTIMODAL_MODELS = {
     "ChameleonForConditionalGeneration": ("chameleon", "ChameleonForConditionalGeneration"),  # noqa: E501
     "Cohere2VisionForConditionalGeneration": ("cohere2_vision", "Cohere2VisionForConditionalGeneration"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
+    "DotsOCRForCausalLM": ("dots_ocr", "DotsOCRForCausalLM"),
     "Ernie4_5_VLMoeForConditionalGeneration": ("ernie45_vl", "Ernie4_5_VLMoeForConditionalGeneration"),  # noqa: E501
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),  # noqa: E501
@@ -223,6 +229,7 @@ _MULTIMODAL_MODELS = {
     "GraniteSpeechForConditionalGeneration": ("granite_speech", "GraniteSpeechForConditionalGeneration"),  # noqa: E501
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
+    "NemotronH_Nano_VL": ("nano_nemotron_vl", "NemotronH_Nano_VL"),
     "InternS1ForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "InternVLForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
@@ -232,6 +239,7 @@ _MULTIMODAL_MODELS = {
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
+    "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
@@ -257,17 +265,15 @@ _MULTIMODAL_MODELS = {
     "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
     "Qwen2_5OmniModel": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
     "Qwen2_5OmniForConditionalGeneration": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
-    "UltravoxModel": ("ultravox", "UltravoxModel"),
+    "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),  # noqa: E501
+    "Qwen3VLMoeForConditionalGeneration": ("qwen3_vl_moe", "Qwen3VLMoeForConditionalGeneration"),  # noqa: E501
+    "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),  # noqa: E501
     "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),  # noqa: E501
     "Tarsier2ForConditionalGeneration": ("qwen2_vl", "Tarsier2ForConditionalGeneration"),  # noqa: E501
+    "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     # [Encoder-decoder]
-    "DonutForConditionalGeneration": ("donut", "DonutForConditionalGeneration"),
-    "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
-    "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
-    "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
-    "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
 
@@ -277,13 +283,13 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
-    # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
-    # "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
+    "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
     # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
@@ -321,7 +327,17 @@ _SUBPROCESS_COMMAND = [
     sys.executable, "-m", "vllm.model_executor.models.registry"
 ]
 
-_PREVIOUSLY_SUPPORTED_MODELS = {"Phi3SmallForCausalLM": "0.9.2"}
+_PREVIOUSLY_SUPPORTED_MODELS = {
+    "Phi3SmallForCausalLM": "0.9.2",
+    # encoder-decoder models except whisper
+    # have been removed for V0 deprecation.
+    "BartModel": "0.10.2",
+    "BartForConditionalGeneration": "0.10.2",
+    "DonutForConditionalGeneration": "0.10.2",
+    "Florence2ForConditionalGeneration": "0.10.2",
+    "MBartForConditionalGeneration": "0.10.2",
+    "MllamaForConditionalGeneration": "0.10.2",
+}
 
 
 @dataclass(frozen=True)
@@ -410,10 +426,92 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     module_name: str
     class_name: str
 
-    # Performed in another process to avoid initializing CUDA
+    @staticmethod
+    def _get_cache_dir() -> Path:
+        return Path(envs.VLLM_CACHE_ROOT) / "modelinfos"
+
+    def _get_cache_filename(self) -> str:
+        cls_name = f"{self.module_name}-{self.class_name}".replace(".", "-")
+        return f"{cls_name}.json"
+
+    def _load_modelinfo_from_cache(self,
+                                   module_hash: str) -> _ModelInfo | None:
+        try:
+            try:
+                modelinfo_path = self._get_cache_dir(
+                ) / self._get_cache_filename()
+                with open(modelinfo_path, encoding="utf-8") as file:
+                    mi_dict = json.load(file)
+            except FileNotFoundError:
+                logger.debug(("Cached model info file "
+                              "for class %s.%s not found"), self.module_name,
+                             self.class_name)
+                return None
+
+            if mi_dict["hash"] != module_hash:
+                logger.debug(("Cached model info file "
+                              "for class %s.%s is stale"), self.module_name,
+                             self.class_name)
+                return None
+
+            # file not changed, use cached _ModelInfo properties
+            return _ModelInfo(**mi_dict["modelinfo"])
+        except Exception:
+            logger.exception(("Cached model info "
+                              "for class %s.%s error. "), self.module_name,
+                             self.class_name)
+            return None
+
+    def _save_modelinfo_to_cache(self, mi: _ModelInfo,
+                                 module_hash: str) -> None:
+        """save dictionary json file to cache"""
+        from vllm.model_executor.model_loader.weight_utils import atomic_writer
+        try:
+            modelinfo_dict = {
+                "hash": module_hash,
+                "modelinfo": asdict(mi),
+            }
+            cache_dir = self._get_cache_dir()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            modelinfo_path = cache_dir / self._get_cache_filename()
+            with atomic_writer(modelinfo_path, encoding='utf-8') as f:
+                json.dump(modelinfo_dict, f, indent=2)
+        except Exception:
+            logger.exception("Error saving model info cache.")
+
+    @logtime(logger=logger, msg="Registry inspect model class")
     def inspect_model_cls(self) -> _ModelInfo:
-        return _run_in_subprocess(
+        model_path = Path(
+            __file__).parent / f"{self.module_name.split('.')[-1]}.py"
+        module_hash = None
+
+        if model_path.exists():
+            with open(model_path, "rb") as f:
+                module_hash = hashlib.md5(f.read()).hexdigest()
+
+            mi = self._load_modelinfo_from_cache(module_hash)
+            if mi is not None:
+                logger.debug(("Loaded model info "
+                              "for class %s.%s from cache"), self.module_name,
+                             self.class_name)
+                return mi
+            else:
+                logger.debug(("Cache model info "
+                              "for class %s.%s miss. "
+                              "Loading model instead."), self.module_name,
+                             self.class_name)
+
+        # Performed in another process to avoid initializing CUDA
+        mi = _run_in_subprocess(
             lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
+        logger.debug("Loaded model info for class %s.%s", self.module_name,
+                     self.class_name)
+
+        # save cache file
+        if module_hash is not None:
+            self._save_modelinfo_to_cache(mi, module_hash)
+
+        return mi
 
     def load_model_cls(self) -> type[nn.Module]:
         mod = importlib.import_module(self.module_name)
@@ -576,7 +674,7 @@ class _ModelRegistry:
                     if model_module is not None:
                         break
             else:
-                if model_config.model_impl != ModelImpl.TRANSFORMERS:
+                if model_config.model_impl != "transformers":
                     return None
 
                 raise ValueError(
@@ -587,7 +685,7 @@ class _ModelRegistry:
                     "'auto_map' (relevant if the model is custom).")
 
         if not model_module.is_backend_compatible():
-            if model_config.model_impl != ModelImpl.TRANSFORMERS:
+            if model_config.model_impl != "transformers":
                 return None
 
             raise ValueError(
@@ -633,20 +731,20 @@ class _ModelRegistry:
             raise ValueError("No model architectures are specified")
 
         # Require transformers impl
-        if model_config.model_impl == ModelImpl.TRANSFORMERS:
+        if model_config.model_impl == "transformers":
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
                     return (model_info, arch)
-        elif model_config.model_impl == ModelImpl.TERRATORCH:
+        elif model_config.model_impl == "terratorch":
             model_info = self._try_inspect_model_cls("Terratorch")
             return (model_info, "Terratorch")
 
         # Fallback to transformers impl (after resolving convert_type)
         if (all(arch not in self.models for arch in architectures)
-                and model_config.model_impl == ModelImpl.AUTO
+                and model_config.model_impl == "auto"
                 and getattr(model_config, "convert_type", "none") == "none"):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
@@ -663,7 +761,7 @@ class _ModelRegistry:
 
         # Fallback to transformers impl (before resolving runner_type)
         if (all(arch not in self.models for arch in architectures)
-                and model_config.model_impl == ModelImpl.AUTO):
+                and model_config.model_impl == "auto"):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
@@ -684,14 +782,14 @@ class _ModelRegistry:
             raise ValueError("No model architectures are specified")
 
         # Require transformers impl
-        if model_config.model_impl == ModelImpl.TRANSFORMERS:
+        if model_config.model_impl == "transformers":
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
                     return (model_cls, arch)
-        elif model_config.model_impl == ModelImpl.TERRATORCH:
+        elif model_config.model_impl == "terratorch":
             arch = "Terratorch"
             model_cls = self._try_load_model_cls(arch)
             if model_cls is not None:
@@ -699,7 +797,7 @@ class _ModelRegistry:
 
         # Fallback to transformers impl (after resolving convert_type)
         if (all(arch not in self.models for arch in architectures)
-                and model_config.model_impl == ModelImpl.AUTO
+                and model_config.model_impl == "auto"
                 and getattr(model_config, "convert_type", "none") == "none"):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
@@ -716,7 +814,7 @@ class _ModelRegistry:
 
         # Fallback to transformers impl (before resolving runner_type)
         if (all(arch not in self.models for arch in architectures)
-                and model_config.model_impl == ModelImpl.AUTO):
+                and model_config.model_impl == "auto"):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:

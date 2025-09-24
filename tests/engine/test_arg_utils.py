@@ -287,15 +287,6 @@ def test_prefix_cache_default():
         },
         "mm-processor-kwargs"
     ),
-    (
-        '{"cast_logits_dtype":"bfloat16","sequence_parallel_norm":true,"sequence_parallel_norm_threshold":2048}',
-        {
-            "cast_logits_dtype": "bfloat16",
-            "sequence_parallel_norm": True,
-            "sequence_parallel_norm_threshold": 2048,
-        },
-        "override-neuron-config"
-    ),
 ])
 # yapf: enable
 def test_composite_arg_parser(arg, expected, option):
