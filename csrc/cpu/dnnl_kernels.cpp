@@ -523,7 +523,7 @@ void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
   CPU_KERNEL_GUARD_IN(onednn_mm)
   TORCH_CHECK(a.dim() == 2);
   TORCH_CHECK(a.stride(-1) == 1);
-  TORCH_CHECK(c.is_contiguous());
+  TORCH_CHECK(c.stride(-1) == 1);
   MatMulPrimitiveHandler* ptr =
       reinterpret_cast<MatMulPrimitiveHandler*>(handler);
 
