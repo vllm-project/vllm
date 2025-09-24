@@ -126,6 +126,10 @@ class FusedMoEModularKernel:
         return output
 ```
 
+### FusedMoEQuantConfig
+
+
+
 ## How-To
 
 ### How To Add a FusedMoEPrepareAndFinalize Type
