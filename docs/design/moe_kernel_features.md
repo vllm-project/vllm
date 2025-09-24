@@ -8,15 +8,15 @@ There are a number of All2All communication backends that are used to implement 
 
 The following table describes the relevant features of each backend, i.e. activation format, supported quantization schemes and async support.
 
-The output activation format (standard or batched) corresponds to the output of the prepare step of the `FusedMoEPrepareAndFinalize` subclass, the finalize step requires the same format. All the backends operate on and yield activations in standard format. More details on the formats can be found in the [Fused MoE Modular Kernel](./fused_moe_modular_kernel.md) document.
+The output activation format (standard or batched) corresponds to the output of the prepare step of the `FusedMoEPrepareAndFinalize` subclass, the finalize step requires the same format. All the backend `prepare` methods expect activations in standard format and all the `finalize methods return activations in standard format. More details on the formats can be found in the [Fused MoE Modular Kernel](./fused_moe_modular_kernel.md) document.
 
-The quantization types and formats enumerate what quantization schemes are supported by each `FusedMoEPrepareAndFinalize` class. The quantization can happen before or after dispatch depending on which backend is selected, e.g. deepep_high_latency performs fp8 quantization after dispatch.  The output of the prepare step for each backend is the quantized type.  The finalize step generally requires the same input type as the original activations, e.g. if the original input is bfloat16 and the quantization scheme is fp8 w/per-tensor scales, `prepare` will return fp8/per-tensor scale activations and `finalize` will take bfloat16 activations. See the diagrams in [Fused MoE Modular Kernel](./fused_moe_modular_kernel.md) for more details on the types and formats of activations at each step of the MoE process.
+The quantization types and formats enumerate what quantization schemes are supported by each `FusedMoEPrepareAndFinalize` class. The quantization can happen before or after the dispatch based on the format the all2all backend supports. e.g. deepep_high_throughput supports only block-quantized fp8 format, any other format will result in dispatching in higher precision and quantizing afterwards. The output of the prepare step for each backend is the quantized type.  The finalize step generally requires the same input type as the original activations, e.g. if the original input is bfloat16 and the quantization scheme is fp8 w/per-tensor scales, `prepare` will return fp8/per-tensor scale activations and `finalize` will take bfloat16 activations. See the diagrams in [Fused MoE Modular Kernel](./fused_moe_modular_kernel.md) for more details on the types and formats of activations at each step of the MoE process.  If no quantization type is specified, the kernel operates on float16 and/or bfloat16.
 
 Async backends support the use of DBO (Dual Batch Overlap) and shared expert overlap (where shared experts are computed during the combine step).
 
 Certain models require the topk weights to be applied to the input activations rather than the output activations when topk==1, e.g. llama. For modular kernels, this feature is supported by the `FusedMoEPrepareAndFinalize` subclass, for non-modular kernels, it is up to the experts function to deal with this flag.
 
-unless otherwise specified, backends are controlled via `VLLM_ALL2ALL_BACKEND`.  All backends except `flashinfer` only work with EP. `Flashinfer` can work with EP or DP.
+unless otherwise specified, backends are controlled via `VLLM_ALL2ALL_BACKEND`.  All backends except `flashinfer` only work with EP+DP or EP+TP. `Flashinfer` can work with EP or DP w/o EP.
 
 | Backend                               | Output act. format | Quant. types    | Quant. format          | Async | Apply Weight On Input | Sub-class                                                                                                                                                     |
 |---------------------------------------|--------------------|-----------------|------------------------|-------|-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -31,7 +31,7 @@ unless otherwise specified, backends are controlled via `VLLM_ALL2ALL_BACKEND`. 
 | BatchedPrepareAndFinalize<sup>5<.sup> | batched            | fp8,int8        | G,A,T                  | N     | Y                     | [`BatchedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.fused_batched_moe.BatchedPrepareAndFinalize]                                               |
 
 1. All types: mxfp4, nvfp4, int4, int8, fp8
-2. AT quantization occurs after dispatch.
+2. A,T quantization occurs after dispatch.
 3. All quantization happens after dispatch.
 4. Controlled by different env vars (`VLLM_FLASHINFER_MOE_BACKEND` "throughput" or "latency")
 5. This is a no-op dispatcher that can be used to pair with any modular experts to produce a modular kernel that runs w/o dispatch or combine.  These cannot be selected via environment variable.  These are generally use for testing or adapting an expert subclass to the `fused_experts` API.
