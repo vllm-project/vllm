@@ -177,7 +177,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                 layer.weight_scale,
                 layer.alpha,
                 use_mx=False,
-            )
+            ).to(output_dtype)
         else:
             out = cutlass_scaled_fp4_mm(*mm_args)
 
