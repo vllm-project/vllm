@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from functools import cache
 from typing import Optional
 
 import torch
@@ -22,27 +21,15 @@ _FP8_MAX = 224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.max
 _FP8_MIN = -224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.min
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
-# import importlib
-# aiter_module_quant = importlib.import_module("aiter.jit.module_quant")
-# dynamic_per_tensor_quant = getattr(
-#     aiter_module_quant, "dynamic_per_tensor_quant")
-# static_per_tensor_quant = getattr(
-#     aiter_module_quant, "static_per_tensor_quant")
 
-
-def per_tensor_quant_impl(
+def rocm_aiter_per_tensor_quant_impl(
         x: torch.Tensor, scale: torch.Tensor,
         dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.quant import per_tensor_quant_hip
-
-    # scale = torch.empty(1, dtype=torch.float, device=x.device)
-    # y = torch.empty(x.shape, dtype=dtype, device=x.device)
-    # dynamic_per_tensor_quant(y, x, scale)
-    # return y, scale.view(1)
     return per_tensor_quant_hip(x, scale, dtype)
 
 
-def per_tensor_quant_fake(
+def rocm_aiter_per_tensor_quant_fake(
         x: torch.Tensor, scale: torch.Tensor,
         dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(x, dtype=dtype), torch.empty(1,
@@ -50,16 +37,39 @@ def per_tensor_quant_fake(
                                                          device=x.device)
 
 
+def rocm_aiter_per_token_quant_impl(
+        x: torch.Tensor, scale: Optional[torch.Tensor],
+        dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.quant import per_token_quant_hip
+    return per_token_quant_hip(x, scale, dtype)
+
+
+def rocm_aiter_per_token_quant_fake(
+        x: torch.Tensor, scale: Optional[torch.Tensor],
+        dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    scale_shape = (*x.shape[:-1], 1)
+    return torch.empty_like(x, dtype=dtype), torch.empty(scale_shape,
+                                                         dtype=torch.float32,
+                                                         device=x.device)
+
+
 direct_register_custom_op(
-    op_name="per_tensor_quant",
-    op_func=per_tensor_quant_impl,
+    op_name="rocm_aiter_per_tensor_quant",
+    op_func=rocm_aiter_per_tensor_quant_impl,
     mutates_args=[],
-    fake_impl=per_tensor_quant_fake,
+    fake_impl=rocm_aiter_per_tensor_quant_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+direct_register_custom_op(
+    op_name="rocm_aiter_per_token_quant",
+    op_func=rocm_aiter_per_token_quant_impl,
+    mutates_args=[],
+    fake_impl=rocm_aiter_per_token_quant_fake,
     dispatch_key=current_platform.dispatch_key,
 )
 
 
-@cache
 def use_aiter():
     return envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
 
@@ -88,6 +98,7 @@ class QuantFP8(CustomOp):
         self.static = static
         self.group_shape = group_shape
         self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
+        self.use_aiter = use_aiter()
 
     def forward_cuda(
         self,
@@ -113,7 +124,15 @@ class QuantFP8(CustomOp):
         scale: Optional[torch.Tensor] = None,
         scale_ub: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.per_tensor_quant(x, scale, _FP8_DTYPE)
+        if not self.use_aiter or scale_ub is not None:
+            # Fallback to CUDA implementation
+            return self.forward_cuda(x, scale, scale_ub)
+        if self.group_shape == GroupShape.PER_TENSOR:
+            return torch.ops.vllm.rocm_aiter_per_tensor_quant(
+                x, scale, _FP8_DTYPE)
+        if self.group_shape == GroupShape.PER_TOKEN:
+            return torch.ops.vllm.rocm_aiter_per_token_quant(
+                x, scale, _FP8_DTYPE)
 
     def forward_native(
         self,
