@@ -585,6 +585,7 @@ def decode_attention_fwd_normal(
     k_buffer,
     v_buffer,
     o,
+    lse,
     req_to_token,
     b_seq_len,
     attn_logits,
@@ -605,7 +606,7 @@ def decode_attention_fwd_normal(
         page_size,
         logit_cap,
     )
-    _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, b_seq_len,
+    _decode_softmax_reducev_fwd(attn_logits, q, o, lse, v_buffer, b_seq_len,
                                 num_kv_splits)
 
 
@@ -663,6 +664,7 @@ def decode_attention_fwd(
             k_buffer,
             v_buffer,
             o,
+            lse,
             req_to_token,
             b_seq_len,
             attn_logits,
