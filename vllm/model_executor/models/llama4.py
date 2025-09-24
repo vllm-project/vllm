@@ -671,6 +671,11 @@ class Llama4ForCausalLM(LlamaForCausalLM):
                            prefix=prefix,
                            layer_type=layer_type)
 
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """Override to return custom layers for Llama4."""
+        # This will be overridden by the config during initialization
+        return (1, 23, 44)  # Custom auxiliary layers for this model
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
