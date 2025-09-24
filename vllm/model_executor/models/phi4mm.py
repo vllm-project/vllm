@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -18,7 +18,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -31,6 +30,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
@@ -391,41 +391,71 @@ class Phi4MMImageEncoder(nn.Module):
         return img_set_tensor
 
 
-class Phi4MMImagePixelInputs(TypedDict):
+class Phi4MMImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - p: Number of patches (1 + num_patches)
+        - c: Number of channels (3)
+        - h: Height of each image patch
+        - w: Width of each image patch
+        - nc: Number of crops
+        - H_mask: Height of attention mask
+        - W_mask: Width of attention mask
+    """
+
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+
+    data: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "p", 3, "h", "w", dynamic_dims={"p"}
+                    ),  # may be different per batch and image
+    ]
+
+    image_sizes: Annotated[
+        torch.Tensor,
+        TensorShape("bn", 2),  # (height, width)
+    ]
+
+    num_img_tokens: Annotated[
+        list[int],
+        TensorShape("bn"),
+    ]
+
+    image_attention_mask: Annotated[
+        torch.Tensor,
+        TensorShape("bn", "nc", 32, 32),  # H_mask, W_mask
+    ]
+
+
+class Phi4MMAudioFeatureInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
-
-    Note that `num_patches` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
+    Dimensions:
+        - bn: Batch size * number of audios
+        - t: Time frames (M)
     """
 
-    image_sizes: torch.Tensor
-    """
-    Shape: `(batch_size * num_images, 2)`
-
-    This should be in `(height, width)` format.
-    """
-
-    num_img_tokens: list[int]
-    """Shape: `(batch_size * num_images)`"""
-
-    image_attention_mask: torch.Tensor
-    """Shape: `(batch_size * num_images, H_mask, W_mask)`"""
-
-
-class Phi4MMAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
-    """Shape: `(batch_size * num_audios, 80, M)"""
+
+    data: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "t", 80, dynamic_dims={"t"}),
+    ]
 
 
-class Phi4MMAudioEmbeddingInputs(TypedDict):
+class Phi4MMAudioEmbeddingInputs(TensorSchema):
+    """
+    Dimensions:
+        - b: Batch size
+        - n: Number of audios
+        - f: Audio feature size
+        - h: Hidden size (must match language model backbone)
+    """
     type: Literal["audio_embeds"]
-    data: NestedTensors
-    """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)"""
+    data: Annotated[
+        NestedTensors,
+        TensorShape("b", "n", "f", "h"),
+    ]
 
 
 Phi4MMAudioInputs = Union[Phi4MMAudioFeatureInputs, Phi4MMAudioEmbeddingInputs]
@@ -958,6 +988,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             org_num_embeddings=config.vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
@@ -985,18 +1016,10 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             return None
 
         if audio_features is not None:
-            if not isinstance(audio_features, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of audio features. "
-                                 f"Got type: {type(audio_features)}")
-
             return Phi4MMAudioFeatureInputs(type="audio_features",
                                             data=flatten_bn(audio_features))
 
         if audio_embeds is not None:
-            if not isinstance(audio_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of audio embeds. "
-                                 f"Got type: {type(audio_embeds)}")
-
             return Phi4MMAudioEmbeddingInputs(type="audio_embeds",
                                               data=audio_embeds)
 
@@ -1031,8 +1054,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         ]
         return audio_embeds
 
-    def _parse_and_validate_image_input(self,
-                                        **kwargs: object) -> Optional[dict]:
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Phi4MMImagePixelInputs]:
         input_image_embeds: NestedTensors = kwargs.get("input_image_embeds")
         if input_image_embeds is None:
             return None
@@ -1074,7 +1097,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         elif isinstance(image_sizes, torch.Tensor):
             image_sizes = image_sizes.flatten(0, 1)
         else:
-            raise ValueError("Incorrect image_attention_mask inputs")
+            raise ValueError("Incorrect image_sizes inputs")
 
         if isinstance(num_img_tokens, list):
             num_img_tokens = [
@@ -1084,7 +1107,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         elif isinstance(num_img_tokens, torch.Tensor):
             num_img_tokens = num_img_tokens.flatten(0, 1).tolist()
         else:
-            raise ValueError("Incorrect image_attention_mask inputs")
+            raise ValueError("Incorrect num_img_tokens inputs")
 
         return Phi4MMImagePixelInputs(
             type="pixel_values",
@@ -1131,7 +1154,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
@@ -1233,10 +1256,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

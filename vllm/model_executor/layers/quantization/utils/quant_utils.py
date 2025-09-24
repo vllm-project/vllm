@@ -34,6 +34,15 @@ class GroupShape(_GroupShape):
     PER_TENSOR: ClassVar['GroupShape']
     PER_TOKEN: ClassVar['GroupShape']
 
+    def is_per_tensor(self) -> bool:
+        return self.row == -1 and self.col == -1
+
+    def is_per_token(self) -> bool:
+        return self.row == 1 and self.col == -1
+
+    def is_per_group(self) -> bool:
+        return self.row == 1 and self.col >= 1
+
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
 GroupShape.PER_TOKEN = GroupShape(1, -1)
@@ -116,7 +125,7 @@ def _normalize_quant_group_shape(x: torch.Tensor, group_shape: GroupShape):
 # then we would expand a to:
 #       a = [[1, 1, 2, 2],
 #            [3, 3, 4, 4]]
-# NOTE this function this function does not explicitly broadcast dimensions
+# NOTE this function does not explicitly broadcast dimensions
 # with an extent of 1, since this can be done implicitly by pytorch
 def group_broadcast(t, shape):
     for i, s in enumerate(shape):

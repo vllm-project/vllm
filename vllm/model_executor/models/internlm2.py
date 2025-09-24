@@ -3,6 +3,7 @@
 
 from collections.abc import Iterable
 from functools import partial
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -28,7 +29,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -297,7 +297,7 @@ class InternLM2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -357,10 +357,8 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.output, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.output, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -422,13 +420,15 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
             delattr(self, attr)
 
         config = vllm_config.model_config.hf_config
-        self.v_head = RowParallelLinear(
-            config.hidden_size,
-            1,
-            bias=False,
-            input_is_parallel=False,
-            prefix=maybe_prefix(prefix, "v_head"),
-        )
+        self.head_dtype = vllm_config.model_config.head_dtype
+
+        self.v_head = RowParallelLinear(config.hidden_size,
+                                        1,
+                                        bias=False,
+                                        input_is_parallel=False,
+                                        params_dtype=self.head_dtype,
+                                        prefix=maybe_prefix(prefix, "v_head"),
+                                        return_bias=False)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -445,5 +445,6 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
-        logits, _ = self.v_head(hidden_states)
+        hidden_states = hidden_states.to(self.head_dtype)
+        logits = self.v_head(hidden_states)
         return logits

@@ -11,7 +11,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
@@ -64,10 +63,6 @@ class TorchSDPABackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return TorchSDPAMetadata
-
-    @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
-        return CommonAttentionState
 
     @staticmethod
     def get_builder_cls() -> type["TorchSDPAMetadataBuilderV1"]:
@@ -317,8 +312,8 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device) -> None:
-        self.kv_cache_spec = kv_cache_spec
-        self.vllm_config = vllm_config
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         self.scheduler_config = vllm_config.scheduler_config
 
         # For reorder
@@ -425,7 +420,6 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
                                                     num_prompt_req],  # prefill
             query_start_loc=query_start_loc_cpu[:num_reqs +
                                                 1],  # for logits index
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
         )
 
@@ -641,10 +635,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         attn_metadata: TorchSDPAMetadata,
         attn_type: str = AttentionType.DECODER,
     ) -> None:
-        if self.num_kv_heads != self.num_heads:
-            key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
-            value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
-
         attn_masks = attn_metadata.get_attn_bias(attn_type)
         if attn_masks is None:
             if self.alibi_slopes is not None:
@@ -664,6 +654,10 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         query = query.movedim(0, query.dim() - 2)
         key = key.movedim(0, key.dim() - 2)
         value = value.movedim(0, value.dim() - 2)
+
+        if self.num_kv_heads != self.num_heads:
+            key = key.repeat_interleave(self.num_queries_per_kv, dim=-3)
+            value = value.repeat_interleave(self.num_queries_per_kv, dim=-3)
 
         causal_attn = (attn_type == AttentionType.DECODER)
 
@@ -835,16 +829,6 @@ class _PagedAttention:
             blocksparse_block_size,
             blocksparse_head_sliding_step,
         )
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: list[torch.Tensor],
-        src_to_dists: torch.Tensor,
-        *args,
-    ) -> None:
-        key_caches = [kv_cache[0] for kv_cache in kv_caches]
-        value_caches = [kv_cache[1] for kv_cache in kv_caches]
-        ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
 class _IPEXPagedAttention(_PagedAttention):

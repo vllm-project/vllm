@@ -81,13 +81,3 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch):
             more_args = ["--max-num-seqs", "64"]
 
         run_test(more_args)
-
-
-@pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
-def test_lm_eval_accuracy_v0_engine(monkeypatch: pytest.MonkeyPatch,
-                                    more_args):
-    """Run with the V0 Engine."""
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-        run_test(more_args)

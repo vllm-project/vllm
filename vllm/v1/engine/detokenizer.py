@@ -9,10 +9,10 @@ from tokenizers import Tokenizer
 from tokenizers.decoders import DecodeStream
 from transformers import PreTrainedTokenizerFast
 
-from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -121,17 +121,14 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                     self.output_token_ids) <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
 
-        if stop_terminated:
-            if skipped_stop_token_id is not None:
-                # Cleanup after skipping detokenization.
-                self.token_ids.append(skipped_stop_token_id)
-            # Stop token triggered; skip stop string check.
-            return None
+        if skipped_stop_token_id is not None:
+            # Cleanup after skipping detokenization.
+            self.token_ids.append(skipped_stop_token_id)
 
         # 2) Evaluate stop strings.
         stop_string = None
         if self.stop and len(self.output_token_ids) > self.min_tokens:
-            stop = StopChecker.check_stop_strings(
+            stop = check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
                 stop=self.stop,
@@ -182,11 +179,12 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
         # Find a safe place to start.
-        prompt_suffix = request.prompt_token_ids
+        prompt_token_ids = request.prompt_token_ids or []
+        prompt_suffix = prompt_token_ids
         prompt_len = len(prompt_suffix)
         if prompt_len > 4:
             for i in range(4, min(prompt_len + 1, 24)):
-                suffix = request.prompt_token_ids[-i:]
+                suffix = prompt_token_ids[-i:]
                 if '�' not in self.tokenizer.decode(suffix):
                     prompt_suffix = suffix
                     break
@@ -233,8 +231,13 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
     def _protected_step(self, next_token_id: int) -> Optional[str]:
         try:
             token = self.stream.step(self.tokenizer, next_token_id)
+        except OverflowError:
+            # Handle rare observed overflow, still to be diagnosed.
+            # See https://github.com/vllm-project/vllm/issues/21951.
+            logger.exception("Encountered invalid token id: %d", next_token_id)
+            token = None
         except Exception as e:
-            if str(e) != INVALID_PREFIX_ERR_MSG:
+            if not str(e).startswith(INVALID_PREFIX_ERR_MSG):
                 raise e
             # Recover from edge case where tokenizer can produce non-monotonic,
             # invalid UTF-8 output, which breaks the internal state of
@@ -243,7 +246,8 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             logger.warning(
                 "Encountered invalid prefix detokenization error"
                 " for request %s, resetting decode stream.", self.request_id)
-            self.stream = DecodeStream(self.skip_special_tokens)
+            self.stream = DecodeStream(
+                skip_special_tokens=self.skip_special_tokens)
             token = self.stream.step(self.tokenizer, next_token_id)
         return token
 
@@ -257,16 +261,25 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         params = request.sampling_params
         assert params is not None
 
-        # Metadata for incremental detokenization.
-        self.tokens, self.prefix_offset, self.read_offset = (
-            convert_prompt_ids_to_tokens(
-                tokenizer=tokenizer,
-                prompt_ids=request.prompt_token_ids,
-                skip_special_tokens=params.skip_special_tokens,
-            ))
+        self.prompt_len = length_from_prompt_token_ids_or_embeds(
+            request.prompt_token_ids, request.prompt_embeds)
 
-        self.token_ids.extend(request.prompt_token_ids)
-        self.prompt_len = len(request.prompt_token_ids)
+        # Metadata for incremental detokenization.
+        if request.prompt_token_ids is not None:
+            self.tokens, self.prefix_offset, self.read_offset = (
+                convert_prompt_ids_to_tokens(
+                    tokenizer=tokenizer,
+                    prompt_ids=request.prompt_token_ids,
+                    skip_special_tokens=params.skip_special_tokens,
+                ))
+        else:
+            # Prompt embedding requests cannot be detokenized, in general.
+            self.tokens = [""] * self.prompt_len
+            self.prefix_offset = 0
+            self.read_offest = 0
+
+        self.token_ids.extend(request.prompt_token_ids
+                              or [0] * self.prompt_len)
 
         self.skip_special_tokens = params.skip_special_tokens
         self.spaces_between_special_tokens = (
@@ -295,3 +308,42 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.read_offset = read_offset
 
         return decoded_text
+
+
+def check_stop_strings(
+    output_text: str,
+    new_char_count: int,
+    stop: list[str],
+    include_in_output: bool,
+) -> Optional[tuple[str, int]]:
+    """Check if any stop strings are matched and truncate sequence
+    output text accordingly.
+
+    Returns tuple (stop_string, offset) if matched or else None.
+
+    Where stop_string is the matched stop string and offset is the
+    length to which output_text should be truncated, or -1 for no
+    truncation.
+    """
+    if not new_char_count or not stop:
+        return None
+
+    for stop_str in stop:
+        stop_string_len = len(stop_str)
+        # Avoid searching already-searched text.
+        stop_index = output_text.find(stop_str,
+                                      1 - new_char_count - stop_string_len)
+        if stop_index == -1:
+            continue
+
+        if include_in_output:
+            # Truncate to end of stop string.
+            stop_index += stop_string_len
+            if stop_index >= len(output_text):
+                # No truncation required.
+                return stop_str, -1
+
+        # Truncate the output text to either the beginning
+        # or end of the stop string.
+        return stop_str, stop_index
+    return None

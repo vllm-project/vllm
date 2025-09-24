@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.serving_engine import (ClassificationServeContext,
                                                     OpenAIServing,
                                                     ServeContext)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
@@ -49,20 +50,12 @@ class ClassificationMixin(OpenAIServing):
             return None
 
         try:
-            ctx.lora_request = self._maybe_get_adapters(ctx.request)
+            ctx.tokenizer = await self.engine_client.get_tokenizer()
 
-            ctx.tokenizer = await self.engine_client.get_tokenizer(
-                ctx.lora_request)
-
-            (
-                ctx.request_prompts,
-                ctx.engine_prompts,
-            ) = await self._preprocess_completion(
-                ctx.request,
-                ctx.tokenizer,
-                ctx.request.input,
-                truncate_prompt_tokens=ctx.request.truncate_prompt_tokens,
-            )
+            renderer = self._get_renderer(ctx.tokenizer)
+            ctx.engine_prompts = await renderer.render_prompt(
+                prompt_or_prompts=ctx.request.input,
+                config=self._build_render_config(ctx.request))
 
             return None
 
@@ -118,6 +111,12 @@ class ClassificationMixin(OpenAIServing):
             usage=usage,
         )
 
+    def _build_render_config(self,
+                             request: ClassificationRequest) -> RenderConfig:
+        return RenderConfig(
+            max_length=self.max_model_len,
+            truncate_prompt_tokens=request.truncate_prompt_tokens)
+
 
 class ServingClassification(ClassificationMixin):
     request_id_prefix = "classify"
@@ -144,7 +143,7 @@ class ServingClassification(ClassificationMixin):
         request: ClassificationRequest,
         raw_request: Request,
     ) -> Union[ClassificationResponse, ErrorResponse]:
-        model_name = self._get_model_name(request.model)
+        model_name = self.models.model_name()
         request_id = (f"{self.request_id_prefix}-"
                       f"{self._base_request_id(raw_request)}")
 
@@ -156,18 +155,6 @@ class ServingClassification(ClassificationMixin):
         )
 
         return await super().handle(ctx)  # type: ignore
-
-    @override
-    def _validate_request(
-        self,
-        ctx: ClassificationServeContext,
-    ) -> Optional[ErrorResponse]:
-        if error := super()._validate_request(ctx):
-            return error
-
-        ctx.truncate_prompt_tokens = ctx.request.truncate_prompt_tokens
-
-        return None
 
     @override
     def _create_pooling_params(

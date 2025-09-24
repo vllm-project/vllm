@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import os
 import queue
 import signal
@@ -22,16 +23,17 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import receiver_cache_from_config
+from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
                         resolve_obj_by_qualname, set_process_title)
-from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_config,
+from vllm.v1.core.kv_cache_utils import (BlockHash,
+                                         generate_scheduler_kv_cache_config,
+                                         get_kv_cache_configs,
                                          get_request_block_hasher,
-                                         init_none_hash,
-                                         unify_kv_cache_configs)
+                                         init_none_hash)
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
@@ -128,9 +130,12 @@ class EngineCore:
             log_stats=self.log_stats,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+        if self.scheduler.connector is not None:  # type: ignore
+            self.model_executor.init_kv_output_aggregator(
+                self.scheduler.connector.get_finished_count())  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
-        self.mm_receiver_cache = receiver_cache_from_config(
+        self.mm_receiver_cache = engine_receiver_cache_from_config(
             vllm_config, mm_registry)
 
         # Setup batch queue for pipeline parallelism.
@@ -138,12 +143,12 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
-                                                     SchedulerOutput]]] = None
+        self.batch_queue: Optional[deque[tuple[Future[ModelRunnerOutput],
+                                               SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
-            self.batch_queue = queue.Queue(self.batch_queue_size)
+            self.batch_queue = deque(maxlen=self.batch_queue_size)
 
         self.request_block_hasher: Optional[Callable[[Request],
                                                      list[BlockHash]]] = None
@@ -157,6 +162,9 @@ class EngineCore:
 
             self.request_block_hasher = get_request_block_hasher(
                 block_size, caching_hash_fn)
+
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -187,28 +195,13 @@ class EngineCore:
             available_gpu_memory = [0] * len(kv_cache_specs)
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
-        # Get the kv cache tensor size
-        kv_cache_configs = [
-            get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
-                                available_gpu_memory_one_worker)
-            for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
-            zip(kv_cache_specs, available_gpu_memory)
-        ]
 
-        # Since we use a shared centralized controller, we need the
-        # `kv_cache_config` to be consistent across all workers to make sure
-        # all the memory operators can be applied to all workers.
-        unify_kv_cache_configs(kv_cache_configs)
-
-        # All workers have the same kv_cache_config except layer names, so use
-        # an arbitrary one to initialize the scheduler.
-        assert all([
-            cfg.num_blocks == kv_cache_configs[0].num_blocks
-            for cfg in kv_cache_configs
-        ])
-        num_gpu_blocks = kv_cache_configs[0].num_blocks
+        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
+                                                available_gpu_memory)
+        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
+            kv_cache_configs)
+        num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         num_cpu_blocks = 0
-        scheduler_kv_cache_config = kv_cache_configs[0]
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
@@ -223,7 +216,7 @@ class EngineCore:
 
     def add_request(self, request: Request, request_wave: int = 0):
         """Add request to the scheduler.
-        
+
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
@@ -319,41 +312,44 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-        assert self.batch_queue is not None
+        batch_queue = self.batch_queue
+        assert batch_queue is not None
 
-        engine_core_outputs = None
-        scheduler_output = None
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.
         # Note that this is not blocking.
-        if not self.batch_queue.full():
+        assert len(batch_queue) < self.batch_queue_size
+
+        model_executed = False
+        if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            if scheduler_output.total_num_scheduled_tokens > 0:
-                future = self.model_executor.execute_model(scheduler_output)
-                self.batch_queue.put_nowait(
-                    (future, scheduler_output))  # type: ignore
+            future = self.model_executor.execute_model(scheduler_output,
+                                                       non_block=True)
+            batch_queue.appendleft(
+                (future, scheduler_output))  # type: ignore[arg-type]
 
-        scheduled_batch = (scheduler_output is not None
-                           and scheduler_output.total_num_scheduled_tokens > 0)
+            model_executed = scheduler_output.total_num_scheduled_tokens > 0
+            if model_executed and len(batch_queue) < self.batch_queue_size \
+                and not batch_queue[-1][0].done():
+                # Don't block on next worker response unless the queue is full
+                # or there are no more requests to schedule.
+                return None, True
 
-        # If no more requests can be scheduled and the job queue is not empty,
-        # block until the first batch in the job queue is finished.
-        # TODO(comaniac): Ideally we should peek the first batch in the
-        # job queue to check if it's finished before scheduling a new batch,
-        # but peeking the first element in a queue is not thread-safe,
-        # so we need more work.
-        if not scheduled_batch and not self.batch_queue.empty():
-            future, scheduler_output = self.batch_queue.get_nowait()
+        elif not batch_queue:
+            # Queue is empty. We should not reach here since this method should
+            # only be called when the scheduler contains requests or the queue
+            # is non-empty.
+            return None, False
 
-            # Blocking until the first result is available.
-            model_output = self.execute_model_with_error_logging(
-                lambda _: future.result(), scheduler_output)
+        # Block until the next result is available.
+        future, scheduler_output = batch_queue.pop()
+        model_output = self.execute_model_with_error_logging(
+            lambda _: future.result(), scheduler_output)
 
-            self.batch_queue.task_done()
-            engine_core_outputs = (self.scheduler.update_from_output(
-                scheduler_output, model_output))
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output)
 
-        return engine_core_outputs, scheduled_batch
+        return engine_core_outputs, model_executed
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -388,7 +384,7 @@ class EngineCore:
         return self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
-        self.model_executor.collective_rpc("execute_dummy_batch")
+        self.model_executor.execute_dummy_batch()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
@@ -430,19 +426,17 @@ class EngineCore:
     def preprocess_add_request(
             self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
-        
+
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
-        if request.mm_hashes is not None:
-            assert request.mm_kwargs is not None
-
-            # Note on thread safety: no race condition.
-            # `mm_receiver_cache` is reset at the end of LLMEngine init,
-            # and will only accessed in the input processing thread afterwards.
-            if self.mm_receiver_cache is not None:
-                request.mm_kwargs = self.mm_receiver_cache.get_and_update(
-                    request.mm_kwargs, request.mm_hashes)
+        # Note on thread safety: no race condition.
+        # `mm_receiver_cache` is reset at the end of LLMEngine init,
+        # and will only be accessed in the input processing thread afterwards.
+        if self.mm_receiver_cache is not None and request.mm_features:
+            request.mm_features = (
+                self.mm_receiver_cache.get_and_update_features(
+                    request.mm_features))
 
         req = Request.from_engine_core_request(request,
                                                self.request_block_hasher)
@@ -533,8 +527,10 @@ class EngineCoreProc(EngineCore):
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
 
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
+        # Mark the startup heap as static so that it's ignored by GC.
+        # Reduces pause times of oldest generation collections.
+        gc.collect()
+        gc.freeze()
 
     @contextmanager
     def _perform_handshakes(
@@ -691,7 +687,7 @@ class EngineCoreProc(EngineCore):
             parallel_config: ParallelConfig = kwargs[
                 "vllm_config"].parallel_config
             if parallel_config.data_parallel_size > 1 or dp_rank > 0:
-                set_process_title("DPEngineCore", str(dp_rank))
+                set_process_title("EngineCore", f"DP{dp_rank}")
                 decorate_logs()
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
@@ -735,7 +731,8 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while not self.engines_running and not self.scheduler.has_requests():
+        while not self.engines_running and not self.scheduler.has_requests() \
+                and not self.batch_queue:
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True

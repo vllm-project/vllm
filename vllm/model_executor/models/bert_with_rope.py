@@ -15,8 +15,8 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import (get_act_and_mul_fn,
                                                    get_act_fn)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk, torch_vllm_outplace_fused_experts)
+from vllm.model_executor.layers.fused_moe import (activation_without_mul,
+                                                  fused_topk)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -27,12 +27,15 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import WeightsMapper
+from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
+                                              maybe_prefix)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsQuant
+from ..layers.pooler import ClassifierPooler, DispatchPooler, Pooler
+from .bert import BertPooler
+from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .interfaces_base import default_pooling_type
 
 
@@ -227,7 +230,7 @@ class NomicMoE(nn.Module):
         self.hidden_size = hidden_size
         self.total_intermediate_size = intermediate_size
         self.intermediate_size = divide(intermediate_size, self.tp_size)
-        self.hidden_act = hidden_act
+        self.hidden_act = activation_without_mul(hidden_act)
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -294,14 +297,14 @@ class NomicMoE(nn.Module):
                                                router_logits,
                                                self.top_k,
                                                renormalize=False)
-        final_hidden_states = torch_vllm_outplace_fused_experts(
+
+        final_hidden_states = torch.ops.vllm.outplace_fused_experts(
             hidden_states=hidden_states,
             w1=self.w1,
             w2=self.w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=self.hidden_act,
-            is_act_and_mul=False,
         )
 
         if self.tp_size > 1:
@@ -406,9 +409,14 @@ class BertWithRopeEncoder(nn.Module):
 class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 add_pooling_layer: bool = False):
         super().__init__()
         self.vllm_config = vllm_config
+        self.add_pooling_layer = add_pooling_layer
         self.config = vllm_config.model_config.hf_config
         self.embeddings = BertWithRopeEmbedding(self.config)
         self.encoder = BertWithRopeEncoder(
@@ -416,6 +424,7 @@ class BertWithRope(nn.Module, SupportsQuant):
             bias=getattr(self.config, "bias", True),
             rotary_kwargs=self.config.rotary_kwargs,
             prefix=f"{prefix}.encoder")
+        self.pooler = BertPooler(self.config) if add_pooling_layer else None
 
     def forward(
         self,
@@ -448,7 +457,7 @@ class BertWithRope(nn.Module, SupportsQuant):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if "pooler" in name:
+            if not self.add_pooling_layer and "pooler" in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -508,8 +517,8 @@ class GteNewModel(BertWithRope):
             "attention.o_proj": "attn.out_proj",
         })
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs):
+        super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
         # GteNewModel only gate_up_proj does not have bias.
         # Hack method learned from vllm/model_executor/models/glm.py
@@ -614,3 +623,65 @@ class JinaRobertaModel(BertWithRope):
                                                    torch.Tensor]]) -> set[str]:
         weights = self.jina_merge_lora_weights(weights)
         return super().load_weights(weights)
+
+
+@default_pooling_type("CLS")
+class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
+    is_pooling_model = True
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+
+        self.new = GteNewModel(vllm_config=vllm_config,
+                               prefix=prefix,
+                               add_pooling_layer=True)
+        self.classifier = ReplicatedLinear(
+            config.hidden_size,
+            config.num_labels,
+            bias=True,
+            quant_config=quant_config,
+            params_dtype=vllm_config.model_config.head_dtype,
+            prefix=maybe_prefix(prefix, "classifier"),
+            return_bias=False)
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "classify":
+            ClassifierPooler(
+                pooling=self.new.pooler,
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_seq_cls(
+                    vllm_config.model_config),
+            ),
+            "score":
+            ClassifierPooler(
+                pooling=self.new.pooler,
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
+                    vllm_config.model_config),
+            ),
+        })
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(self)
+        loaded_params = loader.load_weights(weights)
+        return loaded_params
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+
+        return self.new(input_ids=input_ids,
+                        positions=positions,
+                        inputs_embeds=inputs_embeds,
+                        intermediate_tensors=intermediate_tensors)

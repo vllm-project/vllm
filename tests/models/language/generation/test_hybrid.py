@@ -8,7 +8,7 @@ from tests.utils import multi_gpu_test
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sampling_params import SamplingParams
 
-from ...utils import check_logprobs_close, check_outputs_equal
+from ...utils import check_logprobs_close
 
 # Mark all tests as hybrid
 pytestmark = pytest.mark.hybrid_model
@@ -20,49 +20,31 @@ pytestmark = pytest.mark.hybrid_model
 SSM_MODELS = [
     "state-spaces/mamba-130m-hf",
     "tiiuae/falcon-mamba-tiny-dev",
-    "yujiepan/mamba2-codestral-v0.1-tiny-random",
+    # mamba2-codestral in transformers is broken pending:
+    # https://github.com/huggingface/transformers/pull/40861
+    #"yujiepan/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    # skipping until vLLM implementation issues are resolved
-    # "pfnet/plamo-2-1b",
+    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
-]
-
-HF_UNSUPPORTED_MODELS = [
-    # The HF transformers implementation of
-    # Mamba2 is buggy for Codestral as it doesn't handle n_groups, so the test
-    # doesn't compare vLLM output with HF output.
-    # See https://github.com/huggingface/transformers/pull/35943
-    "yujiepan/mamba2-codestral-v0.1-tiny-random",
-    # transformers 4.55 is still producing garbage for this model
-    # TODO(tdoublep): follow-up on transformers side
-    "ibm-granite/granite-4.0-tiny-preview"
-]
-
-V1_SUPPORTED_MODELS = [
-    "state-spaces/mamba-130m-hf",
-    "ai21labs/Jamba-tiny-dev",
-    "yujiepan/mamba2-codestral-v0.1-tiny-random",
-    "Zyphra/Zamba2-1.2B-instruct",
-    "hmellor/tiny-random-BambaForCausalLM",
-    "ibm-granite/granite-4.0-tiny-preview",
-    "tiiuae/Falcon-H1-0.5B-Base",
-    "LiquidAI/LFM2-1.2B",
+    "tiny-random/qwen3-next-moe",
 ]
 
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
+    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
-V0_UNSUPPORTED_MODELS = [
-    "LiquidAI/LFM2-1.2B",
+FP32_STATE_MODELS = [
+    "state-spaces/mamba-130m-hf",
+    "Zyphra/Zamba2-1.2B-instruct",
 ]
 
 # Avoid OOM
@@ -85,54 +67,24 @@ def test_models(
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
         model_info.check_available_online(on_fail="skip")
-        hf_version_check = model_info.check_transformers_version(
-            on_fail="return")
+        model_info.check_transformers_version(on_fail="skip")
     except ValueError:
-        hf_version_check = None
-
-    if hf_version_check is not None:
-        print(f"Skipping transformers comparison because: {hf_version_check}")
+        pass
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS and hf_version_check is None:
-            hf_outputs = hf_model.generate_greedy_logprobs_limit(
-                example_prompts, max_tokens, num_logprobs)
-        else:
-            hf_outputs = None
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs)
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-        if model not in V0_UNSUPPORTED_MODELS:
-            with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-                vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
-                    example_prompts, max_tokens, num_logprobs)
-        else:
-            vllm_v0_outputs = None
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
-    if model in V1_SUPPORTED_MODELS:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-            vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, num_logprobs)
-    else:
-        vllm_v1_outputs = None
-
-    if hf_outputs is not None and vllm_v0_outputs is not None:
-        check_logprobs_close(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=vllm_v0_outputs,
-            name_0="hf",
-            name_1="vllm-v0",
-        )
-
-    if model in V1_SUPPORTED_MODELS:
-        ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
-        assert ref_outputs is not None
-        check_logprobs_close(
-            outputs_0_lst=ref_outputs,
-            outputs_1_lst=vllm_v1_outputs,
-            name_0="hf" if hf_outputs is not None else "vllm-v0",
-            name_1="vllm-v1",
-        )
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
 
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
@@ -169,45 +121,6 @@ def test_batching(
         name_0="for_loop_vllm",
         name_1="batched_vllm",
     )
-
-
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
-def test_chunked_prefill(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    max_tokens: int,
-    num_logprobs: int,
-    chunked_prefill_token_size: int,
-    monkeypatch,
-) -> None:
-    max_num_seqs = chunked_prefill_token_size
-    max_num_batched_tokens = chunked_prefill_token_size
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-        with vllm_runner(model,
-                         enable_chunked_prefill=True,
-                         max_num_batched_tokens=max_num_batched_tokens,
-                         max_num_seqs=max_num_seqs) as vllm_model:
-            chunked = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, num_logprobs)
-
-        with vllm_runner(model,
-                         enable_chunked_prefill=False,
-                         max_num_seqs=max_num_seqs) as vllm_model:
-            non_chunked = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, num_logprobs)
-
-        check_logprobs_close(
-            outputs_0_lst=chunked,
-            outputs_1_lst=non_chunked,
-            name_0="chunked",
-            name_1="non_chunked",
-        )
 
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
@@ -272,38 +185,6 @@ def test_mamba_cache_cg_padding(
 
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
-@pytest.mark.parametrize("max_tokens", [20])
-def test_models_preemption_recompute(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    max_tokens: int,
-    monkeypatch,
-) -> None:
-    """
-    Tests that outputs are identical with and w/o preemptions (recompute).
-    """
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-            scheduler = vllm_model.llm.llm_engine.scheduler[0]
-            scheduler.ENABLE_ARTIFICIAL_PREEMPT = True
-            preempt_vllm_outputs = vllm_model.generate_greedy(
-                example_prompts, max_tokens)
-
-            scheduler.ENABLE_ARTIFICIAL_PREEMPT = False
-            vllm_outputs = vllm_model.generate_greedy(example_prompts,
-                                                      max_tokens)
-
-        check_outputs_equal(
-            outputs_0_lst=preempt_vllm_outputs,
-            outputs_1_lst=vllm_outputs,
-            name_0="vllm_preepmtions",
-            name_1="vllm",
-        )
-
-
-@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     vllm_runner,
     example_prompts,
@@ -315,7 +196,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     finished_requests_ids is larger than the maximum mamba block capacity.
 
     This could generally happen due to the fact that hybrid does support
-    statelessness mechanism where it can cleanup new incoming requests in
+    statelessness mechanism where it can clean up new incoming requests in
     a single step.
     """
     try:
@@ -336,7 +217,7 @@ def test_state_cleanup(
     This test is for verifying that the Hybrid state is cleaned up between
     steps.
     
-    If its not cleaned, an error would be expected.
+    If it's not cleaned, an error would be expected.
     """
     try:
         with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
@@ -397,47 +278,27 @@ def test_full_cuda_graph(
         pass
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS:
-            hf_outputs = hf_model.generate_greedy_logprobs_limit(
-                example_prompts, max_tokens, num_logprobs)
-        else:
-            hf_outputs = None
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-        if model not in V0_UNSUPPORTED_MODELS:
-            with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-                vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
-                    example_prompts, max_tokens, num_logprobs)
-        else:
-            vllm_v0_outputs = None
-
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
-    if hf_outputs is not None and vllm_v0_outputs is not None:
-        check_logprobs_close(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=vllm_v0_outputs,
-            name_0="hf",
-            name_1="vllm-v0",
-        )
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
-    ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
-    assert ref_outputs is not None
     check_logprobs_close(
-        outputs_0_lst=ref_outputs,
-        outputs_1_lst=vllm_v1_outputs,
-        name_0="hf" if hf_outputs is not None else "vllm-v0",
-        name_1="vllm-v1",
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
     )
 
 
-@pytest.mark.parametrize("model", ["Zyphra/Zamba2-1.2B-instruct"])
+@pytest.mark.parametrize("model", FP32_STATE_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_fp32_state(
+@pytest.mark.parametrize("cache_dtype_param",
+                         ["mamba_ssm_cache_dtype", "mamba_cache_dtype"])
+def test_fp32_cache_state(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -445,6 +306,7 @@ def test_fp32_state(
     model: str,
     max_tokens: int,
     num_logprobs: int,
+    cache_dtype_param: str,
 ) -> None:
 
     try:
@@ -455,38 +317,18 @@ def test_fp32_state(
         pass
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS:
-            hf_outputs = hf_model.generate_greedy_logprobs_limit(
-                example_prompts, max_tokens, num_logprobs)
-        else:
-            hf_outputs = None
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-        with vllm_runner(model,
-                         max_num_seqs=MAX_NUM_SEQS,
-                         mamba_ssm_cache_dtype="float32") as vllm_model:
-            vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, num_logprobs)
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs)
 
     with vllm_runner(model,
                      max_num_seqs=MAX_NUM_SEQS,
-                     mamba_ssm_cache_dtype="float32") as vllm_model:
-        vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+                     **{cache_dtype_param: "float32"}) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    if hf_outputs is not None:
-        check_logprobs_close(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=vllm_v0_outputs,
-            name_0="hf",
-            name_1="vllm-v0",
-        )
-
-    ref_outputs = hf_outputs if hf_outputs is not None else vllm_v0_outputs
     check_logprobs_close(
-        outputs_0_lst=ref_outputs,
-        outputs_1_lst=vllm_v1_outputs,
-        name_0="hf" if hf_outputs is not None else "vllm-v0",
-        name_1="vllm-v1",
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
     )

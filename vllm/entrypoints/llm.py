@@ -11,15 +11,13 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar
 
-import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
-from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
-                         is_init_field)
+from vllm.config import (CompilationConfig, ModelDType,
+                         StructuredOutputsConfig, TokenizerMode, is_init_field)
 from vllm.engine.arg_utils import (ConvertOption, EngineArgs, HfOverrides,
                                    PoolerConfig, RunnerOption)
-from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
                                          apply_hf_chat_template,
@@ -37,13 +35,15 @@ from vllm.entrypoints.score_utils import (ScoreContentPartParam,
 # yapf: enable
 from vllm.entrypoints.utils import (_validate_truncation_size,
                                     log_non_default_args)
-from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
+from vllm.inputs import (DataPrompt, PromptType, SingletonPrompt, TextPrompt,
+                         TokensPrompt)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
                           ScoringRequestOutput)
+from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, RequestOutputKind,
                                   SamplingParams)
@@ -51,7 +51,8 @@ from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, Device, is_list_of
+from vllm.utils import Counter, Device, as_iter, is_list_of
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -108,6 +109,14 @@ class LLM:
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors.
+        kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
+            this is set to None and vllm can automatically infer the kv cache
+            size based on gpu_memory_utilization. However, users may want to
+            manually specify the kv cache memory size. kv_cache_memory_bytes
+            allows more fine-grain control of how much memory gets used when
+            compared with using gpu_memory_memory_utilization. Note that
+            kv_cache_memory_bytes (when not-None) ignores
+            gpu_memory_utilization
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
@@ -121,15 +130,8 @@ class LLM:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
-        max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
-            to eager mode. Additionally for encoder-decoder models, if the
-            sequence length of the encoder input is larger than this, we fall
-            back to the eager mode.
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
-        disable_async_output_proc: Disable async output processing.
-            This may result in lower performance.
         hf_token: The token to use as HTTP bearer authorization for remote files
             . If `True`, will use the token generated when running
             `huggingface-cli login` (stored in `~/.huggingface`).
@@ -141,9 +143,11 @@ class LLM:
             multi-modal processor obtained from `AutoProcessor.from_pretrained`.
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
-        override_pooler_config: Initialize non-default pooling config or
-            override default pooling config for the pooling model.
-            e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+        pooler_config: Initialize non-default pooling config for the pooling
+            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+        override_pooler_config: [DEPRECATED] Use `pooler_config` instead. This
+            argument is deprecated and will be removed in v0.12.0 or v1.0.0,
+            whichever is sooner.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
@@ -175,13 +179,15 @@ class LLM:
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: bool = False,
-        max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
-        disable_async_output_proc: bool = False,
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        pooler_config: Optional[PoolerConfig] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
+        structured_outputs_config: Optional[Union[dict[
+            str, Any], StructuredOutputsConfig]] = None,
+        kv_cache_memory_bytes: Optional[int] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
         logits_processors: Optional[list[Union[str,
@@ -202,7 +208,7 @@ class LLM:
 
         if "kv_transfer_config" in kwargs and isinstance(
                 kwargs["kv_transfer_config"], dict):
-            from vllm.config import KVTransferConfig
+            from vllm.config.kv_transfer import KVTransferConfig
             raw_config_dict = kwargs["kv_transfer_config"]
             try:
                 kwargs["kv_transfer_config"] = KVTransferConfig(
@@ -225,13 +231,29 @@ class LLM:
                 compilation_config_instance = CompilationConfig(
                     level=compilation_config)
             elif isinstance(compilation_config, dict):
-                predicate = lambda x: is_init_field(CompilationConfig, x[0])
                 compilation_config_instance = CompilationConfig(
-                    **dict(filter(predicate, compilation_config.items())))
+                    **{
+                        k: v
+                        for k, v in compilation_config.items()
+                        if is_init_field(CompilationConfig, k)
+                    })
             else:
                 compilation_config_instance = compilation_config
         else:
             compilation_config_instance = CompilationConfig()
+
+        if structured_outputs_config is not None:
+            if isinstance(structured_outputs_config, dict):
+                structured_outputs_instance = StructuredOutputsConfig(
+                    **{
+                        k: v
+                        for k, v in structured_outputs_config.items()
+                        if is_init_field(StructuredOutputsConfig, k)
+                    })
+            else:
+                structured_outputs_instance = structured_outputs_config
+        else:
+            structured_outputs_instance = StructuredOutputsConfig()
 
         engine_args = EngineArgs(
             model=model,
@@ -249,16 +271,17 @@ class LLM:
             tokenizer_revision=tokenizer_revision,
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
+            kv_cache_memory_bytes=kv_cache_memory_bytes,
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
-            max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
-            disable_async_output_proc=disable_async_output_proc,
             hf_token=hf_token,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
+            pooler_config=pooler_config,
             override_pooler_config=override_pooler_config,
+            structured_outputs_config=structured_outputs_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
@@ -274,33 +297,28 @@ class LLM:
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
-        if envs.VLLM_USE_V1:
-            supported_tasks = self.llm_engine \
-                .get_supported_tasks()  # type: ignore
-        else:
-            supported_tasks = self.llm_engine.model_config.supported_tasks
+        supported_tasks = self.llm_engine.get_supported_tasks()  # type: ignore
 
         logger.info("Supported_tasks: %s", supported_tasks)
 
         self.supported_tasks = supported_tasks
 
-    def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return self.llm_engine.get_tokenizer_group().get_lora_tokenizer(
-            lora_request)
+        # Load the Input/Output processor plugin if any
+        io_processor_plugin = self.llm_engine.model_config.io_processor_plugin
+        self.io_processor = get_io_processor(self.llm_engine.vllm_config,
+                                             io_processor_plugin)
+
+    def get_tokenizer(self) -> AnyTokenizer:
+        return self.llm_engine.get_tokenizer()
 
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
-        tokenizer_group = self.llm_engine.get_tokenizer_group()
-
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
         # user-defined tokenizer started with 'Cached'
         if tokenizer.__class__.__name__.startswith("Cached"):
-            tokenizer_group.tokenizer = tokenizer
+            self.llm_engine.tokenizer = tokenizer
         else:
-            tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
+            self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:
@@ -329,7 +347,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.
                 When it is a single value, it is applied to every prompt.
@@ -364,14 +382,6 @@ class LLM:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
 
-        tokenization_kwargs: dict[str, Any] = {}
-        truncate_prompt_tokens = None
-        if isinstance(sampling_params, SamplingParams):
-            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
-
-        _validate_truncation_size(model_config.max_model_len,
-                                  truncate_prompt_tokens, tokenization_kwargs)
-
         # Add any modality specific loras to the corresponding prompts
         lora_request = self._get_modality_specific_lora_reqs(
             prompts, lora_request)
@@ -381,7 +391,6 @@ class LLM:
             params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
 
@@ -497,9 +506,14 @@ class LLM:
         """
         Run a function directly on the model inside each worker,
         returning the result for each of them.
+
+        !!! warning
+            To reduce the overhead of data transfer, avoid returning large
+            arrays or tensors from this method. If you must return them,
+            make sure you move them to CPU first to avoid taking up additional
+            VRAM!
         """
-        executor = self.llm_engine.model_executor
-        return executor.apply_model(func)
+        return self.llm_engine.apply_model(func)
 
     def _get_beam_search_lora_requests(
         self,
@@ -695,6 +709,105 @@ class LLM:
 
         return outputs
 
+    def preprocess_chat(
+        self,
+        messages: Union[list[ChatCompletionMessageParam],
+                        list[list[ChatCompletionMessageParam]]],
+        chat_template: Optional[str] = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
+        add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
+        tools: Optional[list[dict[str, Any]]] = None,
+        chat_template_kwargs: Optional[dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    ) -> list[TokensPrompt]:
+        """
+        Generate prompt for a chat conversation. The pre-processed
+        prompt can then be used as input for the other LLM methods.
+
+        Refer to `chat` for a complete description of the arguments.
+        Returns:
+            A list of `TokensPrompts` objects containing the tokenized
+            prompt after chat template interpolation, and the
+            pre-processed multi-modal inputs.
+        """
+        list_of_messages: list[list[ChatCompletionMessageParam]]
+
+        # Handle multi and single conversations
+        if is_list_of(messages, list):
+            # messages is list[list[...]]
+            list_of_messages = cast(list[list[ChatCompletionMessageParam]],
+                                    messages)
+        else:
+            # messages is list[...]
+            list_of_messages = [
+                cast(list[ChatCompletionMessageParam], messages)
+            ]
+
+        tokenizer = self.get_tokenizer()
+        model_config = self.llm_engine.get_model_config()
+        resolved_content_format = resolve_chat_template_content_format(
+            chat_template,
+            tools,
+            chat_template_content_format,
+            tokenizer,
+            model_config=model_config,
+        )
+
+        _chat_template_kwargs: dict[str, Any] = dict(
+            chat_template=chat_template,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tools,
+        )
+        _chat_template_kwargs.update(chat_template_kwargs or {})
+
+        prompts: list[TokensPrompt] = []
+
+        for msgs in list_of_messages:
+            # NOTE: _parse_chat_message_content_parts() currently doesn't
+            # handle mm_processor_kwargs, since there is no implementation in
+            # the chat message parsing for it.
+            conversation, mm_data, mm_uuids = parse_chat_messages(
+                msgs,
+                model_config,
+                tokenizer,
+                content_format=resolved_content_format,
+            )
+
+            if isinstance(tokenizer, MistralTokenizer):
+                prompt_token_ids = apply_mistral_chat_template(
+                    tokenizer,
+                    messages=msgs,
+                    **_chat_template_kwargs,
+                )
+            else:
+                prompt_str = apply_hf_chat_template(
+                    tokenizer=tokenizer,
+                    conversation=conversation,
+                    model_config=model_config,
+                    **_chat_template_kwargs,
+                )
+                # Special tokens are already included in chat templates so
+                # should not be added by the tokenizer in this case.
+                prompt_token_ids = tokenizer.encode(prompt_str,
+                                                    add_special_tokens=False)
+
+            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+
+            if mm_data is not None:
+                prompt["multi_modal_data"] = mm_data
+
+            if mm_uuids is not None:
+                prompt["multi_modal_uuids"] = mm_uuids
+
+            if mm_processor_kwargs is not None:
+                prompt["mm_processor_kwargs"] = mm_processor_kwargs
+
+            prompts.append(prompt)
+
+        return prompts
+
     def chat(
         self,
         messages: Union[list[ChatCompletionMessageParam],
@@ -761,77 +874,17 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
         """
-        list_of_messages: list[list[ChatCompletionMessageParam]]
 
-        # Handle multi and single conversations
-        if is_list_of(messages, list):
-            # messages is list[list[...]]
-            list_of_messages = cast(list[list[ChatCompletionMessageParam]],
-                                    messages)
-        else:
-            # messages is list[...]
-            list_of_messages = [
-                cast(list[ChatCompletionMessageParam], messages)
-            ]
-
-        tokenizer = self.get_tokenizer(lora_request)
-        model_config = self.llm_engine.get_model_config()
-        resolved_content_format = resolve_chat_template_content_format(
-            chat_template,
-            tools,
-            chat_template_content_format,
-            tokenizer,
-            model_config=model_config,
-        )
-
-        _chat_template_kwargs: dict[str, Any] = dict(
+        prompts = self.preprocess_chat(
+            messages=messages,
             chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
             add_generation_prompt=add_generation_prompt,
             continue_final_message=continue_final_message,
             tools=tools,
+            chat_template_kwargs=chat_template_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
-        _chat_template_kwargs.update(chat_template_kwargs or {})
-
-        prompts: list[Union[TokensPrompt, TextPrompt]] = []
-
-        for msgs in list_of_messages:
-            # NOTE: _parse_chat_message_content_parts() currently doesn't
-            # handle mm_processor_kwargs, since there is no implementation in
-            # the chat message parsing for it.
-            conversation, mm_data = parse_chat_messages(
-                msgs,
-                model_config,
-                tokenizer,
-                content_format=resolved_content_format,
-            )
-
-            if isinstance(tokenizer, MistralTokenizer):
-                prompt_token_ids = apply_mistral_chat_template(
-                    tokenizer,
-                    messages=msgs,
-                    **_chat_template_kwargs,
-                )
-            else:
-                prompt_str = apply_hf_chat_template(
-                    tokenizer=tokenizer,
-                    conversation=conversation,
-                    model_config=model_config,
-                    **_chat_template_kwargs,
-                )
-                # Special tokens are already included in chat templates so
-                # should not be added by the tokenizer in this case.
-                prompt_token_ids = tokenizer.encode(prompt_str,
-                                                    add_special_tokens=False)
-
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
-
-            if mm_data is not None:
-                prompt["multi_modal_data"] = mm_data
-
-            if mm_processor_kwargs is not None:
-                prompt["mm_processor_kwargs"] = mm_processor_kwargs
-
-            prompts.append(prompt)
 
         return self.generate(
             prompts,
@@ -842,7 +895,7 @@ class LLM:
 
     def encode(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
+        prompts: Union[PromptType, Sequence[PromptType], DataPrompt],
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         *,
@@ -862,7 +915,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
@@ -871,6 +924,8 @@ class LLM:
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             pooling_task: Override the pooling task to use.
+            tokenization_kwargs: overrides tokenization_kwargs set in
+                pooling_params
 
         Returns:
             A list of `PoolingRequestOutput` objects containing the
@@ -881,6 +936,10 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the `inputs` parameter.
         """
+
+        if self.supported_tasks == ["encode"] and pooling_task is None:
+            pooling_task = "encode"
+
         if pooling_task is None:
             if "embed" in self.supported_tasks:
                 pooling_task = "embed"
@@ -916,29 +975,54 @@ class LLM:
             # Use default pooling params.
             pooling_params = PoolingParams()
 
-        if isinstance(pooling_params, PoolingParams):
-            pooling_params.verify(pooling_task, model_config)
-        else:
-            for pooling_param in pooling_params:
-                pooling_param.verify(pooling_task, model_config)
+        for param in as_iter(pooling_params):
+            param.verify(pooling_task, model_config)
+            # for backwards compatibility
+            if truncate_prompt_tokens is not None:
+                param.truncate_prompt_tokens = truncate_prompt_tokens
 
-        if tokenization_kwargs is None:
-            tokenization_kwargs = dict[str, Any]()
-            _validate_truncation_size(model_config.max_model_len,
-                                      truncate_prompt_tokens,
-                                      tokenization_kwargs)
+        io_processor_prompt = False
+        if isinstance(prompts, dict) and "data" in prompts:
+            io_processor_prompt = True
+            if self.io_processor is None:
+                raise ValueError(
+                    "No IOProcessor plugin installed. Please refer "
+                    "to the documentation and to the "
+                    "'prithvi_geospatial_mae_io_processor' "
+                    "offline inference example for more details.")
+
+            # Validate the request data is valid for the loaded plugin
+            validated_prompt = self.io_processor.parse_request(prompts)
+
+            # obtain the actual model prompts from the pre-processor
+            prompts = self.io_processor.pre_process(prompt=validated_prompt)
 
         self._validate_and_add_requests(
             prompts=prompts,
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return self.engine_class.validate_outputs(outputs,
-                                                  PoolingRequestOutput)
+
+        model_outputs = self.engine_class.validate_outputs(
+            outputs, PoolingRequestOutput)
+
+        if io_processor_prompt:
+            # get the post-processed model outputs
+            assert self.io_processor is not None
+            processed_outputs = self.io_processor.post_process(
+                model_output=model_outputs)
+
+            return [
+                PoolingRequestOutput[Any](request_id="",
+                                          outputs=processed_outputs,
+                                          prompt_token_ids=[],
+                                          finished=True)
+            ]
+        else:
+            return model_outputs
 
     def embed(
         self,
@@ -960,7 +1044,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
@@ -1008,7 +1092,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
@@ -1052,7 +1136,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
@@ -1156,8 +1240,7 @@ class LLM:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-            if envs.VLLM_USE_V1 and (token_type_ids := engine_prompt.pop(
-                    "token_type_ids", None)):
+            if (token_type_ids := engine_prompt.pop("token_type_ids", None)):
                 params = pooling_params.clone()
                 compressed = compress_token_type_ids(token_type_ids)
                 params.extra_kwargs = {"compressed_token_type_ids": compressed}
@@ -1374,24 +1457,21 @@ class LLM:
         Note:
             This method is only available with the V1 LLM engine.
         """
-        from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-        assert isinstance(self.llm_engine, V1LLMEngine)
         return self.llm_engine.get_metrics()
 
     def _validate_and_add_requests(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
+        prompts: Union[PromptType, Sequence[PromptType], DataPrompt],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
         priority: Optional[list[int]] = None,
     ) -> None:
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
-            prompts = [prompts]
+            prompts = [prompts]  # type: ignore[list-item]
 
         num_requests = len(prompts)
         if isinstance(params, Sequence) and len(params) != num_requests:
@@ -1413,7 +1493,22 @@ class LLM:
             tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
             it = tqdm_func(it, desc="Adding requests")
 
+        model_config = self.llm_engine.model_config
+
         for i, prompt in enumerate(it):
+
+            if isinstance(prompt, dict):
+                self._validate_mm_data_and_uuids(
+                    prompt.get("multi_modal_data"),
+                    prompt.get("multi_modal_uuids"))
+
+            param = params[i] if isinstance(params, Sequence) else params
+
+            tokenization_kwargs: dict[str, Any] = {}
+            _validate_truncation_size(model_config.max_model_len,
+                                      param.truncate_prompt_tokens,
+                                      tokenization_kwargs)
+
             self._add_request(
                 prompt,
                 params[i] if isinstance(params, Sequence) else params,
@@ -1422,6 +1517,41 @@ class LLM:
                     lora_request, Sequence) else lora_request,
                 priority=priority[i] if priority else 0,
             )
+
+    def _validate_mm_data_and_uuids(
+            self,
+            multi_modal_data: Optional[Any],  # MultiModalDataDict
+            multi_modal_uuids: Optional[Any],  # MultiModalUUIDDict
+    ):
+        """
+        Validate that if any multi-modal data is skipped (i.e. None),
+        then its corresponding UUID must be set.
+        """
+        if multi_modal_data is None:
+            return
+
+        for modality, data in multi_modal_data.items():
+            if isinstance(data, list):
+                for i, d in enumerate(data):
+                    if d is None:
+                        if multi_modal_uuids is None or modality not in multi_modal_uuids or multi_modal_uuids[  # noqa: E501
+                                modality] is None:
+                            raise ValueError(
+                                f"Multi-modal data for {modality} is None "
+                                f"but UUID is not provided")
+                        else:
+                            if len(
+                                    multi_modal_uuids[modality]
+                            ) <= i or multi_modal_uuids[modality][i] is None:
+                                raise ValueError(
+                                    f"Multi-modal data for {modality} is None "
+                                    f"but UUID is not provided")
+            else:
+                if data is None and (multi_modal_uuids is None
+                                     or modality not in multi_modal_uuids
+                                     or multi_modal_uuids[modality] is None):
+                    raise ValueError(f"Multi-modal data for {modality} is None"
+                                     f" but UUID is not provided")
 
     def _add_request(
         self,

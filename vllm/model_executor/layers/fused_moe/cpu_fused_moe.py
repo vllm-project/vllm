@@ -21,6 +21,7 @@ def grouped_topk(
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
     e_score_correction_bias: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], (
@@ -65,6 +66,8 @@ def grouped_topk(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
+    if routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * routed_scaling_factor
     return topk_weights, topk_ids.to(torch.int32)
 
 
@@ -78,6 +81,7 @@ def select_experts(
     num_expert_group: Optional[int] = None,
     custom_routing_function: Optional[Callable] = None,
     scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
     e_score_correction_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if use_grouped_topk:
@@ -90,16 +94,20 @@ def select_experts(
                             num_expert_group=num_expert_group,
                             topk_group=topk_group,
                             scoring_func=scoring_func,
+                            routed_scaling_factor=routed_scaling_factor,
                             e_score_correction_bias=e_score_correction_bias)
     elif custom_routing_function is None:
         assert scoring_func == "softmax"
-        topk_weights = torch.nn.functional.softmax(router_logits,
-                                                   dim=1,
-                                                   dtype=torch.float32)
-        topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
+        topk_logit_vals, topk_idx = torch.topk(router_logits,
+                                               k=top_k,
+                                               dim=-1,
+                                               sorted=False)
         if renormalize:
-            topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
-        return topk_weights, topk_ids.to(torch.int32)
+            topk_vals = torch.softmax(topk_logit_vals, dim=-1)
+        else:
+            logZ = torch.logsumexp(router_logits, dim=-1, keepdim=True)
+            topk_vals = (topk_logit_vals - logZ).exp()
+        return topk_vals.to(torch.float32), topk_idx.to(torch.int32)
     else:
         return custom_routing_function(hidden_states=hidden_states,
                                        gating_output=router_logits,
@@ -131,12 +139,15 @@ class IPEXFusedMOE:
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
         assert activation == "silu", f"{activation} is not supported."
         assert not apply_router_weight_on_input
+        assert routed_scaling_factor == 1.0, \
+            f"routed_scaling_factor {routed_scaling_factor} is not supported."
         return layer.ipex_fusion(
             x,
             use_grouped_topk,
@@ -170,6 +181,7 @@ class SGLFusedMOE:
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -186,6 +198,7 @@ class SGLFusedMOE:
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
         )
 
@@ -227,6 +240,7 @@ class CPUFusedMOE:
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -243,6 +257,7 @@ class CPUFusedMOE:
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
         )
 

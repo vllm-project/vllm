@@ -69,17 +69,18 @@ class CpuPlatform(Platform):
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
+    device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
-        elif sys.platform.startswith(
-                "darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
-            # TODO: change this condition to check if the platform support bf16
-            # instead of checking the OS. For instance M2 shall supports bf16
-            # already. But we need to modify `cpu_extension.cmake` to activate
-            # the feature in the build.
+        elif (self.get_cpu_architecture() == CpuArchEnum.ARM
+              and sys.platform.startswith("darwin")):
+            if (subprocess.check_output(
+                ["sysctl -n hw.optional.arm.FEAT_BF16"],
+                    shell=True).strip() == b"1"):
+                return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
@@ -124,10 +125,6 @@ class CpuPlatform(Platform):
         Set the device for the current platform.
         """
         torch.cpu.set_device(device)
-
-    @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
 
     @classmethod
     def inference_mode(cls):
@@ -184,6 +181,11 @@ class CpuPlatform(Platform):
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
+        # Disable DBO
+        if parallel_config.enable_dbo:
+            logger.warning(
+                "Dual-Batch Overlap is not supported on CPU, disabled.")
+            parallel_config.enable_dbo = False
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationLevel
@@ -297,6 +299,13 @@ class CpuPlatform(Platform):
             allowed_numa_nodes.add(x.numa_node)  # type: ignore
         allowed_numa_nodes_list = sorted(allowed_numa_nodes)
 
+        env_key = CpuPlatform.device_control_env_var
+        if (env_key in os.environ and os.environ[env_key] != ""):
+            visible_nodes = [int(s) for s in os.environ[env_key].split(',')]
+            allowed_numa_nodes_list = [
+                x for x in visible_nodes if x in allowed_cpu_id_list
+            ]
+
         return allowed_numa_nodes_list, logical_cpu_list
 
     @classmethod
@@ -320,22 +329,9 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_v1(cls, model_config) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
+    def opaque_attention_op(cls) -> bool:
         return True
 
     @classmethod
-    def default_v1(cls, model_config) -> bool:
-        """Returns whether the current platform can use v1 by default for the
-        supplied model configuration.
-        """
-        arch = cls.get_cpu_architecture()
-        return (cls.supports_v1(model_config)
-                and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC,
-                             CpuArchEnum.ARM, CpuArchEnum.S390X))
-
-    @classmethod
-    def opaque_attention_op(cls) -> bool:
+    def support_hybrid_kv_cache(cls) -> bool:
         return True
