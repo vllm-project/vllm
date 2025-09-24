@@ -982,7 +982,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         num_frames = start_num_frames
 
         while True:
-            next_num_frames = num_frames + 2
+            next_num_frames = num_frames + 1
             next_max_tokens = self.get_num_video_tokens(
                 image_width=target_width,
                 image_height=target_height,
