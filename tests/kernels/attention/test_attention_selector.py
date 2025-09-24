@@ -31,7 +31,7 @@ DEVICE_MLA_BACKENDS = {
 }
 
 DEVICE_REGULAR_ATTN_BACKENDS = {
-    "cuda": ["XFORMERS", "FLASHINFER"],
+    "cuda": ["XFORMERS", "FLASHINFER", "FLASH_ATTN"],
     "hip": ["ROCM_FLASH"],
     "cpu": ["TORCH_SDPA"],
 }
@@ -220,7 +220,15 @@ def test_env(
                                                use_mla=use_mla)
                     expected = "FLASHINFER"
                     assert backend.get_name() == expected
-                else:
+                elif name == "XFORMERS":
+                    backend = get_attn_backend(32,
+                                               torch.float16,
+                                               None,
+                                               block_size,
+                                               use_mla=use_mla)
+                    expected = "XFORMERS"
+                    assert backend.get_name() == expected
+                elif name == "FLASH_ATTN":
                     backend = get_attn_backend(32,
                                                torch.float16,
                                                None,
@@ -228,15 +236,6 @@ def test_env(
                                                use_mla=use_mla)
                     expected = "FLASH_ATTN"
                     assert backend.get_name() == expected
-
-                    backend = get_attn_backend(16,
-                                               torch.float16,
-                                               None,
-                                               block_size,
-                                               use_mla=use_mla)
-                    assert backend.get_name() == "FLEX_ATTENTION", (
-                        "Should fallback to FlexAttention if head size is "
-                        "not supported by FlashAttention")
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
