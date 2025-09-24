@@ -4024,7 +4024,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 if self.do_mark_step:
                     htorch.core.mark_step()
                 if hasattr(self.model.sampler, '_sampling_tensors') and \
-                    self.model.sampler._sampling_tensors is not None:
+                    self.model.sampler._sampling_tensors is not None and \
+                    self.model.sampler._do_penalties:
                     sampling_tensors = self.model.sampler._sampling_tensors
                     if sampling_tensors.prompt_tokens.numel() > 0:
                         # Cache the prompt_tokens tensor that's already on HPU
