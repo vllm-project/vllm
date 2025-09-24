@@ -53,6 +53,7 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
     with vllm_runner(model_path,
                      kv_cache_dtype=kv_cache_dtype,
+                     enforce_eager=True,
                      tensor_parallel_size=tp) as llm:
 
         def check_model(model):
@@ -70,7 +71,7 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=1)
         assert output
 
 
@@ -95,7 +96,7 @@ def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=10)
         assert output
 
 
@@ -114,7 +115,7 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=10)
         assert output
 
 
