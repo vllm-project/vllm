@@ -34,6 +34,12 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
 
+    # Whether this backend supports receiving pre-quantized query input.
+    # If True, the attention layer will handle query quantization instead
+    # of the backend, allowing torch.compile to fuse quantization with
+    # previous operations.
+    supports_quant_query_input: bool = False
+
     @staticmethod
     @abstractmethod
     def get_name() -> str:

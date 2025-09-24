@@ -22,7 +22,10 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import GiB_bytes, direct_register_custom_op
@@ -247,6 +250,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 "This may be caused by insufficient memory to allocate "
                 "kv cache.") from e
 
+        # for attn backends supporting query quantization
+        self.query_quant = None
+        if self.kv_cache_dtype.startswith(
+                "fp8") and self.attn_backend.supports_quant_query_input:
+            self.query_quant = QuantFP8(static=True,
+                                        group_shape=GroupShape.PER_TENSOR)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -270,6 +280,15 @@ class Attention(nn.Module, AttentionLayerBase):
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
+
+        if self.query_quant is not None:
+            # quantizing with a simple torch operation enables
+            # torch.compile to fuse this into previous ops
+            # which reduces overheads during decoding.
+            # Otherwise queries are quantized using custom ops
+            # which causes decoding overheads
+            query, _ = self.query_quant.forward_native(query, self._q_scale)
+
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
@@ -277,22 +296,6 @@ class Attention(nn.Module, AttentionLayerBase):
                                  dtype=query.dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
-
-            if envs.VLLM_FUSE_QUERY_QUANT and self.kv_cache_dtype != "auto":
-                # quantizing with a simple torch operation enables
-                # torch.compile to fuse this into previous ops
-                # which reduces overheads during decoding.
-                # Otherwise queries are quantized using custom ops
-                # which causes decoding overheads
-                assert self._q_scale.numel() == 1
-                if self.kv_cache_dtype in ["fp8", "fp8_e4m3"]:
-                    query = (query / self._q_scale).to(torch.float8_e4m3fn)
-                elif self.kv_cache_dtype == "fp8_e5m2":
-                    query = (query / self._q_scale).to(torch.float8_e5m2)
-                else:
-                    raise NotImplementedError(
-                        "VLLM_FUSE_QUERY_QUANT only supported for fp8_e4m3 "
-                        "and fp8_e5m2")
 
             # We skip reshaping query, key and value tensors for the MLA
             # backend since these tensors have different semantics and are
