@@ -34,9 +34,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp, check_aiter_fp8_linear_support,
     create_fp8_input_scale, create_fp8_scale_parameter,
     create_fp8_weight_parameter, expert_weight_is_col_major,
-    get_col_major_tma_aligned_tensor, maybe_post_process_fp8_weight_block,
-    process_fp8_weight_block_strategy, process_fp8_weight_tensor_strategy,
-    requant_weight_ue8m0_inplace, validate_fp8_block_shape)
+    maybe_post_process_fp8_weight_block, process_fp8_weight_block_strategy,
+    process_fp8_weight_tensor_strategy, requant_weight_ue8m0_inplace,
+    validate_fp8_block_shape)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin)
@@ -53,7 +53,9 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
+from vllm.utils.deep_gemm import (get_col_major_tma_aligned_tensor,
+                                  is_deep_gemm_e8m0_used,
+                                  is_deep_gemm_supported)
 from vllm.utils.flashinfer import has_flashinfer_moe
 
 if TYPE_CHECKING:
