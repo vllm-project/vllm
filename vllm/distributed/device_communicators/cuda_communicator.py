@@ -114,6 +114,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import DeepEPLLAll2AllManager
                 self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
                 logger.info("Using DeepEP Low-Latency all2all manager.")
+            elif all2all_backend == "deepep_hybrid":
+                from .all2all import DeepEPHybridAll2AllManager
+                self.all2all_manager = DeepEPHybridAll2AllManager(self.cpu_group)
+                logger.info("Using DeepEP Hybrid all2all manager.")
             elif all2all_backend == "flashinfer_all2allv":
                 from .all2all import FlashInferAllToAllManager
                 self.all2all_manager = FlashInferAllToAllManager(
