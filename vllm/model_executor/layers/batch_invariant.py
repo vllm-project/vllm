@@ -8,6 +8,7 @@ from typing import Any, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 
 
@@ -557,5 +558,7 @@ def vllm_kernel_override_batch_invariant():
 def init_batch_invariance():
     # this will hit all the csrc overrides as well
     if vllm_kernel_override_batch_invariant():
-        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+        curr_attn_backend = envs.VLLM_ATTENTION_BACKEND
+        if curr_attn_backend not in ["FLEX_ATTENTION", "FLASHINFER"]:
+            os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
         enable_batch_invariant_mode()
