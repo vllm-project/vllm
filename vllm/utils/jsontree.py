@@ -4,7 +4,7 @@
 
 from collections.abc import Iterable
 from functools import reduce
-from typing import Callable, TypeVar, Union, overload
+from typing import Callable, TypeVar, Union, cast, overload
 
 _T = TypeVar("_T")
 _U = TypeVar("_U")
@@ -30,10 +30,42 @@ def json_iter_leaves(value: JSONTree[_T]) -> Iterable[_T]:
         yield value
 
 
+@overload
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[_T, dict[str, _T]],
+) -> Union[_U, dict[str, _U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[_T, list[_T]],
+) -> Union[_U, list[_U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[_T, tuple[_T, ...]],
+) -> Union[_U, tuple[_U, ...]]:
+    ...
+
+
+@overload
 def json_map_leaves(
     func: Callable[[_T], _U],
     value: JSONTree[_T],
 ) -> JSONTree[_U]:
+    ...
+
+
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[dict[str, _T], list[_T], tuple[_T, ...], JSONTree[_T]],
+) -> Union[dict[str, _U], list[_U], tuple[_U, ...], JSONTree[_U]]:
     """Apply a function to each leaf in a nested JSON structure."""
     if isinstance(value, dict):
         return {k: json_map_leaves(func, v) for k, v in value.items()}
@@ -43,6 +75,33 @@ def json_map_leaves(
         return tuple(json_map_leaves(func, v) for v in value)
     else:
         return func(value)
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[_T, _T], _T],
+    value: Union[_T, dict[str, _T]],
+    /,
+) -> _T:
+    ...
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[_T, _T], _T],
+    value: Union[_T, list[_T]],
+    /,
+) -> _T:
+    ...
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[_T, _T], _T],
+    value: Union[_T, tuple[_T, ...]],
+    /,
+) -> _T:
+    ...
 
 
 @overload
@@ -65,10 +124,10 @@ def json_reduce_leaves(
 
 
 def json_reduce_leaves(
-    func: Callable[..., Union[_T, _U]],
-    value: JSONTree[_T],
-    initial: _U = ...,  # type: ignore[assignment]
-    /,
+        func: Callable[..., Union[_T, _U]],
+        value: Union[dict[str, _T], list[_T], tuple[_T, ...], JSONTree[_T]],
+        initial: _U = cast(_U, ...),  # noqa: B008
+        /,
 ) -> Union[_T, _U]:
     """
     Apply a function of two arguments cumulatively to each leaf in a
