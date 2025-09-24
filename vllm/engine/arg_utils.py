@@ -156,8 +156,8 @@ def is_online_quantization(quantization: Any) -> bool:
 
 
 NEEDS_HELP = (
-    "--help" in (argv := sys.argv)  # vllm SUBCOMMAND --help
-    or (argv0 := argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
+    any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
+    or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
     or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
 )
 
