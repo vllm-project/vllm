@@ -899,7 +899,6 @@ steps:
   - pytest -v -s distributed/test_sequence_parallel.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
-  - pytest -v -s models/multimodal/generation/test_maverick.py
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
 - label: Distributed Model Tests (2 GPUs) # 110min -> ???
@@ -918,6 +917,7 @@ steps:
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest -v -s models/multimodal/generation/test_maverick.py
 
 - label: Plugin Tests (2 GPUs) # 40min
   timeout_in_minutes: 60
