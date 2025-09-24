@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+from datetime import timedelta
+from tkinter import NO
 from typing import Optional
 
 import torch
 import torch.nn as nn
+import triton
+import triton.language as tl
+import time
 from packaging import version
 
 from vllm import envs
@@ -19,6 +25,19 @@ try:
     is_flashinfer_available = True
 except ImportError:
     is_flashinfer_available = False
+    
+def g_str(s):
+    return "\033[32m" + s + "\033[0m"
+def r_str(s):
+    return "\033[31m" + s + "\033[0m"
+def b_str(s):
+    return "\033[34m" + s + "\033[0m"
+def y_str(s):
+    return "\033[33m" + s + "\033[0m"
+def c_str(s):
+    return "\033[36m" + s + "\033[0m"
+def m_str(s):
+    return "\033[35m" + s + "\033[0m"
 
 
 class TopKTopPSampler(nn.Module):
@@ -120,6 +139,190 @@ class TopKTopPSampler(nn.Module):
         return flashinfer_sample(logits.contiguous(), k, p, generators), None
 
 
+def original_apply_top_k_top_p(
+    logits: torch.Tensor,
+    k: Optional[torch.Tensor],
+    p: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Apply top-k and top-p masks to the logits.
+    """
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+    
+    if p is None:
+        if k is None:
+            return logits
+
+        # Avoid sorting vocab for top-k only case.
+        logits = apply_top_k_only(logits, k)
+    else:
+        if k is not None:
+            # Apply top-k.
+            top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
+            # Get all the top_k values.
+            top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
+            top_k_mask = logits_sort < top_k_mask
+            logits_sort.masked_fill_(top_k_mask, -float("inf"))
+
+        if p is not None:
+            # Apply top-p.
+            probs_sort = logits_sort.softmax(dim=-1)
+            probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
+            top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+            # at least one
+            top_p_mask[:, -1] = False
+            logits_sort.masked_fill_(top_p_mask, -float("inf"))
+
+        # Re-sort the probabilities.
+        logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
+    return logits
+
+@triton.jit
+def _topk_topp_kernel(LOGITS, PROBS, K, P, B, 
+                      N: tl.constexpr,
+                      BLOCK_SIZE: tl.constexpr,
+                      NUM_TILES: tl.constexpr,
+                      NUM_PIVOTS: tl.constexpr):
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    for row_id in tl.range(pid, B, num_programs):
+        k = tl.load(K + row_id)
+        p = tl.load(P + row_id)
+        if not (k == N and p == 1.0): # All tokens are valid
+            max_logit = -float('inf')
+            min_logit = float('inf')
+
+            max_prob = 0.0
+            min_prob = 1.0
+
+            # First pass: compute max and min logits (for numerical stability)
+            for i in range(0, NUM_TILES):
+                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                mask_n = offs_n < N
+                logits_blk = tl.load(LOGITS + offs_n, mask=mask_n, other=0.0)
+
+                max_logit = tl.maximum(max_logit, tl.max(logits_blk))
+                min_logit = tl.minimum(min_logit, tl.min(logits_blk))
+            
+            # Second pass: compute probabilities using softmax
+            # (This requires the max for numerical stability)
+            exp_logits_sum = 0.0
+            for i in range(0, NUM_TILES):
+                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                mask_n = offs_n < N
+                logits_blk = tl.load(LOGITS + offs_n, mask=mask_n, other=-float('inf'))
+                
+                logits_tile_stable = logits_blk - max_logit  # Numerical stability
+                exp_logits = tl.exp(logits_tile_stable)
+                exp_logits_sum += tl.sum(exp_logits)
+                tl.store(PROBS + offs_n, exp_logits)
+
+            # Third pass: compute probabilities and update max and min probabilities
+            for i in range(0, NUM_TILES):
+                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                mask_n = offs_n < N
+                probs_blk = tl.load(PROBS + offs_n, mask=mask_n, other=0.0)
+                probs_blk = probs_blk / exp_logits_sum
+                max_prob = tl.maximum(max_prob, tl.max(probs_blk))
+                min_prob = tl.minimum(min_prob, tl.min(probs_blk))
+                tl.store(PROBS + offs_n, probs_blk)
+
+            # Fourth passes: Search for pivots
+            num_iters = 0
+            k_pivot = -float('inf')
+            k_pivots = tl.full((NUM_PIVOTS,), -float('inf'), dtype=tl.float32)
+            k_pivots_num = tl.full((NUM_PIVOTS,), 0, dtype=tl.uint32)
+            
+            p_pivot = 0.0
+            p_pivots = tl.full((NUM_PIVOTS,), -float('inf'), dtype=tl.float32)
+            p_pivots_sum = tl.full((NUM_PIVOTS,), 0.0, dtype=tl.float32)
+                
+            while (k_pivot == -float('inf') or p_pivot == 0.0) and num_iters < 32:
+                k_pivots = (max_logit - min_logit) * tl.arange(1, NUM_PIVOTS + 1) / NUM_PIVOTS + min_logit
+                p_pivots = (max_prob - min_prob) * tl.arange(1, NUM_PIVOTS + 1) / NUM_PIVOTS + min_prob
+                for i in range(0, NUM_TILES):
+                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                    mask_n = offs_n < N
+                    logits_blk = tl.load(LOGITS + offs_n, mask=mask_n, other=-float('inf'))
+                    probs_blk = tl.load(PROBS + offs_n, mask=mask_n, other=0.0)
+
+                    logits_expanded = logits_blk[None, :] # shape: 1 x BLOCK_SIZE
+                    k_pivots_expanded = k_pivots[:, None] # shape: NUM_PIVOTS x 1
+                    larger_mask = logits_expanded > k_pivots_expanded # shape: NUM_PIVOTS x BLOCK_SIZE
+                    k_pivots_num += tl.sum(larger_mask, axis=1) # shape: NUM_PIVOTS
+
+                    probs_expanded = probs_blk[None, :] # shape: 1 x BLOCK_SIZE
+                    p_pivots_expanded = p_pivots[:, None] # shape: NUM_PIVOTS x 1
+                    larger_mask = probs_expanded > p_pivots_expanded # shape: NUM_PIVOTS x BLOCK_SIZE
+                    larger_probs = tl.where(larger_mask, probs_expanded, 0.0) # shape: NUM_PIVOTS x BLOCK_SIZE
+                    p_pivots_sum += tl.sum(larger_probs, axis=1) # shape: NUM_PIVOTS
+
+                exact_match_k = k_pivots_num == k
+                if tl.sum(exact_match_k) > 0:
+                    matches = tl.where(exact_match_k, k_pivots, float('inf'))
+                    k_pivot = tl.min(matches)
+                else:
+                    smaller_mask = k_pivots_num < k
+                    if tl.sum(smaller_mask) > 0:
+                        small_indices = tl.where(smaller_mask, k_pivots, float('inf'))
+                        max_logit = tl.min(small_indices)
+                    larger_mask = k_pivots_num > k
+                    if tl.sum(larger_mask) > 0:
+                        large_indices = tl.where(larger_mask, k_pivots, -float('inf'))
+                        min_logit = tl.max(large_indices)
+
+                exact_match_p = tl.abs(p_pivots_sum - p) < 1e-6
+                if tl.sum(exact_match_p) > 0:
+                    match_indices = tl.where(exact_match_p, p_pivots, float('inf'))
+                    p_pivot = tl.min(match_indices)
+                else:
+                    smaller_mask = p_pivots_sum < p
+                    if tl.sum(smaller_mask) > 0:
+                        small_indices = tl.where(smaller_mask, p_pivots, float('inf'))
+                        max_prob = tl.min(small_indices)
+                    larger_mask = p_pivots_sum > p
+                    if tl.sum(larger_mask) > 0:
+                        large_indices = tl.where(larger_mask, p_pivots, -float('inf'))
+                        min_prob = tl.max(large_indices)
+                # For the case where sum of existing probabilities does not hit p
+                if min_prob == max_prob:
+                    p_pivot = min_prob
+
+                num_iters += 1
+
+            # Fifth pass: Apply top-k and top-p masks
+            for i in range(0, NUM_TILES):
+                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                mask_n = offs_n < N
+                logits_blk = tl.load(LOGITS + offs_n, mask=mask_n, other=-float('inf'))
+                probs_blk = tl.load(PROBS + offs_n, mask=mask_n, other=0.0)
+                logits_blk = tl.where(logits_blk > k_pivot, logits_blk, -float('inf'))
+                logits_blk = tl.where(probs_blk > p_pivot, logits_blk, -float('inf'))
+                tl.store(LOGITS + offs_n, logits_blk, mask=mask_n)
+
+
+def triton_apply_top_k_top_p(
+    logits: torch.Tensor,
+    k: Optional[torch.Tensor],
+    p: Optional[torch.Tensor],
+) -> torch.Tensor:
+    batch_size, vocab_size = logits.shape
+    BLOCK_SIZE = 4096
+    NUM_PROGRAMS = 128
+    NUM_PIVOTS = 4 # Multi pivot search for smaller number of scans
+    NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
+    probs = torch.zeros_like(logits)
+    _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
+                                      vocab_size, BLOCK_SIZE, NUM_TILES, NUM_PIVOTS)
+    return logits
+
+@torch.compile
+def compiled_apply_top_k_top_p(
+    logits: torch.Tensor,
+    k: Optional[torch.Tensor],
+    p: Optional[torch.Tensor],
+) -> torch.Tensor:
+    return original_apply_top_k_top_p(logits, k, p)
+
 def apply_top_k_top_p(
     logits: torch.Tensor,
     k: Optional[torch.Tensor],
@@ -132,34 +335,24 @@ def apply_top_k_top_p(
 
     The logits tensor may be updated in-place.
     """
-    if p is None:
-        if k is None:
-            return logits
-
-        # Avoid sorting vocab for top-k only case.
-        return apply_top_k_only(logits, k)
-
-    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
-
-    if k is not None:
-        # Apply top-k.
-        top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
-        # Get all the top_k values.
-        top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
-        top_k_mask = logits_sort < top_k_mask
-        logits_sort.masked_fill_(top_k_mask, -float("inf"))
-
-    if p is not None:
-        # Apply top-p.
-        probs_sort = logits_sort.softmax(dim=-1)
-        probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
-        top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
-        # at least one
-        top_p_mask[:, -1] = False
-        logits_sort.masked_fill_(top_p_mask, -float("inf"))
-
-    # Re-sort the probabilities.
-    logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
+    torch.cuda.synchronize()
+    start_time = time.time()
+    batch_size, vocab_size = logits.shape
+    print(g_str("apply_top_k_top_p") + f" logits.shape: {batch_size} x {vocab_size}, p is None: {p is None}, k is None: {k is None}")
+    input_logits = logits.clone()
+    
+    # logits = original_apply_top_k_top_p(logits, k, p)
+    # logits = compiled_apply_top_k_top_p(logits, k, p)
+    logits = triton_apply_top_k_top_p(logits, k, p)
+        
+    torch.cuda.synchronize()
+    time_taken = time.time() - start_time
+    print(y_str(f"apply_top_k_top_p done in {time_taken} seconds"))
+    start_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(start_time))
+    out_dir = "./sampler_input_output"
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = f"{out_dir}/llama8b_{start_time_str}.pt"
+    torch.save({"input_logits": input_logits, "p": p, "k": k, "output_logits": logits}, out_path)
     return logits
 
 
