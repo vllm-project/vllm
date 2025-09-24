@@ -471,6 +471,7 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
                 "type": "auto"
             }
         }],
+        reasoning={"effort": "low"},
         temperature=0,  # More deterministic output in response
     )
     assert response is not None
