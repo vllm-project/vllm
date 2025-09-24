@@ -150,9 +150,27 @@ class LlamaModel(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_embeds = self.embed_tokens(input_ids)
-        assert hidden_states.shape[-1] == input_embeds.shape[-1]
+        # Eagle3 drafter processes auxiliary hidden states from verifier model
+        # For multimodal inputs, the verifier already processed the multimodal content
+        # and generated auxiliary hidden states that contain this context.
+        # The drafter only needs text embeddings for the current prediction step.
+
+        if inputs_embeds is not None:
+            # In speculative decoding, inputs_embeds should typically be None
+            # because Eagle3 drafter works with auxiliary hidden states, not original inputs.
+            # However, if provided (e.g., during warmup), use text-only embeddings.
+            input_embeds = inputs_embeds
+        else:
+            # Standard case: use text embeddings for current token prediction
+            input_embeds = self.embed_tokens(input_ids)
+
+        # Adapt auxiliary hidden state dimensions if they don't match text embeddings
+        # This is critical when the verifier model has different hidden dimensions
+        # (e.g., multimodal verifier with larger hidden states)
+        if hidden_states.shape[-1] != input_embeds.shape[-1]:
+            hidden_states = self.fc(hidden_states)
 
         residual = None
         hidden_states, residual = self.layers[0](
@@ -239,11 +257,11 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if inputs_embeds is not None:
-            raise NotImplementedError(
-                f"{type(self).__name__} does not support multimodal inputs yet."
-            )
-        return self.model(input_ids, positions, hidden_states)
+        # Eagle3 drafter in speculative decoding:
+        # - Receives auxiliary hidden states from multimodal verifier model
+        # - Processes text-only input_ids for next token prediction
+        # - Combines both through the Eagle3 architecture
+        return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
     def compute_logits(
         self,
