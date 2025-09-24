@@ -277,9 +277,8 @@ class Attention(nn.Module, AttentionLayerBase):
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
         if self.calculate_kv_scales:
-            attn_metadata = get_forward_context().attn_metadata
-            if attn_metadata.enable_kv_scales_calculation:
-                self.calc_kv_scales(query, key, value)
+            torch.ops.vllm.maybe_calc_kv_scales(query, key, value,
+                                                self.layer_name)
 
         output_dtype = query.dtype
         if self.query_quant is not None:
@@ -340,6 +339,16 @@ class Attention(nn.Module, AttentionLayerBase):
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
+
+    def calc_kv_scales(self, query, key, value):
+        self._q_scale.copy_(torch.abs(query).max() / self.q_range)
+        self._k_scale.copy_(torch.abs(key).max() / self.k_range)
+        self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._q_scale_float = self._q_scale.item()
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
+        # We only calculate the scales once
+        self.calculate_kv_scales = False
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
@@ -544,47 +553,41 @@ def maybe_save_kv_layer_to_connector(
                             attn_metadata[layer_name])
 
 
-def unified_kv_scale_calc(
+def maybe_calc_kv_scales(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    q_scale: torch.Tensor,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-    q_range: torch.Tensor,
-    k_range: torch.Tensor,
-    v_range: torch.Tensor,
-    scale_calc: bool,
+    layer_name: str,
 ) -> None:
 
-    if not scale_calc:
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+
+    if attn_metadata is None or not getattr(
+            attn_metadata, 'enable_kv_scales_calculation', False):
         return
 
-    q_scale.copy_(torch.abs(query).max() / q_range)
-    k_scale.copy_(torch.abs(key).max() / k_range)
-    v_scale.copy_(torch.abs(value).max() / v_range)
+    self = forward_context.no_compile_layers[layer_name]
+    self.calc_kv_scales(query, key, value)
 
 
-def unified_kv_scale_calc_fake(
+def maybe_calc_kv_scales_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    q_scale: torch.Tensor,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-    q_range: torch.Tensor,
-    k_range: torch.Tensor,
-    v_range: torch.Tensor,
-    scale_calc: bool,
+    layer_name: str,
 ) -> None:
     return
 
 
 direct_register_custom_op(
-    op_name="unified_kv_scale_calc",
-    op_func=unified_kv_scale_calc,
-    mutates_args=["q_scale", "k_scale", "v_scale"],
-    fake_impl=unified_kv_scale_calc_fake,
+    op_name="maybe_calc_kv_scales",
+    op_func=maybe_calc_kv_scales,
+    mutates_args=[],
+    fake_impl=maybe_calc_kv_scales_fake,
     dispatch_key=current_platform.dispatch_key,
     tags=tag_cudagraph_unsafe,
 )
