@@ -25,25 +25,7 @@ class BlockTable:
         device: torch.device,
         kernel_block_size: int,
     ):
-        """Manages KV cache block allocation and token-to-block mapping for
-        efficient inference.
-
-        The BlockTable manages the relationship between token positions and
-        their corresponding memory blocks in the KV cache, supporting flexible
-        block size configurations to optimize both memory usage and
-        computational efficiency. It implements a hybrid block system that
-        bridges potential differences between memory allocation granularity
-        and kernel computation requirements.
-
-        Key functionality:
-        - Maps token positions to KV cache memory blocks for efficient lookup
-        - Handles hybrid block configurations when allocation and computation
-          sizes differ
-        - Manages slot mappings for batched processing of multiple requests
-        - Provides efficient GPU/CPU buffer management for block metadata
-        - Supports distributed processing with DCP (Distributed Context
-          Parallelism)
-
+        """
         Args:
             block_size: Block size used for KV cache memory allocation
             max_num_reqs: Maximum number of concurrent requests supported.
@@ -54,7 +36,7 @@ class BlockTable:
             kernel_block_size: The block_size of underlying attention kernel.
                 Will be the same as `block_size` if `block_size` is supported
                 by the attention kernel.
-    """
+        """
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
@@ -153,10 +135,6 @@ class BlockTable:
             # for block_table_indices calculation.
             virtual_block_size = self.block_size * self.dcp_world_size
 
-            # Account for the expanded kernel table
-            # (always needed with unified tensor)
-            # Each kv_manager_block_size is split into multiple kernel blocks
-            # The kernel table has been expanded to accommodate this
             block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                    positions // virtual_block_size)
 
