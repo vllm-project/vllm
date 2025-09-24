@@ -18,7 +18,6 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
     def __init__(self, base_layer: ReplicatedLinear) -> None:
         super().__init__(base_layer, )
         # To ensure interface compatibility, set to 1 always.
-        self.tp_size = 1
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
 
