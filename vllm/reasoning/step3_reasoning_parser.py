@@ -25,7 +25,7 @@ class Step3ReasoningParser(ReasoningParser):
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
-        super().__init__(tokenizer)
+        super().__init__(tokenizer, *args, **kwargs)
         self.think_end_token = "</think>"
 
         self.reasoning_regex = re.compile(rf"(.*?){self.think_end_token}",

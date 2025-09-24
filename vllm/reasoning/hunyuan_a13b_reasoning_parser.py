@@ -41,7 +41,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
-        super().__init__(tokenizer)
+        super().__init__(tokenizer, *args, **kwargs)
         self.think_start_expr = r"<think>\n"
         self.think_end_expr = r"\n</think>\n"
 

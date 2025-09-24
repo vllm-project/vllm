@@ -25,7 +25,7 @@ class GraniteReasoningParser(ReasoningParser):
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
-        super().__init__(tokenizer)
+        super().__init__(tokenizer, *args, **kwargs)
 
         # NOTE: There have been some observed occurrences of quantized
         # instances of the current models using "Here's" instead of "Here is",

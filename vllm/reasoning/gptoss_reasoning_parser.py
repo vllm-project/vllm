@@ -25,7 +25,7 @@ class GptOssReasoningParser(ReasoningParser):
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
-        super().__init__(tokenizer)
+        super().__init__(tokenizer, *args, **kwargs)
         self.reasoning_end_token_ids = self.model_tokenizer.encode(
             "<|start|>assistant<|channel|>final<|message|>")
 
