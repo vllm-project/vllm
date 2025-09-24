@@ -38,6 +38,8 @@ class AttentionBackend(ABC):
     # If True, the attention layer will handle query quantization instead
     # of the backend, allowing torch.compile to fuse quantization with
     # previous operations.
+    # Needs to be worked through for all backends
+    # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
 
     @staticmethod
