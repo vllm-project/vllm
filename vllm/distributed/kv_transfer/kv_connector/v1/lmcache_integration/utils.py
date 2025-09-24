@@ -199,8 +199,7 @@ def extract_mm_features(
     """
     if getattr(request, "mm_features", None):
         mm_hashes, mm_positions = zip(*((f.identifier, f.mm_position)
-                                        for f in request.mm_features),
-                                      strict=False)
+                                        for f in request.mm_features))
         return (list(mm_hashes), list(mm_positions))
     elif getattr(request, "mm_hashes", None):
         if modify:
