@@ -18,8 +18,10 @@ from flashinfer.utils import FP4Tensor
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
+from vllm.attention.ops.common import cp_lse_ag_out_ar
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
+from vllm.distributed.parallel_state import get_cp_group
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey, kFp8StaticTensorSym, kNvfp4Quant)
 from vllm.platforms import current_platform
@@ -266,6 +268,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._decode_cudagraph_max_bs = min(
                 max_num_reqs, self.compilation_config.max_capture_size)
 
+        try:
+            self.cp_world_size = get_cp_group().world_size
+            self.cp_rank = get_cp_group().rank_in_group
+        except AssertionError:
+            # CP might not be initialized in testing
+            self.cp_world_size = 1
+            self.cp_rank = 0
+
         self.num_qo_heads = self.model_config.get_num_attention_heads(
             self.vllm_config.parallel_config)
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
@@ -416,6 +426,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         seq_lens_np = seq_lens_cpu.numpy()
         block_table_tensor = common_attn_metadata.block_table_tensor
 
+        if self.cp_world_size > 1:
+            seq_lens_np = seq_lens_np // self.cp_world_size + \
+                (self.cp_rank < seq_lens_np % self.cp_world_size)
+
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
         use_cascade = common_prefix_len > 0
@@ -495,6 +509,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                  self.cache_dtype,
                                                  self.q_data_type,
                                                  has_sinks=self.has_sinks)
+
+        if self.cp_world_size > 1 and (prefill_use_trtllm
+                                        or decode_use_trtllm):
+            raise NotImplementedError(
+                "Trtllm not support lse, please use flash attention "
+                "or disable attention sinks.")
+
         if self.has_sinks and not (prefill_use_trtllm and decode_use_trtllm):
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
@@ -643,6 +664,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
             # TODO: The cascade wrapper currently does not support setting
             # kv cache dtype to something different from query dtype.
+            return False
+        if self.cp_world_size > 1:
             return False
         return use_cascade_attention(*args, **kwargs)
 
@@ -933,13 +956,24 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
                                                            or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
-                decode_wrapper.run(
-                    decode_query,
-                    kv_cache_permute,
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    out=output[:num_decode_tokens],
-                )
+                if self.cp_world_size > 1:
+                    out, lse = decode_wrapper.run(
+                        decode_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        return_lse=True,
+                    )
+                    output[:num_decode_tokens] =\
+                        cp_lse_ag_out_ar(out, lse, get_cp_group())
+                else:
+                    decode_wrapper.run(
+                        decode_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output[:num_decode_tokens],
+                    )
             else:
                 # decode_query may be non-contiguous
                 decode_query = decode_query.contiguous()
