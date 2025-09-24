@@ -41,7 +41,9 @@ from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import (DotsOCRConfig,
                                                      DotsVisionConfig)
-from .vision import run_dp_sharded_vision_model
+
+from .vision import run_dp_sharded_mrope_vision_model
+
 IMAGE_TOKEN = "<|imgpad|>"
 
 
@@ -784,8 +786,17 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         else:
             pixel_values = image_input["pixel_values"].type(
                 self.vision_tower.dtype)
-            image_embeds = self.vision_tower(
-                pixel_values, grid_thw)[:, :self.config.hidden_size]
+
+            if self.use_data_parallel:
+                image_embeds = run_dp_sharded_mrope_vision_model(
+                    self.vision_tower,
+                    pixel_values,
+                    grid_thw,
+                    rope_type="rope_3d",
+                )
+            else:
+                image_embeds = self.vision_tower(
+                    pixel_values, grid_thw)[:, :self.config.hidden_size]
 
         # Split concatenated embeddings for each image item.
         merge_size = self.vision_tower.spatial_merge_size
