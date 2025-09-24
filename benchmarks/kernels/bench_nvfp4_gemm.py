@@ -3,6 +3,7 @@
 import argparse
 import copy
 import itertools
+import os
 
 import torch
 from weight_shapes import WEIGHT_SHAPES
@@ -130,10 +131,13 @@ if __name__ == "__main__":
 
     for K, N, model in prepare_shapes(args):
         print(f"{model}, N={N} K={K}, BF16 vs NVFP4 GEMMs TFLOP/s:")
+        save_dir = f"bench_nvfp4_res_n{N}_k{K}"
+        os.makedirs(save_dir, exist_ok=True)
+
         benchmark.run(
             print_data=True,
             show_plots=True,
-            save_path=f"bench_nvfp4_res_n{N}_k{K}",
+            save_path=save_dir,
             N=N,
             K=K,
         )
