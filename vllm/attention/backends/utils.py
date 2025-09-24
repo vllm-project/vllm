@@ -304,7 +304,7 @@ class CommonAttentionState(AttentionState):
             max_query_len=1,
             max_decode_query_len=1,
             max_prefill_seq_len=0,
-            max_decode_seq_len=self.runner.max_seq_len_to_capture,
+            max_decode_seq_len=self.runner.max_model_len,
             query_start_loc=None,
             seq_start_loc=None,
             context_lens_tensor=None,
@@ -390,7 +390,7 @@ class CommonAttentionState(AttentionState):
                                                     dtype=torch.int).cuda()
         attn_metadata.encoder_seq_lens_tensor = torch.full(
             (batch_size, ), 1, dtype=torch.int).cuda()
-        attn_metadata.max_encoder_seq_len = self.runner.max_seq_len_to_capture
+        attn_metadata.max_encoder_seq_len = self.runner.max_model_len
         attn_metadata.num_encoder_tokens = 0
 
     def _add_additional_input_buffers_for_enc_dec_model(
