@@ -500,7 +500,6 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_async_tp:
             self.compilation_config.pass_config.enable_sequence_parallelism = \
                 True
-
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
 
