@@ -30,10 +30,42 @@ def json_iter_leaves(value: JSONTree[_T]) -> Iterable[_T]:
         yield value
 
 
+@overload
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[_T, dict[str, _T]],
+) -> Union[_U, dict[str, _U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[_T, list[_T]],
+) -> Union[_U, list[_U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[_T, tuple[_T, ...]],
+) -> Union[_U, tuple[_U, ...]]:
+    ...
+
+
+@overload
 def json_map_leaves(
     func: Callable[[_T], _U],
     value: JSONTree[_T],
 ) -> JSONTree[_U]:
+    ...
+
+
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[dict[str, _T], list[_T], tuple[_T, ...], JSONTree[_T]],
+) -> Union[dict[str, _U], list[_U], tuple[_U, ...], JSONTree[_U]]:
     """Apply a function to each leaf in a nested JSON structure."""
     if isinstance(value, dict):
         return {k: json_map_leaves(func, v) for k, v in value.items()}
