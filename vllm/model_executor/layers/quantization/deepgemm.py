@@ -4,7 +4,6 @@ import logging
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils import direct_register_custom_op
 from vllm.utils.deep_gemm import fp8_gemm_nt
@@ -75,7 +74,5 @@ def w8a8_deepgemm_block_scaled_mm_fake(
 direct_register_custom_op(
     op_name="w8a8_deepgemm_block_scaled_mm",
     op_func=w8a8_deepgemm_block_scaled_mm,
-    mutates_args=[],
     fake_impl=w8a8_deepgemm_block_scaled_mm_fake,
-    dispatch_key=current_platform.dispatch_key,
 )
