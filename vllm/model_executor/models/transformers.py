@@ -710,9 +710,7 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
         # These are applied in order, so the order matters!
         orig_to_new_prefix={
             # Handle BERT-like models
-            "albert": "model",
             "roberta": "model",
-            "electra": "model",
             "bert": "model",
             # Add `model.` prefix for base model checkpoints
             "": "model.",
