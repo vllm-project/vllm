@@ -608,6 +608,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
         "min_p": 0.0,
+        "presence_penalty": 0.0,
     }
 
     def to_beam_search_params(
@@ -653,6 +654,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if (min_p := self.min_p) is None:
             min_p = default_sampling_params.get(
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get(
+                "presence_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["presence_penalty"],
+            )
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
@@ -693,7 +699,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
-            presence_penalty=self.presence_penalty,
+            presence_penalty=presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
             temperature=temperature,
