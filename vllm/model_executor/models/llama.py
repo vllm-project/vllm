@@ -68,6 +68,7 @@ class LlamaMLP(nn.Module):
         bias: bool = False,
         prefix: str = "",
         reduce_results: bool = True,
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -75,6 +76,7 @@ class LlamaMLP(nn.Module):
             output_sizes=[intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -83,6 +85,7 @@ class LlamaMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":

@@ -87,6 +87,7 @@ class Llama4MoE(nn.Module):
             bias=False,
             prefix=f"{prefix}.shared_expert",
             reduce_results=False,
+            disable_tp=self.is_sequence_parallel,
         )
 
         self.experts = SharedFusedMoE(
@@ -106,7 +107,6 @@ class Llama4MoE(nn.Module):
 
     def forward(self, hidden_states):
         num_tokens = hidden_states.shape[0]
-
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
