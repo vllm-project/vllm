@@ -623,6 +623,7 @@ class CompilationConfig:
             self.splitting_ops = []
 
     def set_splitting_ops_for_inductor_graph_partition(self):
+        assert self.use_inductor_graph_partition
         use_inductor_graph_partition_msg = (
             "When use_inductor_graph_partition=True, splitting_ops "
             "are ignored and set to an empty list. Instead, "
