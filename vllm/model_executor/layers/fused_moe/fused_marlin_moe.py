@@ -243,6 +243,7 @@ def fused_marlin_moe_fake(hidden_states: torch.Tensor,
                           intermediate_cache13: Optional[torch.Tensor] = None,
                           intermediate_cache2: Optional[torch.Tensor] = None,
                           is_k_full: bool = True,
+                          output: Optional[torch.Tensor] = None,
                           inplace: bool = False) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
