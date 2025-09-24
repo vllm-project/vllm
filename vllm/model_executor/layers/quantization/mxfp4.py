@@ -13,8 +13,7 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig, ocp_mx_moe_quant_config,
-    mxfp4_w4a16_moe_quant_config)
+    FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config, ocp_mx_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts)
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts

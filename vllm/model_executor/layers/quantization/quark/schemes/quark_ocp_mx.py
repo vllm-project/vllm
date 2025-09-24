@@ -91,6 +91,12 @@ class QuarkOCP_MX(QuarkScheme):
     def get_min_capability(cls) -> int:
         return 70
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.weight = torch.nn.Parameter(layer.weight.data,
+                                          requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
+                                                requires_grad=False)
+
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: list[int],
                        input_size_per_partition: int,
@@ -127,12 +133,6 @@ class QuarkOCP_MX(QuarkScheme):
             weight_loader=weight_loader,
         )
         layer.register_parameter("weight_scale", weight_scale)
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = torch.nn.Parameter(layer.weight.data,
-                                          requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
-                                                requires_grad=False)
 
     def apply_weights(self,
                       layer: torch.nn.Module,

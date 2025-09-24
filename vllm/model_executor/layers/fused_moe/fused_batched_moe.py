@@ -14,8 +14,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input, normalize_batched_scales_shape,
     normalize_scales_shape)
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
-    OCP_MX_Scheme)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
 from vllm.triton_utils import tl, triton

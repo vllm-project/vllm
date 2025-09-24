@@ -1221,12 +1221,13 @@ def outplace_fused_experts(
     w1_bias: Optional[torch.Tensor] = None,
     w2_bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    return fused_experts_impl(
-        hidden_states, w1, w2, topk_weights, topk_ids, False, activation,
-        apply_router_weight_on_input, use_fp8_w8a8, use_int8_w8a8,
-        use_int8_w8a16, use_int4_w4a16, ocp_mx_scheme, per_channel_quant,
-        global_num_experts, expert_map, w1_scale, w2_scale, w1_zp, w2_zp,
-        a1_scale, a2_scale, block_shape, w1_bias, w2_bias)
+    return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
+                              False, activation, apply_router_weight_on_input,
+                              use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16,
+                              use_int4_w4a16, ocp_mx_scheme, per_channel_quant,
+                              global_num_experts, expert_map, w1_scale,
+                              w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
+                              block_shape, w1_bias, w2_bias)
 
 
 def outplace_fused_experts_fake(

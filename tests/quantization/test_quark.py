@@ -11,6 +11,7 @@ import importlib.metadata
 import os
 from dataclasses import dataclass
 from importlib.util import find_spec
+from typing import Optional
 
 import huggingface_hub
 import lm_eval

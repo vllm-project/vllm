@@ -9,11 +9,12 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_DTYPES, OCP_MX_Scheme)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.utils import cdiv, has_triton_kernels
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme, OCP_MX_SUPPORTED_DTYPES
 
 logger = init_logger(__name__)
 
@@ -297,8 +298,15 @@ class FusedMoEQuantConfig:
 
     @property
     def ocp_mx_scheme(self) -> Union[str, None]:
-        ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(self._a1.dtype, self._w1.dtype)
-        ocp_mx_scheme = ocp_mx_scheme.value if ocp_mx_scheme is not None else None
+        assert self._a1.dtype is None or isinstance(self._a1.dtype, str)
+        assert self._w1.dtype is None or isinstance(self._w1.dtype, str)
+
+        ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(self._a1.dtype,
+                                                       self._w1.dtype)
+
+        if ocp_mx_scheme is not None:
+            ocp_mx_scheme = ocp_mx_scheme.value
+
         return ocp_mx_scheme
 
     @property
@@ -483,6 +491,7 @@ def mxfp4_w4a16_moe_quant_config(
         _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
     )
 
+
 def ocp_mx_moe_quant_config(
     quant_dtype: str,
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
@@ -496,7 +505,7 @@ def ocp_mx_moe_quant_config(
     """
     Construct a quant config for mxfp4 activations and mxfp4 weights.
     """
-    assert quant_dtype in OCP_MX_SUPPORTED_DTYPES
+    assert quant_dtype in OCP_MX_DTYPES
     return FusedMoEQuantConfig.make(
         quant_dtype=quant_dtype,
         w1_scale=w1_scale,
@@ -509,7 +518,7 @@ def ocp_mx_moe_quant_config(
         per_out_ch_quant=False,
         block_shape=block_shape,
     )
-    
+
 
 def nvfp4_moe_quant_config(
     g1_alphas: torch.Tensor,
