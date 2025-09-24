@@ -199,8 +199,6 @@ class PatchMerger(nn.Module):
             self.ln_q = LayerNorm(context_dim, eps=1e-6)
         elif self.pre_norm == "rmsnorm":
             self.ln_q = RMSNorm(context_dim, eps=1e-6)
-        else:
-            print("no norm in patch merger")
 
         self.mlp = nn.Sequential(
             ColumnParallelLinear(self.hidden_size,
@@ -240,7 +238,6 @@ class DotsVisionAttention(nn.Module):
         super().__init__()
 
         self.embed_dim = dim
-        self.head_dim = dim // num_heads
         self.tp_size = (1 if use_data_parallel else
                         get_tensor_model_parallel_world_size())
         self.tp_rank = (0 if use_data_parallel else
@@ -538,7 +535,7 @@ class DotsVisionTransformer(nn.Module):
         if self.attn_backend != _Backend.FLASH_ATTN and \
                 check_upstream_fa_availability(torch.get_default_dtype()):
             self.attn_backend = _Backend.FLASH_ATTN
-
+        self.out_hidden_size = config.hidden_size
         # Keep blocks for compatibility with other vision towers
         num_layers = (config.num_hidden_layers if num_hidden_layers_override
                       is None else num_hidden_layers_override)
@@ -618,7 +615,11 @@ class DotsVisionTransformer(nn.Module):
         return max_seqlen, seqlens
 
     def forward(self, hidden_states: torch.Tensor,
-                grid_thw: torch.Tensor) -> torch.Tensor:
+                grid_thw: list[list[int]]) -> torch.Tensor:
+        # Convert grid_thw to tensor (always expecting list format now)
+        grid_thw = torch.tensor(grid_thw,
+                                device=hidden_states.device,
+                                dtype=torch.long)
         hidden_states = hidden_states.to(self.dtype)
         hidden_states = self.patch_embed(hidden_states, grid_thw)
 
@@ -776,10 +777,10 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                 self.vision_tower.dtype)
 
             if self.use_data_parallel:
-                image_embeds = run_dp_sharded_mrope_vision_model(
+                return run_dp_sharded_mrope_vision_model(
                     self.vision_tower,
                     pixel_values,
-                    grid_thw,
+                    grid_thw_list,
                     rope_type="rope_3d",
                 )
             else:
