@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
+from importlib.util import find_spec
+from typing import Optional, Protocol, Union
 
 import torch
 from torch.distributed import ProcessGroup
@@ -19,6 +20,46 @@ from vllm.platforms import current_platform
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
+
+
+class CustomAllreduceProtocol(Protocol):
+    """Protocol for custom allreduce implementations. 
+    used just to bypass mypy error"""
+
+    disabled: bool = True
+
+    def __init__(self, group: ProcessGroup,
+                 device: Union[int, str, torch.device]) -> None:
+        ...
+
+    def should_custom_ar(self, inp: torch.Tensor):
+        ...
+
+    def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
+        ...
+
+
+def is_rocm_aiter_custom_allreduce_enabled() -> bool:
+    """Check if aiter custom allreduce is enabled for ROCm platform."""
+    from vllm.platforms.rocm import on_gfx9
+    return current_platform.is_rocm() \
+        and on_gfx9() \
+        and envs.VLLM_ROCM_USE_AITER \
+        and envs.VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE \
+        and find_spec("aiter.dist.custom_all_reduce") is not None \
+
+
+def dispatch_custom_allreduce() -> type[CustomAllreduceProtocol]:
+    """Dispatch the custom allreduce implementation based on the platform."""
+    if is_rocm_aiter_custom_allreduce_enabled():
+        from aiter.dist.custom_all_reduce import CustomAllreduce
+        logger.info_once(
+            "Using aiter.dist.custom_all_reduce for ROCm platform")
+    else:
+        from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa: E501
+            CustomAllreduce)
+
+    return CustomAllreduce
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
@@ -47,8 +88,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_torch_symm_mem = use_torch_symm_mem
 
         # lazy import to avoid documentation build error
-        from vllm.distributed.device_communicators.custom_all_reduce import (
-            CustomAllreduce)
+        CustomAllreduce = dispatch_custom_allreduce()
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -65,7 +105,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             if is_symmetric_memory_enabled():
                 register_nccl_symmetric_ops(self.pynccl_comm)
 
-        self.ca_comm: Optional[CustomAllreduce] = None
+        self.ca_comm: Optional[CustomAllreduceProtocol] = None
         self.qr_comm: Optional[QuickAllReduce] = None
         self.symm_mem_comm: Optional[SymmMemCommunicator] = None
         if use_torch_symm_mem and current_platform.is_cuda():
