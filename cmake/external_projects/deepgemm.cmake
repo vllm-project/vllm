@@ -37,7 +37,7 @@ message(STATUS "DeepGEMM git reference: ${DEEPGEMM_GIT_REF}")
 # Create the _deepgemm_C target that runs the install script with custom git ref
 add_custom_target(_deepgemm_C
     COMMAND ${CMAKE_COMMAND} -E echo "Installing DeepGEMM using tools/install_deepgemm.sh..."
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/install_deepgemm.sh --ref ${DEEPGEMM_GIT_REF}
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/install_deepgemm.sh --ref ${DEEPGEMM_GIT_REF} --cuda-version ${CMAKE_CUDA_COMPILER_VERSION}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Installing DeepGEMM Python package"
     VERBATIM
