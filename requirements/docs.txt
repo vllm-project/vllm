@@ -16,3 +16,4 @@ cachetools
 msgspec
 pydantic
 torch
+diskcache == 5.6.3
