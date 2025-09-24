@@ -52,29 +52,40 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
       }
     }
     // Concatenate all node_ids into a single comma-separated string
-    std::string node_ids_str;
-    for (const int node_id : node_ids) {
-      if (!node_ids_str.empty()) {
-        node_ids_str += ",";
+    if (!node_ids.empty()) {
+      std::string node_ids_str;
+      for (const int node_id : node_ids) {
+        if (!node_ids_str.empty()) {
+          node_ids_str += ",";
+        }
+        node_ids_str += std::to_string(node_id);
       }
-      node_ids_str += std::to_string(node_id);
+
+      bitmask* mask = numa_parse_nodestring(node_ids_str.c_str());
+      bitmask* src_mask = numa_get_membind();
+      
+      int pid = getpid();
+      
+      if (mask && src_mask) {
+        // move all existing pages to the specified numa node.
+        *(src_mask->maskp) = *(src_mask->maskp) ^ *(mask->maskp);
+        int page_num = numa_migrate_pages(pid, src_mask, mask);
+        if (page_num == -1) {
+          TORCH_WARN("numa_migrate_pages failed. errno: " + 
+                     std::to_string(errno));
+        }
+
+        // restrict memory allocation node.
+        numa_set_membind(mask);
+        numa_set_strict(1);
+
+        numa_free_nodemask(mask);
+        numa_free_nodemask(src_mask);
+      } else {
+        TORCH_WARN("numa_parse_nodestring or numa_get_membind failed. errno: " + 
+                   std::to_string(errno));
+      }
     }
-
-    bitmask* mask = numa_parse_nodestring(node_ids_str.c_str());
-    bitmask* src_mask = numa_get_membind();
-
-    int pid = getpid();
-
-    // move all existing pages to the specified numa node.
-    *(src_mask->maskp) = *(src_mask->maskp) ^ *(mask->maskp);
-    int page_num = numa_migrate_pages(pid, src_mask, mask);
-    if (page_num == -1) {
-      TORCH_WARN("numa_migrate_pages failed. errno: " + std::to_string(errno));
-    }
-
-    // restrict memory allocation node.
-    numa_set_membind(mask);
-    numa_set_strict(1);
   }
 
   // OMP threads binding
