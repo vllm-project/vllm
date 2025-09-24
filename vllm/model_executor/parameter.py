@@ -116,7 +116,7 @@ class BasevLLMParameter(Parameter):
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if not is_torch_equal_or_newer("2.8.0"):
-            logger.warning(
+            logger.warning_once(
                 "Torch %s detected (<2.8.0): returning NotImplemented in "
                 "BasevLLMParameter.__torch_function__ to avoid potential "
                 "TorchDynamo issues.",
