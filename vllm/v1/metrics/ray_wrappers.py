@@ -11,6 +11,7 @@ try:
     from ray.util.metrics import Metric
 except ImportError:
     ray_metrics = None
+import regex as re
 
 
 class RayPrometheusMetric:
@@ -42,6 +43,17 @@ class RayPrometheusMetric:
 
         return self
 
+    @staticmethod
+    def _get_sanitized_opentelemetry_name(name: str) -> str:
+        """
+        For compatibility with Ray + OpenTelemetry, the metric name must be 
+        sanitized. In particular, this removes ':' from the name.
+        Current restriction is: a-z, A-Z, 0-9, -, _, ., /   
+        Ref: https://github.com/open-telemetry/opentelemetry-cpp/blob/main/sdk/src/metrics/instrument_metadata_validator.cc#L22-L23
+        """
+
+        return re.sub(r"[^a-zA-Z0-9\-_.\/]", "_", name)
+
 
 class RayGaugeWrapper(RayPrometheusMetric):
     """Wraps around ray.util.metrics.Gauge to provide same API as
@@ -58,7 +70,7 @@ class RayGaugeWrapper(RayPrometheusMetric):
         # implemented at the observability layer (Prometheus/Grafana).
         del multiprocess_mode
         labelnames_tuple = tuple(labelnames) if labelnames else None
-        name = name.replace(":", "_")
+        name = self._get_sanitized_opentelemetry_name(name)
         self.metric = ray_metrics.Gauge(name=name,
                                         description=documentation,
                                         tag_keys=labelnames_tuple)
@@ -80,7 +92,7 @@ class RayCounterWrapper(RayPrometheusMetric):
                  documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
-        name = name.replace(":", "_")
+        name = self._get_sanitized_opentelemetry_name(name)
         self.metric = ray_metrics.Counter(name=name,
                                           description=documentation,
                                           tag_keys=labelnames_tuple)
@@ -101,7 +113,7 @@ class RayHistogramWrapper(RayPrometheusMetric):
                  labelnames: Optional[list[str]] = None,
                  buckets: Optional[list[float]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
-        name = name.replace(":", "_")
+        name = self._get_sanitized_opentelemetry_name(name)
         boundaries = buckets if buckets else []
         self.metric = ray_metrics.Histogram(name=name,
                                             description=documentation,
