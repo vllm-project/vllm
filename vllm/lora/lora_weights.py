@@ -213,7 +213,7 @@ class ClassifierLoRALayerWeights(LoRALayerWeights):
         bias_enabled: Optional[bool] = False,
     ) -> "LoRALayerWeights":
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
-        lora_a = torch.zeros([input_dim, rank],
+        lora_a = torch.zeros([rank, input_dim],
                              dtype=dtype,
                              device=device,
                              pin_memory=pin_memory)

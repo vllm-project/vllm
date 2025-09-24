@@ -60,9 +60,9 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
         if lora_a.dtype != self.lora_type:
             lora_a = lora_a.to(self.lora_type)
         self.lora_a_stacked[index,
-                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-                                lora_a.T, non_blocking=True)
-        self._label_slot[index] = lora_a.shape[1]
+                            0, :lora_a.shape[0], :lora_a.shape[1]].copy_(
+                                lora_a, non_blocking=True)
+        self._label_slot[index] = lora_a.shape[0]
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         """Forward of ClassifierWithLoRA
