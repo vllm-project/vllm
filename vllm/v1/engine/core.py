@@ -150,12 +150,26 @@ class EngineCore:
         self._profiler_running = False
         _perf_env_str = envs.VLLM_NSYS_PROFILE_START_STOP
         if '-' in _perf_env_str:
-            start, stop = _perf_env_str.strip().split('-')
-            self._start_perf_iter = int(start)
-            self._stop_perf_iter = int(stop)
-            logger.info_once(f"NSYS profiling will start at iteration "
-                             f"{self._start_perf_iter} and stop at iteration "
-                             f"{self._stop_perf_iter}")
+            try:
+                parts = _perf_env_str.strip().split('-')
+                if len(parts) != 2:
+                    raise ValueError("Expected format 'start-stop'.")
+                start, stop = map(int, parts)
+                if start < 0 or stop <= start:
+                    raise ValueError("Start must be non-negative and stop"
+                                     "must be greater than start.")
+                self._start_perf_iter = start
+                self._stop_perf_iter = stop
+                logger.info_once(
+                    f"NSYS profiling will start at iteration "
+                    f"{self._start_perf_iter} and stop at iteration "
+                    f"{self._stop_perf_iter}")
+            except ValueError as e:
+                logger.warning_once(
+                    "Invalid VLLM_NSYS_PROFILE_START_STOP value: '%s'. "
+                    "Reason: %s. Disabling profiling.", _perf_env_str, e)
+                self._start_perf_iter = -1
+                self._stop_perf_iter = -1
         else:
             self._start_perf_iter = -1
             self._stop_perf_iter = -1
