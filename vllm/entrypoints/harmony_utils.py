@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import logging
 import datetime
 import json
 from collections.abc import Iterable, Sequence
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Union, TYPE_CHECKING
 
 from openai.types.responses import (ResponseFunctionToolCall,
                                     ResponseOutputItem, ResponseOutputMessage,
@@ -26,6 +27,12 @@ from vllm import envs
 from vllm.entrypoints.openai.protocol import (ChatCompletionToolsParam,
                                               ResponseInputOutputItem)
 from vllm.utils import random_uuid
+if TYPE_CHECKING:
+    from vllm.entrypoints.context import HarmonyContext
+else:
+    HarmonyContext = None
+
+logger = logging.getLogger(__name__)
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -431,3 +438,31 @@ def parse_chat_output(
             [msg.content[0].text for msg in reasoning_msg])
         final_content = final_msg.content[0].text
     return reasoning_content, final_content, is_tool_call
+
+
+_CONTEXT_LOADER: dict[str, type[HarmonyContext]] = {}
+
+
+def register_context_loader(load_format: str):
+    def _wrapper(model_loader_cls):
+        if load_format in _CONTEXT_LOADER:
+            logger.warning(
+                "Context load format `%s` is already registered, and will be "
+                "overwritten by the new loader class `%s`.", load_format,
+                model_loader_cls)
+        from vllm.entrypoints.context import ConversationContext  
+        if not issubclass(model_loader_cls, ConversationContext):
+            raise ValueError(f"The context loader {model_loader_cls} must be a subclass of ConversationContext.")
+        _CONTEXT_LOADER[load_format] = model_loader_cls
+        logger.info("Registered context loader `%s` with load format `%s`",
+                    model_loader_cls, load_format)
+        return model_loader_cls
+
+    return _wrapper
+
+
+def get_openai_context(load_config: str) -> HarmonyContext:
+    if load_config not in _CONTEXT_LOADER:
+        raise ValueError(f"OpenAI context `{load_config}` is not supported")
+    logger.info(f"Loading OpenAI context {_CONTEXT_LOADER[load_config]}")
+    return _CONTEXT_LOADER[load_config]

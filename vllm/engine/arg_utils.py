@@ -305,6 +305,7 @@ class EngineArgs:
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
     max_model_len: Optional[int] = ModelConfig.max_model_len
+    load_customized_openai_context: str = ModelConfig.load_customized_openai_context
     cuda_graph_sizes: list[int] = get_field(SchedulerConfig,
                                             "cuda_graph_sizes")
     # Note: Specifying a custom executor backend by passing a class
@@ -1032,6 +1033,7 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             io_processor_plugin=self.io_processor_plugin,
+            load_customized_openai_context=self.load_customized_openai_context,
         )
 
     def validate_tensorizer_args(self):
