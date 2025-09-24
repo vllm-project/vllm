@@ -8,7 +8,7 @@ import numpy as np
 
 from numba import njit 
 from collections import defaultdict, deque, Counter 
-from typing import Dict, List
+from typing import List
 from .abstract_policy import EplbPolicy 
 
 numba_logger = logging.getLogger("numba") 
@@ -401,8 +401,8 @@ def compute_logical_to_physical_map(phy2log, num_layers, num_expert, num_replica
 
 class FlashLB(EplbPolicy): 
 
-    par_history: Dict[int, float] = {} 
-    hotness_window: Dict[int, deque[float]] = {} 
+    par_history: dict[int, float] = {} 
+    hotness_window: dict[int, deque[float]] = {} 
 
     def __init__(self): 
         self.max_stage_window = 32
@@ -653,7 +653,10 @@ def warmup_flashlb():
         layers = [] 
         for _ in range(num_layers): 
             full_experts = torch.arange(expert_min, expert_max + 1, dtype=torch.int64) 
-            extra_experts = torch.randint(expert_min, expert_max + 1, size=(extra_slots,), dtype=torch.int64) 
+            extra_experts = torch.randint(
+                expert_min, expert_max + 1,
+                size=(extra_slots,), dtype=torch.int64
+            )  
             layer_flat = torch.cat([full_experts, extra_experts], dim=0) 
             shuffle_idx = torch.randperm(layer_flat.shape[0]) 
             layer_shuffled = layer_flat[shuffle_idx] 
@@ -666,7 +669,9 @@ def warmup_flashlb():
     physical_to_logical_map, _, _ = algo.rebalance_experts(hotness, 288, 4, 2, 32) 
     expert_tensor = physical_to_logical_map.reshape((58, 32, 9)) 
     for _ in range(3):
-        physical_to_logical_map, _, _ = algo.rebalance_experts(hotness, 288, 4, 2, 32, expert_tensor) 
+        physical_to_logical_map, _, _ = algo.rebalance_experts(
+            hotness, 288, 4, 2, 32, expert_tensor
+        )
         expert_tensor = physical_to_logical_map.reshape((58, 32, 9)) 
 
     FlashLB.par_history = defaultdict(float) 
