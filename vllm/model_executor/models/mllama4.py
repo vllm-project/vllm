@@ -32,7 +32,6 @@ from transformers.models.llama4.image_processing_llama4_fast import (
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import InputProcessingContext
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
@@ -47,10 +46,11 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+                                        BaseProcessingInfo,
+                                        InputProcessingContext,
+                                        PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.multimodal.utils import run_dp_sharded_vision_model
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -58,6 +58,7 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llama4 import Llama4ForCausalLM
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
+from .vision import run_dp_sharded_vision_model
 
 
 class Llama4ImagePatchInputs(TensorSchema):

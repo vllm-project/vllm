@@ -119,6 +119,12 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_gfx950() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx950"])
+
+
+@cache
 def use_rocm_custom_paged_attention(
         qtype: torch.dtype,
         head_size: int,
@@ -395,11 +401,6 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fnuz
         else:
             return torch.float8_e4m3fn
-
-    @classmethod
-    def supports_v1(cls, model_config: "ModelConfig") -> bool:
-        # V1 support on AMD gpus is experimental
-        return True
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
