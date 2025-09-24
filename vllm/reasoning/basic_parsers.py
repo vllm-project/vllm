@@ -35,7 +35,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """The token that ends reasoning content."""
         raise NotImplementedError
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
         super().__init__(tokenizer)
 
         if not self.model_tokenizer:
