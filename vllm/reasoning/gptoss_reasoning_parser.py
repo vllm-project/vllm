@@ -147,7 +147,7 @@ class GptOssReasoningParser(ReasoningParser):
                     builtin_tool_list.append("container")
 
                 if len(builtin_tool_list) > 0:
-                    logger.info("Builtin_tool_list:\%s", builtin_tool_list)
+                    logger.info("Builtin_tool_list: %s", builtin_tool_list)
                     func_tag = json.dumps( \
                         tag_with_builtin_funcs(no_func_reaonsing_tag, \
                             builtin_tool_list))
