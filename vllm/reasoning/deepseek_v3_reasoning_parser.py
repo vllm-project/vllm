@@ -30,9 +30,9 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         thinking = bool(kwargs.pop("thinking", False))
 
         if thinking:
-            self._parser = DeepSeekR1ReasoningParser(tokenizer)
+            self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
         else:
-            self._parser = IdentityReasoningParser(tokenizer)
+            self._parser = IdentityReasoningParser(tokenizer, *args, **kwargs)
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser.is_reasoning_end(input_ids)
