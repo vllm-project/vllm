@@ -6,21 +6,19 @@ from typing import Optional, Union
 import torch
 
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    quant_dequant_mxfp4)
+    quant_dequant_mxfp4, use_fp4_aiter_moe)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_quantize)
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import fp4_quantize
 
-if current_platform.supports_mx() and envs.VLLM_ROCM_USE_AITER:
+if use_fp4_aiter_moe():
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 else:
     dynamic_mxfp4_quant = None
@@ -178,7 +176,7 @@ def _mxfp4_quantize(
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     assert block_shape is None
 
-    if not current_platform.supports_mx():
+    if not use_fp4_aiter_moe():
         A = quant_dequant_mxfp4(A)
         return A, A_scale
 
