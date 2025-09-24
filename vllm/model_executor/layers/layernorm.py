@@ -16,6 +16,11 @@ def is_rocm_aiter_rmsnorm_enabled() -> bool:
     return envs.VLLM_ROCM_USE_AITER_RMSNORM \
         and envs.VLLM_ROCM_USE_AITER
 
+if current_platform.is_rocm() and is_rocm_aiter_rmsnorm_enabled():
+    import aiter as rocm_aiter
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+    rocm_aiter_fp8_dtype = rocm_aiter.dtypes.fp8
+    rocm_aiter_fp8_quant_group_size = 128
 
 def rms_norm(x: torch.Tensor, weight: torch.Tensor,
              variance_epsilon: float) -> torch.Tensor:
@@ -88,6 +93,44 @@ def rocm_aiter_rmsnorm2d_fwd_with_add_impl(
     return output, residual_out
 
 
+def rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    import aiter as rocm_aiter
+    (x_quant, x_quant_scales), _, _, res = \
+    fused_rms_fp8_group_quant(
+        x,
+        weight,
+        variance_epsilon,
+        None,
+        None,
+        None,
+        group_size=rocm_aiter_fp8_quant_group_size,
+        dtype_quant=rocm_aiter_fp8_dtype,
+        res1=residual,
+    )
+    return (x_quant, x_quant_scales, res)
+
+
+def rocm_aiter_rmsnorm_fp8_group_quant_impl(
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+    import aiter as rocm_aiter
+    (x_quant, x_quant_scales), _, _, res = \
+    fused_rms_fp8_group_quant(
+        x,
+        weight,
+        variance_epsilon,
+        None,
+        None,
+        None,
+        group_size=rocm_aiter_fp8_quant_group_size,
+        dtype_quant=rocm_aiter_fp8_dtype,
+        res1=residual,
+    )
+    return (x_quant, x_quant_scales)
+
+
 def rocm_aiter_rms_norm_fake(x: torch.Tensor, weight: torch.Tensor,
                              variance_epsilon: float) -> torch.Tensor:
     return torch.empty_like(x)
@@ -97,6 +140,24 @@ def rocm_aiter_rmsnorm2d_fwd_with_add_fake(
         x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
         variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(x), torch.empty_like(residual)
+
+
+def rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    scale_shape = (M, (N + rocm_aiter_fp8_quant_group_size - 1) // rocm_aiter_fp8_quant_group_size)
+    return (torch.empty_like(x, dtype=rocm_aiter_fp8_dtype, device=x.device), 
+            torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+            torch.empty_like(residual, device=residual.device))
+
+
+def rocm_aiter_rmsnorm_fp8_group_quant_fake(
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    scale_shape = (M, (N + rocm_aiter_fp8_quant_group_size - 1) // rocm_aiter_fp8_quant_group_size)
+    return (torch.empty_like(x, dtype=rocm_aiter_fp8_dtype, device=x.device), torch.empty(scale_shape, dtype=torch.float32, device=x.device))
 
 
 if current_platform.is_rocm():
@@ -113,6 +174,22 @@ if current_platform.is_rocm():
         op_func=rocm_aiter_rmsnorm2d_fwd_with_add_impl,
         mutates_args=[],
         fake_impl=rocm_aiter_rmsnorm2d_fwd_with_add_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+    
+    direct_register_custom_op(
+        op_name="rocm_aiter_rmsnorm_fp8_group_quant",
+        op_func=rocm_aiter_rmsnorm_fp8_group_quant_impl,
+        mutates_args=[],
+        fake_impl=rocm_aiter_rmsnorm_fp8_group_quant_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+    
+    direct_register_custom_op(
+        op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
+        op_func=rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
+        mutates_args=[],
+        fake_impl=rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
 
