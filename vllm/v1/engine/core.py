@@ -18,6 +18,7 @@ import msgspec
 import torch.cuda.profiler as profiler
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.logger import init_logger
@@ -140,6 +141,11 @@ class EngineCore:
             vllm_config, mm_registry)
 
         # cudaProfilerApi Support
+        # To enable profiling, set the environment variable
+        # VLLM_NSYS_PROFILE_START_STOP to the iteration number
+        # to start and stop profiling. For example, to start at
+        # iteration 10 and stop at iteration 20, set the
+        # environment variable to "10-20".
         self._perf_iter = 0
         self._profiler_running = False
         _perf_env_str = envs.VLLM_NSYS_PROFILE_START_STOP
@@ -147,9 +153,9 @@ class EngineCore:
             start, stop = _perf_env_str.strip().split('-')
             self._start_perf_iter = int(start)
             self._stop_perf_iter = int(stop)
-            logger.info_once(
-                "NSYS profiling will start at iteration %d and stop at iteration %d",
-                self._start_perf_iter, self._stop_perf_iter)
+            logger.info_once(f"NSYS profiling will start at iteration "
+                             f"{self._start_perf_iter} and stop at iteration "
+                             f"{self._stop_perf_iter}")
         else:
             self._start_perf_iter = -1
             self._stop_perf_iter = -1
