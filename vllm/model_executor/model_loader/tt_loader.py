@@ -17,11 +17,11 @@ class TTModelLoader(BaseModelLoader):
                    model_config: ModelConfig) -> nn.Module:
         """Load a model with the given configurations."""
 
-        # For TT models, prepend "TT" to the architecture name,
-        # e.g. "TTLlamaForCausalLM"
         device_config = vllm_config.device_config
         scheduler_config = vllm_config.scheduler_config
 
+        # For TT models, prepend "TT" to the architecture name,
+        # e.g. "TTLlamaForCausalLM"
         arch_names = model_config.hf_config.architectures
         for i in range(len(arch_names)):
             arch_names[i] = "TT" + arch_names[i]

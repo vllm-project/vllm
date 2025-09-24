@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -12,9 +13,10 @@ from vllm.sampling_params import SamplingParams
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
 else:
+    ModelConfig = None
     VllmConfig = None
     PoolingParams = None
 
@@ -45,10 +47,17 @@ class TTPlatform(Platform):
                 == 1), "TT backend does not support distributed execution"
         assert not vllm_config.lora_config, (
             "LoRA is not supported for TT backend")
+        assert not vllm_config.cache_config.enable_prefix_caching, (
+            "Automatic prefix caching is not yet supported for TT backend")
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.tt_worker.TTWorker"
+            if envs.VLLM_USE_V1:
+                parallel_config.worker_cls = "vllm.v1.worker.tt_worker.TTWorker"
+                vllm_config.scheduler_config.scheduler_cls = (
+                    "vllm.v1.core.sched.ascend_scheduler.AscendScheduler")
+            else:
+                parallel_config.worker_cls = "vllm.worker.tt_worker.TTWorker"
 
         # Setting attributes on the class level is kind of hacky, but
         # it's the only way to make validate_request depend on vllm_config
@@ -75,20 +84,51 @@ class TTPlatform(Platform):
         cls.compat_sampling_possible = (  # type: ignore[attr-defined]
             sample_on_device_mode is None)
 
+        if cls.compat_sampling_possible and envs.VLLM_USE_V1:  # type: ignore[attr-defined]
+            cls.compat_sampling_possible = False  # type: ignore[attr-defined]
+            logger.warning(
+                "Disabling compatibility sampling as it's not yet support for "
+                "V1 TT backend.")
+
         always_compat_sampling = False
         if override_tt_config is not None \
             and "always_compat_sampling" in override_tt_config:
-            logger.info("Compatibility sampling mode enabled for all requests")
             always_compat_sampling = override_tt_config[
                 "always_compat_sampling"]
             assert always_compat_sampling in [
                 True, False
             ], "always_compat_sampling must be a boolean"
+            if always_compat_sampling:
+                if envs.VLLM_USE_V1:
+                    raise ValueError(
+                        "always_compat_sampling is not yet supported for "
+                        "V1 TT backend.")
+                logger.info(
+                    "Compatibility sampling mode enabled for all requests")
         cls.always_compat_sampling = always_compat_sampling  # type: ignore[attr-defined]
 
         if cls.always_compat_sampling and not cls.compat_sampling_possible:  # type: ignore[attr-defined]
             raise ValueError("Compatibility sampling mode only works with"
                              "sample_on_device_mode=None")
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        # V1 support on TT is experimental.
+        # Allow users to opt in, but give a warning.
+        if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
+            if model_config.is_encoder_decoder:
+                raise ValueError(
+                    "VLLM_USE_V1=1 was set but encoder-decoder models aren't "
+                    "yet supported in V1 for TT")
+            elif model_config.is_multimodal_model:
+                raise ValueError(
+                    "VLLM_USE_V1=1 was set but multimodal models aren't "
+                    "yet supported in V1 for TT")
+            logger.warning(
+                "Enabling V1 since VLLM_USE_V1=1, however V1 is still "
+                "experimental for TT backend.")
+            return envs.VLLM_USE_V1
+        return False
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:

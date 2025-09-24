@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple, cast
 import torch
 import ttnn
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, VllmConfig)
 from vllm.logger import init_logger
@@ -152,9 +153,14 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
 
-        # whether to use ttnn tracing for model execution,
-        # TODO: make this configurable
+        # Whether to use ttnn tracing for model execution
+        override_tt_config = self.model_config.override_tt_config
+        trace_key = "trace_mode"
         self.trace_mode = True
+        if override_tt_config and trace_key in override_tt_config:
+            assert override_tt_config[trace_key] in [True, False], \
+                f"Invalid {trace_key}: {override_tt_config[trace_key]}"
+            self.trace_mode = override_tt_config[trace_key]
 
         self.model_runner: TTModelRunner = TTModelRunner(
             vllm_config=vllm_config,
@@ -199,54 +205,7 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         appended to.
         """
         # TODO: Add proper implementation which runs profiling on TT devices
-        data_parallel = 1
-        if (self.model_config.override_tt_config
-                and "data_parallel" in self.model_config.override_tt_config):
-            data_parallel = self.model_config.override_tt_config[
-                "data_parallel"]
-
-        is_wormhole = "wormhole_b0" in ttnn.get_arch_name()
-        num_devices_per_model = (self.device_config.device.get_num_devices() //
-                                 data_parallel)
-
-        if (("Llama-3.1-8B" in self.model_config.model
-             or "Mistral-7B" in self.model_config.model
-             or "gemma-3-4b" in self.model_config.model)
-                and num_devices_per_model == 1 and is_wormhole):
-            # Llama8B, Mistral7B, and gemma3-4b on N150
-            max_tokens_all_users = 65536
-        elif (("DeepSeek-R1-Distill-Qwen-14B" in self.model_config.model
-               or "Qwen2.5-14B" in self.model_config.model)
-              and num_devices_per_model == 2 and is_wormhole):
-            # Qwen2.5-14B on N300
-            max_tokens_all_users = 65536
-        elif ("Llama-3.2-90B" in self.model_config.model
-              and num_devices_per_model == 8 and is_wormhole):
-            # Llama90B on WH T3K
-            max_tokens_all_users = 65536
-        else:
-            # Note: includes num vision tokens for multi-modal
-            max_tokens_all_users = 131072
-
-        # To fit a max batch with (max_tokens_all_users / max batch) per user,
-        # allocate an extra block_size per user since vLLM uses a worst-case
-        # heuristic and assumes each touched block will require a new
-        # allocation. E.g. batch 32, block 64 needs an extra 2048 tokens.
-        max_batch = self.scheduler_config.max_num_seqs
-        max_tokens_all_users += self.cache_config.block_size * max_batch
-
-        # For multi-step, to fit (max_tokens_all_users / max batch) per user,
-        # allocate an extra num_lookahead_slots (num_scheduler_steps - 1 when
-        # not using speculative decoding) per user.
-        # E.g. batch 32, num_lookahead_slots 9 needs 288 extra tokens.
-        max_tokens_all_users += (self.scheduler_config.num_lookahead_slots *
-                                 max_batch)
-
-        num_tt_blocks = math.ceil(max_tokens_all_users /
-                                  self.cache_config.block_size)
-        num_tt_blocks = int(
-            num_tt_blocks *
-            1.01)  # Add 1% to account for vLLM's watermark_blocks
+        num_tt_blocks = get_num_available_blocks_tt(self.vllm_config)
         num_cpu_blocks = 0
         return num_tt_blocks, num_cpu_blocks
 
@@ -413,7 +372,7 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     ## Destructor (used to close devices)
 
     def __del__(self):
-        # Delete model runner first in case there are model arifacts
+        # Delete model runner first in case there are model artifacts
         with suppress(AttributeError):
             # attributes may be already torn down when destructor is called
             del self.model_runner
@@ -425,6 +384,69 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         if hasattr(super(), '__del__'):
             super().__del__()  # type: ignore
+
+
+def get_num_available_blocks_tt(vllm_config: VllmConfig) -> int:
+    """
+    Used to set the number of available blocks for the TT KV cache as we 
+    currently do not run profiling to determine available memory. 
+    Also used by the V1 TTWorker.
+    """
+
+    model_config = vllm_config.model_config
+    device_config = vllm_config.device_config
+    scheduler_config = vllm_config.scheduler_config
+    cache_config = vllm_config.cache_config
+
+    data_parallel = 1
+    if (model_config.override_tt_config
+            and "data_parallel" in model_config.override_tt_config):
+        data_parallel = model_config.override_tt_config["data_parallel"]
+
+    is_wormhole = "wormhole_b0" in ttnn.get_arch_name()
+    num_devices_per_model = (device_config.device.get_num_devices() //
+                             data_parallel)
+
+    if (("Llama-3.1-8B" in model_config.model or "Mistral-7B"
+         in model_config.model or "gemma-3-4b" in model_config.model)
+            and num_devices_per_model == 1 and is_wormhole):
+        # Llama8B, Mistral7B, and gemma3-4b on N150
+        max_tokens_all_users = 65536
+    elif (("DeepSeek-R1-Distill-Qwen-14B" in model_config.model
+           or "Qwen2.5-14B" in model_config.model)
+          and num_devices_per_model == 2 and is_wormhole):
+        # Qwen2.5-14B on N300
+        max_tokens_all_users = 65536
+    elif ("Llama-3.2-90B" in model_config.model and num_devices_per_model == 8
+          and is_wormhole):
+        # Llama90B on WH T3K
+        max_tokens_all_users = 65536
+    else:
+        # Note: includes num vision tokens for multi-modal
+        max_tokens_all_users = 131072
+
+    # To fit a max batch with (max_tokens_all_users / max batch) per user,
+    # allocate an extra block_size per user since vLLM uses a worst-case
+    # heuristic and assumes each touched block will require a new
+    # allocation. E.g. batch 32, block 64 needs an extra 2048 tokens.
+    max_batch = scheduler_config.max_num_seqs
+    max_tokens_all_users += cache_config.block_size * max_batch
+
+    if not envs.VLLM_USE_V1:
+        # For multi-step, to fit (max_tokens_all_users / max batch) per user,
+        # allocate an extra num_lookahead_slots (num_scheduler_steps - 1 when
+        # not using speculative decoding) per user.
+        # E.g. batch 32, num_lookahead_slots 9 needs 288 extra tokens.
+        max_tokens_all_users += (scheduler_config.num_lookahead_slots *
+                                 max_batch)
+
+    num_tt_blocks = math.ceil(max_tokens_all_users / cache_config.block_size)
+
+    if not envs.VLLM_USE_V1:
+        # Add 1% to account for vLLM's watermark_blocks
+        num_tt_blocks = int(num_tt_blocks * 1.01)
+
+    return num_tt_blocks
 
 
 # TT-NN utilities, also used by V1 TTWorker

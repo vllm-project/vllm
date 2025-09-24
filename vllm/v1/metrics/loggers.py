@@ -49,6 +49,67 @@ class StatLoggerBase(ABC):
         pass
 
 
+class AvgTracker:
+    """Tracks running average of a value."""
+
+    def __init__(self) -> None:
+        self.avg = 0.0
+        self.count = 0
+
+    def update(self, new_val: float) -> None:
+        self.count += 1
+        self.avg += (new_val - self.avg) / self.count
+
+
+class GlobalStatLogger(StatLoggerBase):
+    """GlobalStatLogger is used in LLMEngine to track stats across the entire 
+    generation (until manually reset) """
+
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
+        self.engine_index = engine_index
+        self.vllm_config = vllm_config
+        self.time_to_first_token = AvgTracker()
+        self.time_per_output_token = AvgTracker()
+
+    def record(self,
+               scheduler_stats: Optional[SchedulerStats],
+               iteration_stats: Optional[IterationStats],
+               engine_idx: int = 0):
+        """Called by LLMEngine. Updates stats at end of each step"""
+
+        def avg_list(list):
+            return sum(list) / len(list)
+
+        assert isinstance(iteration_stats, IterationStats)
+        if len(iteration_stats.time_to_first_tokens_iter) > 0:
+            self.time_to_first_token.update(
+                avg_list(iteration_stats.time_to_first_tokens_iter))
+        if len(iteration_stats.time_per_output_tokens_iter) > 0:
+            self.time_per_output_token.update(
+                avg_list(iteration_stats.time_per_output_tokens_iter))
+
+    def log_out(self):
+        ttft = self.time_to_first_token
+        tpot = self.time_per_output_token
+        if ttft.count != 0:
+            logger.info("Average time to first token (batch): %f s", ttft.avg)
+        if tpot.count != 0:
+            decode_throughput = 1 / tpot.avg if tpot.avg != 0 else 0
+            logger.info("Average decode throughput: %f t/s/u",
+                        decode_throughput)
+
+    def reset(self) -> None:
+        self.time_to_first_token = AvgTracker()
+        self.time_per_output_token = AvgTracker()
+
+    def log_engine_initialized(self):
+        if self.vllm_config.cache_config.num_gpu_blocks:
+            logger.info(
+                "Engine %03d: vllm cache_config_info with initialization "
+                "after num_gpu_blocks is: %d", self.engine_index,
+                self.vllm_config.cache_config.num_gpu_blocks)
+
+
 class LoggingStatLogger(StatLoggerBase):
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):

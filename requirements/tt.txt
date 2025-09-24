@@ -2,8 +2,8 @@
 -r common.txt
 
 # TT-NN works with older torch versions, but vLLM requires torch >= 2.7.0
-torch==2.7.0+cpu
-torchvision==0.22.0
-torchaudio==2.7.0
+torch==2.7.1+cpu
+torchvision==0.22.1
+torchaudio==2.7.1
 # Pinned down in https://github.com/tenstorrent/vllm/pull/127 to match tt-metal's requirements
 numpy>=1.24.4,<2
