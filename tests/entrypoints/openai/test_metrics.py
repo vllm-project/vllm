@@ -22,7 +22,7 @@ MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 PREV_MINOR_VERSION = version._prev_minor_version()
 
 
-@pytest.fixture(scope="module", params=[True, False])
+@pytest.fixture(scope="module", params=[True])
 def use_v1(request):
     # Module-scoped variant of run_with_both_engines
     #
@@ -432,7 +432,7 @@ def test_metrics_exist_run_batch(use_v1: bool):
             "--port",
             port,
         ],
-                                env={"VLLM_USE_V1": "1" if use_v1 else "0"})
+                                env={"VLLM_USE_V1": "1"})
 
         def is_server_up(url):
             try:

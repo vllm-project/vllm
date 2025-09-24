@@ -76,10 +76,6 @@ class TpuPlatform(Platform):
         raise NotImplementedError
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
-
-    @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
 
@@ -179,11 +175,6 @@ class TpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        # V1 support on TPU is experimental
-        return True
-
-    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,
@@ -225,6 +216,10 @@ class TpuPlatform(Platform):
         """ tpu blocks to cpu blocks"""
         torch.ops.xla.dynamo_set_buffer_donor_(src_cache, True)
         dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()
+
+    @classmethod
+    def use_sync_weight_loader(cls) -> bool:
+        return True
 
 
 try:

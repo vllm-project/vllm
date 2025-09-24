@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import Optional
 
 import torch
 
@@ -9,6 +9,7 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
+                                              compute_causal_conv1d_metadata,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
@@ -33,7 +34,6 @@ class ShortConvAttentionMetadata:
 
     # For causal_conv1d
     nums_dict: Optional[dict] = None
-    cu_seqlen: Optional[int] = None
     batch_ptr: Optional[torch.Tensor] = None
     token_chunk_offset_ptr: Optional[torch.Tensor] = None
 
@@ -41,7 +41,7 @@ class ShortConvAttentionMetadata:
 class ShortConvAttentionMetadataBuilder(
         AttentionMetadataBuilder[ShortConvAttentionMetadata]):
 
-    reorder_batch_threshold: ClassVar[int] = 1
+    reorder_batch_threshold: int = 1
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -57,6 +57,9 @@ class ShortConvAttentionMetadataBuilder(
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
+        # for causal_conv1d
+        nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
@@ -70,6 +73,12 @@ class ShortConvAttentionMetadataBuilder(
             has_initial_states = has_initial_states_cpu.to(
                 query_start_loc.device)
 
+            query_start_loc_p = common_attn_metadata.query_start_loc[
+                -num_prefills - 1:] - num_decode_tokens
+
+            nums_dict, batch_ptr, token_chunk_offset_ptr = \
+                compute_causal_conv1d_metadata(query_start_loc_p)
+
         attn_metadata = ShortConvAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -78,5 +87,8 @@ class ShortConvAttentionMetadataBuilder(
             query_start_loc=query_start_loc,
             has_initial_states=has_initial_states,
             state_indices_tensor=state_indices_tensor,
+            nums_dict=nums_dict,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         return attn_metadata

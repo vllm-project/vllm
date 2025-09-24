@@ -601,11 +601,7 @@ class AsyncLLM(EngineClient):
     async def is_tracing_enabled(self) -> bool:
         return self.observability_config.otlp_traces_endpoint is not None
 
-    async def do_log_stats(
-        self,
-        scheduler_outputs=None,
-        model_output=None,
-    ) -> None:
+    async def do_log_stats(self) -> None:
         if self.logger_manager:
             self.logger_manager.log()
 

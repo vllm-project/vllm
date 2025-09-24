@@ -4,7 +4,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import (Annotated, Final, Literal, Optional, Protocol, TypeVar,
-                    Union, cast)
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -17,21 +17,20 @@ from transformers.processing_utils import ProcessingKwargs, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
 from vllm.config import VllmConfig
-from vllm.inputs import InputProcessingContext
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.llava import LlavaDummyInputsBuilder
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
+                                        BaseProcessingInfo,
+                                        InputProcessingContext,
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.jsontree import json_map_leaves
@@ -491,11 +490,8 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
         pixel_values: Union[torch.Tensor, list[torch.Tensor]],
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         # From vLLM LLaVA, vision tower output handling
-        image_hidden_states = vision_tower(pixel_values)
-        if not isinstance(image_hidden_states, torch.Tensor):
-            raise TypeError(
-                f"image_hidden_states type: {type(image_hidden_states)}"
-                " is not supported")
+        image_hidden_states: Union[torch.Tensor, tuple[torch.Tensor, ...]] = \
+            vision_tower(pixel_values)
 
         def select_features_fn(leaf: torch.Tensor):
             return self._select_image_features(
@@ -503,11 +499,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
                 strategy=self.config.vision_feature_select_strategy,
             )
 
-        selected_features = cast(
-            Union[torch.Tensor, tuple[torch.Tensor, ...]],
-            json_map_leaves(select_features_fn, image_hidden_states),
-        )
-        return selected_features
+        return json_map_leaves(select_features_fn, image_hidden_states)
 
     def _add_tarsier_split_tokens(
             self, projected_image_features: torch.Tensor) -> torch.Tensor:
@@ -638,10 +630,8 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

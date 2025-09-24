@@ -214,13 +214,14 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
         assert a1q_scale is not None
-        assert self.a2_scale is None
+        assert a2_scale is None
         assert self.block_shape is not None
         assert self.w1_scale is not None
         assert self.w2_scale is not None

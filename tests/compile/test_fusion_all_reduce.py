@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm.compilation.collective_fusion import AllReduceFusionPass
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.compilation.noop_elimination import NoOpEliminationPass
+from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (CompilationConfig, CompilationLevel, DeviceConfig,
                          ModelConfig, PassConfig, VllmConfig)
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -215,8 +216,10 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
     noop_pass = NoOpEliminationPass(vllm_config)
     func_pass = FixFunctionalizationPass(vllm_config)
+    cleanup_pass = PostCleanupPass(vllm_config)
 
-    backend = TestBackend(all_reduce_fusion_pass, noop_pass, func_pass)
+    backend = TestBackend(all_reduce_fusion_pass, noop_pass, func_pass,
+                          cleanup_pass)
 
     token_num = batch_size * seq_len
     model = test_model_cls(hidden_size, token_num)
@@ -227,6 +230,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     compiled_model = torch.compile(model, backend=backend)
     compiled_model(hidden_states, residual)
 
+    assert all_reduce_fusion_pass.matched_count == 1
     backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
     backend.check_after_ops(model.ops_in_model_after())
     del all_reduce_fusion_pass

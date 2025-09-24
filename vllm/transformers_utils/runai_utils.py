@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 import os
 import shutil
 import signal
@@ -56,12 +57,18 @@ class ObjectStorageModel:
         pull_files(): Pull model from object storage to the temporary directory.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, url: str) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self._close_by_signal(existing_handler))
 
-        self.dir = tempfile.mkdtemp()
+        dir_name = os.path.join(
+            tempfile.gettempdir(),
+            hashlib.sha256(str(url).encode()).hexdigest()[:8])
+        if os.path.exists(dir_name):
+            shutil.rmtree(dir_name)
+        os.makedirs(dir_name)
+        self.dir = dir_name
 
     def __del__(self):
         self._close()

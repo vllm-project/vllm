@@ -14,7 +14,7 @@ from typing import Literal, NamedTuple, Optional
 
 import pytest
 
-from vllm.config import _FLOAT16_NOT_SUPPORTED_MODELS, RunnerOption
+from vllm.config.model import _FLOAT16_NOT_SUPPORTED_MODELS, RunnerOption
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 
@@ -382,7 +382,6 @@ def test_tp_language_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    pytest.skip("Skipping the test until V1 passes it.")
     _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,
@@ -410,7 +409,6 @@ def test_tp_language_embedding(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    pytest.skip("Skipping the test until V1 passes it.")
     _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,
@@ -438,7 +436,6 @@ def test_tp_multimodal_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    pytest.skip("Skipping the test until V1 passes it.")
     _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,

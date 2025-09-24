@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+import os
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
@@ -138,12 +139,18 @@ class ParallelConfig:
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
     enable_dbo: bool = False
-    """Enable microbatching for the model executor."""
+    """Enable dual batch overlap for the model executor."""
 
     dbo_decode_token_threshold: int = 32
-    """The threshold for microbatching. If the number of tokens in the
-    request is greater than this threshold, microbatching will be used.
-    Otherwise, the request will be processed in a single batch."""
+    """The threshold for dual batch overlap for batches only containing decodes.
+    If the number of tokens in the request is greater than this threshold,
+    microbatching will be used. Otherwise, the request will be processed in a
+    single batch."""
+    dbo_prefill_token_threshold: int = 512  # TODO(lucas): tune
+    """The threshold for dual batch overlap for batches that contain one or more
+    prefills. If the number of tokens in the request is greater than this
+    threshold, microbatching will be used. Otherwise, the request will be
+    processed in a single batch."""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -192,6 +199,25 @@ class ParallelConfig:
     """Number of decode context parallel groups, because the world size does
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
+
+    _api_process_count: int = 1
+    """
+    The number of API processes initialized.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
+
+    _api_process_rank: int = 0
+    """
+    The rank of this API process, or `-1` for engine core processes
+    under API server scale-out.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
 
     @property
     def world_size_across_dp(self) -> int:
@@ -332,6 +358,10 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
+        if self.distributed_executor_backend == "external_launcher":
+            logger.info("Using external launcher for distributed inference.")
+            self.world_size *= self.data_parallel_size
+
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
                 f"data_parallel_size_local ({self.data_parallel_size_local}) "
@@ -339,6 +369,13 @@ class ParallelConfig:
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
+            if self.distributed_executor_backend == "external_launcher":
+                # For external launcher,
+                # we need to set the data parallel rank automatically
+                self.data_parallel_rank = int(os.environ["RANK"]) \
+                    // (self.world_size // self.data_parallel_size)
+                logger.info("Set data_parallel_rank to %d automatically.",
+                            self.data_parallel_rank)
             if not self._data_parallel_master_port_list:
                 self._data_parallel_master_port_list = get_open_ports_list(5)
             self.data_parallel_master_port = \
@@ -361,7 +398,6 @@ class ParallelConfig:
                                  "be set when data_parallel_size > 1")
 
         if self.distributed_executor_backend == "external_launcher":
-            import os
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
@@ -427,6 +463,12 @@ class ParallelConfig:
 
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
+
+        if not -1 <= self._api_process_rank < self._api_process_count:
+            raise ValueError(
+                "Invalid value of `_api_process_rank`. "
+                f"Expected to be `-1` or `[0, {self._api_process_count})`, "
+                f"but found: {self._api_process_rank}")
 
     @property
     def use_ray(self) -> bool:

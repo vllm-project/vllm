@@ -285,8 +285,6 @@ class SpeculativeConfig:
                     max_model_len,
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
-                    max_seq_len_to_capture=self.target_model_config.
-                    max_seq_len_to_capture,
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=SpeculativeConfig.hf_config_override,
                 )
@@ -527,7 +525,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        eagle3_target_supported = ["llama", "qwen"]
+        eagle3_target_supported = ["llama", "qwen", "gpt_oss"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
