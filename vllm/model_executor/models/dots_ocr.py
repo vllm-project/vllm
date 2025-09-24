@@ -11,8 +11,9 @@ from transformers.models.qwen2_vl import Qwen2VLProcessor
 
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
-from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -27,6 +28,7 @@ from vllm.model_executor.models.interfaces import (MultiModalEmbeddings,
                                                    SupportsPP)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
+from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionAttention
 from vllm.model_executor.models.qwen2_vl import (Qwen2VLDummyInputsBuilder,
                                                  Qwen2VLMultiModalProcessor,
                                                  Qwen2VLProcessingInfo)
@@ -238,34 +240,32 @@ class DotsVisionAttention(nn.Module):
         super().__init__()
 
         self.embed_dim = dim
-        self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.tp_size = (1 if use_data_parallel else
-                        parallel_state.get_tensor_model_parallel_world_size())
-        self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
-        self.num_heads_per_partition = dist_utils.divide(
+                        get_tensor_model_parallel_world_size())
+        self.tp_rank = (0 if use_data_parallel else
+                        get_tensor_model_parallel_rank())
+        self.hidden_size_per_attention_head = dist_utils.divide(dim, num_heads)
+        self.num_attention_heads_per_partition = dist_utils.divide(
             num_heads, self.tp_size)
-
         # qkv/proj follow Qwen2-VL style; bias controlled by arg
-        self.qkv = QKVParallelLinear(hidden_size=dim,
-                                     head_size=dim // num_heads,
-                                     total_num_heads=num_heads,
-                                     bias=bias,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.qkv",
-                                     disable_tp=use_data_parallel)
+        self.qkv = QKVParallelLinear(
+            hidden_size=dim,
+            head_size=self.hidden_size_per_attention_head,
+            total_num_heads=num_heads,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv",
+            disable_tp=use_data_parallel)
         self.proj = RowParallelLinear(input_size=dim,
                                       output_size=dim,
                                       bias=bias,
                                       quant_config=quant_config,
                                       prefix=f"{prefix}.proj",
                                       disable_tp=use_data_parallel)
-        self._all_gather = tensor_model_parallel_all_gather
-        self._split_last = dist_utils.split_tensor_along_last_dim
-
         # Select attention backend
-        self.attn_backend = get_vit_attn_backend(self.head_dim,
-                                                 torch.get_default_dtype())
+        self.attn_backend = get_vit_attn_backend(
+            self.hidden_size_per_attention_head, torch.get_default_dtype())
         self.use_upstream_fa = False
         if self.attn_backend != _Backend.FLASH_ATTN and \
                 check_upstream_fa_availability(torch.get_default_dtype()):
@@ -281,19 +281,6 @@ class DotsVisionAttention(nn.Module):
             _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
         }
 
-    def _split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        # qkv: [S, B, 3*dim]
-        seq_len, bs, _ = qkv.shape
-        if self.tp_size > 1:
-            qkv = self._all_gather(qkv)
-        q, k, v = qkv.chunk(3, dim=2)
-        if self.tp_size > 1:
-            q = self._split_last(q, num_partitions=self.tp_size)[self.tp_rank]
-            k = self._split_last(k, num_partitions=self.tp_size)[self.tp_rank]
-            v = self._split_last(v, num_partitions=self.tp_size)[self.tp_rank]
-        new_shape = (seq_len, bs, self.num_heads_per_partition, self.head_dim)
-        return (q.view(*new_shape), k.view(*new_shape), v.view(*new_shape))
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -306,7 +293,7 @@ class DotsVisionAttention(nn.Module):
         # [S, C] -> [S, B=1, C]
         x = hidden_states.unsqueeze(1)
         x, _ = self.qkv(x)
-        q, k, v = self._split_qkv(x)
+        q, k, v = Qwen2_5_VisionAttention.split_qkv(self, x)
         bs = q.shape[1]
         # [S,B,H,D] -> [B,S,H,D]
         q = q.permute(1, 0, 2, 3).contiguous()
@@ -338,8 +325,9 @@ class DotsVisionAttention(nn.Module):
                                             max_seqlen_k=max_seqlen,
                                             dropout_p=0.0,
                                             causal=False)
-            context_layer = output.view(bs, -1, self.num_heads_per_partition,
-                                        self.head_dim)
+            context_layer = output.view(bs, -1,
+                                        self.num_attention_heads_per_partition,
+                                        self.hidden_size_per_attention_head)
         elif self.attn_backend == _Backend.TORCH_SDPA:
             outputs = []
             for i in range(1, len(cu_seqlens)):
