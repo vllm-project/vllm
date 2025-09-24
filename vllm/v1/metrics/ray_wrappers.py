@@ -52,7 +52,7 @@ class RayPrometheusMetric:
         Ref: https://github.com/open-telemetry/opentelemetry-cpp/blob/main/sdk/src/metrics/instrument_metadata_validator.cc#L22-L23
         """
 
-        return re.sub(r"[^a-zA-Z0-9\-_.\/]", "_", name)
+        return re.sub(r"[^a-zA-Z0-9_\/]", "_", name)
 
 
 class RayGaugeWrapper(RayPrometheusMetric):

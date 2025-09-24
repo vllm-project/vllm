@@ -69,12 +69,18 @@ def test_engine_log_metrics_ray(
 
 
 def test_sanitized_opentelemetry_name():
-    """Test the _get_sanitized_opentelemetry_name method."""
+    """Test the metric name sanitization logic for Ray."""
 
-    # Test valid characters are preserved
-    valid_name = "valid_metric-name.test/path123"
+    # Only a-z, A-Z, 0-9, _, /, test valid characters are preserved
+    valid_name = "valid_metric_123/abcDEF"
     assert RayPrometheusMetric._get_sanitized_opentelemetry_name(
         valid_name) == valid_name
+
+    # Test dash, dot, are replaced
+    name_with_dash_dot = "metric-name.test"
+    expected = "metric_name_test"
+    assert RayPrometheusMetric._get_sanitized_opentelemetry_name(
+        name_with_dash_dot) == expected
 
     # Test colon is replaced with underscore
     name_with_colon = "metric:name"
@@ -88,15 +94,9 @@ def test_sanitized_opentelemetry_name():
     assert RayPrometheusMetric._get_sanitized_opentelemetry_name(
         name_with_invalid) == expected
 
-    # Test spaces are replaced
-    name_with_spaces = "metric name with spaces"
-    expected = "metric_name_with_spaces"
-    assert RayPrometheusMetric._get_sanitized_opentelemetry_name(
-        name_with_spaces) == expected
-
     # Test mixed valid and invalid characters
     complex_name = "vllm:engine_stats/time.latency_ms-99p"
-    expected = "vllm_engine_stats/time.latency_ms-99p"
+    expected = "vllm_engine_stats_time_latency_ms_99p"
     assert RayPrometheusMetric._get_sanitized_opentelemetry_name(
         complex_name) == expected
 
