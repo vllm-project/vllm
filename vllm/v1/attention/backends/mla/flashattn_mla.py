@@ -64,7 +64,7 @@ class FlashAttnMLAMetadataBuilder(
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_BATCH
 
-    reorder_batch_threshold: ClassVar[int] = 512
+    reorder_batch_threshold: int = 512
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -99,7 +99,7 @@ class FlashAttnMLAMetadataBuilder(
 
         # TODO(lucas): Until we add support for the DCP custom masking we need
         #   to restrict decodes to q_len == 1 when DCP is enabled.
-        self.__class__.reorder_batch_threshold = 1 \
+        self.reorder_batch_threshold = 1 \
             if get_dcp_group().world_size > 1 else self.reorder_batch_threshold
 
     def _schedule_decode(self, num_reqs, cu_query_lens, max_query_len, seqlens,
