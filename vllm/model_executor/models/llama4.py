@@ -29,6 +29,7 @@ from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -44,6 +45,8 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
                     is_pp_missing_parameter)
+
+logger = init_logger(__name__)
 
 
 class Llama4MoE(nn.Module):
@@ -686,7 +689,10 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
                          layer_type=Llama4DecoderLayer)
+        # Set MoE hyperparameters
+        self.set_moe_parameters()
 
+    def set_moe_parameters(self):
         self.expert_weights = []
 
         self.moe_layers: list[FusedMoE] = []
@@ -699,17 +705,25 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
                 self.moe_layers.append(layer.feed_forward.experts)
 
         if example_moe is None:
-            raise RuntimeError("No Llama4MoE layer found in model.layers.")
-
-        # Set MoE hyperparameters
-        self.num_moe_layers = len(self.moe_layers)
-        self.num_expert_groups = 1
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            logger.warning("No Llama4MoE layer found in model.layers.")
+        else:
+            self.num_moe_layers = len(self.moe_layers)
+            self.num_expert_groups = 1
+            self.num_logical_experts = example_moe.n_logical_experts
+            self.num_physical_experts = example_moe.n_physical_experts
+            self.num_local_physical_experts = \
+                example_moe.n_local_physical_experts
+            self.num_routed_experts = example_moe.n_routed_experts
+            self.num_shared_experts = example_moe.n_shared_experts
+            self.num_redundant_experts = example_moe.n_redundant_experts
 
     def set_eplb_state(
         self,

@@ -8,6 +8,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -21,6 +22,8 @@ from .deepseek_v2 import (DeepseekV2DecoderLayer, DeepseekV2MoE,
                           get_spec_layer_idx_from_weight_name)
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import maybe_prefix
+
+logger = init_logger(__name__)
 
 
 class SharedHead(nn.Module):
@@ -141,12 +144,13 @@ class DeepSeekMTP(nn.Module, SupportsPP, MixtureOfExperts):
         self.model = DeepSeekMultiTokenPredictor(vllm_config=vllm_config,
                                                  prefix=maybe_prefix(
                                                      prefix, "model"))
-        config = vllm_config.model_config.hf_config
+        self.set_moe_parameters()
 
+    def set_moe_parameters(self):
         self.expert_weights = []
         # Set MoE hyperparameters
-        self.num_moe_layers = config.num_nextn_predict_layers
-        self.num_expert_groups = config.n_group
+        self.num_moe_layers = self.config.num_nextn_predict_layers
+        self.num_expert_groups = self.config.n_group
 
         self.moe_layers: list[FusedMoE] = []
         example_moe = None
@@ -159,14 +163,24 @@ class DeepSeekMTP(nn.Module, SupportsPP, MixtureOfExperts):
                 self.moe_layers.append(layer.mlp.experts)
 
         if example_moe is None:
-            raise RuntimeError("No DeepseekV2MoE layer found in model.layers.")
-
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            logger.warning("DeepSeekMTP: No DeepseekV2MoE layer "
+                           "found in model.layers.")
+        else:
+            self.num_logical_experts = example_moe.n_logical_experts
+            self.num_physical_experts = example_moe.n_physical_experts
+            self.num_local_physical_experts = \
+                example_moe.n_local_physical_experts
+            self.num_routed_experts = example_moe.n_routed_experts
+            self.num_shared_experts = example_moe.n_shared_experts
+            self.num_redundant_experts = example_moe.n_redundant_experts
 
     def set_eplb_state(
         self,

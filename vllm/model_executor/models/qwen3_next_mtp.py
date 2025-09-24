@@ -52,6 +52,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
+        enable_eplb = vllm_config.parallel_config.enable_eplb
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
@@ -75,6 +76,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f'{prefix}.layers.{idx}',
+                enable_eplb=enable_eplb,
             ) for idx in range(self.num_mtp_layers))
 
         self.make_empty_intermediate_tensors = (
@@ -246,12 +248,14 @@ class Qwen3NextMTP(nn.Module, SupportsPP, MixtureOfExperts):
                                                 config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        self.set_moe_parameters()
 
+    def set_moe_parameters(self):
         self.expert_weights = []
 
         self.moe_layers: list[FusedMoE] = []
         example_moe = None
-        for layer in self.model.layers.values():
+        for layer in self.model.layers:
             assert isinstance(layer, Qwen3NextDecoderLayer)
             if isinstance(layer.mlp, Qwen3NextSparseMoeBlock):
                 example_moe = layer.mlp
@@ -296,7 +300,7 @@ class Qwen3NextMTP(nn.Module, SupportsPP, MixtureOfExperts):
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = (num_physical_experts -
                                       self.num_logical_experts)
-        for layer in self.model.layers.values():
+        for layer in self.model.layers:
             assert isinstance(layer, Qwen3NextDecoderLayer)
             if isinstance(layer.mlp, Qwen3NextSparseMoeBlock):
                 moe = layer.mlp

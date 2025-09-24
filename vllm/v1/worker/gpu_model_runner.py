@@ -2529,8 +2529,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         logger.info("Starting to load model %s...", self.model_config.model)
         global_expert_loads, old_global_expert_indices_per_model, \
-            rank_mapping = EplbState.get_epp_state(
-            self.parallel_config.eep_scale_up)
+            rank_mapping = EplbState.get_epp_state(eep_scale_up)
 
         if self.parallel_config.enable_eplb:
             self.eplb_state = EplbState(self.parallel_config, self.device)
@@ -2551,8 +2550,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         and is_mixture_of_experts(self.drafter.model)
                         and self.parallel_config.enable_eplb):
                     logger.info(
-                        "EPLB is enabled for model %s.", self.vllm_config.
-                        speculative_config.draft_model_config.model)
+                        "EPLB is enabled for drafter model %s.",
+                        self.vllm_config.speculative_config.draft_model_config.
+                        model)
 
                     global_expert_load = global_expert_loads[
                         eplb_models] if global_expert_loads else None

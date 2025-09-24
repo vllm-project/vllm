@@ -528,6 +528,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
+        parallel_config = vllm_config.parallel_config
 
         self.prefix = prefix
         self.vllm_config = vllm_config
@@ -561,6 +562,9 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                                 config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        if (parallel_config.enable_eplb
+                and getattr(config, "num_experts", 0) > 0):
+            raise NotImplementedError("EPLB is not supported for MiniCPM yet.")
 
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
         return MiniCPMModel(vllm_config=vllm_config, prefix=prefix)
