@@ -1186,6 +1186,10 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
+                reasoning_content, content, _ = parse_chat_output(token_ids)
+                if not request.include_reasoning:
+                    reasoning_content = None
+
                 if self.tool_parser is not None:
                     tool_parser = self.tool_parser(tokenizer)
                     # NOTE: We use token_ids for openai tool parser
@@ -1194,10 +1198,7 @@ class OpenAIServingChat(OpenAIServing):
                         request=request,
                         token_ids=token_ids,  # type: ignore
                     )
-                    reasoning_content, content = None, tool_call_info.content
-                    if request.include_reasoning:
-                        reasoning_content, content, _ = parse_chat_output(
-                            token_ids)
+                    content = tool_call_info.content
                     message = ChatMessage(
                         role=role,
                         reasoning_content=reasoning_content,
@@ -1205,10 +1206,6 @@ class OpenAIServingChat(OpenAIServing):
                         tool_calls=tool_call_info.tool_calls,
                     )
                 else:
-                    reasoning_content, content, _ = parse_chat_output(
-                        token_ids)
-                    if not request.include_reasoning:
-                        reasoning_content = None
                     message = ChatMessage(
                         role=role,
                         reasoning_content=reasoning_content,
