@@ -304,7 +304,7 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
                 tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
 
 @triton.jit
-def _topk_kernel(LOGITS, PROBS, K, B, 
+def _topk_kernel(LOGITS, K, B, 
                  N: tl.constexpr,
                  BLOCK_SIZE: tl.constexpr,
                  NUM_TILES: tl.constexpr):
@@ -315,6 +315,8 @@ def _topk_kernel(LOGITS, PROBS, K, B,
         if not (k == N): # All tokens are valid
             max_logit = -float('inf')
             min_logit = float('inf')
+            sum_logits = 0.0
+            pow_sum_logits = 0.0
 
             LOGITS_ROW = LOGITS + row_id * N
 
@@ -327,29 +329,41 @@ def _topk_kernel(LOGITS, PROBS, K, B,
                 max_logit = tl.maximum(max_logit, tl.max(logits_blk))
                 min_logit = tl.minimum(min_logit, tl.min(logits_blk))
 
-            # Fourth passes: Search for pivots
+            # Fourth passes: Binary search for pivots
             num_iters = 0
-            pivot_found = False
-            k_pivot = 0.0
+            k_pivot = -float('inf')
+            k_pivot_0 = 0.0
+            k_pivot_1 = 0.0
             
-            while not pivot_found and num_iters < 32:
-                k_pivot = (max_logit - min_logit) / 2.0
-                k_pivots_num = 0.0
+            while k_pivot == -float('inf') and num_iters < 32:
+                k_pivot_0 = (max_logit - min_logit) * 1.0 / 3.0 + min_logit
+                k_pivot_1 = (max_logit - min_logit) * 2.0 / 3.0 + min_logit
+                k_pivots_num_0 = 0.0
+                k_pivots_num_1 = 0.0
 
                 for i in range(0, NUM_TILES):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < N
                     logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float('inf'))
 
-                    larger_mask = logits_blk > k_pivot 
-                    k_pivots_num += tl.sum(larger_mask)
+                    larger_mask = logits_blk > k_pivot_0 
+                    k_pivots_num_0 += tl.sum(larger_mask)
+                    larger_mask = logits_blk > k_pivot_1 
+                    k_pivots_num_1 += tl.sum(larger_mask)
 
-                if k_pivots_num == k:
-                    pivot_found = True
-                elif k_pivots_num < k:
-                    min_logit = k_pivot
-                else:
-                    max_logit = k_pivot
+                if k_pivots_num_0 == k:
+                    k_pivot = k_pivot_0
+                elif k_pivots_num_1 == k:
+                    k_pivot = k_pivot_1
+                elif k_pivots_num_1 > k:
+                    min_logit = k_pivot_1
+                elif k_pivots_num_0 > k:
+                    min_logit = k_pivot_0
+                    
+                if k_pivots_num_0 < k:
+                    max_logit = k_pivot_0
+                elif k_pivots_num_1 < k:
+                    max_logit = k_pivot_1
 
                 num_iters += 1
 
@@ -369,11 +383,11 @@ def triton_apply_top_k_top_p(
     batch_size, vocab_size = logits.shape
     BLOCK_SIZE = 4096
     NUM_PROGRAMS = 128
-    NUM_PIVOTS = 16 # Multi pivot search for smaller number of scans
     NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
+    NUM_PIVOTS = 16 # Multi pivot search for smaller number of scans
     probs = torch.zeros_like(logits)
     if p is None:
-        _topk_kernel[(NUM_PROGRAMS,)](logits, probs, k, batch_size, 
+        _topk_kernel[(NUM_PROGRAMS,)](logits, k, batch_size, 
                                       vocab_size, BLOCK_SIZE, NUM_TILES)
     else:
         _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
