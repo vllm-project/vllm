@@ -28,19 +28,26 @@ PROVIDER_CFGS = {
     "fbgemm-nvfp4-noquant": dict(fbgemm=True, no_a_quant=True, enabled=True),
 }
 
-_enabled = [k for k, v in PROVIDER_CFGS.items() if v["enabled"]]
-_needs_fbgemm = any(PROVIDER_CFGS[k].get("fbgemm", False) for k in _enabled)
+_needs_fbgemm = any(
+    v.get("fbgemm", False) for v in PROVIDER_CFGS.values() if v.get("enabled", False)
+)
 if _needs_fbgemm:
     try:
         from fbgemm_gpu.experimental.gemm.triton_gemm.fp4_quantize import (
             triton_scale_nvfp4_quant,
         )
-    except ImportError as e:
-        raise ImportError(
-            "Failed to import fbgemm_gpu, required for fbgemm-enabled providers."
-            "Please install fbgemm_gpu with: pip install fbgemm-gpu-genai\n"
-            "For more information, see: https://github.com/pytorch/FBGEMM/releases"
-        ) from e
+    except ImportError:
+        print(
+            "WARNING: FBGEMM providers are enabled but fbgemm_gpu is not installed. "
+            "These providers will be skipped. Please install fbgemm_gpu with: "
+            "'pip install fbgemm-gpu-genai' to run them."
+        )
+        # Disable FBGEMM providers so the benchmark can run.
+        for cfg in PROVIDER_CFGS.values():
+            if cfg.get("fbgemm"):
+                cfg["enabled"] = False
+
+_enabled = [k for k, v in PROVIDER_CFGS.items() if v["enabled"]]
 
 
 def _quant_weight_nvfp4(b: torch.Tensor, device: str, cfg):
