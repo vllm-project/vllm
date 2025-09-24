@@ -698,7 +698,6 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             self.config.vision_config = vision_config
         else:
             vision_config = self.config.vision_config
-        vision_config.hidden_act = "silu"
         self.vision_tower = DotsVisionTransformer(
             vision_config,
             quant_config=self.quant_config,
