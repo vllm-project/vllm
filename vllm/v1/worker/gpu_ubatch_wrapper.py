@@ -11,6 +11,8 @@ import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_ep_group
+from vllm.distributed.device_communicators.pynccl_allocator import (
+    set_graph_pool_id)
 from vllm.forward_context import (create_forward_context, get_forward_context,
                                   override_forward_context)
 from vllm.logger import init_logger
@@ -102,6 +104,7 @@ class UBatchWrapper:
             self.graph_pool = current_platform.get_global_graph_pool()
 
         self.sm_control = self._create_sm_control_context(vllm_config)
+        self.device = device
 
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
@@ -166,6 +169,7 @@ class UBatchWrapper:
 
         @torch.inference_mode()
         def _capture_ubatch_thread(results, ubatch_metadata):
+            torch.cuda.set_device(self.device)
             ubatch_context = ubatch_metadata.context
             with torch.cuda.stream(ubatch_context.compute_stream):
                 _ = torch.cuda.current_blas_handle()
@@ -206,6 +210,10 @@ class UBatchWrapper:
                             cudagraph=torch.cuda.CUDAGraph(),
                             ubatch_metadata=ubatch_metadata,
                         )
+            if self.graph_pool is not None:
+                set_graph_pool_id(self.graph_pool)
+            else:
+                set_graph_pool_id(current_platform.graph_pool_handle())
             with torch.cuda.graph(cudagraph_metadata.cudagraph,
                                   stream=compute_stream,
                                   pool=self.graph_pool):

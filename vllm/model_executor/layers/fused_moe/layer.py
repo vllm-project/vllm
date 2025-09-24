@@ -58,7 +58,7 @@ else:
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
     FusedMoEPrepareAndFinalize = None  # type: ignore
 
-    def eplb_map_to_physical_and_record(
+    def _eplb_map_to_physical_and_record(
             topk_ids: torch.Tensor, expert_load_view: torch.Tensor,
             logical_to_physical_map: torch.Tensor,
             logical_replica_count: torch.Tensor,
@@ -66,12 +66,11 @@ else:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
 
+    eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
 
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
         rocm_aiter_grouped_topk as grouped_topk)
-elif current_platform.is_cpu():
-    pass
 else:
     from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
 if current_platform.is_tpu():
@@ -860,12 +859,11 @@ def maybe_roundup_hidden_size(
     if necessary.
     
     Args:
-        hidden_size(int): Layer hidden-size
+        hidden_size: Layer hidden-size
         act_dtype: Data type of the layer activations.
-        quant_config(FusedMoEQuantConfig): Fused MoE quantization configuration.
-        moe_parallel_config(FusedMoEParallelConfig): Fused MoE parallelization
-            strategy configuration.
-    
+        quant_config: Fused MoE quantization configuration.
+        moe_parallel_config: Fused MoE parallelization strategy configuration.
+
     Return:
         Rounded up hidden_size if rounding up is required based on the configs.
         Original hidden size otherwise.
@@ -2091,7 +2089,6 @@ direct_register_custom_op(
     op_func=moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
@@ -2122,7 +2119,6 @@ direct_register_custom_op(
     op_func=moe_forward_shared,
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_shared_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
