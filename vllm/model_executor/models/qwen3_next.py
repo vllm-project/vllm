@@ -1225,7 +1225,6 @@ direct_register_custom_op(
     op_func=gdn_attention,
     mutates_args=["output"],
     fake_impl=gdn_attention_fake,
-    dispatch_key=current_platform.dispatch_key,
 )
 
 

@@ -91,9 +91,7 @@ if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_aiter_gemm_w8a8_blockscale",
         op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
-        mutates_args=[],
         fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
     if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
             and current_platform.is_fp8_fnuz()):
@@ -132,13 +130,14 @@ def _w8a8_triton_block_scaled_mm_fake(
                        device=qx.device)
 
 
-direct_register_custom_op(
-    "w8a8_triton_block_scaled_mm_func",
-    _w8a8_triton_block_scaled_mm_func,
-    mutates_args=[],
-    fake_impl=_w8a8_triton_block_scaled_mm_fake,
-    dispatch_key="CUDA",
-)
+# Note: the check can be removed when CPU torch > 2.7
+if not current_platform.is_cpu():
+    direct_register_custom_op(
+        "w8a8_triton_block_scaled_mm_func",
+        _w8a8_triton_block_scaled_mm_func,
+        fake_impl=_w8a8_triton_block_scaled_mm_fake,
+        dispatch_key="CUDA",
+    )
 
 
 # TODO fix ROCm->Triton custom path:
