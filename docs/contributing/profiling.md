@@ -131,6 +131,28 @@ nsys stop --session=profile-XXXXX
 
 to manually kill the profiler and generate your `nsys-rep` report.
 
+### Programmatic start/stop with CUDA profiler API
+
+vLLM exposes a helper environment variable to control Nsight Systems capture window from inside the engine loop without killing the process.
+
+- Set `VLLM_NSYS_PROFILE_START_STOP="<start>-<stop>"` to begin and end capture on specific engine iterations. Example: `VLLM_NSYS_PROFILE_START_STOP=10-20` starts at iteration 10 and stops at iteration 20.
+- Use this together with `nsys` flags enabling CUDA profiler API capture:
+
+```bash
+nsys profile -o report.nsys-rep \
+  --trace-fork-before-exec=true \
+  --cuda-graph-trace=node \
+  --capture-range=cudaProfilerApi \
+  --stop-on-range-end=true \
+  vllm serve meta-llama/Llama-3.1-8B-Instruct
+```
+
+Notes:
+
+- The iteration count refers to the internal engine scheduler loop, not tokens or requests. When the range is reached, vLLM logs will show "Starting NSYS profiler" and "Stopping NSYS profiler" once.
+- If `VLLM_NSYS_PROFILE_START_STOP` is invalid, vLLM logs a warning and disables the programmatic capture.
+- Leave `VLLM_NSYS_PROFILE_START_STOP` unset or set to `None` to disable.
+
 #### Analysis
 
 You can view these profiles either as summaries in the CLI, using `nsys stats [profile-file]`, or in the GUI by installing Nsight [locally following the directions here](https://developer.nvidia.com/nsight-systems/get-started).

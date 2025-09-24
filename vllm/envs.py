@@ -1449,7 +1449,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NCCL_INCLUDE_PATH":
     lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
 
-    # Nsys profile start and stop
+    # Enable programmatic Nsight Systems capture via CUDA profiler API.
+    # Set to "<start>-<stop>" to start/stop profiling on engine iteration
+    # numbers. Example: "10-20" starts at iteration 10 and stops at 20.
+    # Use together with nsys flags:
+    #   --capture-range=cudaProfilerApi --stop-on-range-end=true
+    # Default: "None" (disabled). Invalid values are ignored with a warning.
+    # Note: "iteration" refers to the engine's internal scheduler loop, not
+    # tokens; vLLM logs will indicate when profiling starts/stops.
     "VLLM_NSYS_PROFILE_START_STOP":
     lambda: os.environ.get("VLLM_NSYS_PROFILE_START_STOP", "None"),
 
