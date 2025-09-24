@@ -85,14 +85,16 @@ class CPTritonContext:
 
 def correct_attn_out(out: torch.Tensor, lses: torch.Tensor, cp_rank: int,
                      ctx: CPTritonContext):
-    """
-    Correct the attention output using the all-gathered lses.
+    """Correct the attention output using the all-gathered lses.
 
     Args:
         out: Tensor of shape [ B, H, D ]
         lses: Tensor of shape [ N, B, H ]
         cp_rank: Current rank in the context-parallel group
         ctx: Triton context to avoid recompilation
+
+    Returns:
+        Tuple of (out, lse) with corrected attention and final log-sum-exp.
     """
     if ctx is None:
         ctx = CPTritonContext()
