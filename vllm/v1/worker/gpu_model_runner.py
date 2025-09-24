@@ -3629,11 +3629,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     self.reorder_batch_threshold = reorder_batch_threshold_i
 
-    def _find_compatible_block_sizes(
-            self,
-            kv_manager_block_size: int,
-            backend_cls: type[AttentionBackend],
-            return_all: bool = False) -> Union[int, list[int]]:
+    def _find_compatible_block_sizes(self,
+                                     kv_manager_block_size: int,
+                                     backend_cls: type[AttentionBackend],
+                                     return_all: bool = False) -> list[int]:
         """
         Find compatible block sizes for a backend.
 
@@ -3663,7 +3662,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             raise ValueError(
                 f"No compatible block size for {kv_manager_block_size}")
 
-        return compatible_sizes if return_all else max(compatible_sizes)
+        return compatible_sizes if return_all else [max(compatible_sizes)]
 
     def _get_all_compatible_block_sizes(
             self, kv_manager_block_size: int,
@@ -3874,8 +3873,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     kv_manager_block_size = kv_cache_spec.block_size
-                    logical_kernel_size = self._find_compatible_block_sizes(
+                    logical_kernel_size_list = \
+                        self._find_compatible_block_sizes(
                         kv_manager_block_size, attn_backend, return_all=False)
+                    logical_kernel_size = logical_kernel_size_list[0]
                     num_blocks_per_phys_block = (kv_manager_block_size //
                                                  logical_kernel_size)
                     logical_num_blocks = num_blocks * num_blocks_per_phys_block
