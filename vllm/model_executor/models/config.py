@@ -381,15 +381,16 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         #   * Other MLA backends: 64-byte alignment
         if model_config.use_mla:
             use_cutlass_mla = (envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA")
-            block_alignment_bytes = 128 if use_cutlass_mla else 64
+            kernel_block_alignment_size = 128 if use_cutlass_mla else 64
         else:
-            block_alignment_bytes = 16
+            kernel_block_alignment_size = 16
 
         # Calculate minimum attention block size that satisfies both:
-        # 1. Backend alignment requirements (block_alignment_bytes)
+        # 1. Backend alignment requirements (kernel_block_alignment_size)
         # 2. Mamba page size compatibility (attn_page_size >= mamba_page_size)
-        attn_block_size = block_alignment_bytes * cdiv(
-            mamba_page_size, block_alignment_bytes * attn_page_size_1_token)
+        attn_block_size = kernel_block_alignment_size * cdiv(
+            mamba_page_size,
+            kernel_block_alignment_size * attn_page_size_1_token)
 
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
