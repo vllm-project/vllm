@@ -161,7 +161,6 @@ class TPUWorker:
             per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
                                          f"tp{world_size}_rank{rank}")
             xr.initialize_cache(per_rank_path, readonly=False)
-            logger.debug("XLA cache initialized at %s", per_rank_path)
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = \
