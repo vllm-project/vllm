@@ -47,7 +47,6 @@ def main(
     )
     query.uniform_(-scale, scale)
 
-    assert num_query_heads % num_kv_heads == 0
     alibi_slopes = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float, device=device)
