@@ -297,7 +297,6 @@ class Attention(nn.Module, AttentionLayerBase):
                                  dtype=output_dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
-
             # We skip reshaping query, key and value tensors for the MLA
             # backend since these tensors have different semantics and are
             # processed differently.
