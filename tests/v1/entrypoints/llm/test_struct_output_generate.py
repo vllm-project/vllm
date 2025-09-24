@@ -81,16 +81,6 @@ class CarDescription(BaseModel):
     car_type: CarType
 
 
-def _load_json(s: str, backend: str) -> str:
-    if backend != "xgrammar":
-        return json.loads(s)
-
-    # xgrammar specific workarounds
-    # https://github.com/mlc-ai/xgrammar/issues/286
-    s = re.sub(r'[\x00-\x1F\x7F-\xFF]', '', s)
-    return json.loads(s)
-
-
 def test_guided_decoding_deprecated():
     with pytest.warns(DeprecationWarning,
                       match="GuidedDecodingParams is deprecated.*"):
@@ -177,7 +167,12 @@ def test_structured_output(
         if backend != 'lm-format-enforcer':
             assert "\n" not in generated_text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        output_json = json.loads(generated_text)
+        try:
+            output_json = json.loads(generated_text)
+        except json.JSONDecodeError as e:
+            pytest.fail(
+                f"Invalid JSON from backend={backend}: {generated_text!r}\n"
+                f"Schema: {sample_json_schema}\nError: {e}")
         jsonschema.validate(instance=output_json, schema=sample_json_schema)
 
     #
@@ -425,7 +420,12 @@ def test_structured_output(
         generated_text = output.outputs[0].text
         assert generated_text is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        output_json = json.loads(generated_text)
+        try:
+            output_json = json.loads(generated_text)
+        except json.JSONDecodeError as e:
+            pytest.fail(
+                f"Invalid JSON from backend={backend}: {generated_text!r}\n"
+                f"Schema: {json_schema}\nError: {e}")
         jsonschema.validate(instance=output_json, schema=json_schema)
 
     #
@@ -468,7 +468,12 @@ def test_structured_output(
         generated_text = output.outputs[0].text
         assert generated_text is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        output_json = json.loads(generated_text)
+        try:
+            output_json = json.loads(generated_text)
+        except json.JSONDecodeError as e:
+            pytest.fail(
+                f"Invalid JSON from backend={backend}: {generated_text!r}\n"
+                f"Schema: {json_schema}\nError: {e}")
         jsonschema.validate(instance=output_json, schema=json_schema)
 
     if backend not in ["outlines", "lm-format-enforcer"]:
