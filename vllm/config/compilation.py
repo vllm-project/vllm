@@ -228,15 +228,14 @@ class CompilationConfig:
     The mode of the cudagraph:
 
     - NONE, no cudagraph capture.
-    - PIECEWISE. (v1 default)
+    - PIECEWISE.
     - FULL.
     - FULL_DECODE_ONLY.
-    - FULL_AND_PIECEWISE.
+    - FULL_AND_PIECEWISE. (v1 default)
 
     PIECEWISE mode build piecewise cudagraph only, keeping the cudagraph
     incompatible ops (i.e. some attention ops) outside the cudagraph
     for general flexibility.
-    This is the default mode.
 
     FULL mode: Capture full cudagraph for all batches. Can be good for small
     models or workloads with small prompts; not supported by many backends.
@@ -249,7 +248,7 @@ class CompilationConfig:
     
     FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
     piecewise cudagraph for prefill and mixed prefill-decode batches.
-    This is like the most performant mode for most models.
+    This is the most performant mode for most models and is the default.
 
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 

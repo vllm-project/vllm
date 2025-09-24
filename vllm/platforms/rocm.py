@@ -119,6 +119,12 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_gfx950() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx950"])
+
+
+@cache
 def use_rocm_custom_paged_attention(
         qtype: torch.dtype,
         head_size: int,
