@@ -373,7 +373,6 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
-    max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
@@ -545,8 +544,6 @@ class EngineArgs:
                                  **model_kwargs["quantization"])
         model_group.add_argument("--enforce-eager",
                                  **model_kwargs["enforce_eager"])
-        model_group.add_argument("--max-seq-len-to-capture",
-                                 **model_kwargs["max_seq_len_to_capture"])
         model_group.add_argument("--max-logprobs",
                                  **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode",
@@ -1008,7 +1005,6 @@ class EngineArgs:
             max_model_len=self.max_model_len,
             quantization=self.quantization,
             enforce_eager=self.enforce_eager,
-            max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
