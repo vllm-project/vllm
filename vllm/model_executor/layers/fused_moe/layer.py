@@ -42,16 +42,18 @@ from vllm.utils import (cdiv, direct_register_custom_op, has_deep_ep, has_pplx,
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
-    from .fused_batched_moe import BatchedTritonExperts
-    from .fused_moe import (TritonExperts, eplb_map_to_physical_and_record,
-                            fused_experts)
+    from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+        BatchedTritonExperts)
+    from vllm.model_executor.layers.fused_moe.fused_moe import (
+        TritonExperts, eplb_map_to_physical_and_record, fused_experts)
     if has_pplx():
-        from .pplx_prepare_finalize import (PplxPrepareAndFinalize,
-                                            pplx_hidden_dim_scale_bytes)
+        from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+            PplxPrepareAndFinalize, pplx_hidden_dim_scale_bytes)
     if has_deep_ep():
-        from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
-        from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
-                                                 DeepEPLLPrepareAndFinalize)
+        from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
+            DeepEPHTPrepareAndFinalize)
+        from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
+            DEEPEP_QUANT_BLOCK_SHAPE, DeepEPLLPrepareAndFinalize)
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
