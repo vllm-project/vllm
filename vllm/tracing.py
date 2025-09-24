@@ -12,7 +12,7 @@ from vllm.utils import run_once
 # because tracing.py imports SchedulerOutput
 from vllm.v1.core.sched.output import (NewRequestData, SchedulerOutput,
                                        TraceHeaders)
-from vllm.v1.utils import join_contexts
+from vllm.v1.utils import join_context_managers
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
 TRACE_HEADERS = ["traceparent", "tracestate"]
@@ -171,28 +171,31 @@ def trace_in_every_processed_request(tracer: Tracer, span_name: str,
     ]
     all_reqs = cached_reqs + new_reqs
 
-    span_ctxs = [new_span_context(tracer, req, span_name) for req in all_reqs]
-    single_ctx = join_contexts(span_ctxs)  # type: ignore
-    return single_ctx
+    span_context_managers = [
+        new_span_ctx_manager(tracer, req, span_name) for req in all_reqs
+    ]
+    single_context_manager = join_context_managers(
+        span_context_managers)  # type: ignore
+    return single_context_manager
 
 
-def new_span_context(tracer: Tracer, req_data: Union[NewRequestData,
-                                                     CachedRequestState],
-                     name: str) -> Iterator[Span]:
+def new_span_ctx_manager(tracer: Tracer, req_data: Union[NewRequestData,
+                                                         CachedRequestState],
+                         name: str) -> Iterator[Span]:
     """
-    Creates an OpenTelemetry span_context that can be used as a 
+    Creates an OpenTelemetry span which can be used as a
     context manager. E.g.
 
     ```python
-    with new_span_context(tracer, req_data, "Some Work") as span:
+    with new_span_ctx_manager(tracer, req_data, "Some Work") as span:
         # do work
     ```
     """
     assert isinstance(req_data, (NewRequestData, CachedRequestState))
     context: Context = extract_trace_context(req_data.trace_headers)
-    span_context = tracer.start_as_current_span(
+    span_context_manager = tracer.start_as_current_span(
         name=name,
         kind=SpanKind.INTERNAL,
         context=context,
     )
-    return span_context
+    return span_context_manager

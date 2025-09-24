@@ -397,12 +397,12 @@ def record_function_or_nullcontext(name: str) -> AbstractContextManager:
 
 
 @contextlib.contextmanager
-def join_contexts(contexts: Iterable[AbstractContextManager]):
+def join_context_managers(contexts_managers: Iterable[AbstractContextManager]):
     """
     Join together multiple context managers into a single context manager.
     https://stackoverflow.com/a/3025119/5730291
     """
     with contextlib.ExitStack() as stack:
-        for ctx in contexts:
-            stack.enter_context(ctx)
+        for cm in contexts_managers:
+            stack.enter_context(cm)
         yield stack
