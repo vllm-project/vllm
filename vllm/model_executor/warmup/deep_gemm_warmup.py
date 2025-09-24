@@ -6,6 +6,8 @@ DeepGEMM JIT's the kernels. The warmup aims to JIT all the kernels that would
 be used during model execution beforehand.
 """
 
+import os
+
 import torch
 from tqdm import tqdm
 
@@ -22,6 +24,32 @@ from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.utils.deep_gemm import fp8_gemm_nt, m_grouped_fp8_gemm_nt_contiguous
+
+
+def _get_deep_gemm_cache_dir() -> str:
+    """Get the DeepGEMM cache directory path."""
+    cache_env = os.environ.get('DG_JIT_CACHE_DIR')
+    if cache_env:
+        return cache_env
+    return os.path.join(envs.VLLM_CACHE_ROOT, "deep_gemm")
+
+
+def _should_skip_warmup() -> bool:
+    """Check if warmup can be skipped based on existing cache."""
+    cache_dir = _get_deep_gemm_cache_dir()
+
+    # Check if cache directory exists and has any cached kernels
+    if os.path.isdir(cache_dir):
+        # Check if there are any cached files (compiled kernels)
+        try:
+            cache_files = os.listdir(cache_dir)
+            # Look for enough files that indicate compiled kernels exist
+            return len(cache_files) > 100
+        except (OSError, PermissionError):
+            # If we can't read the directory, proceed with warmup to be safe
+            return False
+
+    return False
 
 
 def _extract_data_from_linear_base_module(
@@ -226,5 +254,8 @@ def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model: torch.nn.Module,
 
 
 def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
+    if _should_skip_warmup():
+        return
+
     deepgemm_fp8_gemm_nt_warmup(model, max_tokens)
     deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens)
