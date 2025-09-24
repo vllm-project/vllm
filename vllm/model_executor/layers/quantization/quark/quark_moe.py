@@ -507,6 +507,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
         return ocp_mx_moe_quant_config(
             quant_dtype=self.input_dtype,
+            weight_dtype=self.weight_dtype,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             a1_scale=None,

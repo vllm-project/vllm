@@ -301,6 +301,7 @@ class FusedMoEQuantConfig:
         assert self._a1.dtype is None or isinstance(self._a1.dtype, str)
         assert self._w1.dtype is None or isinstance(self._w1.dtype, str)
 
+        # TODO: we should not rerun this all the time during inference!
         ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(self._a1.dtype,
                                                        self._w1.dtype)
 
@@ -388,12 +389,12 @@ class FusedMoEQuantConfig:
         w2_bias: Optional[torch.Tensor] = None,
         w1_zp: Optional[torch.Tensor] = None,
         w2_zp: Optional[torch.Tensor] = None,
+        weight_dtype: Union[torch.dtype, str, None] = None,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
         - quant_dtype: Optional quantization type. None if activations are
-          unquantized or quantized prior to calling.  Note: "nvfp4" and
-          "mxfp4" are the only valid string values for quant_dtype.
+          unquantized or quantized prior to calling.  Note: "nvfp4", "fp4", "fp6_e3m2", "fp6_e2m3" are the only valid string values for quant_dtype.
         - per_act_token_quant: Activations have per token quantization.
         - per_out_ch_quant: Outputs have per channel quantization. (only
           for cutlass).
@@ -412,8 +413,12 @@ class FusedMoEQuantConfig:
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
         """
-        assert (not isinstance(quant_dtype, str) or quant_dtype == "nvfp4"
-                or quant_dtype == "mxfp4")
+        assert (not isinstance(quant_dtype, str) or quant_dtype in {"nvfp4", "fp4", "fp6_e3m2", "fp6_e2m3"})
+        assert (not isinstance(weight_dtype, str) or weight_dtype in {"nvfp4", "fp4", "fp6_e3m2", "fp6_e2m3"})
+
+        if weight_dtype is None:
+            weight_dtype = quant_dtype
+
         a_shape, w_shape = _quant_flags_to_group_shape(quant_dtype,
                                                        per_act_token_quant,
                                                        per_out_ch_quant,
@@ -421,9 +426,9 @@ class FusedMoEQuantConfig:
         quant_config = FusedMoEQuantConfig(
             _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
             _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
-            _w1=FusedMoEQuantDesc(quant_dtype, w_shape, w1_scale, g1_alphas,
+            _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, g1_alphas,
                                   w1_zp, w1_bias),
-            _w2=FusedMoEQuantDesc(quant_dtype, w_shape, w2_scale, g2_alphas,
+            _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, g2_alphas,
                                   w2_zp, w2_bias),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
@@ -496,6 +501,7 @@ def ocp_mx_moe_quant_config(
     quant_dtype: str,
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
     w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    weight_dtype: Optional[str] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     w1_bias: Optional[torch.Tensor] = None,
@@ -508,6 +514,7 @@ def ocp_mx_moe_quant_config(
     assert quant_dtype in OCP_MX_DTYPES
     return FusedMoEQuantConfig.make(
         quant_dtype=quant_dtype,
+        weight_dtype=weight_dtype,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a1_scale,
