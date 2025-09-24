@@ -124,15 +124,27 @@ class QuantFP8(CustomOp):
         scale: Optional[torch.Tensor] = None,
         scale_ub: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if not self.use_aiter or scale_ub is not None:
-            # Fallback to CUDA implementation
-            return self.forward_cuda(x, scale, scale_ub)
-        if self.group_shape == GroupShape.PER_TENSOR:
+        use_aiter_per_tensor_quant = (
+            self.group_shape == GroupShape.PER_TENSOR and \
+            self.use_aiter and \
+            scale_ub is not None
+        )
+        use_aiter_per_token_quant = (
+            self.group_shape == GroupShape.PER_TOKEN and \
+            self.use_aiter and \
+            scale_ub is not None and \
+            not self.static
+        )
+
+        if use_aiter_per_tensor_quant:
             return torch.ops.vllm.rocm_aiter_per_tensor_quant(
                 x, scale, _FP8_DTYPE)
-        if self.group_shape == GroupShape.PER_TOKEN:
+        if use_aiter_per_token_quant:
             return torch.ops.vllm.rocm_aiter_per_token_quant(
                 x, scale, _FP8_DTYPE)
+
+        # Fallback to CUDA implementation
+        return self.forward_cuda(x, scale, scale_ub)
 
     def forward_native(
         self,
