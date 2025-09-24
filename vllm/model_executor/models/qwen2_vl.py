@@ -960,6 +960,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,
+            num_frames=1,
             image_processor=None,
         )
         return max_image_size
