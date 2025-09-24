@@ -21,7 +21,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
-from vllm.v1.sample.metadata import SamplingMetadata
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -204,6 +203,11 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         nn.Module.__init__(self)
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
+        # Ensure draft_vocab_size is set
+        # default to the base vocab size when absent
+        if getattr(self.config, "draft_vocab_size", None) is None:
+            base_vocab_size = getattr(self.config, "vocab_size", None)
+            self.config.draft_vocab_size = base_vocab_size
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
 
@@ -220,7 +224,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             self.config.hidden_size,
             org_num_embeddings=self.config.draft_vocab_size,
             padding_size=(DEFAULT_VOCAB_PADDING_SIZE),
-            prefix="")
+            prefix=maybe_prefix(prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(self.config.draft_vocab_size,
                                                 scale=logit_scale)
         self.draft_id_to_target_id = nn.Parameter(
@@ -244,10 +248,8 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             assert logits.shape[1] == self.config.vocab_size, \
                 "Expected logits to have shape " \
