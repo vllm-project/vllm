@@ -48,7 +48,7 @@ class RayPrometheusMetric:
         """
         For compatibility with Ray + OpenTelemetry, the metric name must be 
         sanitized. In particular, this removes ':' from the name.
-        Current restriction is: a-z, A-Z, 0-9, -, _, ., /   
+        Allowed characters: a-z, A-Z, 0-9, _, /   
         Ref: https://github.com/open-telemetry/opentelemetry-cpp/blob/main/sdk/src/metrics/instrument_metadata_validator.cc#L22-L23
         """
 
