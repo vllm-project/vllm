@@ -640,7 +640,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 attn_type=attn_type)
         return attention_instances
 
-    def init_parameters(self, module: nn.Module):
+    def init_parameters(self, module: nn.Module, dtype: Optional[torch.dtype] = None):
         """
         If a `parameter` is on the `meta` device, then its parent
         `module` is the original module created by:
@@ -654,11 +654,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             if param.device == torch.device("meta"):
                 new_param = nn.Parameter(
                     torch.empty_like(param.data,
-                                     dtype=self.model_config.dtype,
+                                     dtype=dtype or self.model_config.dtype,
                                      device=self.device_config.device))
                 setattr(module, name, new_param)
         for child in module.children():
-            self.init_parameters(child)
+            self.init_parameters(child, dtype)
 
     def forward(
         self,
