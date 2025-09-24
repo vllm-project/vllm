@@ -69,8 +69,6 @@ else:
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
         rocm_aiter_grouped_topk as grouped_topk)
-elif current_platform.is_cpu():
-    pass
 else:
     from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
 if current_platform.is_tpu():
@@ -972,12 +970,15 @@ class FusedMoE(CustomOp):
                         "experts. Falling back to linear expert placement.")
                     expert_placement_strategy = "linear"
 
-            self.local_num_experts, self.expert_map = determine_expert_map(
+            self.expert_map: Optional[torch.Tensor]
+            local_num_experts, expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=expert_placement_strategy,
             )
+            self.local_num_experts = local_num_experts
+            self.register_buffer("expert_map", expert_map)
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
                 "placement strategy: %s. Local/global"
@@ -1154,10 +1155,12 @@ class FusedMoE(CustomOp):
         # ep_size and ep_rank should already be updated
         assert self.expert_map is not None
         with self.expert_map.device:
-            self.local_num_experts, self.expert_map = determine_expert_map(
+            local_num_experts, expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
+            self.local_num_experts = local_num_experts
+            self.register_buffer("expert_map", expert_map)
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
@@ -2035,7 +2038,6 @@ direct_register_custom_op(
     op_func=moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
@@ -2066,7 +2068,6 @@ direct_register_custom_op(
     op_func=moe_forward_shared,
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_shared_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 

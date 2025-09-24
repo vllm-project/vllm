@@ -547,7 +547,6 @@ if flashinfer_comm is not None:
             "scale_out",
         ],
         fake_impl=call_trtllm_fused_allreduce_norm_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
     flashinfer_trtllm_fused_allreduce_norm = (
         torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default)
