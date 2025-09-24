@@ -1447,17 +1447,24 @@ def LLMM1(a: torch.Tensor, b: torch.Tensor,
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
 
 
-def wvSplitK(a: torch.Tensor, b: torch.Tensor, cu_count: int) -> torch.Tensor:
-    return torch.ops._rocm_C.wvSplitK(a, b, cu_count)
+def wvSplitK(a: torch.Tensor,
+             b: torch.Tensor,
+             cu_count: int,
+             bias: torch.Tensor = None) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
-def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
-              scale_a: torch.Tensor, scale_b: torch.Tensor,
-              cu_count: int) -> torch.Tensor:
+def wvSplitKQ(a: torch.Tensor,
+              b: torch.Tensor,
+              out_dtype: torch.dtype,
+              scale_a: torch.Tensor,
+              scale_b: torch.Tensor,
+              cu_count: int,
+              bias: torch.Tensor = None) -> torch.Tensor:
     out = torch.empty((b.shape[0], a.shape[0]),
                       dtype=out_dtype,
                       device=b.device)
-    torch.ops._rocm_C.wvSplitKQ(a, b, out, scale_a, scale_b, cu_count)
+    torch.ops._rocm_C.wvSplitKQ(a, b, bias, out, scale_a, scale_b, cu_count)
     return out
 
 
@@ -1823,15 +1830,6 @@ def flash_mla_with_kvcache(
     return out, softmax_lse
 
 
-def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
-                       q_pe: torch.Tensor, kv_c_and_k_pe_cache: torch.Tensor,
-                       seq_lens: torch.Tensor, page_table: torch.Tensor,
-                       scale: float) -> torch.Tensor:
-    torch.ops._C.cutlass_mla_decode(out, q_nope, q_pe, kv_c_and_k_pe_cache,
-                                    seq_lens, page_table, scale)
-    return out
-
-
 def sm100_cutlass_mla_decode(out: torch.Tensor, lse: torch.Tensor,
                              q_nope: torch.Tensor, q_pe: torch.Tensor,
                              kv_c_and_k_pe_cache: torch.Tensor,
@@ -2011,3 +2009,27 @@ def onednn_scaled_mm(
                                   input_zp_adj, bias, dnnl_handler.handler)
 
     return output
+
+
+def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
+    """
+    Perform Hadamard transforms using [Hadacore](https://arxiv.org/abs/2412.08832)
+    kernels. Note that these kernels exploit the recursive properties of
+    Sylvester Hadamards, and therefore do not require transform weight data
+
+    Note that sylvester hadamard transforms are also symmetric, which means that
+    this function is also applies the (transpose <=> inverse) transform.
+    
+    :param x: value to be transformed inplace
+    :param inplace: modify value in place
+    :return: value after transformation
+    """
+    return torch.ops._C.hadacore_transform(x, inplace)
+
+
+if hasattr(torch.ops._C, "hadacore_transform"):
+
+    @register_fake("_C::hadacore_transform")
+    def _hadacore_transform_fake(x: torch.Tensor,
+                                 inplace: bool) -> torch.Tensor:
+        return torch.empty_like(x) if not inplace else x

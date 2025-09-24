@@ -20,11 +20,10 @@ from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
                                          parse_chat_messages_futures,
                                          resolve_chat_template_content_format,
                                          resolve_hf_chat_template)
-from vllm.entrypoints.llm import apply_hf_chat_template
 from vllm.multimodal import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
                                    encode_video_base64)
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -38,7 +37,6 @@ QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN2VL_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 QWEN25VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
-MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
 HERMES_MODEL_ID = "NousResearch/Hermes-3-Llama-3.1-8B"
 MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
@@ -71,12 +69,7 @@ def phi3v_model_config_mm_interleaved():
 
 @pytest.fixture(scope="module")
 def phi3v_tokenizer():
-    return TokenizerGroup(
-        tokenizer_id=PHI3V_MODEL_ID,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
-    )
+    return get_tokenizer(PHI3V_MODEL_ID)
 
 
 @pytest.fixture(scope="function")
@@ -93,12 +86,7 @@ def qwen2_audio_model_config():
 
 @pytest.fixture(scope="module")
 def qwen2_audio_tokenizer():
-    return TokenizerGroup(
-        tokenizer_id=QWEN2AUDIO_MODEL_ID,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
-    )
+    return get_tokenizer(QWEN2AUDIO_MODEL_ID)
 
 
 @pytest.fixture(scope="function")
@@ -117,33 +105,7 @@ def qwen25omni_model_config_mm_interleaved():
 
 @pytest.fixture(scope="module")
 def qwen25omni_tokenizer():
-    return TokenizerGroup(
-        tokenizer_id=QWEN25OMNI_MODEL_ID,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
-    )
-
-
-@pytest.fixture(scope="module")
-def mllama_model_config():
-    return ModelConfig(
-        MLLAMA_MODEL_ID,
-        runner="generate",
-        limit_mm_per_prompt={
-            "image": 2,
-        },
-    )
-
-
-@pytest.fixture(scope="module")
-def mllama_tokenizer():
-    return TokenizerGroup(
-        MLLAMA_MODEL_ID,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
-    )
+    return get_tokenizer(QWEN25OMNI_MODEL_ID)
 
 
 @pytest.fixture(scope="function")
@@ -159,12 +121,7 @@ def mistral_model_config():
 
 @pytest.fixture(scope="module")
 def mistral_tokenizer():
-    return TokenizerGroup(
-        tokenizer_id=MISTRAL_MODEL_ID,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
-    )
+    return get_tokenizer(MISTRAL_MODEL_ID)
 
 
 @pytest.fixture(scope="module")
@@ -2249,180 +2206,6 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
         )
 
 
-### Mllama currently wraps images / texts as interleaved dictionaries
-def test_mllama_single_image(
-    mllama_model_config,
-    mllama_tokenizer,
-    image_url,
-):
-    """Ensures that a single image is parsed correctly mllama."""
-    conversation, mm_data, mm_uuids = parse_chat_messages(
-        [{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "The content of this image is:"
-                },
-                {
-                    "image_url": image_url
-                },
-            ],
-        }],
-        mllama_model_config,
-        mllama_tokenizer,
-        content_format="openai",
-    )
-    _assert_mm_data_is_image_input(mm_data, 1)
-    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
-    assert conversation == [{
-        "role":
-        "user",
-        "content": [
-            {
-                "type": "text",
-                "text": "The content of this image is:"
-            },
-            {
-                "type": "image"
-            },
-        ],
-    }]
-
-
-def test_mllama_interleaved_images(
-    mllama_model_config,
-    mllama_tokenizer,
-    image_url,
-):
-    """Ensures that multiple image are parsed as interleaved dicts."""
-    conversation, mm_data, mm_uuids = parse_chat_messages(
-        [{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "The content of the first image is:",
-                },
-                {
-                    "image_url": image_url
-                },
-                {
-                    "type": "text",
-                    "text": "The content of the second image is:",
-                },
-                {
-                    "image_url": image_url
-                },
-            ],
-        }],
-        mllama_model_config,
-        mllama_tokenizer,
-        content_format="openai",
-    )
-    _assert_mm_data_is_image_input(mm_data, 2)
-    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
-    assert conversation == [{
-        "role":
-        "user",
-        "content": [
-            {
-                "type": "text",
-                "text": "The content of the first image is:"
-            },
-            {
-                "type": "image"
-            },
-            {
-                "type": "text",
-                "text": "The content of the second image is:"
-            },
-            {
-                "type": "image"
-            },
-        ],
-    }]
-
-
-@pytest.mark.parametrize("model", [MLLAMA_MODEL_ID])
-def test_multimodal_image_parsing_matches_hf(model, image_url):
-    """Checks end to end hf alignment for multimodal [image] parsing."""
-
-    def get_conversation(is_hf: bool):
-        img_part = {"type": "image_url", "image_url": {"url": image_url}}
-        if is_hf:
-            img_part = {"type": "image"}
-        return [{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "The content of the first image is:",
-                },
-                img_part,
-                {
-                    "type": "text",
-                    "text": "The content of the second image is:",
-                },
-                img_part,
-                {
-                    "type": "text",
-                    "text": "What animal is in the first image?",
-                },
-            ],
-        }]
-
-    # Build a config for the model
-    model_config = ModelConfig(
-        model,
-        runner="generate",
-        limit_mm_per_prompt={
-            "image": 2,
-        },
-    )
-
-    # Build the tokenizer group and grab the underlying tokenizer
-    tokenizer_group = TokenizerGroup(
-        model,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
-        trust_remote_code=model_config.trust_remote_code,
-    )
-    tokenizer = tokenizer_group.tokenizer
-
-    # Build and parse a conversation with {"type": "image"} using the tokenizer
-    hf_conversation = get_conversation(is_hf=True)
-    hf_result = tokenizer.apply_chat_template(
-        hf_conversation,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-    # Now parse with vLLMs chat utils & apply the template
-    vllm_conversation = get_conversation(is_hf=False)
-    conversation, _, _ = parse_chat_messages(
-        vllm_conversation,
-        model_config,
-        tokenizer_group,
-        content_format="openai",
-    )
-
-    vllm_result = apply_hf_chat_template(
-        tokenizer=tokenizer,
-        conversation=conversation,
-        chat_template=None,
-        model_config=model_config,
-        tools=None,
-        add_generation_prompt=True,
-    )
-
-    assert hf_result == vllm_result
-
-
 @pytest.mark.parametrize(
     "model",
     [
@@ -2447,15 +2230,11 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype)
 
-    # Build the tokenizer group and grab the underlying tokenizer
-    tokenizer_group = TokenizerGroup(
+    # Build the tokenizer
+    tokenizer = get_tokenizer(
         model,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
         trust_remote_code=model_config.trust_remote_code,
     )
-    tokenizer = tokenizer_group.tokenizer
 
     tools = ([{
         "type": "function",
@@ -2486,7 +2265,6 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
      (QWEN25VL_MODEL_ID, "openai"),
      (ULTRAVOX_MODEL_ID, "string"),
      (QWEN2AUDIO_MODEL_ID, "openai"),
-     (MLLAMA_MODEL_ID, "openai"),
      (LLAMA_GUARD_MODEL_ID, "openai")],
 )
 # yapf: enable
@@ -2505,14 +2283,10 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype)
 
-    tokenizer_group = TokenizerGroup(
+    tokenizer = get_tokenizer(
         model,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
         trust_remote_code=model_config.trust_remote_code,
     )
-    tokenizer = tokenizer_group.tokenizer
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_hf_chat_template(
@@ -2545,7 +2319,6 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     [("Salesforce/blip2-opt-2.7b", "string"),
      ("facebook/chameleon-7b", "string"),
      ("deepseek-ai/deepseek-vl2-tiny", "string"),
-     ("microsoft/Florence-2-base", "string"),
      ("adept/fuyu-8b", "string"),
      ("google/paligemma-3b-mix-224", "string"),
      ("Qwen/Qwen-VL", "string"),
@@ -2567,14 +2340,10 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype)
 
-    tokenizer_group = TokenizerGroup(
+    tokenizer = get_tokenizer(
         model_config.tokenizer,
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
         trust_remote_code=model_config.trust_remote_code,
     )
-    tokenizer = tokenizer_group.tokenizer
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_hf_chat_template(
@@ -2631,14 +2400,10 @@ def test_resolve_content_format_examples(template_path, expected_format):
         trust_remote_code=True,
     )
 
-    tokenizer_group = TokenizerGroup(
+    dummy_tokenizer = get_tokenizer(
         PHI3V_MODEL_ID,  # Dummy
-        enable_lora=False,
-        max_num_seqs=5,
-        max_input_length=None,
         trust_remote_code=model_config.trust_remote_code,
     )
-    dummy_tokenizer = tokenizer_group.tokenizer
     dummy_tokenizer.chat_template = None
 
     chat_template = load_chat_template(EXAMPLES_DIR / template_path)
