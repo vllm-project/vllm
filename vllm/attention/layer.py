@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
-from typing import List, Optional
+from typing import List, Optional, cast
 
 import torch
 import torch.nn as nn
@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.attention import AttentionType
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -560,6 +560,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:
             kv_cache_dtype = "auto"
             block_size = 16
+        self.kv_cache_dtype = kv_cache_dtype
 
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(self.head_size,
@@ -567,12 +568,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                                              kv_cache_dtype,
                                              block_size,
                                              use_mla=True)
-        impl_cls = self.attn_backend.get_impl_cls()
+        impl_cls = cast(type[MLAAttentionImpl],
+                        self.attn_backend.get_impl_cls())
         self.impl = impl_cls(
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
             num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=self.kv_cache_dtype,
+            logits_soft_cap=None,
+            attn_type=AttentionType.DECODER,
+            kv_sharing_target_layer_name=None,
             # MLA Args
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,

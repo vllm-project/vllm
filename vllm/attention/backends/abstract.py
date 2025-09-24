@@ -185,6 +185,29 @@ class AttentionImpl(ABC, Generic[T]):
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
 
     @abstractmethod
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[list[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        logits_soft_cap: Optional[float],
+        attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
+        # MLA Specific Arguments
+        q_lora_rank: Optional[int],
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def forward(
         self,
         layer: AttentionLayer,
