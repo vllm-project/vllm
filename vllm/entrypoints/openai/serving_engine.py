@@ -10,7 +10,6 @@ from http import HTTPStatus
 from typing import Any, Callable, ClassVar, Generic, Optional, TypeVar, Union
 
 import aiohttp
-import pybase64
 import torch
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
