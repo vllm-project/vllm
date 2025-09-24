@@ -139,12 +139,23 @@ vLLM exposes a helper environment variable to control Nsight Systems capture win
 - Use this together with `nsys` flags enabling CUDA profiler API capture:
 
 ```bash
+# server
+export VLLM_NSYS_PROFILE_START_STOP="10-20"
 nsys profile -o report.nsys-rep \
   --trace-fork-before-exec=true \
   --cuda-graph-trace=node \
   --capture-range=cudaProfilerApi \
   --stop-on-range-end=true \
   vllm serve meta-llama/Llama-3.1-8B-Instruct
+
+# client
+vllm bench serve \
+    --backend vllm \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --num-prompts 1 \
+    --dataset-name random \
+    --random-input 1024 \
+    --random-output 512
 ```
 
 Notes:
