@@ -161,8 +161,6 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
-        if self.backend == "fbgemm":
-            x_blockscale = x_blockscale.view(-1).view(torch.uint8)
         mm_args = (x_fp4, layer.weight_packed, x_blockscale,
                    layer.weight_scale, layer.alpha, output_dtype)
         if self.backend == "flashinfer-trtllm":
@@ -173,7 +171,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             out = torch.ops.fbgemm.f4f4bf16(
                 x_fp4,
                 layer.weight_packed,
-                x_blockscale,
+                x_blockscale.view(-1).view(torch.uint8),
                 layer.weight_scale,
                 layer.alpha,
                 use_mx=False,
