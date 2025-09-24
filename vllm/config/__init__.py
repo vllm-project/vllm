@@ -503,14 +503,21 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
 
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        if current_platform.support_static_graph_mode():
             # if cudagraph_mode is not explicitly set by users, set default
             # value
             if self.compilation_config.cudagraph_mode is None:
                 if envs.VLLM_USE_V1 and self.compilation_config.level \
                     == CompilationLevel.PIECEWISE:
+                    # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = \
-                        CUDAGraphMode.PIECEWISE
+                        CUDAGraphMode.FULL_AND_PIECEWISE
+
+                    # pooling model does not support full cudagraphs
+                    if self.model_config is not None and \
+                        self.model_config.pooler_config is not None:
+                        self.compilation_config.cudagraph_mode = \
+                            CUDAGraphMode.PIECEWISE
                 else:
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -638,11 +645,13 @@ class VllmConfig:
 
         if self.parallel_config.enable_dbo:
             a2a_backend = envs.VLLM_ALL2ALL_BACKEND
-            assert a2a_backend == "deepep_low_latency", \
-            "Microbatching currently only supports the deepep_low_latency "\
-            f"all2all backend. {a2a_backend} is not supported. To fix set "\
-            "the VLLM_ALL2ALL_BACKEND environment variable to "\
-            "deepep_low_latency and install the DeepEP kerenls."
+            assert a2a_backend in \
+                ["deepep_low_latency", "deepep_high_throughput"], \
+            "Microbatching currently only supports the deepep_low_latency and "\
+            f"deepep_high_throughput all2all backend. {a2a_backend} is not "\
+            "supported. To fix set the VLLM_ALL2ALL_BACKEND environment "\
+            "variable to deepep_low_latency or deepep_high_throughput and "\
+            "install the DeepEP kernels."
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
@@ -684,6 +693,23 @@ class VllmConfig:
                     # Hybrid KV cache manager is not yet supported with chunked
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
+
+        def has_blocked_weights():
+            if self.quant_config is not None:
+                if hasattr(self.quant_config, "weight_block_size"):
+                    return self.quant_config.weight_block_size is not None
+                elif hasattr(self.quant_config, "has_blocked_weights"):
+                    return self.quant_config.has_blocked_weights()
+            return False
+
+        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
+        # On H100 the CUDA kernel is faster than
+        # native implementation
+        # https://github.com/vllm-project/vllm/issues/25094
+        if has_blocked_weights():
+            custom_ops = self.compilation_config.custom_ops
+            if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
+                custom_ops.append("+quant_fp8")
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
@@ -905,10 +931,9 @@ def set_current_vllm_config(vllm_config: VllmConfig,
     except Exception:
         raise
     else:
-        logger.debug("enabled custom ops: %s",
-                     vllm_config.compilation_config.enabled_custom_ops)
-        logger.debug("disabled custom ops: %s",
-                     vllm_config.compilation_config.disabled_custom_ops)
+        if check_compile:
+            vllm_config.compilation_config.custom_op_log_check()
+
         if check_compile and \
             vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
             and compilation_counter.num_models_seen == num_models_seen:

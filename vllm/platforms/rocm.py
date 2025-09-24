@@ -119,6 +119,12 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_gfx950() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx950"])
+
+
+@cache
 def use_rocm_custom_paged_attention(
         qtype: torch.dtype,
         head_size: int,
@@ -231,7 +237,17 @@ class RocmPlatform(Platform):
                 logger.info("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "rocm_aiter_fa.AiterFlashAttentionBackend")
+            elif (envs.VLLM_ROCM_USE_AITER and
+                envs.VLLM_USE_AITER_UNIFIED_ATTENTION) or \
+                    envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION or \
+                        selected_backend == _Backend.ROCM_ATTN_VLLM_V1:
+                # rocm specific backend, with aiter and/or
+                #   triton prefix-prefill
+                logger.info("Using Rocm/Aiter Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "rocm_attn.RocmAttentionBackend")
             else:
+                # default case, using triton unified attention
                 logger.info("Using Triton Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "triton_attn.TritonAttentionBackend")
@@ -387,11 +403,6 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fn
 
     @classmethod
-    def supports_v1(cls, model_config: "ModelConfig") -> bool:
-        # V1 support on AMD gpus is experimental
-        return True
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
@@ -476,4 +487,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
         return True
