@@ -160,7 +160,6 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
-    VLLM_FUSE_QUERY_QUANT: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Optional[Literal["NHD", "HND"]] = None
@@ -1257,13 +1256,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SLEEP_WHEN_IDLE":
     lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
 
-    # Quantize the query in the attention layer with a simple
-    # pytorch operation instead of a custom op in the attention backend.
-    # Then torch.compile can fuse it and reduce overhead.
-    # Only relevant for quantized attention w/ FA3
-    "VLLM_FUSE_QUERY_QUANT":
-    lambda: bool(int(os.getenv("VLLM_FUSE_QUERY_QUANT", "0"))),
-
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
@@ -1523,7 +1515,6 @@ def compute_hash() -> str:
         "VLLM_USE_CUDNN_PREFILL",
         "VLLM_USE_TRTLLM_ATTENTION",
         "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
-        "VLLM_FUSE_QUERY_QUANT",
         "VLLM_ROCM_USE_AITER",
         "VLLM_ROCM_USE_AITER_PAGED_ATTN",
         "VLLM_ROCM_USE_AITER_LINEAR",
