@@ -3619,12 +3619,6 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_sequence_parallelism = \
                 True
 
-        if envs.VLLM_USE_V1 and self.model_config is not None and \
-            not self.model_config.enforce_eager and current_platform.is_rocm():
-            if "none" in self.compilation_config.custom_ops:
-                self.compilation_config.custom_ops.remove("none")
-            self.compilation_config.custom_ops.append("+quant_fp8")
-
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
 
