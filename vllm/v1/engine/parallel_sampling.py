@@ -43,6 +43,9 @@ class ParentRequest:
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
 
+        # Track abort state for synchronized cleanup
+        self.is_marked_for_abort = False
+
     def _get_child_sampling_params(
         self,
         index: int,
