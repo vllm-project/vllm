@@ -31,7 +31,7 @@ logger = init_logger(__name__)
 # Error message when the user tries to initialize vLLM with a pooling model
 # and custom logitsproces
 STR_POOLING_REJECTS_LOGITSPROCS = ("Pooling models do not support custom"
-                                   " logits processors.")
+                                   " loits processors.")
 
 LOGITSPROCS_GROUP = 'vllm.logits_processors'
 
