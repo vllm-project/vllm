@@ -27,13 +27,11 @@ if ! command -v uv &> /dev/null; then
     source $HOME/.local/bin/env
 fi
 
-# Clone Prime-RL repository at specific commit for reproducible tests
-PRIME_RL_COMMIT="4321960ee34b060c6902a63ceb820f73d6b8114c"
-echo "Cloning Prime-RL repository at commit: ${PRIME_RL_COMMIT}..."
-git clone --depth 1 "${PRIME_RL_REPO}" "${PRIME_RL_DIR}"
+# Clone Prime-RL repository at specific branch for reproducible tests
+PRIME_RL_BRANCH="integ-vllm-main"
+echo "Cloning Prime-RL repository at branch: ${PRIME_RL_BRANCH}..."
+git clone --branch "${PRIME_RL_BRANCH}" --single-branch "${PRIME_RL_REPO}" "${PRIME_RL_DIR}"
 cd "${PRIME_RL_DIR}"
-git fetch --depth 1 origin "${PRIME_RL_COMMIT}"
-git checkout "${PRIME_RL_COMMIT}"
 
 echo "Setting up UV project environment..."
 export UV_PROJECT_ENVIRONMENT=/usr/local
