@@ -602,10 +602,8 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
                 smart_resize = image_smart_resize
                 extra_kwargs = {}
             resized_height, resized_width = smart_resize(
-                # num_frames=num_frames,
                 height=image_height,
                 width=image_width,
-                # temporal_factor=temporal_patch_size,
                 factor=patch_size * merge_size,
                 min_pixels=image_processor.size["shortest_edge"],
                 max_pixels=image_processor.size["longest_edge"],
@@ -703,9 +701,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             self.info.get_image_size_with_most_features())
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts)
-        print("seq_len:", seq_len)
-        print("target_num_frames, target_width, target_height:",
-              target_num_frames, target_width, target_height)
         return {
             "image":
             self._get_dummy_images(width=target_width,
@@ -728,7 +723,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         num_frames: int,
         num_videos: int,
     ) -> list[VideoItem]:
-        print("num_frames, width, height:", num_frames, width, height)
         num_frames = max(num_frames, 2)
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         video_items = []
@@ -813,7 +807,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(
                     video_outputs["pixel_values_videos"])
-            print("video_grid_thw_lst:", video_grid_thw_lst)
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),
@@ -1323,11 +1316,9 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 vision_embeddings = self._process_image_input(multimodal_input)
-                print("image", [x.shape for x in vision_embeddings])
                 multimodal_embeddings += vision_embeddings
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
-                print("video", [x.shape for x in video_embeddings])
                 multimodal_embeddings += video_embeddings
         return multimodal_embeddings
 
