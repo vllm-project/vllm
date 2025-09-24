@@ -31,12 +31,12 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_fp8_block_linear, check_aiter_fp8_linear_support,
+    W8A8BlockFp8LinearOp, check_aiter_fp8_linear_support,
     create_fp8_input_scale, create_fp8_scale_parameter,
-    create_fp8_weight_parameter, get_col_major_tma_aligned_tensor,
-    maybe_post_process_fp8_weight_block, process_fp8_weight_block_strategy,
-    process_fp8_weight_tensor_strategy, requant_weight_ue8m0_inplace,
-    validate_fp8_block_shape)
+    create_fp8_weight_parameter, expert_weight_is_col_major,
+    get_col_major_tma_aligned_tensor, maybe_post_process_fp8_weight_block,
+    process_fp8_weight_block_strategy, process_fp8_weight_tensor_strategy,
+    requant_weight_ue8m0_inplace, validate_fp8_block_shape)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin)
@@ -62,12 +62,6 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
-
-
-def _is_col_major(x: torch.Tensor) -> bool:
-    assert x.dim() == 3
-    b, m, n = x.shape
-    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
 
 
 class Fp8Config(QuantizationConfig):
@@ -240,15 +234,28 @@ class Fp8LinearMethod(LinearMethodBase):
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
-        # Use per-token quantization for better perf if dynamic and cutlass
-        if not self.act_q_static and cutlass_fp8_supported():
-            self.act_q_group_shape = GroupShape.PER_TOKEN
+        if self.weight_block_size:
+            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
         else:
-            self.act_q_group_shape = GroupShape.PER_TENSOR
+            # Use per-token quantization for better perf if dynamic and cutlass
+            if not self.act_q_static and cutlass_fp8_supported():
+                self.act_q_group_shape = GroupShape.PER_TOKEN
+            else:
+                self.act_q_group_shape = GroupShape.PER_TENSOR
 
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.act_q_static,
-            act_quant_group_shape=self.act_q_group_shape)
+        if self.block_quant:
+            assert not self.act_q_static
+            assert self.weight_block_size is not None
+            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+                weight_group_shape=GroupShape(*self.weight_block_size),
+                act_quant_group_shape=self.act_q_group_shape,
+                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+            )
+        else:
+            self.fp8_linear = Fp8LinearOp(
+                act_quant_static=self.act_q_static,
+                act_quant_group_shape=self.act_q_group_shape)
 
     def create_weights(
         self,
@@ -397,12 +404,15 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias)
 
         if self.block_quant:
-            return apply_fp8_block_linear(
-                layer,
+            assert self.weight_block_size is not None
+
+            return self.w8a8_block_fp8_linear.apply(
                 input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                input_scale=layer.input_scale,
                 bias=bias,
-                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-                use_aiter_and_is_supported=self.use_aiter_and_is_supported)
+            )
 
         return self.fp8_linear.apply(input=x,
                                      weight=layer.weight,
@@ -660,10 +670,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # DeepGemm scales need to be transposed and aligned. We try to do
             # it ahead of time for performance reasons.
             if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
-                if _is_col_major(layer.w13_weight_scale_inv):
+                if expert_weight_is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
                         get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv)
-                if _is_col_major(layer.w2_weight_scale_inv):
+                if expert_weight_is_col_major(layer.w2_weight_scale_inv):
                     layer.w2_weight_scale_inv = \
                         get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
 
@@ -811,10 +821,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
             # Ensure column-major TMA alignment expected by DeepGEMM.
-            if _is_col_major(layer.w13_weight_scale_inv):
+            if expert_weight_is_col_major(layer.w13_weight_scale_inv):
                 layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
                     layer.w13_weight_scale_inv)
-            if _is_col_major(layer.w2_weight_scale_inv):
+            if expert_weight_is_col_major(layer.w2_weight_scale_inv):
                 layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
                     layer.w2_weight_scale_inv)
 
