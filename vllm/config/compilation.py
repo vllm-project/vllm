@@ -304,8 +304,8 @@ class CompilationConfig:
     flag cannot be used together with splitting_ops. This may provide
     performance benefits for smaller models.
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=FULL
-    instead.
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=
+    FULL_AND_PIECEWISE instead.
     """
 
     use_inductor_graph_partition: bool = False
