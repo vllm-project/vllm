@@ -1378,7 +1378,7 @@ GELU_NO_MUL: str = activation_without_mul("gelu")
 def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
-    use_mxfp4_w4a4: bool,
+    ocp_mx_scheme: Optional[str],
 ) -> Union[None, torch.dtype, str]:
     """
     Get the quantization type based on the quantization strategy flags.
@@ -1391,8 +1391,12 @@ def _get_config_quant_dtype(
         return torch.float8_e4m3fn
     elif use_int8_w8a8:
         return torch.int8
-    elif use_mxfp4_w4a4:
+    elif ocp_mx_scheme == "w_fp4_a_fp4":
         return "mxfp4"
+    elif ocp_mx_scheme in {"w_fp4_a_fp6_e3m2", "w_fp6_e3m2_a_fp6_e3m2"}:
+        return "mxfp6_e3m2"
+    elif ocp_mx_scheme in {"w_fp4_a_fp6_e2m3", "w_fp6_e2m3_a_fp6_e2m3"}:
+        return "mxfp6_e2m3"
     return None
 
 

@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.utils import cdiv, has_triton_kernels
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme, OCP_MX_SUPPORTED_DTYPES
 
 logger = init_logger(__name__)
 
@@ -30,7 +31,7 @@ def _get_config_dtype_str(
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    use_mxfp4_w4a4: bool = False,
+    ocp_mx_scheme: Optional[str] = None,
 ) -> Optional[str]:
     """
     Return a string used to construct the filename that contains the
@@ -43,8 +44,11 @@ def _get_config_dtype_str(
         return "int8_w8a16"
     elif use_int4_w4a16:
         return "int4_w4a16"
-    elif use_mxfp4_w4a4:
-        return "mxfp4_w4a4"
+    elif ocp_mx_scheme is not None:
+        # The output of this function is passed to `try_get_optimal_moe_config`,
+        # and as we only simulate OCP MX execution in fused_moe for now,
+        # we will NOT look for `*,dtype=w_fp4_a_fp4.json` for now.
+        return None
     elif dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
         # use fp16/bfloat16 configs
@@ -292,8 +296,10 @@ class FusedMoEQuantConfig:
         return (self._a1.dtype is None and self._w1.dtype == "int4")
 
     @property
-    def use_mxfp4_w4a4(self) -> bool:
-        return (self._a1.dtype == "mxfp4" and self._w1.dtype == "mxfp4")
+    def ocp_mx_scheme(self) -> Union[str, None]:
+        ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(self._a1.dtype, self._w1.dtype)
+        ocp_mx_scheme = ocp_mx_scheme.value if ocp_mx_scheme is not None else None
+        return ocp_mx_scheme
 
     @property
     def use_mxfp4_w4a16(self) -> bool:
@@ -313,7 +319,7 @@ class FusedMoEQuantConfig:
             use_fp8_w8a8=self.use_fp8_w8a8,
             use_int8_w8a16=self.use_int8_w8a16,
             use_int4_w4a16=self.use_int4_w4a16,
-            use_mxfp4_w4a4=self.use_mxfp4_w4a4,
+            ocp_mx_scheme=self.ocp_mx_scheme,
             dtype=dtype,
         )
 
@@ -477,8 +483,8 @@ def mxfp4_w4a16_moe_quant_config(
         _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
     )
 
-
-def mxfp4_w4a4_moe_quant_config(
+def ocp_mx_moe_quant_config(
+    quant_dtype: str,
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
     w2_scale: Union[torch.Tensor, "PrecisionConfig"],
     a1_scale: Optional[torch.Tensor] = None,
@@ -490,8 +496,9 @@ def mxfp4_w4a4_moe_quant_config(
     """
     Construct a quant config for mxfp4 activations and mxfp4 weights.
     """
+    assert quant_dtype in OCP_MX_SUPPORTED_DTYPES
     return FusedMoEQuantConfig.make(
-        "mxfp4",
+        quant_dtype=quant_dtype,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a1_scale,
@@ -502,7 +509,7 @@ def mxfp4_w4a4_moe_quant_config(
         per_out_ch_quant=False,
         block_shape=block_shape,
     )
-
+    
 
 def nvfp4_moe_quant_config(
     g1_alphas: torch.Tensor,

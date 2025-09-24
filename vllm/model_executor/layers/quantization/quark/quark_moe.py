@@ -11,9 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig, fp8_w8a8_moe_quant_config,
-    mxfp4_w4a4_moe_quant_config)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig, fp8_w8a8_moe_quant_config, ocp_mx_moe_quant_config
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -506,7 +504,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
-        return mxfp4_w4a4_moe_quant_config(
+        return ocp_mx_moe_quant_config(
+            quant_dtype=self.input_dtype,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             a1_scale=None,

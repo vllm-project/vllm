@@ -231,7 +231,7 @@ def moe_kernel_quantize_input(
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp8":
         return _mxfp8_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif quant_dtype in ["mxfp6_e3m2", "mxfp6_e2m3"]:
+    elif quant_dtype in {"mxfp6_e3m2", "mxfp6_e2m3"}:
         return _mxfp6_quantize(A, quant_dtype, A_scale, per_act_token_quant,
                                block_shape)
     else:
