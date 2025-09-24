@@ -37,7 +37,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                 import fbgemm_gpu  # noqa: F401
             except ImportError as exc:
                 raise ImportError(
-                    "Backend fbgemm  requires fbgemm.f4f4bf16 operator, "
+                    "Backend fbgemm requires fbgemm.f4f4bf16 operator, "
                     "Please install with: pip install fbgemm-gpu-genai"
                 ) from exc
             logger.info_once("Using FGBEMM-GPU-GENAI for FP4")
@@ -161,6 +161,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
+
         mm_args = (x_fp4, layer.weight_packed, x_blockscale,
                    layer.weight_scale, layer.alpha, output_dtype)
         if self.backend == "flashinfer-trtllm":
