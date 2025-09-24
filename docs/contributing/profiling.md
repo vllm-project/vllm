@@ -160,7 +160,7 @@ GUI example:
 
 <img width="1799" alt="Screenshot 2025-03-05 at 11 48 42 AM" src="https://github.com/user-attachments/assets/c7cff1ae-6d6f-477d-a342-bd13c4fc424c" />
 
-## Profile with Unitrace
+## Profile with Unitrace on Intel(R) GPU
 
 If you run your workload on Intel(R) GPUs, you need the unitrace tool for GPU profiling. The tool is open sourced. Please follow the [instructions](https://github.com/intel/pti-gpu/blob/master/tools/unitrace/README.md) to build and install the tool.
 
