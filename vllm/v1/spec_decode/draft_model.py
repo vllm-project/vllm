@@ -25,15 +25,14 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             device=device,
             pass_hidden_states_to_model=False,
             pass_cudagraph_args_to_forward_ctx=True,
+            # The draft model runs one forward pass to prefill
+            # the target_token_ids, and another forward pass for decoding
+            # based on the next_token_ids. I.e. it needs 1 more forward pass.
             one_extra_forward_pass=True,
             # the first draft_token_ids are identical to next_token_ids, so
             # they don't need to be returned as proposed tokens
             drop_first_drafted_tokens=True,
             runner=runner)
-        # The draft model runs one forward pass to prefill
-        # the target_token_ids, and another forward pass for decoding
-        # based on the next_token_ids. I.e. it needs 1 more forward pass.
-        self.num_forward_passes = self.num_speculative_tokens + 1
         self._raise_if_multimodal()
         self._raise_if_mrope()
 
@@ -71,6 +70,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self.input_ids[:num_tokens] = target_token_ids
 
     def load_model(self, target_model: Any) -> None:
+        """Takes target_model to satisfy the type checker."""
         draft_model_config: ModelConfig = (
             self.vllm_config.speculative_config.draft_model_config)
         vllm_config_draft: VllmConfig = replace(

@@ -2604,7 +2604,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.drafter.load_model(self.model)
                 elif self.speculative_config.uses_draft_model():
                     assert isinstance(self.drafter, DraftModelProposer)
-                    self.drafter.load_model()
+                    # Passed something to satisfy the type checker
+                    self.drafter.load_model(None)
             if self.use_aux_hidden_state_outputs:
                 if supports_eagle3(self.model):
                     self.model.set_aux_hidden_state_layers(
