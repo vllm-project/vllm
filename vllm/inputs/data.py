@@ -287,8 +287,8 @@ class EncoderDecoderInputs(TypedDict):
 
 SingletonInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
-A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be 
-passed to [`vllm.sequence.Sequence`][].
+A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be
+passed to [`Sequence`][collections.abc.Sequence].
 """
 
 ProcessorInputs = Union[DecoderOnlyInputs, EncoderDecoderInputs]

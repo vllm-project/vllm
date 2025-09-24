@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import IO, Any, Callable, Optional, Union
 
 import filelock
 import huggingface_hub.constants
@@ -102,7 +102,7 @@ def get_lock(model_name_or_path: Union[str, Path],
 @contextmanager
 def atomic_writer(filepath: Union[str, Path],
                   mode: str = 'w',
-                  encoding: Optional[str] = None):
+                  encoding: Optional[str] = None) -> Generator[IO]:
     """
     Context manager that provides an atomic file writing routine.
 

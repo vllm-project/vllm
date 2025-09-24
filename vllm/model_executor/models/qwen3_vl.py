@@ -1445,14 +1445,18 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 **NOTE**: If mrope is enabled (default setting for Qwen3VL
                 opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-            pixel_values: Pixel values to be fed to a model.
-                `None` if no images are passed.
-            image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in LLM.
-                `None` if no images are passed.
-            pixel_values_videos: Pixel values of videos to be fed to a model.
-                `None` if no videos are passed.
-            video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM.
-                `None` if no videos are passed.
+            intermediate_tensors: Intermediate tensors from previous pipeline
+                stages.
+            inputs_embeds: Pre-computed input embeddings.
+            **kwargs: Additional keyword arguments including:
+                - pixel_values: Pixel values to be fed to a model.
+                    `None` if no images are passed.
+                - image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in
+                    LLM. `None` if no images are passed.
+                - pixel_values_videos: Pixel values of videos to be fed to a
+                    model. `None` if no videos are passed.
+                - video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in
+                    LLM. `None` if no videos are passed.
         """
 
         if intermediate_tensors is not None:
