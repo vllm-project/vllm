@@ -677,27 +677,29 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
-        runner_arch_default = None
-        convert_arch_default = None
+        # Check if the architecture we're wrapping has defaults
+        runner = None
+        convert = "embed"
         if defaults := try_match_architecture_defaults(self.architectures[0]):
-            _, (runner_arch_default, convert_arch_default) = defaults
-        runner: RunnerType = getattr_iter(self, ("runner_type", "runner"),
-                                          runner_arch_default)
-        if runner is not None:
-            self.runner_type = runner
-        convert: ConvertType = getattr_iter(self, ("convert_type", "convert"),
-                                            convert_arch_default)
-        if convert is not None:
-            self.convert_type = convert
-
+            _, (runner, convert) = defaults
+        # If the user didn't specify runner, use architecture default
+        if self.runner == "auto" and runner is not None:
+            self.runner = runner
+        # If the user didn't specify convert, use architecture default
+        if self.runner == "pooling" and self.convert == "auto":
+            logger.info(
+                "Resolved `--convert auto` to `--convert none`. "
+                "Pass the value explicitly to silence this message.")
+            self.convert = "none"
+        # Resolve Transformers backend pooling classes
         if runner == "pooling":
             if convert == "embed":
-                return "TransformersForEmbedding"
+                return "TransformersEmbeddingModel"
             if convert == "classify":
                 return "TransformersForClassification"
             if convert == "reward":
                 return "TransformersForReward"
-
+        # Resolve Transformers backend generate classes
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
