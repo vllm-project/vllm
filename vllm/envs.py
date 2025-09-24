@@ -200,6 +200,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
+    VLLM_NSYS_PROFILE_START_STOP: str = "None"
 
 
 def get_default_cache_root():
@@ -1447,6 +1448,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH":
     lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
+
+    # Nsys profile start and stop
+    "VLLM_NSYS_PROFILE_START_STOP":
+    lambda: os.environ.get("VLLM_NSYS_PROFILE_START_STOP", "None"),
 
 }
 

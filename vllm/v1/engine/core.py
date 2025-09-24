@@ -15,6 +15,7 @@ from logging import DEBUG
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
+import torch.cuda.profiler as profiler
 import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
@@ -137,6 +138,21 @@ class EngineCore:
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = engine_receiver_cache_from_config(
             vllm_config, mm_registry)
+
+        # cudaProfilerApi Support
+        self._perf_iter = 0
+        self._profiler_running = False
+        _perf_env_str = envs.VLLM_NSYS_PROFILE_START_STOP
+        if '-' in _perf_env_str:
+            start, stop = _perf_env_str.strip().split('-')
+            self._start_perf_iter = int(start)
+            self._stop_perf_iter = int(stop)
+            logger.info_once(
+                "NSYS profiling will start at iteration %d and stop at iteration %d",
+                self._start_perf_iter, self._stop_perf_iter)
+        else:
+            self._start_perf_iter = -1
+            self._stop_perf_iter = -1
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -276,6 +292,18 @@ class EngineCore:
         was executed.
         """
 
+        # Profiler Start and Stop
+        if self._perf_iter == self._start_perf_iter:
+            logger.info_once("Starting NSYS profiler")
+            profiler.start()
+            self._profiler_running = True
+
+        if self._perf_iter == self._stop_perf_iter:
+            logger.info_once("Stopping NSYS profiler")
+            profiler.stop()
+            self._profiler_running = False
+        self._perf_iter += 1
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -352,6 +380,11 @@ class EngineCore:
         return engine_core_outputs, model_executed
 
     def shutdown(self):
+        # Check if profiler is running
+        if self._profiler_running:
+            logger.info_once("Stopping NSYS profiler")
+            profiler.stop()
+
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
