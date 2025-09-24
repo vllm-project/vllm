@@ -184,8 +184,9 @@ class EagleProposer:
         builder = (self._get_attention_metadata_builder()
                    if self.attn_metadata_builder is None else
                    self.attn_metadata_builder)
-        attn_metadata = builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata, draft_index=0)
+        attn_metadata = builder.build_for_drafting(  # type: ignore
+            common_attn_metadata=common_attn_metadata,
+            draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -319,7 +320,7 @@ class EagleProposer:
                 exceeds_max_model_len, PADDING_SLOT_ID)
 
             # Rebuild attention metadata
-            attn_metadata = builder.build_for_drafting(
+            attn_metadata = builder.build_for_drafting(  # type: ignore
                 common_attn_metadata=common_attn_metadata,
                 draft_index=token_index + 1)
             for layer_name in self.attn_layer_names:
