@@ -80,6 +80,33 @@ def json_map_leaves(
 @overload
 def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
+    value: Union[_T, dict[str, _T]],
+    /,
+) -> _T:
+    ...
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[_T, _T], _T],
+    value: Union[_T, list[_T]],
+    /,
+) -> _T:
+    ...
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[_T, _T], _T],
+    value: Union[_T, tuple[_T, ...]],
+    /,
+) -> _T:
+    ...
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[_T, _T], _T],
     value: JSONTree[_T],
     /,
 ) -> _T:
@@ -98,7 +125,7 @@ def json_reduce_leaves(
 
 def json_reduce_leaves(
         func: Callable[..., Union[_T, _U]],
-        value: JSONTree[_T],
+        value: Union[dict[str, _T], list[_T], tuple[_T, ...], JSONTree[_T]],
         initial: _U = cast(_U, ...),  # noqa: B008
         /,
 ) -> Union[_T, _U]:

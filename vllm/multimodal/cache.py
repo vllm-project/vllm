@@ -116,11 +116,8 @@ class MultiModalCache:
         *,
         debug: bool = False,
     ) -> int:
-        size = cast(
-            int,
-            json_reduce_leaves(operator.add,
-                               json_map_leaves(cls.get_leaf_size, value)),
-        )
+        size = json_reduce_leaves(operator.add,
+                                  json_map_leaves(cls.get_leaf_size, value))
 
         if debug:
             leaf_count = json_count_leaves(value)
