@@ -19,24 +19,26 @@ if(NOT DEEPGEMM_ARCHS)
     return()
 endif()
 
+# Support customizing DeepGEMM git reference
+# Can be set as environment variable or cmake argument
+# Environment variable takes precedence
+if (DEFINED ENV{DEEPGEMM_GIT_REF})
+  set(DEEPGEMM_GIT_REF $ENV{DEEPGEMM_GIT_REF})
+endif()
+
+# Use default from tools/install_deepgemm.sh if not specified
+if(NOT DEFINED DEEPGEMM_GIT_REF)
+    set(DEEPGEMM_GIT_REF "ea9c5d9270226c5dd7a577c212e9ea385f6ef048")
+endif()
+
 message(STATUS "Installing DeepGEMM using tools/install_deepgemm.sh for archs: ${DEEPGEMM_ARCHS}")
+message(STATUS "DeepGEMM git reference: ${DEEPGEMM_GIT_REF}")
 
-# Create a timestamp file to track when DeepGEMM was last installed
-set(DEEPGEMM_INSTALL_STAMP "${CMAKE_BINARY_DIR}/deepgemm_install.stamp")
-
-# Create a custom target that runs the install script
-add_custom_command(
-    OUTPUT ${DEEPGEMM_INSTALL_STAMP}
+# Create the _deepgemm_C target that runs the install script with custom git ref
+add_custom_target(_deepgemm_C
     COMMAND ${CMAKE_COMMAND} -E echo "Installing DeepGEMM using tools/install_deepgemm.sh..."
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/install_deepgemm.sh
-    COMMAND ${CMAKE_COMMAND} -E touch ${DEEPGEMM_INSTALL_STAMP}
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tools/install_deepgemm.sh --ref ${DEEPGEMM_GIT_REF}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Installing DeepGEMM Python package"
     VERBATIM
-)
-
-# Create the _deepgemm_C target that depends on the install step
-add_custom_target(_deepgemm_C
-    DEPENDS ${DEEPGEMM_INSTALL_STAMP}
-    COMMENT "DeepGEMM installation target"
 )
