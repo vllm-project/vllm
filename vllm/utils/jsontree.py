@@ -4,7 +4,7 @@
 
 from collections.abc import Iterable
 from functools import reduce
-from typing import Callable, TypeVar, Union, overload
+from typing import Callable, TypeVar, Union, cast, overload
 
 _T = TypeVar("_T")
 _U = TypeVar("_U")
@@ -97,10 +97,10 @@ def json_reduce_leaves(
 
 
 def json_reduce_leaves(
-    func: Callable[..., Union[_T, _U]],
-    value: JSONTree[_T],
-    initial: _U = ...,  # type: ignore[assignment]
-    /,
+        func: Callable[..., Union[_T, _U]],
+        value: JSONTree[_T],
+        initial: _U = cast(_U, ...),  # noqa: B008
+        /,
 ) -> Union[_T, _U]:
     """
     Apply a function of two arguments cumulatively to each leaf in a
