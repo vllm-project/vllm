@@ -144,7 +144,9 @@ class CustomAllreduce:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
                 " more than two PCIe-only GPUs. To silence this warning, "
-                "specify disable_custom_all_reduce=True explicitly.")
+                "specify disable_custom_all_reduce=True explicitly. To bypass "
+                "this check, set the environment variable "
+                "VLLM_SKIP_INTERCONNECT_CHECK=1.")
             return
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
