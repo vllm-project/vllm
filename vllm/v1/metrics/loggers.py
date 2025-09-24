@@ -124,14 +124,19 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_generation_throughput = generation_throughput
         self.last_prompt_throughput = prompt_throughput
 
-        # Format and print output.
+        # Get batch statistics directly from scheduler_stats
+        avg_prefill_bs = scheduler_stats.get_avg_prefill_batch_size()
+        avg_decode_bs = scheduler_stats.get_avg_decode_batch_size()
+
+        # Log with batch size information
         log_fn(
             "Engine %03d: "
             "Avg prompt throughput: %.1f tokens/s, "
             "Avg generation throughput: %.1f tokens/s, "
             "Running: %d reqs, Waiting: %d reqs, "
             "GPU KV cache usage: %.1f%%, "
-            "Prefix cache hit rate: %.1f%%",
+            "Prefix cache hit rate: %.1f%%, "
+            "Avg prefill BS: %.1f, Avg decode BS: %.1f.",
             self.engine_index,
             prompt_throughput,
             generation_throughput,
@@ -139,6 +144,8 @@ class LoggingStatLogger(StatLoggerBase):
             scheduler_stats.num_waiting_reqs,
             scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
+            avg_prefill_bs,
+            avg_decode_bs,
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
         self.kv_transfer_logging.log(log_fn=log_fn)

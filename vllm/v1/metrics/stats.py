@@ -47,6 +47,35 @@ class SchedulerStats:
 
     num_corrupted_reqs: int = 0
 
+    # Enhanced batch statistics for decode analysis
+    prefill_batch_sizes: list[int] = field(default_factory=list)
+    decode_batch_sizes: list[int] = field(default_factory=list)
+    decode_tokens_generated: int = 0
+
+    def get_avg_prefill_batch_size(self) -> float:
+        """Get average prefill batch size."""
+        return (sum(self.prefill_batch_sizes) / len(self.prefill_batch_sizes)
+                if self.prefill_batch_sizes else 0.0)
+
+    def get_avg_decode_batch_size(self) -> float:
+        """Get average decode batch size."""
+        return (sum(self.decode_batch_sizes) / len(self.decode_batch_sizes)
+                if self.decode_batch_sizes else 0.0)
+
+    def update_from_batch_stats(self, batch_stats: dict[str, list[int] | float]) -> None:
+        """Update scheduler stats from GPU model runner batch statistics."""
+        if not batch_stats:
+            return
+
+        # Extend our lists with the new batch sizes
+        if 'prefill_batch_sizes' in batch_stats:
+            self.prefill_batch_sizes.extend(batch_stats['prefill_batch_sizes'])
+        if 'decode_batch_sizes' in batch_stats:
+            self.decode_batch_sizes.extend(batch_stats['decode_batch_sizes'])
+        if 'decode_tokens_generated' in batch_stats:
+            self.decode_tokens_generated += batch_stats[
+                'decode_tokens_generated']
+
 
 @dataclass
 class LoRAStats:
@@ -105,6 +134,14 @@ class IterationStats:
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
 
+        # Enhanced decode batch statistics (similar to gen_ai layer)
+        self.decode_batch_sizes: list[int] = [
+        ]  # Track batch sizes during decode iterations
+        self.decode_iterations: int = 0  # Total number of decode iterations
+        self.decode_tokens_generated: int = 0  # Total tokens generated during decode
+        self.prefill_batch_sizes: list[int] = [
+        ]  # Track batch sizes during prefill
+
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start
@@ -138,6 +175,16 @@ class IterationStats:
             self.inter_token_latencies_iter.append(itl)
 
         req_stats.last_token_ts = engine_core_timestamp
+
+    def get_avg_decode_batch_size(self) -> float:
+        """Get average decode batch size (similar to gen_ai's decode_batches_new / decode_num_decode)."""
+        return (sum(self.decode_batch_sizes) / len(self.decode_batch_sizes)
+                if self.decode_batch_sizes else 0.0)
+
+    def get_avg_prefill_batch_size(self) -> float:
+        """Get average prefill batch size."""
+        return (sum(self.prefill_batch_sizes) / len(self.prefill_batch_sizes)
+                if self.prefill_batch_sizes else 0.0)
 
     def update_from_events(self, req_id: str, events: list["EngineCoreEvent"],
                            is_prefilling: bool, req_stats: RequestStateStats,
