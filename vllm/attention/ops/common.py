@@ -18,12 +18,14 @@ def _correct_attn_cp_out_kernel(outputs_ptr, new_output_ptr, lses_ptr,
     final attention output.
 
     Args:
-        output: [ B, H, D ]
-        lses   : [ N, B, H ]
-        cp, batch, q_heads, v_head_dim
-    Return:
-        output: [ B, H, D ]
-        lse   : [ B, H ]
+        outputs_ptr (triton.PointerType):
+            Pointer to input tensor of shape [ B, H, D ]
+        lses_ptr (triton.PointerType):
+            Pointer to input tensor of shape [ N, B, H ]
+        new_output_ptr (triton.PointerType):
+            Pointer to output tensor of shape [ B, H, D ]
+        vlse_ptr (triton.PointerType):
+            Pointer to output tensor of shape [ B, H ]
     """
     batch_idx = tl.program_id(axis=0).to(tl.int64)
     head_idx = tl.program_id(axis=1).to(tl.int64)
@@ -81,19 +83,19 @@ class CPTritonContext:
             self.inner_kernel[grid](*regular_args)
 
 
-def correct_attn_out(out: torch.Tensor, lses: torch.Tensor, cp_rank: int,
-                     ctx: CPTritonContext):
-    """
-    Apply the all-gathered lses to correct each local rank's attention
-    output. we still need perform a cross-rank reduction to obtain the
-    final attention output.
+def correct_attn_out(
+        out: torch.Tensor, lses: torch.Tensor, cp_rank: int,
+        ctx: CPTritonContext) -> tuple[torch.Tensor, torch.Tensor]:
+    """Correct the attention output using the all-gathered lses.
 
     Args:
-        output: [ B, H, D ]
-        lses   : [ N, B, H ]
-    Return:
-        output: [ B, H, D ]
-        lse   : [ B, H ]
+        out: Tensor of shape [ B, H, D ]
+        lses: Tensor of shape [ N, B, H ]
+        cp_rank: Current rank in the context-parallel group
+        ctx: Triton context to avoid recompilation
+
+    Returns:
+        Tuple of (out, lse) with corrected attention and final log-sum-exp.
     """
     if ctx is None:
         ctx = CPTritonContext()

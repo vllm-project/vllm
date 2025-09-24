@@ -4,7 +4,7 @@ vLLM provides first-class support for generative models, which covers most of LL
 
 In vLLM, generative models implement the[VllmModelForTextGeneration][vllm.model_executor.models.VllmModelForTextGeneration] interface.
 Based on the final hidden states of the input, these models output log probabilities of the tokens to generate,
-which are then passed through [Sampler][vllm.model_executor.layers.sampler.Sampler] to obtain the final text.
+which are then passed through [Sampler][vllm.v1.sample.sampler.Sampler] to obtain the final text.
 
 ## Configuration
 

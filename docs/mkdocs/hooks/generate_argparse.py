@@ -32,8 +32,9 @@ def auto_mock(module, attr, max_mocks=50):
     for _ in range(max_mocks):
         try:
             # First treat attr as an attr, then as a submodule
-            return getattr(importlib.import_module(module), attr,
-                           importlib.import_module(f"{module}.{attr}"))
+            with patch("importlib.metadata.version", return_value="0.0.0"):
+                return getattr(importlib.import_module(module), attr,
+                               importlib.import_module(f"{module}.{attr}"))
         except importlib.metadata.PackageNotFoundError as e:
             raise e
         except ModuleNotFoundError as e:

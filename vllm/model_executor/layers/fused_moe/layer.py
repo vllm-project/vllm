@@ -57,7 +57,7 @@ else:
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
     FusedMoEPrepareAndFinalize = None  # type: ignore
 
-    def eplb_map_to_physical_and_record(
+    def _eplb_map_to_physical_and_record(
             topk_ids: torch.Tensor, expert_load_view: torch.Tensor,
             logical_to_physical_map: torch.Tensor,
             logical_replica_count: torch.Tensor,
@@ -65,6 +65,7 @@ else:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
 
+    eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
 
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -807,12 +808,11 @@ def maybe_roundup_hidden_size(
     if necessary.
     
     Args:
-        hidden_size(int): Layer hidden-size
+        hidden_size: Layer hidden-size
         act_dtype: Data type of the layer activations.
-        quant_config(FusedMoEQuantConfig): Fused MoE quantization configuration.
-        moe_parallel_config(FusedMoEParallelConfig): Fused MoE parallelization
-            strategy configuration.
-    
+        quant_config: Fused MoE quantization configuration.
+        moe_parallel_config: Fused MoE parallelization strategy configuration.
+
     Return:
         Rounded up hidden_size if rounding up is required based on the configs.
         Original hidden size otherwise.
