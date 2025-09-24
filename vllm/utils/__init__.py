@@ -1803,6 +1803,8 @@ class FlexibleArgumentParser(ArgumentParser):
 
         # Handle keyword search of the args
         if (search_keyword := self._search_keyword) is not None:
+            # Normalise the search keyword
+            search_keyword = search_keyword.lower().replace("_", "-")
             # Return full help if searching for 'all'
             if search_keyword == 'all':
                 self.epilog = self._json_tip
