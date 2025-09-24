@@ -48,11 +48,11 @@ class LoRALayerWeights:
 
     @property
     def input_dim(self) -> int:
-        return self.lora_a.shape[0]
+        return self.lora_a.shape[1]
 
     @property
     def output_dim(self) -> int:
-        return self.lora_b.shape[1]
+        return self.lora_b.shape[0]
 
     @property
     def is_packed(self) -> bool:
@@ -86,11 +86,11 @@ class LoRALayerWeights:
             embeddings_tensor_dim: Optional[int] = None,
             bias_enabled: Optional[bool] = False) -> "LoRALayerWeights":
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
-        lora_a = torch.zeros([input_dim, rank],
+        lora_a = torch.zeros([rank, input_dim],
                              dtype=dtype,
                              device=device,
                              pin_memory=pin_memory)
-        lora_b = torch.zeros([rank, output_dim],
+        lora_b = torch.zeros([output_dim, rank],
                              dtype=dtype,
                              device=device,
                              pin_memory=pin_memory)

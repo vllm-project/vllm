@@ -11,12 +11,35 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
+from vllm.utils import round_up
+from vllm.v1.worker.ubatching import (
+    dbo_current_ubatch_id, dbo_enabled, dbo_switch_to_comm,
+    dbo_switch_to_compute, dbo_switch_to_compute_sync,
+    dbo_yield_and_switch_from_comm_to_compute,
+    dbo_yield_and_switch_from_compute_to_comm)
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
     Prepare/Finalize using DeepEP High-Throughput kernels.
     """
+
+    @staticmethod
+    def maybe_roundup_layer_hidden_size(hidden_size: int,
+                                        dtype: torch.dtype) -> int:
+        # Round up hidden size so it is compatible with DeepEP High Throughput
+        # kernels.
+        # DeepEP intranode kernels make copies in units of,
+        # 32(warp-size) int4 elements. Round up hidden size to respect this.
+        # For example, an input hidden size of 2880 with dtype torch.bfloat16
+        # will be rounded up to 3072.
+        hidden_size_bytes = hidden_size * dtype.itemsize
+        xfer_atom_size = 512  # 32 * 16 (size(int4))
+        if hidden_size_bytes % xfer_atom_size == 0:
+            return hidden_size
+
+        hidden_size_bytes = round_up(hidden_size_bytes, xfer_atom_size)
+        return hidden_size_bytes // dtype.itemsize
 
     def __init__(self, buffer: deep_ep.Buffer, num_dispatchers: int,
                  dp_size: int, rank_expert_offset: int):
@@ -28,9 +51,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.async_prepare = True
 
         # The dispatch function returns a handle that the combine function
-        # requires. We store the handle here so it is available to the
-        # combine function.
-        self.handle = None
+        # requires. Under DBO microbatching we must track one handle per
+        # micro-batch to avoid races between threads.
+        self.handles = [None, None]
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
@@ -71,6 +94,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         has_scales = token_scales is not None
 
+        # We yield before launching the dispatch kernel since the dispatch
+        # kernel will block the CPU so we want to queue up all the compute
+        # for the other ubatch before the dispatch kernel starts.
+        dbo_yield_and_switch_from_compute_to_comm()
+
         (num_tokens_per_rank, num_tokens_per_rdma_rank,
          dispatch_expert_num_tokens, is_token_in_rank,
          event) = self.buffer.get_dispatch_layout(
@@ -86,7 +114,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         (
             token_data, expert_topk_ids, expert_topk_weights,
-            expert_num_tokens_per_expert_list, self.handle, event
+            expert_num_tokens_per_expert_list, handle, event
         ) = self.buffer.dispatch(
             x=token_data,
             handle=None,
@@ -101,8 +129,14 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_alignment=1,
             config=self._get_dispatch_config(),
             previous_event=None,
-            async_finish=self.async_prepare,
+            async_finish=self.async_prepare and not dbo_enabled(),
             allocate_on_comm_stream=False)
+
+        # record the handle for this ubatch
+        a2a_idx = dbo_current_ubatch_id()
+        self.handles[a2a_idx] = handle
+
+        dbo_switch_to_compute_sync()
 
         return lambda: self._receiver(
             event,
@@ -128,7 +162,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1_scale: Optional[torch.Tensor],
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        if self.async_prepare:
+        if event.event is not None:
             event.current_stream_wait()
 
         if has_scales:
@@ -189,7 +223,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[Callable, mk.ReceiverType]:
+    ) -> mk.ReceiverType:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -215,14 +249,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = quant_config.a1_scale
 
-        return (lambda *args: None,
-                self._do_dispatch(tokens=a1q,
-                                  token_scales=a1q_scale,
-                                  rank_topk_ids=topk_ids,
-                                  rank_topk_weights=topk_weights,
-                                  num_experts=num_experts,
-                                  a1_scale=a1_post_scale,
-                                  quant_config=quant_config))
+        return self._do_dispatch(tokens=a1q,
+                                 token_scales=a1q_scale,
+                                 rank_topk_ids=topk_ids,
+                                 rank_topk_weights=topk_weights,
+                                 num_experts=num_experts,
+                                 a1_scale=a1_post_scale,
+                                 quant_config=quant_config)
 
     def prepare(
         self,
@@ -234,10 +267,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        (_, receiver) = self.prepare_async(a1, topk_weights, topk_ids,
-                                           num_experts, expert_map,
-                                           apply_router_weight_on_input,
-                                           quant_config)
+        receiver = self.prepare_async(a1, topk_weights, topk_ids, num_experts,
+                                      expert_map, apply_router_weight_on_input,
+                                      quant_config)
         return receiver()
 
     def _finalize(
@@ -251,7 +283,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         do_async: bool,
     ) -> Optional[Callable]:
 
-        assert self.handle is not None
+        a2a_idx = dbo_current_ubatch_id()
+        handle = self.handles[a2a_idx]
+        assert handle is not None
 
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
@@ -265,25 +299,35 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 topk_ids=topk_ids,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
-
+        dbo_yield_and_switch_from_compute_to_comm()
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,
-            handle=self.handle,
+            handle=handle,
             topk_weights=None,
             config=self._get_combine_config(),
             previous_event=None,
-            async_finish=do_async,
+            async_finish=do_async and not dbo_enabled(),
             allocate_on_comm_stream=False)
+
+        dbo_switch_to_compute()
 
         if do_async:
 
             def _receiver():
-                event.current_stream_wait()
+                if event.event is not None:
+                    event.current_stream_wait()
+                dbo_switch_to_comm()
                 # Respect inplace outputs.
                 output.copy_(combined_x, non_blocking=True)
 
-            return lambda: _receiver()
+                # TODO(lucas): refactor the modular kernel so this will be
+                # handled there
+                dbo_yield_and_switch_from_comm_to_compute()
+
+            return _receiver
         else:
+            # TODO(lucas): support this case with the refactored modular kernel
+            assert not dbo_enabled()
             # Respect inplace outputs.
             output.copy_(combined_x, non_blocking=True)
             return None

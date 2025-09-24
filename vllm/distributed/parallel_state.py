@@ -149,29 +149,22 @@ def all_gather_fake(tensor: torch.Tensor, dim: int, world_size: int,
 
 
 if supports_custom_op():
-    from vllm.platforms import current_platform
     direct_register_custom_op(
         op_name="all_reduce",
         op_func=all_reduce,
-        mutates_args=[],
         fake_impl=all_reduce_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
         op_name="reduce_scatter",
         op_func=reduce_scatter,
-        mutates_args=[],
         fake_impl=reduce_scatter_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
         op_name="all_gather",
         op_func=all_gather,
-        mutates_args=[],
         fake_impl=all_gather_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
 
@@ -1032,7 +1025,9 @@ def init_distributed_environment(world_size: int = -1,
         distributed_init_method, backend)
     from vllm.config import get_current_vllm_config
     config = get_current_vllm_config()
-    if config is not None and config.parallel_config.data_parallel_size > 1:
+    if config is not None and config.parallel_config.data_parallel_size > 1 \
+        and config.parallel_config.distributed_executor_backend \
+        != "external_launcher":
         parallel_config = config.parallel_config
         # adjust to take into account data parallelism
         # offset the rank by the data parallel rank

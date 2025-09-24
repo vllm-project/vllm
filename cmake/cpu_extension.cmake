@@ -258,7 +258,8 @@ set(VLLM_EXT_SRC
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
-    "csrc/cpu/torch_bindings.cpp")
+    "csrc/cpu/torch_bindings.cpp"
+    "csrc/moe/dynamic_4bit_int_moe_cpu.cpp")
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC

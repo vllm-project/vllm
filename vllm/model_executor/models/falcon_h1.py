@@ -8,21 +8,17 @@ import torch
 from torch import nn
 from transformers import FalconH1Config
 
-from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.mamba2_metadata import (
-    Mamba2Metadata, prepare_mamba2_metadata)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
@@ -31,8 +27,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
-                                                    MambaCacheParams)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
@@ -179,16 +173,12 @@ class FalconH1SSMDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-        mamba_cache_params: MambaCacheParams,
-        mamba2_metadata: Mamba2Metadata,
         **kwargs,
     ):
         output = torch.empty_like(hidden_states)
         self.mamba(
             hidden_states,
             output,
-            mamba_cache_params,
-            mamba2_metadata=mamba2_metadata,
             mup_vector=self.mup_vector,
         )
         return output, residual
@@ -364,8 +354,6 @@ class FalconH1ParallelHybrid(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        mamba_cache_params: MambaCacheParams,
-        mamba2_metadata: Mamba2Metadata,
         **kwargs,
     ):
         residual = hidden_states
@@ -382,12 +370,10 @@ class FalconH1ParallelHybrid(nn.Module):
 
         # Process input through the SSM branch.
         # FalconH1SSMDecoderLayer expects hidden_states, attn_metadata,
-        # residual, mamba_cache_params, and sequence_idx.
+        # residual, and sequence_idx.
         ssm_hidden, _ = self.mamba(
             hidden_states=hidden_states * self.ssm_in_multiplier,
             residual=residual,
-            mamba_cache_params=mamba_cache_params,
-            mamba2_metadata=mamba2_metadata,
             **kwargs,
         )
         # Sum the outputs from both branches.
@@ -464,24 +450,9 @@ class FalconH1Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        mamba_cache_params: MambaCacheParams,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
-        # pass a sequence index tensor, that is required for
-        # proper continuous batching computation including
-        # chunked prefill
-        attn_metadata = get_forward_context().attn_metadata
-
-        if not envs.VLLM_USE_V1:
-            mamba2_metadata = prepare_mamba2_metadata(
-                chunk_size=self.config.mamba_chunk_size,
-                attn_metadata=attn_metadata,
-            )
-        else:
-            # v1 get mamba2_metadata from forward_context
-            mamba2_metadata = None
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -495,14 +466,9 @@ class FalconH1Model(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            layer_mamba_cache_params = None
-            if mamba_cache_params:
-                layer_mamba_cache_params = mamba_cache_params.at_layer_idx(i)
             hidden_states = layer(
                 positions=positions,
                 hidden_states=hidden_states,
-                mamba_cache_params=layer_mamba_cache_params,
-                mamba2_metadata=mamba2_metadata,
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -541,13 +507,11 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-        use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
             vllm_config: vLLM config
-            use_v1: Get shapes for V1 (or V0)
 
         Returns:
             Tuple containing:
@@ -570,7 +534,6 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             head_dim=hf_config.mamba_d_head,
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
-            use_v1=use_v1,
         )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -592,7 +555,6 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                                    prefix=maybe_prefix(prefix, "model"))
         self.tie_word_embeddings = config.tie_word_embeddings
         self.unpadded_vocab_size = config.vocab_size
-        self.mamba_cache: Optional[MambaCacheManager] = None
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         if get_pp_group().is_last_rank:
@@ -637,39 +599,14 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         **kwargs,
     ):
 
-        mamba_cache_params = None
-        if not envs.VLLM_USE_V1:
-            if self.mamba_cache is None:
-                mamba_state_shape = \
-                    self.get_mamba_state_shape_from_config(
-                        self.vllm_config, use_v1=False)
-                mamba_state_dtype = \
-                    self.get_mamba_state_dtype_from_config(
-                    self.vllm_config)
-                self.mamba_cache = MambaCacheManager(
-                    self.vllm_config,
-                    self.config.num_hidden_layers,
-                    *mamba_state_shape,
-                    *mamba_state_dtype,
-                )
-            mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
-
         hidden_states = self.model(
             input_ids,
             positions,
-            mamba_cache_params,
             intermediate_tensors,
             inputs_embeds,
         )
 
         return hidden_states
-
-    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.mamba_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs)
-
-    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
-        return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def compute_logits(
         self,

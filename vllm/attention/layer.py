@@ -115,12 +115,10 @@ class Attention(nn.Module, AttentionLayerBase):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
-            is_attention_free = cache_config.is_attention_free
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
             block_size = 16
-            is_attention_free = False
             calculate_kv_scales = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
@@ -185,7 +183,6 @@ class Attention(nn.Module, AttentionLayerBase):
                                                  dtype,
                                                  kv_cache_dtype,
                                                  block_size,
-                                                 is_attention_free,
                                                  use_mla=use_mla,
                                                  has_sink=self.has_sink)
         else:
@@ -578,9 +575,7 @@ def unified_attention_fake(
 direct_register_custom_op(
     op_name="unified_attention",
     op_func=unified_attention,
-    mutates_args=[],
     fake_impl=unified_attention_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=tag_cudagraph_unsafe,
 )
 
@@ -631,6 +626,5 @@ direct_register_custom_op(
     op_func=unified_attention_with_output,
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=tag_cudagraph_unsafe,
 )

@@ -50,7 +50,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.multimodal.utils import run_dp_sharded_vision_model
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -58,6 +57,7 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llama4 import Llama4ForCausalLM
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
+from .vision import run_dp_sharded_vision_model
 
 
 class Llama4ImagePatchInputs(TensorSchema):
