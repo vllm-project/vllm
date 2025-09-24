@@ -50,13 +50,13 @@ def from_builtin_tool_to_tag(tool: str) -> list[dict]:
     return tag
 
 
-def tag_with_builtin_funcs(tag: dict, builtin_tool_list: list[str]) -> str:
-    new_tag = no_func_reaonsing_tag
+def tag_with_builtin_funcs(builtin_tool_list: list[str]) -> dict:
+    import copy
+    new_tag = copy.deepcopy(no_func_reaonsing_tag)
     new_tag["format"]["triggers"].append("<|channel|>commentary to=")
 
     for tool in builtin_tool_list:
-        new_tag["format"]["tags"].extend( \
-            from_builtin_tool_to_tag(tool))
+        new_tag["format"]["tags"].extend(from_builtin_tool_to_tag(tool))
     return new_tag
 
 
