@@ -157,7 +157,7 @@ class EngineCore:
                 start, stop = map(int, parts)
                 if start < 0 or stop <= start:
                     raise ValueError("Start must be non-negative and stop"
-                                     "must be greater than start.")
+                                     " must be greater than start.")
                 self._start_perf_iter = start
                 self._stop_perf_iter = stop
                 logger.info_once(
