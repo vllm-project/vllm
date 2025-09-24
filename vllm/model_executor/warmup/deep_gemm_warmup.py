@@ -27,11 +27,13 @@ from vllm.utils.deep_gemm import fp8_gemm_nt, m_grouped_fp8_gemm_nt_contiguous
 
 
 def _get_deep_gemm_cache_dir() -> str:
-    """Get the DeepGEMM cache directory path."""
+    """Get the DeepGEMM cache directory path.
+    Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee15a82dd5fad5cd9beaa393c1f755e6b55/README.md?plain=1#L132
+    """
     cache_env = os.environ.get('DG_JIT_CACHE_DIR')
     if cache_env:
         return cache_env
-    return os.path.join(envs.VLLM_CACHE_ROOT, "deep_gemm")
+    return os.path.expanduser("~/.cache/deep_gemm")
 
 
 def _should_skip_warmup() -> bool:
