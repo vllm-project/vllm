@@ -83,8 +83,9 @@ class CPTritonContext:
             self.inner_kernel[grid](*regular_args)
 
 
-def correct_attn_out(out: torch.Tensor, lses: torch.Tensor, cp_rank: int,
-                     ctx: CPTritonContext):
+def correct_attn_out(
+        out: torch.Tensor, lses: torch.Tensor, cp_rank: int,
+        ctx: CPTritonContext) -> tuple[torch.Tensor, torch.Tensor]:
     """Correct the attention output using the all-gathered lses.
 
     Args:
