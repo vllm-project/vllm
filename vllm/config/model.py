@@ -20,6 +20,7 @@ import vllm.envs as envs
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.pooler import PoolerConfig
+from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -43,7 +44,6 @@ if TYPE_CHECKING:
     import vllm.model_executor.models as me_models
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
-    from vllm.config.scheduler import RunnerType
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.v1.sample.logits_processor import LogitsProcessor
 else:
@@ -55,7 +55,6 @@ else:
                            "vllm.model_executor.models")
     LoadConfig = Any
     ParallelConfig = Any
-    RunnerType = Any
     QuantizationMethods = Any
     LogitsProcessor = Any
 
