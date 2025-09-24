@@ -605,7 +605,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def forward(
         self,
         q: torch.Tensor,
-        k_c_normed: torch.Tensor,
+        kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: Optional[torch.Size] = None,
     ) -> torch.Tensor:
@@ -622,14 +622,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                                      device=q.device)
                 self.impl.forward(self,
                                   q,
-                                  k_c_normed,
+                                  kv_c_normed,
                                   k_pe,
                                   self_kv_cache,
                                   attn_metadata,
                                   output=output)
                 return output
             else:
-                return self.impl.forward(self, q, k_c_normed, k_pe,
+                return self.impl.forward(self, q, kv_c_normed, k_pe,
                                          self_kv_cache, attn_metadata)
         else:
             if self.attn_backend.accept_output_buffer:
@@ -638,7 +638,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                                      device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
                     q,
-                    k_c_normed,
+                    kv_c_normed,
                     k_pe,
                     output,
                     self.layer_name,
@@ -647,7 +647,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 return torch.ops.vllm.unified_mla_attention(
                     q,
-                    k_c_normed,
+                    kv_c_normed,
                     k_pe,
                     self.layer_name,
                 )
@@ -813,7 +813,7 @@ direct_register_custom_op(
 
 def unified_mla_attention(
     q: torch.Tensor,
-    k_c_normed: torch.Tensor,
+    kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
@@ -825,7 +825,7 @@ def unified_mla_attention(
         attn_metadata = attn_metadata[layer_name]
     self: MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    output = self.impl.forward(self, q, k_c_normed, k_pe, kv_cache,
+    output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache,
                                attn_metadata)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
@@ -834,7 +834,7 @@ def unified_mla_attention(
 
 def unified_mla_attention_fake(
     q: torch.Tensor,
-    k_c_normed: torch.Tensor,
+    kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
@@ -852,7 +852,7 @@ direct_register_custom_op(
 
 def unified_mla_attention_with_output(
     q: torch.Tensor,
-    k_c_normed: torch.Tensor,
+    kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
@@ -868,7 +868,7 @@ def unified_mla_attention_with_output(
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(self,
                       q,
-                      k_c_normed,
+                      kv_c_normed,
                       k_pe,
                       kv_cache,
                       attn_metadata,
@@ -881,7 +881,7 @@ def unified_mla_attention_with_output(
 
 def unified_mla_attention_with_output_fake(
     q: torch.Tensor,
-    k_c_normed: torch.Tensor,
+    kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
