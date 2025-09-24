@@ -879,9 +879,9 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/executor/
+  - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
-  - vllm/worker/worker_base.py
   - tests/compile/test_basic_correctness.py
   - tests/compile/test_wrapper.py
   - tests/distributed/
