@@ -119,7 +119,7 @@ class CpuGpuBuffer:
                                pin_memory=pin_memory)
         self.gpu = torch.empty_like(self.cpu, device=device)
         # Many callers (e.g. dummy warmup paths) assume the buffers start
-        # zeroed. We still allocate with empty() for performance, but 
+        # zeroed. We still allocate with empty() for performance, but
         # sanitize here to preserve the previous semantics.
         self.cpu.zero_()
         self.gpu.zero_()
