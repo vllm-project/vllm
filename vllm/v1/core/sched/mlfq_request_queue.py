@@ -192,16 +192,12 @@ class MLFQRequestQueue:
         new_level = min(attrs.current_level + self.eta, self.num_levels - 1)
         
         if new_level != attrs.current_level:
-            # Remove from current level
-            try:
-                self.queues[attrs.current_level].remove(request)
-            except ValueError:
-                pass
-            
-            # Add to new level
+            # A request being demoted has just been scheduled, so it is running
+            # and not in any of the waiting queues. We just need to update its
+            # priority level. If it gets preempted later, it will be added to
+            # the correct queue based on its new level.
             attrs.current_level = new_level
             attrs.attained_iterations = 0  # Reset attained iterations
-            self.queues[new_level].append(request)
     
     def _promote_request(self, request: Request, attrs: MLFQJobAttributes) -> None:
         """Promote a starved request to highest priority."""
