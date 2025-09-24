@@ -32,8 +32,7 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.runai_utils import (ObjectStorageModel,
                                                  is_runai_obj_uri)
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
-                        LazyLoader, common_broadcastable_dtype)
+from vllm.utils import LayerBlockType, LazyLoader, common_broadcastable_dtype
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -700,11 +699,12 @@ class ModelConfig:
             model: Model name or path
             tokenizer: Tokenizer name or path
         """
+
         if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
             return
 
         if is_runai_obj_uri(model):
-            object_storage_model = ObjectStorageModel()
+            object_storage_model = ObjectStorageModel(url=model)
             object_storage_model.pull_files(
                 model, allow_pattern=["*.model", "*.py", "*.json"])
             self.model_weights = model
@@ -723,7 +723,7 @@ class ModelConfig:
 
         # Only download tokenizer if needed and not already handled
         if is_runai_obj_uri(tokenizer):
-            object_storage_tokenizer = ObjectStorageModel()
+            object_storage_tokenizer = ObjectStorageModel(url=tokenizer)
             object_storage_tokenizer.pull_files(model,
                                                 ignore_pattern=[
                                                     "*.pt", "*.safetensors",
@@ -1004,6 +1004,7 @@ class ModelConfig:
                     self.quantization = quantization_override
                     break
 
+            quant_method = quant_method if quant_method != "" else None
             # Verify quantization configurations.
             if self.quantization is None:
                 self.quantization = quant_method
@@ -1102,10 +1103,6 @@ class ModelConfig:
                         self.hf_config.dual_chunk_attention_config:
                     self.hf_config.dual_chunk_attention_config[
                         "sparse_attention_enabled"] = True
-
-            if envs.VLLM_ATTENTION_BACKEND != STR_DUAL_CHUNK_FLASH_ATTN_VAL:
-                raise ValueError("please set VLLM_ATTENTION_BACKEND to "
-                                 f"{STR_DUAL_CHUNK_FLASH_ATTN_VAL}")
 
     def verify_with_parallel_config(
         self,

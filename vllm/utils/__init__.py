@@ -88,64 +88,6 @@ DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
-# Exception strings for non-implemented encoder/decoder scenarios
-
-# Reminder: Please update docs/features/compatibility_matrix.md
-# If the feature combo become valid
-
-STR_NOT_IMPL_ENC_DEC_SWA = \
-    "Sliding window attention for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
-    "Prefix caching for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
-    "Chunked prefill for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
-    "Models with logits_soft_cap "
-    "require FlashInfer backend, which is "
-    "currently not supported for encoder/decoder "
-    "models.")
-
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
-                             "supported with encoder/decoder "
-                             "models.")
-
-STR_NOT_IMPL_ENC_DEC_PP = ("Pipeline parallelism is not "
-                           "currently supported with "
-                           "encoder/decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_MM = ("Multimodal is not currently "
-                           "supported with encoder/decoder "
-                           "models.")
-
-STR_NOT_IMPL_ENC_DEC_SPEC_DEC = ("Speculative decoding is not "
-                                 "currently supported with encoder/"
-                                 "decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
-                                "backends currently supported with encoder/"
-                                "decoder models.")
-
-# Efficiently import all enc/dec error strings
-# rather than having to import all of the above
-STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
-    "STR_NOT_IMPL_ENC_DEC_SWA": STR_NOT_IMPL_ENC_DEC_SWA,
-    "STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE": STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
-    "STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL":
-    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
-    "STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP": STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP,
-    "STR_NOT_IMPL_ENC_DEC_LORA": STR_NOT_IMPL_ENC_DEC_LORA,
-    "STR_NOT_IMPL_ENC_DEC_PP": STR_NOT_IMPL_ENC_DEC_PP,
-    "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
-    "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
-    "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-}
-
 # Constants related to forcing the attention backend selection
 
 # String name of register which may be set in order to
@@ -157,10 +99,8 @@ STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
 # register, corresponding to possible backends
 STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
 STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
-STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
-STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 MB_bytes = 1_000_000
@@ -611,9 +551,10 @@ class AsyncMicrobatchTokenizer:
                 # If every request uses identical kwargs we can run a single
                 # batched tokenizer call for a big speed-up.
                 if can_batch and len(prompts) > 1:
-                    encode_fn = partial(self.tokenizer, prompts, **kwargs)
+                    batch_encode_fn = partial(self.tokenizer, prompts,
+                                              **kwargs)
                     results = await self._loop.run_in_executor(
-                        self._executor, encode_fn)
+                        self._executor, batch_encode_fn)
 
                     for i, fut in enumerate(result_futures):
                         if not fut.done():
@@ -949,7 +890,7 @@ def get_open_port() -> int:
 
 def get_open_ports_list(count: int = 5) -> list[int]:
     """Get a list of open ports."""
-    ports = set()
+    ports = set[int]()
     while len(ports) < count:
         ports.add(get_open_port())
     return list(ports)
@@ -1339,7 +1280,7 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
 
 def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
     if isinstance(obj, str) or not isinstance(obj, Iterable):
-        obj = [obj]
+        return [obj]  # type: ignore[list-item]
     return obj
 
 
@@ -1440,6 +1381,38 @@ def find_nccl_library() -> str:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info("Found nccl from library %s", so_file)
     return so_file
+
+
+def find_nccl_include_paths() -> Optional[list[str]]:
+    """
+    We either use the nccl.h specified by the `VLLM_NCCL_INCLUDE_PATH`
+    environment variable, or we find the library file brought by 
+    nvidia-nccl-cuXX. load_inline by default uses 
+    torch.utils.cpp_extension.include_paths
+    """
+    paths: list[str] = []
+    inc = envs.VLLM_NCCL_INCLUDE_PATH
+    if inc and os.path.isdir(inc):
+        paths.append(inc)
+
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("nvidia.nccl")
+        if spec and getattr(spec, "submodule_search_locations", None):
+            for loc in spec.submodule_search_locations:
+                inc_dir = os.path.join(loc, "include")
+                if os.path.exists(os.path.join(inc_dir, "nccl.h")):
+                    paths.append(inc_dir)
+    except Exception:
+        pass
+
+    seen = set()
+    out: list[str] = []
+    for p in paths:
+        if p and p not in seen:
+            out.append(p)
+            seen.add(p)
+    return out or None
 
 
 prev_set_stream = torch.cuda.set_stream
@@ -2573,10 +2546,10 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 def direct_register_custom_op(
         op_name: str,
         op_func: Callable,
-        mutates_args: list[str],
+        mutates_args: Optional[list[str]] = None,
         fake_impl: Optional[Callable] = None,
         target_lib: Optional[Library] = None,
-        dispatch_key: str = "CUDA",
+        dispatch_key: Optional[str] = None,
         tags: tuple[torch.Tag, ...] = (),
 ):
     """
@@ -2603,6 +2576,13 @@ def direct_register_custom_op(
             "use vLLM in a fresh new environment and let it install "
             "the required dependencies.")
         return
+
+    if mutates_args is None:
+        mutates_args = []
+
+    if dispatch_key is None:
+        from vllm.platforms import current_platform
+        dispatch_key = current_platform.dispatch_key
 
     import torch.library
     if hasattr(torch.library, "infer_schema"):
@@ -3451,7 +3431,7 @@ def length_from_prompt_token_ids_or_embeds(
     prompt_token_ids: Optional[list[int]],
     prompt_embeds: Optional[torch.Tensor],
 ) -> int:
-    """Calculate the request length (in number of tokens) give either 
+    """Calculate the request length (in number of tokens) give either
     prompt_token_ids or prompt_embeds.
     """
     prompt_token_len = None if prompt_token_ids is None else len(
@@ -3472,3 +3452,16 @@ def length_from_prompt_token_ids_or_embeds(
                 f" prompt_token_ids={prompt_token_len}"
                 f" prompt_embeds={prompt_embeds_len}")
         return prompt_token_len
+
+
+@contextlib.contextmanager
+def set_env_var(key, value):
+    old = os.environ.get(key)
+    os.environ[key] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            del os.environ[key]
+        else:
+            os.environ[key] = old
