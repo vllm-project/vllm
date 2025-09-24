@@ -10,8 +10,6 @@ from vllm._bc_linter import bc_linter_include
 from vllm.v1.structured_output import GrammarBitmaskPlaceholder
 
 if TYPE_CHECKING:
-    import numpy as np
-    import numpy.typing as npt
     import torch
 
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (

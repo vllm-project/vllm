@@ -26,8 +26,8 @@ if TYPE_CHECKING:
 
     from vllm.transformers_utils.tokenizer import AnyTokenizer
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.structured_output import GrammarBitmaskPlaceholder
+    from vllm.v1.worker.gpu_input_batch import InputBatch
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
     oc = LazyLoader("oc", globals(), "outlines_core")
