@@ -33,11 +33,13 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             logger.info_once("Using flashinfer-trtllm for FP4")
         elif envs.VLLM_USE_FBGEMM:
             self.backend = "fbgemm"
-            if not (hasattr(torch.ops, 'fbgemm')
-                    and hasattr(torch.ops.fbgemm, 'f4f4bf16')):
-                raise RuntimeError(
+            try:
+                import fbgemm_gpu  # noqa: F401
+            except ImportError as exc:
+                raise ImportError(
                     "Backend fbgemm  requires fbgemm.f4f4bf16 operator, "
-                    "Please install with: pip install fbgemm-gpu-genai")
+                    "Please install with: pip install fbgemm-gpu-genai"
+                ) from exc
             logger.info_once("Using FGBEMM-GPU-GENAI for FP4")
         elif has_flashinfer():
             self.backend = "flashinfer-cutlass"
