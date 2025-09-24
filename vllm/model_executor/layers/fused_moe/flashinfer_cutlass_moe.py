@@ -110,7 +110,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
           of each tuple must be the number of tokens.
         """
         aq_m, aq_n = aq.shape
-        workspace2 = (0,)
+        workspace2 = (0, )
         output_shape = (aq_m,
                         aq_n * 2) if self.quant_dtype == "nvfp4" else (aq_m,
                                                                        aq_n)
