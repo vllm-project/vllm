@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Union
@@ -139,6 +140,9 @@ class InputProcessingContext(InputContext):
         hf_processor: ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
+        *,
+        num_tries: int = 1,
+        max_tries: int = 5,
     ) -> Union[BatchFeature, JSONTree]:
         """
         Call `hf_processor` on the prompt `data`
@@ -180,6 +184,22 @@ class InputProcessingContext(InputContext):
             return cast_output
 
         except Exception as exc:
+            # See https://github.com/huggingface/tokenizers/issues/537
+            if (isinstance(exc, RuntimeError) and exc
+                    and exc.args[0] == "Already borrowed"
+                    and num_tries < max_tries):
+                logger.warning(
+                    "Failed to acquire tokenizer in current thread. "
+                    "Retrying (%d/%d)...", num_tries, max_tries)
+                time.sleep(0.5)
+                return self.call_hf_processor(
+                    hf_processor,
+                    data,
+                    kwargs,
+                    num_tries=num_tries + 1,
+                    max_tries=max_tries,
+                )
+
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={allowed_kwargs}")
 
