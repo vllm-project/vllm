@@ -276,17 +276,21 @@ class NCCLLibrary:
         if so_file not in NCCLLibrary.path_to_dict_mapping:
             _funcs: dict[str, Any] = {}
             for func in NCCLLibrary.exported_functions:
-                f = getattr(self.lib, func.name)
-                if f is None and func.name in [
-                        "ncclCommWindowRegister", "ncclCommWindowDeregister"
-                ] and current_platform.is_rocm():
-                    # These symbols require NCCL >= 2.27.03, and having
-                    # an exception here on ROCm platform is not allowed
-                    # during graph capturing
-                    continue
-                f.restype = func.restype
-                f.argtypes = func.argtypes
-                _funcs[func.name] = f
+                try:
+                    f = getattr(self.lib, func.name)
+                    f.restype = func.restype
+                    f.argtypes = func.argtypes
+                    _funcs[func.name] = f
+                except AttributeError:
+                    if current_platform.is_rocm() and func.name in [
+                            "ncclCommWindowRegister",
+                            "ncclCommWindowDeregister"
+                    ]:
+                        # These symbols require NCCL >= 2.27.03, and having
+                        # an exception here on ROCm platform is not allowed
+                        # during graph capturing
+                        continue
+                    raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
 
