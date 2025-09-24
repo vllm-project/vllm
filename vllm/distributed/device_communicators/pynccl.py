@@ -17,6 +17,38 @@ from vllm.utils import current_stream
 
 logger = init_logger(__name__)
 
+_NCCL_SYMM_OPS_REGISTERED = False
+
+
+def register_nccl_symmetric_ops(pynccl_comm):
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        nccl_symm_mem_context)
+    from vllm.utils import direct_register_custom_op
+
+    global _NCCL_SYMM_OPS_REGISTERED
+    if _NCCL_SYMM_OPS_REGISTERED:
+        return
+    _NCCL_SYMM_OPS_REGISTERED = True
+
+    def all_reduce_symmetric_with_copy_impl(
+            input_tensor: torch.Tensor) -> torch.Tensor:
+        with nccl_symm_mem_context(pynccl_comm):
+            symm_input = torch.empty_like(input_tensor)
+            symm_output = torch.empty_like(input_tensor)
+        symm_input.copy_(input_tensor)
+        symm_output = pynccl_comm.all_reduce(symm_input, symm_output)
+        return symm_output
+
+    def all_reduce_symmetric_with_copy_fake(
+            input_tensor: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(input_tensor)
+
+    direct_register_custom_op(
+        op_name="all_reduce_symmetric_with_copy",
+        op_func=all_reduce_symmetric_with_copy_impl,
+        fake_impl=all_reduce_symmetric_with_copy_fake,
+    )
+
 
 class PyNcclCommunicator:
 
@@ -67,6 +99,7 @@ class PyNcclCommunicator:
         self.available = True
         self.disabled = False
 
+        self.nccl_version = self.nccl.ncclGetRawVersion()
         logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
 
         if self.rank == 0:
@@ -109,6 +142,7 @@ class PyNcclCommunicator:
 
     def all_reduce(self,
                    in_tensor: torch.Tensor,
+                   out_tensor: torch.Tensor = None,
                    op: ReduceOp = ReduceOp.SUM,
                    stream=None) -> torch.Tensor:
         if self.disabled:
@@ -120,7 +154,8 @@ class PyNcclCommunicator:
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {in_tensor.device}")
 
-        out_tensor = torch.empty_like(in_tensor)
+        if out_tensor is None:
+            out_tensor = torch.empty_like(in_tensor)
 
         if stream is None:
             stream = current_stream()
@@ -288,3 +323,18 @@ class PyNcclCommunicator:
 
     def group_end(self):
         self.nccl.ncclGroupEnd()
+
+    def register_comm_window(self, tensor: torch.Tensor):
+        return self.nccl.ncclCommWindowRegister(
+            self.comm,
+            buffer_type(tensor.data_ptr()),
+            tensor.numel() * tensor.element_size(),
+            1,
+        )
+
+    def register_comm_window_raw(self, ptr: int, size: int):
+        return self.nccl.ncclCommWindowRegister(self.comm, buffer_type(ptr),
+                                                size, 1)
+
+    def deregister_comm_window(self, window):
+        return self.nccl.ncclCommWindowDeregister(self.comm, window)
