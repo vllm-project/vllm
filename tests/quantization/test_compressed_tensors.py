@@ -749,6 +749,7 @@ def test_compressed_tensors_transforms_perplexity(vllm_runner, model, prompt,
         print(perplexity)
         assert perplexity <= exp_perplexity
 
+
 def test_compressed_tensors_fp8_block_enabled(vllm_runner):
     model_path = "RedHatAI/Qwen3-0.6B-FP8-BLOCK"
     with vllm_runner(model_path) as llm:
