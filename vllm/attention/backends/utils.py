@@ -9,6 +9,8 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+PAD_SLOT_ID = -1
+
 
 @dataclass
 class MLADims:
