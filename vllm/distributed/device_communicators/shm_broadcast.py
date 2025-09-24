@@ -392,7 +392,7 @@ class MessageQueue:
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.debug(
                             ("No available shared memory broadcast block found"
-                             " in %s second. This typically happens when some"
+                             " in %s seconds. This typically happens when some"
                              " processes are hanging."),
                             VLLM_RINGBUFFER_WARNING_INTERVAL,
                         )
@@ -456,7 +456,7 @@ class MessageQueue:
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.debug(
                             ("No available shared memory broadcast block found"
-                             " in %s second. This typically happens when some"
+                             " in %s seconds. This typically happens when some"
                              " processes are hanging."),
                             VLLM_RINGBUFFER_WARNING_INTERVAL,
                         )
