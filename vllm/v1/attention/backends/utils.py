@@ -236,7 +236,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: ClassVar[Optional[int]] = None
+    reorder_batch_threshold: Optional[int] = None
 
     @abstractmethod
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
@@ -245,6 +245,22 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
+
+    def _init_reorder_batch_threshold(
+            self,
+            reorder_batch_threshold: int = 1,
+            supports_spec_as_decode: bool = False) -> None:
+        self.reorder_batch_threshold = reorder_batch_threshold
+        if self.reorder_batch_threshold is not None \
+            and supports_spec_as_decode:
+            # If the backend supports spec-as-decode kernels, then we can set
+            # the reorder_batch_threshold based on the number of speculative
+            # tokens from the config.
+            speculative_config = self.vllm_config.speculative_config
+            if (speculative_config is not None
+                    and speculative_config.num_speculative_tokens is not None):
+                self.reorder_batch_threshold = \
+                    1 + speculative_config.num_speculative_tokens
 
     @abstractmethod
     def build(self,
@@ -703,9 +719,9 @@ def subclass_attention_backend(
 
 
 def split_decodes_and_prefills(
-    common_attn_metadata: CommonAttentionMetadata,
-    decode_threshold: int = 1,
-) -> tuple[int, int, int, int]:
+        common_attn_metadata: CommonAttentionMetadata,
+        decode_threshold: int = 1,
+        require_uniform: bool = False) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
@@ -714,6 +730,9 @@ def split_decodes_and_prefills(
         common_attn_metadata: CommonAttentionMetadata object containing the
             batch metadata.
         decode_threshold: The maximum query length to be considered a decode.
+        require_uniform: If True, requires that all decode requests have the
+            same query length. When set, some queries may be considered prefills
+            even if they are <= decode_threshold, in order to ensure uniformity.
 
     Returns:
         num_decodes: The number of decode requests.
@@ -726,11 +745,20 @@ def split_decodes_and_prefills(
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
 
-    if max_query_len <= decode_threshold:
+    if max_query_len <= decode_threshold and \
+        (not require_uniform or decode_threshold <= 1):
         return num_reqs, 0, num_tokens, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    is_prefill = query_lens > decode_threshold
+    if query_lens[0].item() > decode_threshold:
+        # first request is not decode, so no decode requests
+        return 0, num_reqs, 0, num_tokens
+
+    if require_uniform:
+        is_prefill = query_lens != query_lens[0]
+    else:
+        is_prefill = query_lens > decode_threshold
+
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
 
@@ -804,6 +832,38 @@ def reorder_batch_to_split_decodes_and_prefills(
         modified_batch = True
 
     return modified_batch
+
+
+def reshape_query_for_spec_decode(query: torch.Tensor,
+                                  batch_size: int) -> torch.Tensor:
+    """
+    Reshapes the query tensor for the specified batch size, so that
+    it has shape (batch_size, seq_len, num_heads, head_dim).
+    """
+    assert query.dim() == 3, f"query must be 3D, got {query.dim()}D"
+    total_tokens = query.shape[0]
+    num_heads = query.shape[1]
+    head_dim = query.shape[2]
+    assert total_tokens % batch_size == 0, (
+        f"{total_tokens=} is not divisible by {batch_size=}")
+    seq_len = total_tokens // batch_size
+    return query.view(batch_size, seq_len, num_heads, head_dim)
+
+
+def reshape_attn_output_for_spec_decode(
+        attn_output: torch.Tensor) -> torch.Tensor:
+    """
+    Reshapes the attention output tensor, so that
+    the batch_size and seq_len dimensions are combined.
+    """
+    if attn_output.dim() == 3:
+        # Already in the correct shape
+        return attn_output
+    assert attn_output.dim() == 4, \
+        f"attn_output must be 4D, got {attn_output.dim()}D"
+    total_tokens = attn_output.shape[0] * attn_output.shape[1]
+    return attn_output.view(total_tokens, attn_output.shape[2],
+                            attn_output.shape[3])
 
 
 KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [

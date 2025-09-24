@@ -3,7 +3,7 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Optional, Protocol
+from typing import Optional
 
 import numpy as np
 import torch
@@ -35,17 +35,6 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
-
-
-class EagleAttentionMetadata(Protocol):
-    # Required attributes
-    num_actual_tokens: int
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    max_seq_len: int
-    seq_lens: torch.Tensor
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
 
 
 class EagleProposer:
@@ -120,7 +109,7 @@ class EagleProposer:
             with_numpy=True)
 
         # Determine allowed attention backends once during initialization.
-        self.allowed_attn_types: tuple[type, ...]
+        self.allowed_attn_types: Optional[tuple] = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
             # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
@@ -129,9 +118,6 @@ class EagleProposer:
                     AiterFlashAttentionMetadata)
                 rocm_types.append(AiterFlashAttentionMetadata)
             self.allowed_attn_types = tuple(rocm_types)
-        else:
-            self.allowed_attn_types = (FlashAttentionMetadata,
-                                       TreeAttentionMetadata)
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
@@ -266,7 +252,8 @@ class EagleProposer:
 
         draft_token_ids = logits.argmax(dim=-1)
 
-        if not isinstance(attn_metadata, self.allowed_attn_types):
+        if self.allowed_attn_types is not None and \
+            not isinstance(attn_metadata, self.allowed_attn_types):
             raise ValueError(
                 f"Unsupported attention metadata type for speculative "
                 "decoding with num_speculative_tokens > 1: "
