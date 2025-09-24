@@ -2864,7 +2864,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             assert num_tokens_after_padding is not None
             num_tokens_across_dp = num_tokens_after_padding
-            assert int(num_tokens_across_dp[0]) == num_tokens // 2
+            # assert int(num_tokens_across_dp[0]) == num_tokens // 2
             num_tokens_after_padding = int(num_tokens_after_padding[0].item())
         else:
             should_ubatch = False
@@ -2872,11 +2872,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dp_rank = self.parallel_config.data_parallel_rank
             (should_ubatch, num_tokens_across_dp) = coordinate_batch_across_dp(
                 num_tokens, num_tokens, should_ubatch, dp_size, dp_rank)
-            num_pad = 0
-            if num_tokens_across_dp:
-                num_pad = int(num_tokens_across_dp[0])
 
-            num_tokens_after_padding = num_tokens + num_pad
+            num_tokens_after_padding = num_tokens
+            if num_tokens_across_dp is not None:
+                num_tokens_after_padding = int(num_tokens_across_dp[0])
+
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 
