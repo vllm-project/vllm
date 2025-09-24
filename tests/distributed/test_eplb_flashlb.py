@@ -338,5 +338,6 @@ def test_experts_exchange():
             old_retained = old_placement_check[expert_not_move]
             assert torch.equal(new_retained, old_retained), (
                 f"There exists expert movement inside NPU, "
-                f"expert placement on layer {layer_id}, rank {gpu_id} is invalid"
+                f"expert placement on layer {layer_id}, "
+                f"rank {gpu_id} is invalid"
             )
