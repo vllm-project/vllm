@@ -145,13 +145,13 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         return ray_remote_kwargs
 
-    def _configure_ray_workers_use_unitrace(self,
-            ray_remote_kwargs) -> Dict[str, Any]:
+    def _configure_ray_workers_use_unitrace(
+            self, ray_remote_kwargs) -> Dict[str, Any]:
         # If unitrace profiling is enabled, we need to set the profiling
         # configuration for the ray workers as runtime env.
         runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
         runtime_env.update({"unitrace": {
-                "chrome-kernel-logging": "",
+            "chrome-kernel-logging": "",
         }})
 
         return ray_remote_kwargs
