@@ -89,7 +89,7 @@ def apply_mm_hashes_to_token_ids(
     efficient slice assignments.
     """
     n = token_ids.size(0)
-    for hash_str, placeholder in zip(mm_hashes, mm_positions, strict=False):
+    for hash_str, placeholder in zip(mm_hashes, mm_positions):
         start, length = placeholder.offset, placeholder.length
         if start >= n:
             continue
