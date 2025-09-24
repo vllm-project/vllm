@@ -16,6 +16,8 @@ from vllm.utils import (PyObjectCache, async_tensor_h2d,
                         make_tensor_with_pad_align)
 
 _SAMPLING_EPS = 1e-5
+pin_memory = is_pin_memory_available()
+is_hpu = current_platform.is_hpu()
 
 
 @dataclass
@@ -286,7 +288,7 @@ def _prepare_seq_groups(
 
         if seq_group_metadata.is_prompt:
             if sampling_params.seed is not None:
-                if current_platform.is_hpu():
+                if is_hpu:
                     import habana_frameworks.torch.hpu.random as htrandom
                     generator = \
                         htrandom.default_generators[
@@ -420,8 +422,10 @@ class SamplingTensors:
         vocab_size: int,
         device: torch.device,
         dtype: torch.dtype,
+        prompt_tokens_cache: torch.tensor,
+        past_seq_ids: set,
     ) -> tuple["SamplingTensors", bool, bool, bool, Optional[int],
-               Optional[float]]:
+               Optional[float], Optional[torch.tensor]]:
         prompt_tokens: list[array] = []
         output_tokens: list[array] = []
         top_ks: list[int] = []
@@ -434,6 +438,7 @@ class SamplingTensors:
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
+        current_seq_ids = set()
 
         assert sampling_metadata.seq_groups is not None
         for seq_group in sampling_metadata.seq_groups:
@@ -508,6 +513,9 @@ class SamplingTensors:
                         seq_data = seq_group.seq_data[seq_id]
                         prompt_tokens.append(seq_data.prompt_token_ids_array)
                         output_tokens.append(seq_data.output_token_ids_array)
+                        current_seq_ids.update(seq_ids)
+            if current_seq_ids != past_seq_ids:
+                prompt_tokens_cache = None
 
         top_k_scalar = top_ks[0] if do_top_p_top_k and all(
             k == top_ks[0] for k in top_ks) else None
@@ -527,9 +535,10 @@ class SamplingTensors:
             vocab_size,
             device,
             dtype,
+            prompt_tokens_cache,
         )
         return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p,
-                top_k_scalar, top_p_scalar)
+                top_k_scalar, top_p_scalar, current_seq_ids)
 
     @classmethod
     def from_lists(
@@ -546,23 +555,28 @@ class SamplingTensors:
         vocab_size: int,
         device: torch.device,
         dtype: torch.dtype,
+        prompt_tokens_cache: torch.tensor,
     ) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
-        pin_memory = is_pin_memory_available()
 
         do_penalties = prompt_tokens or output_tokens
 
         if do_penalties:
-            if current_platform.is_hpu():
-                prompt_t = make_tensor_with_pad_align(
-                    prompt_tokens,
-                    vocab_size,
-                    device="cpu",
-                    dtype=torch.int64,
-                    pin_memory=pin_memory,
-                    max_len_align=1024,
-                )
+            if is_hpu:
+                if (prompt_tokens_cache is not None and
+                    prompt_tokens_cache.device == device):
+                    # Reuse cached prompt_tokens already on HPU
+                    prompt_t = prompt_tokens_cache
+                else:
+                    prompt_t = make_tensor_with_pad_align(
+                        prompt_tokens,
+                        vocab_size,
+                        device="cpu",
+                        dtype=torch.int64,
+                        pin_memory=pin_memory,
+                        max_len_align=1024,
+                    )
                 output_t = make_tensor_with_pad_align(
                     output_tokens,
                     vocab_size,
@@ -647,6 +661,6 @@ class SamplingTensors:
                                                          non_blocking=True),
             repetition_penalties=repetition_penalties_t.to(device=device,
                                                            non_blocking=True),
-            prompt_tokens=prompt_t.to(device=device, non_blocking=True),
+            prompt_tokens=prompt_t.to(device=device, non_blocking=True) if prompt_t.device != device else prompt_t,
             output_tokens=output_t.to(device=device, non_blocking=True),
         )
