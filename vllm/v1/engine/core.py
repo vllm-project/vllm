@@ -101,6 +101,11 @@ class EngineCore:
                 vllm_config.scheduler_config.scheduler_cls)
         else:
             Scheduler = vllm_config.scheduler_config.scheduler_cls
+        
+        # Override scheduler class if MLFQ policy is selected
+        if vllm_config.scheduler_config.policy == "mlfq":
+            from vllm.v1.core.sched.mlfq_scheduler import MLFQScheduler
+            Scheduler = MLFQScheduler
 
         # This warning can be removed once the V1 Scheduler interface is
         # finalized and we can maintain support for scheduler classes that
