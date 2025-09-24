@@ -30,25 +30,10 @@ def test_initialize_kv_cache_for_kv_sharing_different_attn_groups():
                          new_kv_cache_spec()),
     ]
 
-    # Only layers 0 and 1 will have KV caches allocated
-    kv_caches = {
-        "model.layers.0": torch.zeros(1, 2, 3),
-        "model.layers.1": torch.ones(1, 2, 3),
-    }
-
     add_kv_sharing_layers_to_kv_cache_groups(
         shared_kv_cache_layers=shared_kv_cache_layers,
         kv_cache_groups=kv_cache_groups,
     )
-
-    for layer_name, target_layer_name in shared_kv_cache_layers.items():
-        kv_caches[layer_name] = kv_caches[target_layer_name]
-
-    # Check that the KV caches were shared correctly
-    assert kv_caches["model.layers.2"].data_ptr(
-    ) == kv_caches["model.layers.0"].data_ptr()
-    assert kv_caches["model.layers.3"].data_ptr(
-    ) == kv_caches["model.layers.1"].data_ptr()
 
     # Check that the layers were added to the correct KV cache group
     assert len(kv_cache_groups) == 1
@@ -72,24 +57,10 @@ def test_initialize_kv_cache_for_kv_sharing_same_attn_groups():
                          new_kv_cache_spec()),
     ]
 
-    kv_caches = {
-        "model.layers.0": torch.zeros(1, 2, 3),
-        "model.layers.1": torch.ones(1, 2, 3),
-    }
-
     add_kv_sharing_layers_to_kv_cache_groups(
         shared_kv_cache_layers=shared_kv_cache_layers,
         kv_cache_groups=kv_cache_groups,
     )
-
-    for layer_name, target_layer_name in shared_kv_cache_layers.items():
-        kv_caches[layer_name] = kv_caches[target_layer_name]
-
-    # Check that the KV caches were shared correctly
-    assert kv_caches["model.layers.2"].data_ptr(
-    ) == kv_caches["model.layers.0"].data_ptr()
-    assert kv_caches["model.layers.3"].data_ptr(
-    ) == kv_caches["model.layers.1"].data_ptr()
 
     # Check that the layers were added to the correct KV cache group
     assert len(kv_cache_groups) == 1
@@ -114,24 +85,10 @@ def test_initialize_kv_cache_for_kv_sharing_no_attn_groups():
         KVCacheGroupSpec(["model.layers.1"], new_kv_cache_spec()),
     ]
 
-    kv_caches = {
-        "model.layers.0": torch.zeros(1, 2, 3),
-        "model.layers.1": torch.ones(1, 2, 3),
-    }
-
     add_kv_sharing_layers_to_kv_cache_groups(
         shared_kv_cache_layers=shared_kv_cache_layers,
         kv_cache_groups=kv_cache_groups,
     )
-
-    for layer_name, target_layer_name in shared_kv_cache_layers.items():
-        kv_caches[layer_name] = kv_caches[target_layer_name]
-
-    # Check that the KV caches were shared correctly
-    assert kv_caches["model.layers.2"].data_ptr(
-    ) == kv_caches["model.layers.0"].data_ptr()
-    assert kv_caches["model.layers.3"].data_ptr(
-    ) == kv_caches["model.layers.1"].data_ptr()
 
     # Check that the layers were added to the correct KV cache group
     assert len(kv_cache_groups) == 2
