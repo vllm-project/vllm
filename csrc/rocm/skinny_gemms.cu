@@ -434,8 +434,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
-        // Do the matrix multiplication of activation and weight matrix
-        // - Remember the accumulation is happening for K-split of 64!
+          // Do the matrix multiplication of activation and weight matrix
+          // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
         for (uint32_t n = 0; n < N; n++) {
   #pragma unroll
@@ -736,8 +736,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           uint32_t k = k1 + k2 * THRDS * A_CHUNK;
           uint32_t k_ = k + threadIdx.x * A_CHUNK;
           if (k_ >= K) break;
-          // Do the matrix multiplication of activation and weight matrix
-          // - Remember the accumulation is happening for K-split of 64!
+            // Do the matrix multiplication of activation and weight matrix
+            // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
           for (int y = 0; y < YTILE; y++) {
             if constexpr (!use_mfma)
@@ -1055,7 +1055,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       if (m >= M) continue;
   #endif
 
-      // Fetch the weight matrix from memory!
+        // Fetch the weight matrix from memory!
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
@@ -1271,7 +1271,7 @@ int mindiv(int N, int div1, int div2) {
 }
 
 torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
-                       const c10::optional<at::Tensor>& in_bias,
+                       const std::optional<at::Tensor>& in_bias,
                        const int64_t CuCount) {
   auto M_in = in_a.size(0);
   auto K_in = in_a.size(1);
@@ -1729,7 +1729,7 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kp, const int M,
 #endif  // defined(__HIP__MI3XX__) TODO: Add NAVI support
 
 void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
-               const c10::optional<at::Tensor>& in_bias, at::Tensor& out_c,
+               const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
                const at::Tensor& scale_a, const at::Tensor& scale_b,
                const int64_t CuCount) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
