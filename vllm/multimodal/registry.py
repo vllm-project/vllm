@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
 
-from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
 from vllm.utils import ClassRegistry
 
 from .cache import BaseMultiModalProcessorCache
-from .processing import BaseMultiModalProcessor, BaseProcessingInfo
+from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
+                         InputProcessingContext)
 from .profiling import (BaseDummyInputsBuilder, DummyDecoderData,
                         DummyEncoderData, MultiModalProfiler)
 
@@ -41,7 +41,7 @@ class ProcessingInfoFactory(Protocol[_I_co]):
         ...
 
 
-class DummyInputsBuilderFactory(Protocol[_I]):
+class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
     """
     Constructs a
     [`BaseDummyInputsBuilder`][vllm.multimodal.profiling.BaseDummyInputsBuilder]
