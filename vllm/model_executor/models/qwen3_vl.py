@@ -33,11 +33,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
 from transformers.models.qwen2_vl import Qwen2VLImageProcessorFast
-from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
+    smart_resize as image_smart_resize)
 from transformers.models.qwen3_vl import (Qwen3VLProcessor,
                                           Qwen3VLVideoProcessor)
 from transformers.models.qwen3_vl.configuration_qwen3_vl import (
     Qwen3VLConfig, Qwen3VLVisionConfig)
+from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
+    smart_resize as video_smart_resize)
 from transformers.video_utils import VideoMetadata
 
 from vllm.attention.layer import check_upstream_fa_availability
@@ -572,10 +575,15 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         image_height: int,
         num_frames: int = 2,
         do_resize: bool = True,
-        image_processor: Optional[Qwen2VLImageProcessorFast],
+        image_processor: Optional[Union[Qwen2VLImageProcessorFast,
+                                        Qwen3VLVideoProcessor]],
     ) -> tuple[ImageSize, int]:
-        if image_processor is None:
+        if image_processor is None and num_frames > 1:
+            image_processor = self.get_video_processor()
+        elif image_processor is None:
             image_processor = self.get_image_processor()
+
+        is_video = isinstance(image_processor, Qwen3VLVideoProcessor)
 
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -584,12 +592,24 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         temporal_patch_size = vision_config.temporal_patch_size
 
         if do_resize:
+            if is_video:
+                smart_resize = video_smart_resize
+                extra_kwargs = {
+                    "num_frames": num_frames,
+                    "temporal_factor": temporal_patch_size
+                }
+            else:
+                smart_resize = image_smart_resize
+                extra_kwargs = {}
             resized_height, resized_width = smart_resize(
+                # num_frames=num_frames,
                 height=image_height,
                 width=image_width,
+                # temporal_factor=temporal_patch_size,
                 factor=patch_size * merge_size,
                 min_pixels=image_processor.size["shortest_edge"],
                 max_pixels=image_processor.size["longest_edge"],
+                **extra_kwargs,
             )
             preprocessed_size = ImageSize(width=resized_width,
                                           height=resized_height)
@@ -607,6 +627,12 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         num_vision_tokens = num_patches // (merge_size**2)
 
         return preprocessed_size, num_vision_tokens
+
+    def _get_max_video_frames(self,
+                              max_tokens: int,
+                              start_num_frames: int = 2) -> int:
+        return super()._get_max_video_frames(max_tokens,
+                                             start_num_frames=start_num_frames)
 
     def _calculate_timestamps(self, indices: list[int] | torch.Tensor,
                               video_fps: float, merge_size: int):
@@ -677,6 +703,9 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             self.info.get_image_size_with_most_features())
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts)
+        print("seq_len:", seq_len)
+        print("target_num_frames, target_width, target_height:",
+              target_num_frames, target_width, target_height)
         return {
             "image":
             self._get_dummy_images(width=target_width,
@@ -699,6 +728,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         num_frames: int,
         num_videos: int,
     ) -> list[VideoItem]:
+        print("num_frames, width, height:", num_frames, width, height)
         num_frames = max(num_frames, 2)
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         video_items = []
@@ -783,6 +813,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(
                     video_outputs["pixel_values_videos"])
+            print("video_grid_thw_lst:", video_grid_thw_lst)
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),
@@ -1292,9 +1323,11 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 vision_embeddings = self._process_image_input(multimodal_input)
+                print("image", [x.shape for x in vision_embeddings])
                 multimodal_embeddings += vision_embeddings
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
+                print("video", [x.shape for x in video_embeddings])
                 multimodal_embeddings += video_embeddings
         return multimodal_embeddings
 

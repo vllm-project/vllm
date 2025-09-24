@@ -972,10 +972,12 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             image_processor=None,
         )
 
-    def _get_max_video_frames(self, max_tokens: int) -> int:
+    def _get_max_video_frames(self,
+                              max_tokens: int,
+                              start_num_frames: int = 1) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
-        num_frames = 0
+        num_frames = start_num_frames
 
         while True:
             next_num_frames = num_frames + 1
