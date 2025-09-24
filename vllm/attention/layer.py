@@ -289,7 +289,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # Otherwise queries are quantized using custom ops
             # which causes decoding overheads
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
-            query, _ = self.query_quant.forward_native(query, self._q_scale)
+            query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
             output_shape = (output_shape
