@@ -4,7 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from typing import (Annotated, Final, Literal, Optional, Protocol, TypeVar,
-                    Union, cast)
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -623,7 +623,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values)
+        image_features: Union[torch.Tensor, tuple[torch.Tensor, ...]] = \
+            vision_tower(pixel_values)
 
         def select_features(leaf: torch.Tensor):
             return self._select_image_features(
@@ -631,10 +632,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 strategy=self.config.vision_feature_select_strategy,
             )
 
-        return cast(
-            Union[torch.Tensor, tuple[torch.Tensor, ...]],
-            json_map_leaves(select_features, image_features),
-        )
+        return json_map_leaves(select_features, image_features)
 
     def _process_image_pixels(
         self,
