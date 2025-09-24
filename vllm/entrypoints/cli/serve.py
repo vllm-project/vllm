@@ -2,9 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import copy
+import json
+import os
 import signal
 from typing import Optional
 
+import ray
 import uvloop
 
 import vllm
@@ -40,7 +44,9 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, 'model_tag') and args.model_tag is not None:
             args.model = args.model_tag
 
-        if args.headless or args.api_server_count < 1:
+        if args.api_server_config:
+            run_multi_api_server(args)
+        elif args.headless or args.api_server_count < 1:
             run_headless(args)
         else:
             if args.api_server_count > 1:
@@ -62,6 +68,14 @@ class ServeSubcommand(CLISubcommand):
             usage="vllm serve [model_tag] [options]")
 
         serve_parser = make_arg_parser(serve_parser)
+        serve_parser.add_argument(
+            "--api-server-config",
+            type=str,
+            default=None,
+            help="JSON string or file path for distributed API server configuration. "
+                 "Example: '[{\"node_ip\": \"192.168.1.100\", \"port\": 8000, "
+                 "\"client_index\": 0, \"client_count\": 2}]'"
+        )
         show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
         serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
         return serve_parser
@@ -133,8 +147,66 @@ def run_headless(args: argparse.Namespace):
 
 
 def run_multi_api_server(args: argparse.Namespace):
-
     assert not args.headless
+
+    if args.api_server_config:
+        # Parse the distributed API server configuration
+        try:
+            if os.path.exists(args.api_server_config):
+                with open(args.api_server_config, 'r') as f:
+                    api_server_configs = json.load(f)
+            else:
+                api_server_configs = json.loads(args.api_server_config)
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            raise ValueError(f"Invalid --api-server-config: {e}")
+
+        if not isinstance(api_server_configs, list):
+            raise ValueError("--api-server-config must be a list of configurations.")
+
+        # Initialize Ray if not already initialized
+        if not ray.is_initialized():
+            ray.init()
+
+        # Launch API servers using Ray
+        api_server_actors = []
+        for config in api_server_configs:
+            node_ip = config.get("node_ip")
+            port = config.get("port")
+            client_index = config.get("client_index")
+            client_count = config.get("client_count")
+
+            if not all([node_ip, port, client_index is not None, client_count is not None]):
+                raise ValueError("Each API server configuration must specify 'node_ip', 'port', 'client_index', and 'client_count'.")
+
+            # Create a new args object for each API server to avoid conflicts
+            server_args = copy.deepcopy(args)
+            server_args.host = node_ip
+            server_args.port = port
+
+            # Setup server for each distributed API server
+            listen_address, sock = setup_server(server_args)
+
+            # Launch the API server worker as a Ray actor
+            api_server_actor = ray.remote(run_api_server_worker_proc).options(
+                resources={"node:" + node_ip: 0.01} # Assign to specific node
+            ).remote(
+                listen_address,
+                sock,
+                server_args,
+                client_config={
+                    "client_index": client_index,
+                    "client_count": client_count
+                }
+            )
+            api_server_actors.append(api_server_actor)
+
+        # Wait for all API server actors to finish (or handle their lifecycle)
+        # For now, just wait for them to complete. In a real scenario,
+        # you might want to monitor them.
+        ray.get([actor.run.remote() for actor in api_server_actors]) # This will block until all servers are done.
+        return
+
+    # Existing logic for single-node multi-API server
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
