@@ -36,7 +36,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         raise NotImplementedError
 
     def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
-        super().__init__(tokenizer)
+        super().__init__(tokenizer, *args, **kwargs)
 
         if not self.model_tokenizer:
             raise ValueError(
