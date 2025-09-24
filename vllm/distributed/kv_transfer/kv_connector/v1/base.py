@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVConnectorStats)
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -235,6 +237,12 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
+        """
+        Get the KV connector stats collected during the last interval.
+        """
+        return None
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -354,4 +362,27 @@ class KVConnectorBase_V1(ABC):
         if cls is KVConnectorBase_V1:
             raise TypeError("get_required_kvcache_layout should not be called "
                             "on the abstract base class")
+        return None
+
+    def get_finished_count(self) -> Optional[int]:
+        """
+        Get the count of requests expected to complete send/receive operations
+        via this connector.
+
+        Returns:
+            int: expected sending or receiving completion count.
+        """
+
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(
+            cls,
+            data: Optional[dict[str,
+                                Any]] = None) -> Optional["KVConnectorStats"]:
+        """
+        KVConnectorStats resolution method. This method allows dynamically 
+        registered connectors to return their own KVConnectorStats object,
+        which can implement custom aggregation logic on the data dict.
+        """
         return None

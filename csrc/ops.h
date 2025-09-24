@@ -328,6 +328,12 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const std::optional<torch::Tensor>& has_initial_state,
                         const torch::Tensor& ssm_states, int64_t pad_slot_id);
 
+torch::Tensor dynamic_4bit_int_moe_cpu(
+    torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
+    torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t H, int64_t I,
+    int64_t I2, int64_t group_size, bool apply_router_weight_on_input,
+    int64_t activation_kind);
+
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
                       torch::Tensor& rank_data, int64_t rank,
@@ -346,6 +352,8 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
     int64_t size);
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
+
+torch::Tensor hadacore_transform(torch::Tensor& x, bool inplace);
 
 #ifdef USE_ROCM
 fptr_t init_custom_qr(int64_t rank, int64_t world_size,

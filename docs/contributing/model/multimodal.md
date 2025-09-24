@@ -840,7 +840,6 @@ Some HF processors directly insert feature tokens without replacing anything in 
 Examples:
 
 - BLIP-2 (insert at start of prompt): <gh-file:vllm/model_executor/models/blip2.py>
-- Florence2 (insert at start of prompt): <gh-file:vllm/model_executor/models/florence2.py>
 - Molmo (insert after `<|endoftext|>` token): <gh-file:vllm/model_executor/models/molmo.py>
 
 ### Handling prompt updates unrelated to multi-modal data

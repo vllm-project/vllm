@@ -25,10 +25,14 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import GiB_bytes, direct_register_custom_op
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
+try:
+    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
+except AttributeError:
+    tag_cudagraph_unsafe = ()  # type: ignore[assignment]
 
 
 def check_xformers_availability():
@@ -111,12 +115,10 @@ class Attention(nn.Module, AttentionLayerBase):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
-            is_attention_free = cache_config.is_attention_free
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
             block_size = 16
-            is_attention_free = False
             calculate_kv_scales = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
@@ -181,7 +183,6 @@ class Attention(nn.Module, AttentionLayerBase):
                                                  dtype,
                                                  kv_cache_dtype,
                                                  block_size,
-                                                 is_attention_free,
                                                  use_mla=use_mla,
                                                  has_sink=self.has_sink)
         else:
@@ -225,9 +226,26 @@ class Attention(nn.Module, AttentionLayerBase):
             ).parallel_config.pipeline_parallel_size)
         ]
 
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        try:
+            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+        except torch.cuda.OutOfMemoryError as e:
+            logger.error(
+                "Failed to initialize attention q/k/v range constants: %s", e)
+            if torch.cuda.is_available():
+                logger.debug("CUDA device: %s", torch.cuda.current_device())
+                logger.debug("Allocated: %.2f GiB",
+                             torch.cuda.memory_allocated() / GiB_bytes)
+                logger.debug("Reserved: %.2f GiB",
+                             torch.cuda.memory_reserved() / GiB_bytes)
+            raise RuntimeError(
+                "Failed to initialize q/k/v range constants. "
+                "This may be caused by insufficient memory to allocate "
+                "kv cache.") from e
 
     def forward(
         self,
@@ -374,8 +392,8 @@ class MultiHeadAttention(nn.Module):
             backend = _Backend.FLASH_ATTN
             use_upstream_fa = True
 
-        if current_platform.is_rocm():
-            # currently, only torch_sdpa is supported on rocm
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            # currently, only torch_sdpa is supported on rocm/xpu
             self.attn_backend = _Backend.TORCH_SDPA
         else:
 
@@ -413,9 +431,11 @@ class MultiHeadAttention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> torch.Tensor:
-        """Input shape: batch_size x seq_len x hidden_size"""
-        # TODO(Isotr0py): Use existing backend implementations and support FA3
-        bsz, q_len, _ = query.size()
+        """Input shape: 
+        (batch_size x seq_len x hidden_size) or
+        (batch_size x seq_len x num_heads x head_size)
+        """
+        bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
 
         query = query.view(bsz, q_len, self.num_heads, self.head_size)
@@ -555,9 +575,8 @@ def unified_attention_fake(
 direct_register_custom_op(
     op_name="unified_attention",
     op_func=unified_attention,
-    mutates_args=[],
     fake_impl=unified_attention_fake,
-    dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
 )
 
 
@@ -607,5 +626,5 @@ direct_register_custom_op(
     op_func=unified_attention_with_output,
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
-    dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
 )

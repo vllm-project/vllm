@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import Optional
 
 import torch
 
@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
+                                              compute_causal_conv1d_metadata,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
@@ -31,6 +32,7 @@ class GDNAttentionMetadata:
     num_decode_tokens: int
     num_spec_decodes: int
     num_spec_decode_tokens: int
+    num_actual_tokens: int
 
     has_initial_state: Optional[torch.Tensor] = None
 
@@ -49,13 +51,18 @@ class GDNAttentionMetadata:
         Tensor] = None  # shape: [num_prefill_tokens + num_decode_tokens,]
     num_accepted_tokens: Optional[torch.Tensor] = None  # shape: [batch,]
 
+    # The following attributes are for triton implementation of causal_conv1d
+    nums_dict: Optional[dict] = None
+    batch_ptr: Optional[torch.Tensor] = None
+    token_chunk_offset_ptr: Optional[torch.Tensor] = None
+
 
 class GDNAttentionMetadataBuilder(
         AttentionMetadataBuilder[GDNAttentionMetadata]):
 
     cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
-    reorder_batch_threshold: ClassVar[int] = 1
+    reorder_batch_threshold: int = 1
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -69,13 +76,13 @@ class GDNAttentionMetadataBuilder(
         else:
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
-        self.reorder_batch_threshold = self.num_spec + 1  # type: ignore[misc]
+        self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
         self.use_full_cuda_graph = \
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         self.decode_cudagraph_max_bs = min(
-            self.vllm_config.scheduler_config.max_num_seqs,
-            self.compilation_config.max_capture_size)
+            self.vllm_config.scheduler_config.max_num_seqs *
+            (self.num_spec + 1), self.compilation_config.max_capture_size)
 
         self.spec_state_indices_tensor = torch.empty(
             (self.decode_cudagraph_max_bs, self.num_spec + 1),
@@ -127,6 +134,7 @@ class GDNAttentionMetadataBuilder(
         context_lens = m.num_computed_tokens_cpu
         context_lens_tensor = context_lens.to(query_start_loc.device)
         seq_lens_tensor = m.seq_lens
+        nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         if (not self.use_spec_decode or num_draft_tokens is None
                 or num_draft_tokens.sum().item() == 0):
@@ -194,9 +202,8 @@ class GDNAttentionMetadataBuilder(
                              dim=0,
                              out=non_spec_query_start_loc[1:])
 
-            num_spec_decode_tokens = min(
-                num_spec_decodes * (self.num_spec + 1),
-                spec_token_masks.size(0))
+            num_spec_decode_tokens = (query_lens.sum().item() -
+                                      num_prefill_tokens - num_decode_tokens)
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
@@ -204,16 +211,26 @@ class GDNAttentionMetadataBuilder(
             has_initial_state = context_lens_tensor > 0
             if spec_sequence_masks is not None:
                 has_initial_state = has_initial_state[~spec_sequence_masks]
+            nums_dict, batch_ptr, token_chunk_offset_ptr = \
+                compute_causal_conv1d_metadata(non_spec_query_start_loc)
         else:
             has_initial_state = None
+        num_actual_tokens = num_prefill_tokens + num_decode_tokens + \
+            num_spec_decode_tokens
 
         # prepare tensors for cudagraph
+        #
+        # With speculative decoding, the xgrammar backend may rollback tokens
+        # and causing some sequences has less draft tokens than self.num_spec.
+        #
+        # In above cases, the max possible batch size for n tokens, can be
+        # min(n, cudagraph_max_bs).
         if (self.use_full_cuda_graph and num_prefills == 0 and num_decodes == 0
                 and num_spec_decodes <= self.decode_cudagraph_max_bs
-                and m.num_actual_tokens <= self.decode_cudagraph_max_bs):
-            num_total_tokens = self.vllm_config.pad_for_cudagraph(
+                and num_spec_decode_tokens <= self.decode_cudagraph_max_bs):
+            num_actual_tokens = self.vllm_config.pad_for_cudagraph(
                 m.num_actual_tokens)
-            batch_size = num_total_tokens // (self.num_spec + 1)
+            batch_size = min(self.decode_cudagraph_max_bs, num_actual_tokens)
 
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor, non_blocking=True)
@@ -229,7 +246,7 @@ class GDNAttentionMetadataBuilder(
             assert spec_token_masks is not None
             self.spec_token_masks[:spec_token_masks.size(0)].copy_(
                 spec_token_masks, non_blocking=True)
-            spec_token_masks = self.spec_token_masks[:m.num_actual_tokens]
+            spec_token_masks = self.spec_token_masks[:num_actual_tokens]
             spec_token_masks[spec_token_masks.size(0):].fill_(False)
 
             self.spec_query_start_loc[:num_spec_decodes + 1].copy_(
@@ -248,9 +265,9 @@ class GDNAttentionMetadataBuilder(
         if (self.use_full_cuda_graph and num_prefills == 0
                 and num_spec_decodes == 0
                 and num_decodes <= self.decode_cudagraph_max_bs):
-            num_total_tokens = self.vllm_config.pad_for_cudagraph(
+            num_actual_tokens = self.vllm_config.pad_for_cudagraph(
                 m.num_actual_tokens)
-            batch_size = num_total_tokens
+            batch_size = num_actual_tokens
 
             self.non_spec_state_indices_tensor[:num_decodes].copy_(
                 non_spec_state_indices_tensor, non_blocking=True)
@@ -274,6 +291,7 @@ class GDNAttentionMetadataBuilder(
             num_decode_tokens=num_decode_tokens,
             num_spec_decodes=num_spec_decodes,
             num_spec_decode_tokens=num_spec_decode_tokens,
+            num_actual_tokens=num_actual_tokens,
             has_initial_state=has_initial_state,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
@@ -282,6 +300,9 @@ class GDNAttentionMetadataBuilder(
             spec_sequence_masks=spec_sequence_masks,
             spec_token_masks=spec_token_masks,
             num_accepted_tokens=num_accepted_tokens,
+            nums_dict=nums_dict,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         return attn_metadata
 
