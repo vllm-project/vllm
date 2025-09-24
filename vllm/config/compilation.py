@@ -90,7 +90,7 @@ class PassConfig:
     fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
     enable_mul_pad_fusion: bool = False
-    """Whether. to enable the mul+pad fusion pass."""
+    """Whether to enable the mul+pad fusion pass."""
 
     # TODO(luka) better pass enabling system.
 
