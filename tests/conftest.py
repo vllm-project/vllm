@@ -1079,7 +1079,7 @@ def dummy_llava_path():
                           local_dir=_dummy_llava_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
-                              "*.msgpack"
+                              "*.msgpack", "*.safetensors"
                           ])
         assert os.path.exists(json_path)
         with open(json_path) as f:
@@ -1098,7 +1098,7 @@ def dummy_gemma2_embedding_path():
                           local_dir=_dummy_gemma2_embedding_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
-                              "*.msgpack"
+                              "*.msgpack", "*.safetensors"
                           ])
         assert os.path.exists(json_path)
         with open(json_path) as f:
