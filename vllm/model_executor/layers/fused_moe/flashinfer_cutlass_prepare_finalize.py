@@ -22,13 +22,11 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
         use_dp: bool,
-        a1_gscale: Optional[torch.Tensor],
         num_dispatchers: int = 1,
     ):
         super().__init__()
         self.num_dispatchers_ = num_dispatchers
         self.use_dp = use_dp
-        self.a1_gscale = a1_gscale
         self.local_tokens = None
 
     @property
@@ -47,18 +45,13 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],  # Not used
-        a2_scale: Optional[torch.Tensor],  # Not used
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-        # TODO(bnell): use quant_config + scales instead of ctor args
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> mk.PrepareResultType:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -69,7 +62,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
-            self.a1_gscale,
+            quant_config.a1_gscale,
             quant_config.quant_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,

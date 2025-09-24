@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage, FunctionCall,
                                               ToolCall)
 from vllm.entrypoints.openai.tool_parsers import SeedOssToolParser
-from vllm.transformers_utils.detokenizer import detokenize_incrementally
+from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
 # Use a common model that is likely to be available
@@ -102,9 +102,7 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
-        ("""<seed:think>\n</seed:cot_budget_reflect>\n</seed:cot_budget_reflect>\n"""
-         """The current thinking budget is 0, so I will directly start answering the question.\n</seed:think>\n"""
-         """<seed:tool_call>\n<function=get_weather>\n"""
+        ("""<seed:tool_call>\n<function=get_weather>\n"""
          """<parameter=location>Barcelona, Spain</parameter>\n</function>\n</seed:tool_call>""",
          [
              ToolCall(function=FunctionCall(
@@ -114,10 +112,7 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
                  }, ),
              ),
                       type='function')
-         ],
-         """<seed:think>\n</seed:cot_budget_reflect>\n</seed:cot_budget_reflect>\n"""
-         """The current thinking budget is 0, so I will directly start answering the question.\n</seed:think>\n"""
-         ),
+         ], None),
         (
             """<seed:think>The user\'s current thinking budget is 512.</seed:cot_budget_reflect>\nLet me analyze the """
             """question. The user wants to know the weather in Barcelona, Spain. Looking at the functions available, """

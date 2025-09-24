@@ -53,12 +53,14 @@ class OpenAISpeechToText(OpenAIServing):
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
+        log_error_stack: bool = False,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         log_error_stack=log_error_stack)
 
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
@@ -87,6 +89,9 @@ class OpenAISpeechToText(OpenAIServing):
     ) -> tuple[list[PromptType], float]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
+        # Skip to_language validation to avoid extra logging for Whisper.
+        to_language = self.model_cls.validate_language(request.to_language) \
+            if request.to_language else None
 
         if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
             raise ValueError("Maximum file size exceeded.")
@@ -110,7 +115,9 @@ class OpenAISpeechToText(OpenAIServing):
                 model_config=self.model_config,
                 language=language,
                 task_type=self.task_type,
-                request_prompt=request.prompt)
+                request_prompt=request.prompt,
+                to_language=to_language,
+            )
             prompts.append(prompt)
         return prompts, duration
 
@@ -200,7 +207,22 @@ class OpenAISpeechToText(OpenAIServing):
             for result_generator in list_result_generator:
                 async for op in result_generator:
                     text += op.outputs[0].text
-            return cast(T, response_class(text=text))
+
+            if self.task_type == "transcribe":
+                # add usage in TranscriptionResponse.
+                usage = {
+                    "type": "duration",
+                    # rounded up as per openAI specs
+                    "seconds": int(math.ceil(duration_s)),
+                }
+                final_response = cast(T, response_class(text=text,
+                                                        usage=usage))
+            else:
+                # no usage in response for translation task
+                final_response = cast(
+                    T, response_class(text=text))  # type: ignore[call-arg]
+
+            return final_response
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:

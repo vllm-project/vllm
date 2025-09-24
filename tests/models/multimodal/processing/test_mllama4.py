@@ -52,7 +52,7 @@ def test_profiling(model_id: str, max_model_len: int):
     chunks_per_image = prod(mm_data["patches_per_image"])
     total_num_patches = chunks_per_image * tokens_per_patch
     num_tiles = mm_data["aspect_ratios"][0][0] * mm_data["aspect_ratios"][0][
-        1]  # x-y seperator tokens
+        1]  # x-y separator tokens
     total_tokens = total_num_patches.item() + num_tiles.item(
     ) + 3  # image start, image, image end
 

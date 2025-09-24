@@ -20,6 +20,7 @@
 """Inference-only BLOOM model compatible with HuggingFace weights."""
 import math
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -40,7 +41,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP, SupportsQuant
@@ -256,7 +256,7 @@ class BloomModel(nn.Module):
                                                     config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.word_embeddings_layernorm(self.word_embeddings(input_ids))
+        return self.word_embeddings(input_ids)
 
     def forward(
         self,
@@ -270,10 +270,11 @@ class BloomModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
+            hidden_states = self.word_embeddings_layernorm(hidden_states)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-        for layer in self.h[self.start_layer:self.end_layer]:
+        for layer in islice(self.h, self.start_layer, self.end_layer):
             hidden_states = layer(position_ids, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -328,7 +329,9 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             self.lm_head = self.transformer.word_embeddings
         else:
             self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                          self.config.hidden_size)
+                                          self.config.hidden_size,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
@@ -351,10 +354,8 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

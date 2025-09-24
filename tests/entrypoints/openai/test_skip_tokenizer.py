@@ -11,16 +11,8 @@ import torch
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM"
+MODEL_NAME = "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
 DTYPE = "float16"
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 @pytest.fixture(scope="module")
@@ -35,7 +27,9 @@ def server():
         "--trust-remote-code",
         "--skip-tokenizer-init",
         "--max-num-seqs",
-        "32"
+        "32",
+        "--model-impl",
+        "terratorch"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

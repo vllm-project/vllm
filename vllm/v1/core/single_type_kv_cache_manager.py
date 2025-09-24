@@ -8,8 +8,9 @@ from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
-                                        FullAttentionSpec, KVCacheSpec,
-                                        MambaSpec, SlidingWindowSpec)
+                                        CrossAttentionSpec, FullAttentionSpec,
+                                        KVCacheSpec, MambaSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.request import Request
 
 
@@ -24,6 +25,7 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_spec: KVCacheSpec,
         block_pool: BlockPool,
         kv_cache_group_id: int,
+        dcp_world_size: int = 1,
     ) -> None:
         """
         Initializes the SingleTypeKVCacheManager.
@@ -32,8 +34,10 @@ class SingleTypeKVCacheManager(ABC):
             block_pool: The block pool.
             kv_cache_group_id: The id of the kv cache group of this manager.
         """
-
         self.block_size = kv_cache_spec.block_size
+        self.dcp_world_size = dcp_world_size
+        if self.dcp_world_size > 1:
+            self.block_size *= dcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
 
@@ -46,7 +50,7 @@ class SingleTypeKVCacheManager(ABC):
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
         # This is only used to track the RUNNING requests, we do not track the
-        # data for reempted ones.
+        # data for preempted ones.
         self.num_cached_block: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
@@ -195,6 +199,7 @@ class SingleTypeKVCacheManager(ABC):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        dcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than 
@@ -252,6 +257,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        dcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
             kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
@@ -259,7 +265,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             "and chunked local attention groups"
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
-        max_num_blocks = max_length // kv_cache_spec.block_size
+        block_size = kv_cache_spec.block_size
+        if dcp_world_size > 1:
+            block_size *= dcp_world_size
+        max_num_blocks = max_length // block_size
         for block_hash in itertools.islice(block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
@@ -309,9 +318,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        dcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups")
+        assert dcp_world_size == 1, "DCP not support sliding window attn now."
 
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
@@ -407,6 +418,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        dcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         For chunked local attention, we need to find the longest cache hit
@@ -444,6 +456,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "chunked local attention groups")
         assert use_eagle is False, ("Hybrid KV cache is not supported for " +
                                     "eagle + chunked local attention.")
+        assert dcp_world_size == 1, "DCP not support chunked local attn now."
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
             local_attention_start_idx = (max_length //
@@ -524,10 +537,12 @@ class MambaManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
+        dcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
             kv_cache_spec,
             MambaSpec), ("MambaManager can only be used for mamba groups")
+        assert dcp_world_size == 1, "DCP not support mamba now."
         # Prefix caching is not supported for mamba now. Always return empty
         # list.
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
@@ -544,12 +559,99 @@ class MambaManager(SingleTypeKVCacheManager):
                                      num_running_requests: int) -> int:
         return 0
 
+    def get_num_blocks_to_allocate(
+            self, request_id: str, num_tokens: int,
+            new_computed_blocks: list[KVCacheBlock]) -> int:
+        """
+        Get the number of blocks needed to be allocated for the request.
+
+        Args:
+            request_id: The request ID.
+            num_tokens: The total number of tokens that need a slot (including
+                tokens that are already allocated).
+            new_computed_blocks: The new computed blocks just hitting the
+                prefix caching.
+
+        Returns:
+            The number of blocks
+        """
+
+        assert isinstance(self.kv_cache_spec, MambaSpec)
+        if self.kv_cache_spec.num_speculative_blocks > 0:
+            num_tokens += (self.kv_cache_spec.block_size *
+                           self.kv_cache_spec.num_speculative_blocks)
+        num_required_blocks = cdiv(num_tokens, self.block_size)
+        num_new_blocks = (num_required_blocks - len(new_computed_blocks) -
+                          len(self.req_to_blocks[request_id]))
+        # If a computed block of a request is an eviction candidate (in the
+        # free queue and ref_cnt == 0), it will be changed from a free block
+        # to a computed block when the request is allocated, so we also count
+        # it as needed to be allocated.
+        num_evictable_computed_blocks = sum(
+            blk.ref_cnt == 0 and not blk.is_null
+            for blk in new_computed_blocks)
+        return num_new_blocks + num_evictable_computed_blocks
+
     def allocate_new_blocks(self, request_id: str,
                             num_tokens: int) -> list[KVCacheBlock]:
-        new_blocks = super().allocate_new_blocks(request_id, num_tokens)
-        assert len(self.req_to_blocks[request_id]) == 1, (
-            "MambaManager should only allocate 1 block for each request.")
-        return new_blocks
+        # Allocate extra `num_speculative_blocks` blocks for
+        # speculative decoding (MTP/EAGLE) with linear attention.
+        assert isinstance(self.kv_cache_spec, MambaSpec)
+        if self.kv_cache_spec.num_speculative_blocks > 0:
+            num_tokens += (self.kv_cache_spec.block_size *
+                           self.kv_cache_spec.num_speculative_blocks)
+        return super().allocate_new_blocks(request_id, num_tokens)
+
+
+class CrossAttentionManager(SingleTypeKVCacheManager):
+    """Manager for cross-attention KV cache in encoder-decoder models."""
+
+    def save_new_computed_blocks(
+            self, request_id: str,
+            new_computed_blocks: list[KVCacheBlock]) -> None:
+        # We do not cache blocks for cross-attention to be shared between
+        # requests, so  `new_computed_blocks` should always be empty.
+        assert len(new_computed_blocks) == 0
+
+    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+        # We do not cache blocks for cross-attention to be shared between
+        # requests, so this method is not relevant.
+        raise ValueError("Should not be called as prefix caching is disabled.")
+
+    def get_num_common_prefix_blocks(self, request_id: str,
+                                     num_running_requests: int) -> int:
+        # Cross-attention blocks contain request-specific encoder states
+        # and are not shared between different requests
+        return 0
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: list[BlockHash],
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+        dcp_world_size: int = 1,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        assert isinstance(kv_cache_spec, CrossAttentionSpec), (
+            "CrossAttentionManager can only be used for cross-attention groups"
+        )
+        # Cross-attention does not benefit from prefix caching since:
+        # 1. Encoder states are unique per request (different audio/image
+        #    inputs)
+        # 2. Encoder states are computed once per request, not incrementally
+        # 3. No reusable prefix exists between different multimodal inputs
+        # Return empty blocks to indicate no cache hits
+        raise NotImplementedError(
+            "CrossAttentionManager does not support caching")
+
+    def remove_skipped_blocks(self, request_id: str,
+                              num_computed_tokens: int) -> None:
+        # Cross-attention blocks represent encoder states which are needed
+        # for the entire decoding process, so no blocks should be skipped
+        pass
 
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
@@ -557,6 +659,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     SlidingWindowSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
+    CrossAttentionSpec: CrossAttentionManager,
 }
 
 

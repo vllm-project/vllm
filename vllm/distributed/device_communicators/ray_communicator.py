@@ -186,7 +186,7 @@ class RayPPCommunicator(Communicator):
         """
         Receive a torch.Tensor from a peer and synchronize the current stream.
 
-        After this call returns, the receive buffer is safe to read from from
+        After this call returns, the receive buffer is safe to read from
         any stream. An RayChannelError will be raised if an error occurred
         (e.g., remote actor died), and the buffer is not safe to read.
 

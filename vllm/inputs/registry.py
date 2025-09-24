@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
@@ -15,16 +16,9 @@ from vllm.utils.jsontree import JSONTree, json_map_leaves
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
-                                 MultiModalRegistry)
-    from vllm.sequence import SequenceData
     from vllm.transformers_utils.tokenizer import AnyTokenizer
 else:
     ModelConfig = Any
-    MultiModalDataDict = Any
-    MultiModalPlaceholderDict = Any
-    MultiModalRegistry = Any
-    SequenceData = Any
     AnyTokenizer = Any
 
 _T = TypeVar("_T")
@@ -146,6 +140,9 @@ class InputProcessingContext(InputContext):
         hf_processor: ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
+        *,
+        num_tries: int = 1,
+        max_tries: int = 5,
     ) -> Union[BatchFeature, JSONTree]:
         """
         Call `hf_processor` on the prompt `data`
@@ -187,59 +184,23 @@ class InputProcessingContext(InputContext):
             return cast_output
 
         except Exception as exc:
+            # See https://github.com/huggingface/tokenizers/issues/537
+            if (isinstance(exc, RuntimeError) and exc
+                    and exc.args[0] == "Already borrowed"
+                    and num_tries < max_tries):
+                logger.warning(
+                    "Failed to acquire tokenizer in current thread. "
+                    "Retrying (%d/%d)...", num_tries, max_tries)
+                time.sleep(0.5)
+                return self.call_hf_processor(
+                    hf_processor,
+                    data,
+                    kwargs,
+                    num_tries=num_tries + 1,
+                    max_tries=max_tries,
+                )
+
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={allowed_kwargs}")
 
             raise ValueError(msg) from exc
-
-
-class DummyData(NamedTuple):
-    """
-    Dummy data used for profiling.
-
-    Note: This is only used in V0.
-    """
-
-    seq_data: SequenceData
-    multi_modal_data: Optional[MultiModalDataDict] = None
-    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
-
-
-class InputRegistry:
-    """
-    Note: This is only used in V0.
-    """
-
-    def dummy_data_for_profiling(
-        self,
-        model_config: ModelConfig,
-        seq_len: int,
-        mm_registry: MultiModalRegistry,
-        is_encoder_data: bool = False,
-    ) -> DummyData:
-        """
-        Create dummy data for profiling the memory usage of a model.
-
-        The model is identified by ``model_config``.
-        """
-        # Avoid circular import
-        from vllm.sequence import SequenceData
-
-        if not model_config.is_multimodal_model:
-            seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
-            return DummyData(seq_data=seq_data)
-
-        # Encoder dummy data does not contain multi-modal data
-        if is_encoder_data:
-            enc_data = mm_registry.get_encoder_dummy_data(
-                model_config, seq_len)
-            seq_data = SequenceData.from_seqs(enc_data.prompt_token_ids)
-            return DummyData(seq_data=seq_data)
-
-        dec_data = mm_registry.get_decoder_dummy_data(model_config, seq_len)
-
-        return DummyData(
-            seq_data=SequenceData.from_seqs(dec_data.prompt_token_ids),
-            multi_modal_data=dec_data.multi_modal_data.get_data(),
-            multi_modal_placeholders=dec_data.multi_modal_placeholders,
-        )

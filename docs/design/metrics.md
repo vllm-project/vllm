@@ -99,11 +99,11 @@ http_request_duration_seconds_count{handler="/v1/completions",method="POST"} 201
 
 ### Multi-process Mode
 
-In v0, metrics are collected in the engine core process and we use multi-process mode to make them available in the API server process. See <gh-pr:7279>.
+In v0, metrics are collected in the engine core process and we use multiprocess mode to make them available in the API server process. See <gh-pr:7279>.
 
 ### Built in Python/Process Metrics
 
-The following metrics are supported by default by `prometheus_client`, but they are not exposed when multi-process mode is used:
+The following metrics are supported by default by `prometheus_client`, but they are not exposed when multiprocess mode is used:
 
 - `python_gc_objects_collected_total`
 - `python_gc_objects_uncollectable_total`

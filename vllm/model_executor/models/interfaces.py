@@ -3,11 +3,12 @@
 
 from collections.abc import Iterable, Mapping, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
-                    TypeVar, Union, overload, runtime_checkable)
+                    Union, overload, runtime_checkable)
 
 import numpy as np
 import torch
 from torch import Tensor
+from transformers import PretrainedConfig
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
@@ -22,7 +23,6 @@ from vllm.utils import supports_kw
 from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
-    from vllm.attention import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.sequence import IntermediateTensors
@@ -50,6 +50,18 @@ class SupportsMultiModal(Protocol):
     Note:
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
+    """
+
+    supports_multimodal_raw_input_only: ClassVar[bool] = False
+    """
+    A flag that indicates this model supports multi-modal inputs and processes
+    them in their raw form and not embeddings.
+    """
+
+    supports_encoder_tp_data: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
     @classmethod
@@ -84,33 +96,10 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    # Only for models that support v0 chunked prefill
-    # TODO(ywang96): Remove this overload once v0 is deprecated
-    @overload
     def get_input_embeddings(
         self,
         input_ids: Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-        attn_metadata: Optional["AttentionMetadata"] = None,
-    ) -> Tensor:
-        ...
-
-    # TODO: Remove this overload once v0 is deprecated
-    @overload
-    def get_input_embeddings(
-        self,
-        input_ids: Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> Tensor:
-        ...
-
-    def get_input_embeddings(
-        self,
-        input_ids: Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-        # Only necessary so that the v0 overload is valid
-        # TODO: Remove attn_metadata once v0 is deprecated
-        attn_metadata: Optional["AttentionMetadata"] = None,
     ) -> Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 
@@ -137,38 +126,14 @@ def supports_multimodal(
     return getattr(model, "supports_multimodal", False)
 
 
-@runtime_checkable
-class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
-    """The interface required for all multi-modal models."""
-
-    supports_multimodal_raw_input: ClassVar[Literal[True]] = True
-    """
-    A flag that indicates this model supports multi-modal inputs and processes
-    them in their raw form and not embeddings.
-
-    Note:
-        There is no need to redefine this flag if this class is in the
-        MRO of your model class.
-    """
+def supports_multimodal_raw_input_only(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_multimodal_raw_input_only", False)
 
 
-@overload
-def supports_multimodal_raw_input(
-        model: object) -> TypeIs[SupportsMultiModalWithRawInput]:
-    ...
-
-
-@overload
-def supports_multimodal_raw_input(
-        model: type[object]) -> TypeIs[type[SupportsMultiModalWithRawInput]]:
-    ...
-
-
-def supports_multimodal_raw_input(
-    model: Union[type[object], object]
-) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]],
-           TypeIs[SupportsMultiModalWithRawInput]]:
-    return getattr(model, "supports_multimodal_raw_input", False)
+def supports_multimodal_encoder_tp_data(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_encoder_tp_data", False)
 
 
 @runtime_checkable
@@ -641,23 +606,6 @@ def supports_cross_encoding(
     return is_pooling_model(model) and _supports_cross_encoding(model)
 
 
-_T = TypeVar("_T", bound=type[torch.nn.Module])
-
-
-def default_pooling_type(pooling_type: str):
-    """Set default_pooling_type decorator. """
-
-    def func(model: _T) -> _T:
-        model.default_pooling_type = pooling_type  # type: ignore
-        return model
-
-    return func
-
-
-def get_default_pooling_type(model: Union[type[object], object]) -> str:
-    return getattr(model, "default_pooling_type", "LAST")
-
-
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
@@ -729,8 +677,10 @@ class SupportsTranscription(Protocol):
     def get_generation_prompt(cls, audio: np.ndarray,
                               stt_config: SpeechToTextConfig,
                               model_config: ModelConfig,
-                              language: Optional[str], task_type: str,
-                              request_prompt: str) -> PromptType:
+                              language: Optional[str],
+                              task_type: Literal["transcribe", "translate"],
+                              request_prompt: str,
+                              to_language: Optional[str]) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
         returns a valid PromptType."""
@@ -850,7 +800,7 @@ class SupportsEagle3(Protocol):
         
         Args:
             layers: Tuple of layer indices that should output auxiliary
-              hidden states.
+                hidden states.
         """
         ...
 
@@ -879,3 +829,70 @@ def supports_eagle3(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsEagle3]], TypeIs[SupportsEagle3]]:
     return isinstance(model, SupportsEagle3)
+
+
+@runtime_checkable
+class SupportsMRoPE(Protocol):
+    """The interface required for all models that support M-RoPE."""
+
+    supports_mrope: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports M-RoPE.
+    
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        hf_config: PretrainedConfig,
+        image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        video_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        second_per_grid_ts: Optional[list[float]] = None,
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+        audio_feature_lengths: Optional[torch.Tensor] = None,
+        use_audio_in_video: bool = False,
+    ) -> tuple[torch.Tensor, int]:
+        """
+        Get M-RoPE input positions and delta value for this specific model.
+        
+        This method should be implemented by each model that supports M-RoPE
+        to provide model-specific logic for computing input positions.
+        
+        Args:
+            input_tokens: List of input token IDs
+            hf_config: HuggingFace model configuration
+            image_grid_thw: Image grid dimensions (t, h, w)
+            video_grid_thw: Video grid dimensions (t, h, w)
+            second_per_grid_ts: Seconds per grid timestep for videos
+            context_len: Context length
+            seq_len: Sequence length
+            audio_feature_lengths: Audio feature lengths for multimodal models
+            use_audio_in_video: Whether to use audio in video for interleaving
+            
+        Returns:
+            Tuple of (llm_positions, mrope_position_delta)
+            - llm_positions: Tensor of shape [3, num_tokens]
+                with T/H/W positions
+            - mrope_position_delta: Delta for position calculations
+        """
+        ...
+
+
+@overload
+def supports_mrope(model: type[object]) -> TypeIs[type[SupportsMRoPE]]:
+    ...
+
+
+@overload
+def supports_mrope(model: object) -> TypeIs[SupportsMRoPE]:
+    ...
+
+
+def supports_mrope(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsMRoPE]], TypeIs[SupportsMRoPE]]:
+    return isinstance(model, SupportsMRoPE)

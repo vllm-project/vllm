@@ -29,15 +29,12 @@ class TopKTopPSampler(nn.Module):
     Implementations may update the logits tensor in-place.
     """
 
-    def __init__(
-            self,
-            logprobs_mode: LogprobsMode = LogprobsMode.RAW_LOGPROBS) -> None:
+    def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs") -> None:
         super().__init__()
         self.logprobs_mode = logprobs_mode
         # flashinfer optimization does not apply if intermediate
         # logprobs/logits after top_k/top_p need to be returned
-        if logprobs_mode not in (LogprobsMode.PROCESSED_LOGITS,
-                                 LogprobsMode.PROCESSED_LOGPROBS
+        if logprobs_mode not in ("processed_logits", "processed_logprobs"
                                  ) and current_platform.is_cuda():
             if is_flashinfer_available:
                 flashinfer_version = flashinfer.__version__
@@ -73,10 +70,8 @@ class TopKTopPSampler(nn.Module):
                 self.forward = self.forward_native
         else:
             self.forward = self.forward_native
-        if current_platform.is_tpu():
-            self.apply_top_k_top_p = apply_top_k_top_p_tpu
-        else:
-            self.apply_top_k_top_p = apply_top_k_top_p
+
+        self.apply_top_k_top_p = apply_top_k_top_p
 
     def forward_native(
         self,
@@ -92,9 +87,9 @@ class TopKTopPSampler(nn.Module):
         """
         logits = self.apply_top_k_top_p(logits, k, p)
         logits_to_return = None
-        if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
+        if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
-        elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
+        elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators), logits_to_return
@@ -117,59 +112,12 @@ class TopKTopPSampler(nn.Module):
                                     "PyTorch-native implementation.")
             return self.forward_native(logits, generators, k, p)
         assert self.logprobs_mode not in (
-            LogprobsMode.PROCESSED_LOGITS, LogprobsMode.PROCESSED_LOGPROBS
+            "processed_logits", "processed_logprobs"
         ), "FlashInfer does not support returning logits/logprobs"
         # flashinfer sampling functions expect contiguous logits.
         # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
         # because of slicing operation in logits_processor.
         return flashinfer_sample(logits.contiguous(), k, p, generators), None
-
-
-def apply_top_k_top_p_tpu(
-    logits: torch.Tensor,
-    k: torch.Tensor,
-    p: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Apply top-k and top-p optimized for TPU.
-
-    This algorithm avoids using torch.scatter which is extremely slow on TPU.
-    This is achieved by finding a "cut-off" element in the original logit, and
-    after thresholding the logit using this cut-off, the remaining elements
-    shall constitute the top-p set.
-
-    Note: in the case of tie (i.e. multipple cut-off elements present in the
-    logit), all tie elements are included in the top-p set. In other words,
-    this function does not break ties. Instead, these tie tokens have equal
-    chance of being chosen during final sampling, so we can consider the tie
-    being broken then.
-    """
-    probs = logits.softmax(dim=-1)
-    probs_sort, _ = probs.sort(dim=-1, descending=False)
-
-    if k is not None:
-        top_k_count = probs_sort.size(1) - k.to(torch.long)  # shape: (batch, )
-        top_k_count = top_k_count.unsqueeze(dim=1)
-        top_k_cutoff = probs_sort.gather(-1, top_k_count)
-
-        # Make sure the no top-k rows are no-op.
-        no_top_k_mask = (k == logits.shape[1]).unsqueeze(dim=1)
-        top_k_cutoff.masked_fill_(no_top_k_mask, -float("inf"))
-
-        elements_to_discard = probs < top_k_cutoff
-        logits.masked_fill_(elements_to_discard, -float("inf"))
-
-    if p is not None:
-        cumprob = torch.cumsum(probs_sort, dim=-1)
-        top_p_mask = cumprob <= 1 - p.unsqueeze(dim=1)
-        top_p_mask[:, -1] = False  # at least one
-
-        top_p_count = top_p_mask.sum(dim=-1).unsqueeze(1)
-        top_p_cutoff = probs_sort.gather(-1, top_p_count)
-        elements_to_discard = probs < top_p_cutoff
-        logits.masked_fill_(elements_to_discard, -float("inf"))
-
-    return logits
 
 
 def apply_top_k_top_p(

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
-from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.logger import init_logger
 
@@ -11,7 +11,8 @@ logger = init_logger(__name__)
 
 class CudagraphDispatcher:
     """
-    Runtime cudagraph dispatcher to dispach keys for multiple set of cudagraphs.
+    Runtime cudagraph dispatcher to dispatch keys for multiple set of
+    cudagraphs.
 
     The dispatcher stores two sets of dispatch keys, one for PIECEWISE and one
     for FULL cudagraph runtime mode. The keys are initialized depending on 
@@ -21,7 +22,7 @@ class CudagraphDispatcher:
 
     At runtime, the dispatch method generates the runtime cudagraph mode (FULL, 
     PIECEWISE, or NONE for no cudagraph) and the valid key (batch descriptor)
-    based on the input key. After dispatching (commuicate via forward context), 
+    based on the input key. After dispatching (communicate via forward context),
     the cudagraph wrappers will trust the dispatch key to do either capturing
     or replaying (if mode matched), or pass through to the underlying runnable 
     without cudagraph (if mode no match or mode is NONE).
@@ -38,11 +39,15 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        assert not self.cudagraph_mode.requires_piecewise_compilation() or \
-            (self.compilation_config.level == CompilationLevel.PIECEWISE and
-             self.compilation_config.splitting_ops_contain_attention()), \
+        not_use_piecewise_compilation = (
+            not self.cudagraph_mode.requires_piecewise_compilation())
+
+        assert not_use_piecewise_compilation or \
+            self.compilation_config.is_attention_compiled_piecewise(), \
             "Compilation level should be CompilationLevel.PIECEWISE when "\
             "cudagraph_mode piecewise cudagraphs is used, "\
+            "and attention should be in splitting_ops or "\
+            "inductor splitting should be used. " \
             f"cudagraph_mode={self.cudagraph_mode}, "\
             f"compilation_level={self.compilation_config.level}, "\
             f"splitting_ops={self.compilation_config.splitting_ops}"

@@ -42,7 +42,7 @@ def test_basic_lifecycle():
     engine_core_outputs = scheduler.update_from_output(scheduler_output,
                                                        model_runner_output)
 
-    # Ensure the request is finished after 1 tokens.
+    # Ensure the request is finished after 1 token.
     assert request.is_finished()
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
     output = engine_core_outputs[0].outputs[0]
@@ -141,7 +141,7 @@ def test_short_prompt_lifecycle():
 
 
 def test_prefix_cache_lifecycle():
-    """Test that remote decode params still works with a prefix cache hit."""
+    """Test that remote decode params still work with a prefix cache hit."""
 
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)

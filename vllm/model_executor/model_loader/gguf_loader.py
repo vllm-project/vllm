@@ -9,7 +9,8 @@ import torch.nn as nn
 from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCausalLM
 
-from vllm.config import LoadConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig
+from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading, set_default_torch_dtype)

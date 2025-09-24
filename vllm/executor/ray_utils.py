@@ -10,6 +10,7 @@ import msgspec
 
 import vllm.platforms
 from vllm.config import ParallelConfig
+from vllm.distributed import get_pp_group
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -136,6 +137,11 @@ try:
                 scheduler_output, intermediate_tensors)
             if isinstance(output, IntermediateTensors):
                 output = scheduler_output, output
+            elif not get_pp_group().is_last_rank:
+                # Case where there are no scheduled requests
+                # but may still be finished requests.
+                assert not output or not output.req_ids
+                output = scheduler_output, None
             return output
 
         def override_env_vars(self, vars: Dict[str, str]):
@@ -217,7 +223,7 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
 
     """
     # Wait until PG is ready - this will block until all
-    # requested resources are available, and will timeout
+    # requested resources are available, and will time out
     # if they cannot be provisioned.
     placement_group_specs = current_placement_group.bundle_specs
 

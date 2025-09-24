@@ -840,7 +840,6 @@ Some HF processors directly insert feature tokens without replacing anything in 
 Examples:
 
 - BLIP-2 (insert at start of prompt): <gh-file:vllm/model_executor/models/blip2.py>
-- Florence2 (insert at start of prompt): <gh-file:vllm/model_executor/models/florence2.py>
 - Molmo (insert after `<|endoftext|>` token): <gh-file:vllm/model_executor/models/molmo.py>
 
 ### Handling prompt updates unrelated to multi-modal data
@@ -855,7 +854,7 @@ Examples:
 
 ### Custom HF processor
 
-Some models don't define a HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor].
+Some models don't define an HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor].
 
 Examples:
 

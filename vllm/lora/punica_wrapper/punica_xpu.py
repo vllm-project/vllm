@@ -225,6 +225,13 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             add_inputs=True,
             **kwargs)
 
+    @property
+    def sampler_indices_padded(self) -> torch.Tensor:
+        """
+        This property provides access to padded sampler indices.
+        """
+        return self._sampler_indices_padded[:]
+
     def add_lora_logits(self,
                         y: torch.Tensor,
                         x: torch.Tensor,
@@ -259,11 +266,11 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             buffer = torch.zeros((x.size(0), r),
                                  dtype=torch.float32,
                                  device=x.device)
-
-        bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
+        sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+        bgmv_shrink(x, lora_a_stacked, buffer, sampler_indices, scale)
         bgmv_expand(buffer,
                     lora_b_stacked,
                     y,
-                    self.sampler_indices,
+                    sampler_indices,
                     add_inputs=True)
         return y.view_as(y_org)
