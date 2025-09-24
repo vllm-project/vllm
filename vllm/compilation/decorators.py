@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import torch
 import torch.nn as nn
+from packaging import version
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 from vllm.compilation.counter import compilation_counter
@@ -300,13 +301,13 @@ def _support_torch_compile(
                 logger.debug(
                     "enable_cpp_symbolic_shape_guards config not available")
 
-            with patch.object(InliningInstructionTranslator, 'inline_call',
-                              patched_inline_call), torch._dynamo.config.patch(
-                                  **dynamo_config_patches
-                              ), maybe_use_cudagraph_partition_wrapper(
-                                  self.vllm_config):
+            with patch.object(
+                    InliningInstructionTranslator, "inline_call",
+                    patched_inline_call), torch._dynamo.config.patch(
+                        **dynamo_config_patches
+                    ), maybe_use_cudagraph_partition_wrapper(
+                        self.vllm_config), _torch27_patch_tensor_subclasses():
                 output = self.compiled_callable(*args, **kwargs)
-
             return output
 
         # usually, capturing the model once is enough, and then we can
@@ -367,3 +368,33 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
     if (compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and compilation_config.use_inductor_graph_partition):
         torch._inductor.utils.set_customized_partition_wrappers(None)
+
+
+@contextlib.contextmanager
+def _torch27_patch_tensor_subclasses():
+    """
+    Add support for using tensor subclasses (ie `BasevLLMParameter`, ect) when
+    using torch 2.7.0. This enables using weight_loader_v2 and the use of
+    `BasevLLMParameters` without having to replace them with regular tensors
+    before `torch.compile`-time.
+    """
+    from vllm.model_executor.parameter import (BasevLLMParameter,
+                                               ModelWeightParameter,
+                                               RowvLLMParameter,
+                                               _ColumnvLLMParameter)
+
+    def return_false(*args, **kwargs):
+        return False
+
+    if version.parse("2.7") <= version.parse(
+            torch.__version__) < version.parse("2.8"):
+        yield
+        return
+
+    with (torch._dynamo.config.patch("traceable_tensor_subclasses", [
+            BasevLLMParameter, ModelWeightParameter, _ColumnvLLMParameter,
+            RowvLLMParameter
+    ]),
+          patch("torch._dynamo.variables.torch.can_dispatch_torch_function",
+                return_false)):
+        yield
