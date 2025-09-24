@@ -30,8 +30,18 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         if envs.VLLM_USE_TRTLLM_FP4_GEMM:
             assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
             self.backend = "flashinfer-trtllm"
+            logger.info_once("Using flashinfer-trtllm for FP4")
+        elif envs.VLLM_USE_FBGEMM:
+            self.backend = "fbgemm"
+            if not (hasattr(torch.ops, 'fbgemm')
+                    and hasattr(torch.ops.fbgemm, 'f4f4bf16')):
+                raise RuntimeError(
+                    "Backend fbgemm  requires fbgemm.f4f4bf16 operator, "
+                    "Please install with: pip install fbgemm-gpu-genai")
+            logger.info_once("Using FGBEMM-GPU-GENAI for FP4")
         elif has_flashinfer():
             self.backend = "flashinfer-cutlass"
+            logger.info_once("Using flashinfer-cutlass for FP4")
         else:
             self.backend = "cutlass"
         self.group_size = 16
@@ -116,6 +126,9 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             layer.weight_packed = Parameter(weight, requires_grad=False)
         else:
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
+            if self.backend == "fbgemm":
+                swizzled_weight_scale = swizzled_weight_scale.view(-1).view(
+                    torch.uint8)
             layer.weight_scale = Parameter(swizzled_weight_scale,
                                            requires_grad=False)
             layer.weight_packed = Parameter(layer.weight_packed.data,
@@ -146,13 +159,23 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
-
+        if self.backend == "fbgemm":
+            x_blockscale = x_blockscale.view(-1).view(torch.uint8)
         mm_args = (x_fp4, layer.weight_packed, x_blockscale,
                    layer.weight_scale, layer.alpha, output_dtype)
         if self.backend == "flashinfer-trtllm":
             out = flashinfer_scaled_fp4_mm(*mm_args, backend="trtllm")
         elif self.backend == "flashinfer-cutlass":
             out = flashinfer_scaled_fp4_mm(*mm_args, backend="cutlass")
+        elif self.backend == "fbgemm":
+            out = torch.ops.fbgemm.f4f4bf16(
+                x_fp4,
+                layer.weight_packed,
+                x_blockscale,
+                layer.weight_scale,
+                layer.alpha,
+                use_mx=False,
+            )
         else:
             out = cutlass_scaled_fp4_mm(*mm_args)
 
