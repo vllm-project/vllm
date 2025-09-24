@@ -23,7 +23,6 @@ vLLM currently supports the following reasoning models:
     The reasoning feature for the Qwen3 series is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
     DeepSeek-V3.1 tool calling is supported in non-thinking mode.
 
-
 ## Quickstart
 
 To use reasoning models, you need to specify the `--reasoning-parser` flags when making a request to the chat completion endpoint. The `--reasoning-parser` flag specifies the reasoning parser to use for extracting reasoning content from the model output.
