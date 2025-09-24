@@ -58,7 +58,7 @@ def compute_piece_counts(X, P, stage_weights):
             alt = X[i, idx1] / (pieces[idx1] + 1) 
             delta = origin - (alt if alt > secv else secv) 
             deltas[idx1] += (delta * stage_weights[i] 
-                             if np.any(delta)!=0 else stage_weights[i]) 
+                             if np.any(delta) != 0 else stage_weights[i]) 
 
         max_idx = np.argmax(deltas) 
         pieces[max_idx] += 1 
@@ -188,7 +188,9 @@ def slice_values(X, pieces):
 
 
 @njit 
-def group_based_adaptive_searching_kernel(X, P, M, simulated_pieces, simulated_deployment, stage_weights): 
+def group_based_adaptive_searching_kernel(
+    X, P, M, simulated_pieces, simulated_deployment, stage_weights
+): 
     """ 
     Group-based adaptive searching kernel function for calculating the optimal 
     expert partitioning strategy. 
@@ -230,7 +232,9 @@ def group_based_adaptive_searching_kernel(X, P, M, simulated_pieces, simulated_d
     simulated_load = np.zeros(M, dtype=np.float32) 
 
     for i in range(flat_deployment.shape[0]): 
-        simulated_load[i // (flat_deployment.shape[0] // M)] += unit_load[flat_deployment[i]] 
+        simulated_load[i // (flat_deployment.shape[0] // M)] += unit_load[
+            flat_deployment[i]
+        ] 
 
     slice_vals = slice_values(X_all, simulated_pieces) 
     sorted_slices = np.sort(slice_vals)[::-1] 
@@ -425,8 +429,9 @@ class FlashLB(EplbPolicy):
             stage_par[i] = stage_load.max() / stage_load.mean() 
         return stage_par.mean() 
 
-    def group_based_adaptive_searching(self, X, P, M, stage_weights=None,
-                                       recorsive=False):
+    def group_based_adaptive_searching(
+        self, X, P, M, stage_weights=None, recorsive=False
+    ):
         n_stage, N = X.shape
         if stage_weights is None:
             stage_weights = np.ones(n_stage, dtype=np.float32)
@@ -473,8 +478,9 @@ class FlashLB(EplbPolicy):
         stage_weights = stage_weights / stage_weights.max() 
         return stage_weights 
 
-    def rebalance_layer(self, num_replicas, num_rank, deployment, hotness,
-                        layer_id=0):
+    def rebalance_layer(
+        self, num_replicas, num_rank, deployment, hotness, layer_id=0
+    ):
         current_par = self.compute_rank_load(deployment, hotness)
         if not self.need_update(current_par, layer_id):
             pieces = np.bincount(deployment.ravel())
@@ -510,8 +516,10 @@ class FlashLB(EplbPolicy):
         np.add.at(counts, idx, 1) 
         return result / counts 
     
-    def rebalance_experts(self, weight, num_replicas, num_groups, num_nodes,
-                          num_ranks, old_global_expert_indices=None):
+    def rebalance_experts(
+        self, weight, num_replicas, num_groups, num_nodes,
+        num_ranks, old_global_expert_indices=None
+    ):
         """
         Entry point for expert-parallelism load balancer.
         Parameters:
@@ -648,7 +656,9 @@ def warmup_flashlb():
         layer_total = layer_shape[0] * layer_shape[1] 
         extra_slots = layer_total - expert_num 
 
-        assert layer_total >= expert_num, f"Layer elements {layer_total} < experts {expert_num}" 
+        assert layer_total >= expert_num, (
+            f"Layer elements {layer_total} < experts {expert_num}"
+        )
 
         layers = [] 
         for _ in range(num_layers): 
@@ -666,7 +676,9 @@ def warmup_flashlb():
  
     expert_tensor = generate_layered_experts(num_layers=58, layer_shape=(32, 9)) 
     hotness = torch.randint(1, 100, (58, 256)) 
-    physical_to_logical_map, _, _ = algo.rebalance_experts(hotness, 288, 4, 2, 32) 
+    physical_to_logical_map, _, _ = algo.rebalance_experts(
+        hotness, 288, 4, 2, 32
+    ) 
     expert_tensor = physical_to_logical_map.reshape((58, 32, 9)) 
     for _ in range(3):
         physical_to_logical_map, _, _ = algo.rebalance_experts(
