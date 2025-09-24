@@ -27,14 +27,12 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    is_interleaved, maybe_override_with_speculators_target_model,
-    try_get_generation_config, try_get_safetensors_metadata,
+    is_interleaved, try_get_generation_config, try_get_safetensors_metadata,
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.runai_utils import (ObjectStorageModel,
                                                  is_runai_obj_uri)
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
-                        LazyLoader, common_broadcastable_dtype)
+from vllm.utils import LayerBlockType, LazyLoader, common_broadcastable_dtype
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -179,11 +177,6 @@ class ModelConfig:
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
-    max_seq_len_to_capture: int = 8192
-    """Maximum sequence len covered by CUDA graphs. When a sequence has context
-    length larger than this, we fall back to eager mode. Additionally for
-    encoder-decoder models, if the sequence length of the encoder input is
-    larger than this, we fall back to the eager mode."""
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -223,8 +216,6 @@ class ModelConfig:
     that this name(s) will also be used in `model_name` tag content of
     prometheus metrics, if multiple names provided, metrics tag will take the
     first one."""
-    use_async_output_proc: bool = True
-    """Whether to use async output processor."""
     config_format: Union[str, ConfigFormat] = "auto"
     """The format of the model config to load:\n
     - "auto" will try to load the config in hf format if available else it
@@ -417,15 +408,6 @@ class ModelConfig:
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
-
-        if self.runner != "draft":
-            # If we're not running the draft model, check for speculators config
-            # If speculators config, set model / tokenizer to be target model
-            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
-                model=self.model,
-                tokenizer=self.tokenizer,
-                revision=self.revision,
-                trust_remote_code=self.trust_remote_code)
 
         if (backend := envs.VLLM_ATTENTION_BACKEND
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
@@ -712,11 +694,12 @@ class ModelConfig:
             model: Model name or path
             tokenizer: Tokenizer name or path
         """
+
         if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
             return
 
         if is_runai_obj_uri(model):
-            object_storage_model = ObjectStorageModel()
+            object_storage_model = ObjectStorageModel(url=model)
             object_storage_model.pull_files(
                 model, allow_pattern=["*.model", "*.py", "*.json"])
             self.model_weights = model
@@ -735,7 +718,7 @@ class ModelConfig:
 
         # Only download tokenizer if needed and not already handled
         if is_runai_obj_uri(tokenizer):
-            object_storage_tokenizer = ObjectStorageModel()
+            object_storage_tokenizer = ObjectStorageModel(url=tokenizer)
             object_storage_tokenizer.pull_files(model,
                                                 ignore_pattern=[
                                                     "*.pt", "*.safetensors",
@@ -1016,6 +999,7 @@ class ModelConfig:
                     self.quantization = quantization_override
                     break
 
+            quant_method = quant_method if quant_method != "" else None
             # Verify quantization configurations.
             if self.quantization is None:
                 self.quantization = quant_method
@@ -1035,21 +1019,8 @@ class ModelConfig:
             current_platform.verify_quantization(self.quantization)
 
     def _verify_cuda_graph(self) -> None:
-        # The `max_seq_len_to_capture` was incorrectly
-        # based on the encoder's input length (448)
-        # but not the decoder's larger input length (1500).
-        # This change ensures the CUDA Graph captures the correct,
-        # larger sequence length, allowing it to work as intended.
-        effective_max_seq_len = self.max_model_len
-        if self.is_encoder_decoder:
-            effective_max_seq_len = max(
-                effective_max_seq_len,
-                getattr(self.hf_config, "max_source_positions", 0))
-        self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
-                                          effective_max_seq_len)
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
         unsupported_rocm = self.is_encoder_decoder
-
         if (unsupported_rocm and not self.enforce_eager
                 and current_platform.is_rocm()):
             logger.warning(
@@ -1115,41 +1086,6 @@ class ModelConfig:
                     self.hf_config.dual_chunk_attention_config[
                         "sparse_attention_enabled"] = True
 
-            if envs.VLLM_ATTENTION_BACKEND != STR_DUAL_CHUNK_FLASH_ATTN_VAL:
-                raise ValueError("please set VLLM_ATTENTION_BACKEND to "
-                                 f"{STR_DUAL_CHUNK_FLASH_ATTN_VAL}")
-
-    def verify_async_output_proc(self, parallel_config, speculative_config,
-                                 device_config) -> None:
-        if not self.use_async_output_proc:
-            # Nothing to check
-            return
-
-        if parallel_config.pipeline_parallel_size > 1:
-            self.use_async_output_proc = False
-            return
-
-        # Reminder: Please update docs/features/compatibility_matrix.md
-        # If the feature combo become valid
-        from vllm.platforms import current_platform
-        if not current_platform.is_async_output_supported(self.enforce_eager):
-            self.use_async_output_proc = False
-            return
-
-        if envs.VLLM_USE_RAY_SPMD_WORKER:
-            self.use_async_output_proc = False
-            return
-
-        # Async postprocessor is not necessary for pooling models
-        # since there is no token generation
-        if self.runner_type == "pooling":
-            self.use_async_output_proc = False
-
-        # Reminder: Please update docs/features/compatibility_matrix.md
-        # If the feature combo become valid
-        if speculative_config:
-            self.use_async_output_proc = False
-
     def verify_with_parallel_config(
         self,
         parallel_config: ParallelConfig,
@@ -1173,15 +1109,12 @@ class ModelConfig:
             self._verify_with_expert_parallelism()
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
-        if pipeline_parallel_size > 1:
-            if not self.registry.is_pp_supported_model(self.architectures,
-                                                       self):
-                raise NotImplementedError(
-                    "Pipeline parallelism is not supported for this model. "
-                    "Supported models implement the `SupportsPP` interface.")
-
-            if self.use_async_output_proc:
-                self.use_async_output_proc = False
+        if (pipeline_parallel_size > 1
+                and not self.registry.is_pp_supported_model(
+                    self.architectures, self)):
+            raise NotImplementedError(
+                "Pipeline parallelism is not supported for this model. "
+                "Supported models implement the `SupportsPP` interface.")
 
     def get_sliding_window(self) -> Optional[int]:
         """Get the sliding window size from the HF text config if present."""
