@@ -553,8 +553,18 @@ def merge_multimodal_embeddings(
         This updates ``inputs_embeds`` in place.
     """
     if isinstance(placeholder_token_id, list):
-        placeholder_token_id = torch.tensor(placeholder_token_id,
-                                            device=input_ids.device)
+        flat_ids = []
+        for x in placeholder_token_id:
+            if torch.is_tensor(x):
+                flat_ids.extend(int(v) for v in x.reshape(-1).tolist())
+            elif isinstance(x, (list, tuple)):
+                flat_ids.extend(int(v) for v in x)
+            else:
+                flat_ids.append(int(x))
+
+        placeholder_token_id = torch.as_tensor(
+            flat_ids, device=input_ids.device, dtype=input_ids.dtype
+        )
         return _merge_multimodal_embeddings(
             inputs_embeds,
             torch.isin(input_ids, placeholder_token_id),
