@@ -48,7 +48,7 @@ def create_mlfq_scheduler(
     )
     
     model_config = ModelConfig(
-        model="/home/lifd/models/opt-125m/facebook/opt-125m",
+        model="facebook/opt-125m",
         trust_remote_code=True,
         dtype="float16",
         seed=42,
