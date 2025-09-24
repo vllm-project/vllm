@@ -186,11 +186,12 @@ class CudaPlatformBase(Platform):
             # if torch compile cache key issue fixed
             # See https://github.com/vllm-project/vllm/pull/25093
             logger.info(
-                "Data Parallel: disabling cudagraphs since DP "
-                "with DeepEP high-throughput kernels are not CUDA Graph "
-                "compatible. The DeepEP low-latency kernels are CUDA Graph "
-                "compatible. Set the all_to_all backend to deepep_low_latency "
-                "to use those kernels instead.")
+                "WideEP: Disabling CUDA Graphs since DeepEP high-throughput "
+                "kernels are optimized for prefill and are incompatible with "
+                "CUDA Graphs. "
+                "In order to use CUDA Graphs for decode-optimized workloads, "
+                "set VLLM_ALL2ALL_BACKEND to another option, such as "
+                "deepep_low_latency, pplx, or allgather_reducescatter.")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
     @classmethod
