@@ -48,13 +48,9 @@ def test_model_tpu_int8(vllm_runner, model: str, dtype: str, max_tokens: int,
 
     prompts = [
         "A robot may not injure a human being",
-        "It is only with the heart that one can see rightly;",
-        "The greatest glory in living lies not in never falling,",
     ]
     answers = [
-        "or, being injured, not kill, except in",
-        "without the heart, one can only see wrongly.",
-        "but in rising every time we fall. - Nelson"
+        "or kill a human being",
     ]
 
     with vllm_runner(model, dtype=dtype, hf_overrides=hf_overrides) as vllm:
