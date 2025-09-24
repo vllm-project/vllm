@@ -283,11 +283,18 @@ def use_trtllm_attention(
 
     if force_use_trtllm is None:
         # Environment variable not set - use auto-detection
-        use_trtllm = (
-            num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
-        )
+        if is_prefill:
+            # Prefill auto-detection
+            use_trtllm = (max_seq_len <= 131072 and kv_cache_dtype == "auto")
+        else:
+            # Decode auto-detection
+            use_trtllm = (num_tokens <= 256 and max_seq_len <= 131072
+                          and kv_cache_dtype == "auto")
+
         if use_trtllm:
-            logger.warning_once("Using TRTLLM attention (auto-detected).")
+            context = "prefill" if is_prefill else "decode"
+            logger.warning_once(
+                f"Using TRTLLM {context} attention (auto-detected).")
         return use_trtllm
 
     # Environment variable is set to 1 - respect it
