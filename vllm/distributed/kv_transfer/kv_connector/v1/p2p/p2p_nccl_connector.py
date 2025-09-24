@@ -8,6 +8,7 @@ import regex as re
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
@@ -71,6 +72,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
         self.config = vllm_config.kv_transfer_config
+        self._async_transfer = self._should_transfer_async(self.config)
         self.is_producer = self.config.is_kv_producer
         self.chunked_prefill: dict[str, Any] = {}
 
@@ -85,6 +87,22 @@ class P2pNcclConnector(KVConnectorBase_V1):
             hostname="",
             port_offset=self._rank,
         ) if role == KVConnectorRole.WORKER else None
+    
+    def _should_transfer_async(self, kv_transfer_config: Optional[KVTransferConfig]) -> bool:
+        if kv_transfer_config is None:
+            logger.info("P2P NCCL: No config found, using sync mode")
+            return False
+
+        # Check for async mode in extra config
+        extra_config = getattr(kv_transfer_config, 'kv_connector_extra_config', {})
+        if extra_config is None:
+            extra_config = {}
+
+        async_transfer = extra_config.get('enable_async_transfer', False)
+        logger.info(
+            f"P2P NCCL connector initialized with async_transfer={async_transfer}"
+        )
+        return async_transfer
 
     # ==============================
     # Worker-side methods
@@ -194,11 +212,18 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 layer = kv_cache[forward_context.virtual_engine]
 
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "#" + layer_name, remote_address)
+                    request.request_id + "#" + layer_name,
+                    remote_address,
+                    self._async_transfer)
 
                 if kv_cache is None:
-                    logger.warning("🚧kv_cache is None, %s", request.request_id)
-                    continue
+                    if self._async_transfer:
+                        # Current layer is not ready yet, 
+                        # will load in the next engine step
+                        break
+                    else:
+                        logger.warning("🚧kv_cache is None, %s", request.request_id)
+                        continue
 
                 inject_kv_into_layer(layer, kv_cache, request.block_ids,
                                      request.request_id)
@@ -450,7 +475,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self.chunked_prefill.pop(request.request_id, None)
 
-        return False, None
+        if not self._async_transfer:
+            return False, None
+
+        # TODO: Implement async transfer
+        return True, None
 
     # ==============================
     # Static methods

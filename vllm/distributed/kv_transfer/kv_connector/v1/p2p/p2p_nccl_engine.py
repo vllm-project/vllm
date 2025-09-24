@@ -258,6 +258,7 @@ class P2pNcclEngine:
         self,
         tensor_id: str,
         remote_address: typing.Optional[str] = None,
+        async_transfer: bool = False,
     ) -> torch.Tensor:
         if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
             start_time = time.time()
@@ -283,6 +284,13 @@ class P2pNcclEngine:
             return tensor
 
         # GET
+        if async_transfer:
+            raise RuntimeError(
+                f"Async transfers not supported with send_type='{self.send_type}'. "
+                f"Async transfers require PUT or PUT_ASYNC mode. "
+                f"Please configure kv_connector_extra_config with appropriate send_type."
+            )
+
         if remote_address is None:
             return None
 
