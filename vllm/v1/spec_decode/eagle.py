@@ -273,7 +273,7 @@ class EagleProposer:
         else:
             positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
- 
+
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
             draft_token_ids_list = self.propose_tree(
@@ -947,7 +947,7 @@ class EagleProposer:
                 forward_positions = self.positions[:, :num_tokens]
             else:
                 forward_positions = self.positions[:num_tokens]
-            
+
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]

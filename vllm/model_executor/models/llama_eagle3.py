@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -23,7 +22,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.llama import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
 
-from .utils import AutoWeightsLoader, maybe_prefix, merge_multimodal_embeddings
+from .utils import AutoWeightsLoader, maybe_prefix
 
 logger = init_logger(__name__)
 
