@@ -125,48 +125,16 @@ class MLFQScheduler(Scheduler):
         return scheduler_output
     
     def _cleanup_finished_requests_from_mlfq(self) -> None:
-        """Remove any finished or invalid requests from MLFQ queue before scheduling."""
-        requests_to_remove = set()
-        for request in list(self.mlfq):
-            # Remove finished requests
-            if request.is_finished():
-                requests_to_remove.add(request.request_id)
-                logger.debug(f"Found finished request {request.request_id} with status {request.status}")
-            # Remove requests that are already RUNNING (should not be in waiting queue)
-            elif request.status == RequestStatus.RUNNING:
-                requests_to_remove.add(request.request_id)
-                logger.debug(f"Found RUNNING request {request.request_id} in MLFQ queue - removing")
-        
-        if requests_to_remove:
-            logger.debug(f"Cleaning up {len(requests_to_remove)} requests from MLFQ")
-            # Remove requests from MLFQ queue
-            for req_id in requests_to_remove:
-                # Get the request object from MLFQ queue directly
-                request = None
-                for level in range(self.mlfq.num_levels):
-                    for req in self.mlfq.queues[level]:
-                        if req.request_id == req_id:
-                            request = req
-                            break
-                    if request:
-                        break
-                
-                if request:
-                    logger.debug(f"Processing request {req_id}, current status: {request.status}")
-                    # Check if request is still in MLFQ before removing
-                    if req_id in self.mlfq.job_attributes:
-                        level = self.mlfq.job_attributes[req_id].current_level
-                        logger.debug(f"Request {req_id} is in MLFQ level {level}")
-                        if request in self.mlfq.queues[level]:
-                            self.mlfq.queues[level].remove(request)
-                            logger.debug(f"Removed request {req_id} from MLFQ level {level}")
-                        else:
-                            logger.debug(f"Request {req_id} not found in MLFQ level {level} queue")
-                        del self.mlfq.job_attributes[req_id]
-                    else:
-                        logger.debug(f"Request {req_id} not found in MLFQ job attributes")
-                else:
-                    logger.debug(f"Request {req_id} not found in MLFQ queues")
+        """Remove any finished requests from MLFQ queue before scheduling."""
+        requests_to_remove = [req for req in self.mlfq if req.is_finished()]
+        if not requests_to_remove:
+            return
+
+        logger.debug(f"Cleaning up {len(requests_to_remove)} finished requests from MLFQ")
+        for request in requests_to_remove:
+            # The request might have been aborted and already removed.
+            if request.request_id in self.mlfq.job_attributes:
+                self.mlfq.remove_request(request)
     
     def _update_mlfq_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         """Update MLFQ state after scheduling step."""
