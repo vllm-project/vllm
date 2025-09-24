@@ -397,7 +397,7 @@ __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
-    "fp4_quantize",
+    "nvfp4_quantize",
     "nvfp4_block_scale_interleave",
     "trtllm_fp4_block_scale_moe",
     "autotune",

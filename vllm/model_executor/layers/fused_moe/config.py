@@ -394,7 +394,9 @@ class FusedMoEQuantConfig:
         """
         General builder function for a FusedMoEQuantConfig.
         - quant_dtype: Optional quantization type. None if activations are
-          unquantized or quantized prior to calling.  Note: "nvfp4", "fp4", "fp6_e3m2", "fp6_e2m3" are the only valid string values for quant_dtype.
+          unquantized or quantized prior to calling.  Note: "nvfp4", "fp4",
+          "fp6_e3m2", "fp6_e2m3" are the only valid string values
+          for quant_dtype.
         - per_act_token_quant: Activations have per token quantization.
         - per_out_ch_quant: Outputs have per channel quantization. (only
           for cutlass).

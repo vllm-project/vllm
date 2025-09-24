@@ -68,7 +68,7 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         # def check_model(model):
         #     from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
         #         QuarkLinearMethod)
-        #     from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import QuarkOCP_MX
+        #     from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import QuarkOCP_MX  # noqa: E501
         #     from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
         #         QuarkOCP_MX_MoEMethod)
 
