@@ -82,7 +82,7 @@ from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 logger = init_logger(__name__)
 
 # For profile run
-_MAX_FRAMES_PER_VIDEO = 600
+_MAX_FRAMES_PER_VIDEO = 14
 
 # === Vision Inputs === #
 
@@ -982,7 +982,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         num_frames = start_num_frames
 
         while True:
-            next_num_frames = num_frames + 1
+            next_num_frames = num_frames + 2
             next_max_tokens = self.get_num_video_tokens(
                 image_width=target_width,
                 image_height=target_height,
@@ -1001,12 +1001,13 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        max_frames_per_video: int = _MAX_FRAMES_PER_VIDEO,
     ) -> int:
         max_videos = mm_counts.get("video", 0)
 
         max_total_frames = self._get_max_video_frames(seq_len)
         max_frames_per_video = min(max_total_frames // max(max_videos, 1),
-                                   _MAX_FRAMES_PER_VIDEO)
+                                   max_frames_per_video)
 
         return max(max_frames_per_video, 1)
 

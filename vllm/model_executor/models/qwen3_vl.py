@@ -90,6 +90,9 @@ from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
 
+# For profile run
+_MAX_FRAMES_PER_VIDEO = 65536
+
 
 class Qwen3_VisionPatchEmbed(nn.Module):
 
@@ -632,6 +635,14 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         return super()._get_max_video_frames(max_tokens,
                                              start_num_frames=start_num_frames)
 
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        return super().get_num_frames_with_most_features(
+            seq_len, mm_counts, max_frames_per_video=_MAX_FRAMES_PER_VIDEO)
+
     def _calculate_timestamps(self, indices: list[int] | torch.Tensor,
                               video_fps: float, merge_size: int):
         if not isinstance(indices, list):
@@ -701,6 +712,12 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             self.info.get_image_size_with_most_features())
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts)
+        target_video_size, _ = self.info._get_vision_info(
+            image_width=target_width,
+            image_height=target_height,
+            num_frames=target_num_frames,
+            image_processor=self.info.get_video_processor(),
+        )
         return {
             "image":
             self._get_dummy_images(width=target_width,
@@ -708,8 +725,8 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
                                    num_images=num_images),
             "video":
             self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
+                width=target_video_size.width,
+                height=target_video_size.height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
             ),
