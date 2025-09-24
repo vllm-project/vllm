@@ -42,7 +42,6 @@ def test_oot_registration_text_generation(
             assert rest == ""
 
 
-@pytest.mark.skip(reason="This test is skipped because it failed on V1.")
 @create_new_process_for_each_test()
 def test_oot_registration_embedding(
     monkeypatch: pytest.MonkeyPatch,
@@ -63,7 +62,6 @@ def test_oot_registration_embedding(
 image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
 
-@pytest.mark.skip(reason="This test is skipped because it failed on V1.")
 @create_new_process_for_each_test()
 def test_oot_registration_multimodal(
     monkeypatch: pytest.MonkeyPatch,
