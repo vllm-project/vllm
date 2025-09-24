@@ -3621,51 +3621,96 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     self.reorder_batch_threshold = reorder_batch_threshold_i
 
-    def _select_kernel_block_size(self, kv_manager_block_size: int,
-                                  backend_cls: type[AttentionBackend]) -> int:
+    def _find_compatible_block_sizes(
+            self,
+            kv_manager_block_size: int,
+            backend_cls: type[AttentionBackend],
+            return_all: bool = False) -> Union[int, list[int]]:
         """
-        Select the optimal kernel block size for a given physical block size.
+        Find compatible block sizes for a backend.
 
         Args:
-            kv_manager_block_size: The physical block size of the KV cache
-            backend_cls: The attention backend class
+            kv_manager_block_size: Physical block size of KV cache
+            backend_cls: Attention backend class
+            return_all: Return all compatible sizes if True, max size if False
 
         Returns:
-            The selected kernel block size (largest available)
-            - return kv_manager_block_size if supported
-            - otherwise, return max supported block size that is a factor
-              of kv_manager_block_size
+            Compatible block size(s) based on return_all parameter
 
         Raises:
-            ValueError: If no valid kernel block size can be found that
-                       satisfies the backend's constraints
+            ValueError: If no compatible block size found
         """
         supported_block_size = backend_cls.get_supported_block_size()
+        compatible_sizes = []
 
-        # if kv_manager_block_size is supported by the attention backend,
-        # return it.
         for block_size in supported_block_size:
             if isinstance(block_size, int):
-                if kv_manager_block_size == block_size:
-                    return kv_manager_block_size
+                if kv_manager_block_size % block_size == 0:
+                    compatible_sizes.append(block_size)
             elif (isinstance(block_size, MultipleOf)
                   and kv_manager_block_size % block_size.base == 0):
-                return kv_manager_block_size
-
-        # Otherwise, we can't find a valid block_size from the
-        # `MultipleOf`-style candidates. So find the largest one from
-        # the `int`-style candidates.
-        compatible_sizes = [
-            block_size for block_size in supported_block_size
-            if isinstance(block_size, int) and kv_manager_block_size %
-            block_size == 0
-        ]
+                compatible_sizes.append(kv_manager_block_size)
 
         if not compatible_sizes:
             raise ValueError(
                 f"No compatible block size for {kv_manager_block_size}")
 
-        return max(compatible_sizes)
+        return compatible_sizes if return_all else max(compatible_sizes)
+
+    def _get_all_compatible_block_sizes(
+            self, kv_manager_block_size: int,
+            backend_cls: type[AttentionBackend]) -> list[int]:
+        """
+        Get all compatible block sizes for a backend.
+
+        Args:
+            kv_manager_block_size: Physical block size of KV cache
+            backend_cls: Attention backend class
+
+        Returns:
+            List of all compatible block sizes in descending order
+
+        Raises:
+            ValueError: If no compatible block size found
+        """
+        compatible_sizes = self._find_compatible_block_sizes(
+            kv_manager_block_size, backend_cls, return_all=True)
+
+        return sorted(list(set(compatible_sizes)), reverse=True)
+
+    def _select_common_block_size(self, kv_manager_block_size: int,
+                                  attn_groups: list[AttentionGroup]) -> int:
+        """
+        Select common block size for all backends.
+
+        Args:
+            kv_manager_block_size: Physical block size of KV cache
+            attn_groups: List of attention groups
+
+        Returns:
+            Largest block size supported by all backends
+
+        Raises:
+            ValueError: If no common block size found
+        """
+        all_backend_supports = []
+
+        for attn_group in attn_groups:
+            supported_sizes = self._get_all_compatible_block_sizes(
+                kv_manager_block_size, attn_group.backend)
+            all_backend_supports.append(set(supported_sizes))
+
+        common_supported_sizes = set.intersection(*all_backend_supports)
+
+        if not common_supported_sizes:
+            error_msg = (f"No common block size for {kv_manager_block_size}. ")
+            for i, attn_group in enumerate(attn_groups):
+                supported = all_backend_supports[i]
+                error_msg += (f"Backend {attn_group.backend} supports: "
+                              f"{sorted(supported)}. ")
+            raise ValueError(error_msg)
+
+        return max(common_supported_sizes)
 
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:
@@ -3774,12 +3819,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             elif isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
                 # This is an attention backend that supports virtual
                 # block splitting. Get the supported block sizes from
-                # the backend.
+                # all backends in the group.
                 attn_groups = self.attn_groups[kv_cache_group_id]
                 kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-                backend_cls = attn_groups[0].backend
-                selected_kernel_size = self._select_kernel_block_size(
-                    kv_manager_block_size, backend_cls)
+                selected_kernel_size = self._select_common_block_size(
+                    kv_manager_block_size, attn_groups)
                 kernel_block_sizes.append(selected_kernel_size)
             elif isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 # This is likely Mamba or other non-attention cache,
@@ -3822,8 +3866,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     kv_manager_block_size = kv_cache_spec.block_size
-                    logical_kernel_size = self._select_kernel_block_size(
-                        kv_manager_block_size, attn_backend)
+                    logical_kernel_size = self._find_compatible_block_sizes(
+                        kv_manager_block_size, attn_backend, return_all=False)
                     num_blocks_per_phys_block = (kv_manager_block_size //
                                                  logical_kernel_size)
                     logical_num_blocks = num_blocks * num_blocks_per_phys_block
