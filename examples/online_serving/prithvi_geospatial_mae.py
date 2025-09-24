@@ -15,13 +15,14 @@ import requests
 #   https://github.com/christian-pinto/prithvi_io_processor_plugin
 # - start vllm in serving mode with the below args
 #   --model='christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM'
+#   --model-impl terratorch
 #   --task embed --trust-remote-code
 #   --skip-tokenizer-init --enforce-eager
-#   --io-processor-plugin prithvi_to_tiff_india
+#   --io-processor-plugin prithvi_to_tiff
 
 
 def main():
-    image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/India_900498_S2Hand.tif"  # noqa: E501
+    image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/valencia_example_2024-10-26.tiff"  # noqa: E501
     server_endpoint = "http://localhost:8000/pooling"
 
     request_payload_url = {

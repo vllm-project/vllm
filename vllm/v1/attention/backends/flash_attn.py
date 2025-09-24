@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
@@ -32,9 +33,6 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
-
-# NOTE(woosuk): This is an arbitrary number. Tune it if needed.
-_DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH = 16
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -177,12 +175,11 @@ class FlashAttentionMetadataBuilder(
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        self.vllm_config = vllm_config
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
-        self.device = device
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config)
@@ -216,7 +213,8 @@ class FlashAttentionMetadataBuilder(
             # When using cuda graph, we need to set the upper bound of the
             # number of splits so that large enough intermediate buffers are
             # pre-allocated during capture.
-            self.max_num_splits = _DEFAULT_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
+            self.max_num_splits = (
+                envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH)
 
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.

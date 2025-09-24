@@ -1,6 +1,6 @@
 # --8<-- [start:installation]
 
-vLLM supports AMD GPUs with ROCm 6.3.
+vLLM supports AMD GPUs with ROCm 6.3 or above.
 
 !!! tip
     [Docker](#set-up-using-docker) is the recommended way to use vLLM on ROCm.
@@ -11,8 +11,9 @@ vLLM supports AMD GPUs with ROCm 6.3.
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
 
-- GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201)
-- ROCm 6.3
+- GPU: MI200s (gfx90a), MI300 (gfx942), MI350 (gfx950), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201)
+- ROCm 6.3 or above
+    - MI350 requires ROCm 7.0 or above
 
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
@@ -32,35 +33,35 @@ Currently, there are no pre-built ROCm wheels.
     - [ROCm](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html)
     - [PyTorch](https://pytorch.org/)
 
-    For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.3_ubuntu24.04_py3.12_pytorch_release_2.4.0`, `rocm/pytorch-nightly`. If you are using docker image, you can skip to Step 3.
+    For installing PyTorch, you can start from a fresh docker image, e.g, `rocm/pytorch:rocm6.4.3_ubuntu24.04_py3.12_pytorch_release_2.6.0`, `rocm/pytorch-nightly`. If you are using docker image, you can skip to Step 3.
 
     Alternatively, you can install PyTorch using PyTorch wheels. You can check PyTorch installation guide in PyTorch [Getting Started](https://pytorch.org/get-started/locally/). Example:
 
     ```bash
     # Install PyTorch
     pip uninstall torch -y
-    pip install --no-cache-dir --pre torch --index-url https://download.pytorch.org/whl/nightly/rocm6.3
+    pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4
     ```
 
-1. Install [Triton flash attention for ROCm](https://github.com/ROCm/triton)
+1. Install [Triton for ROCm](https://github.com/triton-lang/triton)
 
-    Install ROCm's Triton flash attention (the default triton-mlir branch) following the instructions from [ROCm/triton](https://github.com/ROCm/triton/blob/triton-mlir/README.md)
+    Install ROCm's Triton (the default triton-mlir branch) following the instructions from [ROCm/triton](https://github.com/ROCm/triton/blob/triton-mlir/README.md)
 
     ```bash
     python3 -m pip install ninja cmake wheel pybind11
     pip uninstall -y triton
-    git clone https://github.com/OpenAI/triton.git
+    git clone https://github.com/triton-lang/triton.git
     cd triton
     git checkout e5be006
-    cd python
-    pip3 install .
+    if [ ! -f setup.py ]; then cd python; fi
+    python3 setup.py install
     cd ../..
     ```
 
     !!! note
         If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
 
-2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/ROCm/flash-attention)
+2. Optionally, if you choose to use CK flash attention, you can install [flash attention for ROCm](https://github.com/Dao-AILab/flash-attention)
 
     Install ROCm's flash attention (v2.7.2) following the instructions from [ROCm/flash-attention](https://github.com/ROCm/flash-attention#amd-rocm-support)
     Alternatively, wheels intended for vLLM use can be accessed under the releases.
@@ -68,9 +69,9 @@ Currently, there are no pre-built ROCm wheels.
     For example, for ROCm 6.3, suppose your gfx arch is `gfx90a`. To get your gfx architecture, run `rocminfo |grep gfx`.
 
     ```bash
-    git clone https://github.com/ROCm/flash-attention.git
+    git clone https://github.com/Dao-AILab/flash-attention.git
     cd flash-attention
-    git checkout b7d29fb
+    git checkout 1a7f4dfa
     git submodule update --init
     GPU_ARCHS="gfx90a" python3 setup.py install
     cd ..
@@ -119,7 +120,7 @@ Currently, there are no pre-built ROCm wheels.
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
 
     !!! tip
-        - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
+        - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm-up step before collecting perf numbers.
         - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
         - To use CK flash-attention or PyTorch naive attention, please use this flag `export VLLM_USE_TRITON_FLASH_ATTN=0` to turn off triton flash attention.
         - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
@@ -194,16 +195,6 @@ To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm-rocm .
 ```
 
-To build vllm on ROCm 6.3 for Radeon RX7900 series (gfx1100), you should pick the alternative base image:
-
-```bash
-DOCKER_BUILDKIT=1 docker build \
-    --build-arg BASE_IMAGE="rocm/vllm-dev:navi_base" \
-    -f docker/Dockerfile.rocm \
-    -t vllm-rocm \
-    .
-```
-
 To run the above docker image `vllm-rocm`, use the below command:
 
 ??? console "Command"
@@ -218,8 +209,7 @@ To run the above docker image `vllm-rocm`, use the below command:
     --device /dev/kfd \
     --device /dev/dri \
     -v <path/to/model>:/app/model \
-    vllm-rocm \
-    bash
+    vllm-rocm
     ```
 
 Where the `<path/to/model>` is the location where the model is stored, for example, the weights for llama2 or llama3 models.

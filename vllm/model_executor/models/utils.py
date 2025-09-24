@@ -15,7 +15,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
+from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (get_cuda_view_from_cpu_tensor, is_pin_memory_available,
                         is_uva_available)
@@ -389,22 +389,6 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
         _embedding_count_expression(inner) for inner in embeddings)
 
 
-def merge_multimodal_embeddings_from_map(
-        inputs_embeds: torch.Tensor, multimodal_embeddings: NestedTensors,
-        placeholder_map: MultiModalPlaceholderMap.IndexMap) -> torch.Tensor:
-    """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` using the provided
-    placeholder map .
-
-    Note:
-        This updates ``inputs_embeds`` in place.
-    """
-    flattened_embeddings = _flatten_embeddings(multimodal_embeddings)
-    inputs_embeds[placeholder_map.dest] = flattened_embeddings[
-        placeholder_map.src].to(dtype=inputs_embeds.dtype)
-    return inputs_embeds
-
-
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
     is_multimodal: torch.Tensor,
@@ -761,3 +745,10 @@ def fast_topk(values: torch.Tensor, topk: int,
     else:
         # Use topk for efficiency with larger k values
         return torch.topk(values, topk, dim=dim)
+
+
+def get_model_hidden_size(hf_config: PretrainedConfig) -> int:
+    if hasattr(hf_config, "hidden_size"):
+        return hf_config.hidden_size
+    text_config = hf_config.get_text_config()
+    return text_config.hidden_size

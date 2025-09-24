@@ -195,7 +195,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
     overridden in general. However, to implement custom constructor behavior -
     especially any logic which operates on or stores `vllm_config`, `device`,
     or `is_pin_memory` - `self.__init__(vllm_config, device, is_pin_memory)`
-    must be overriden and the override must call
+    must be overridden and the override must call
     `super().__init__(vllm_config, device, is_pin_memory)`
     """
 
@@ -243,7 +243,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
     def _new_state(
         self,
         params: SamplingParams,
-        prompt_ids: list[int],
+        prompt_ids: Optional[list[int]],
         output_ids: list[int],
     ) -> Optional[partial[torch.Tensor]]:
         """Return state representation for new request

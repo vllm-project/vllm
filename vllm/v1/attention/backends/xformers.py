@@ -3,7 +3,7 @@
 """Attention layer with XFormersAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 import torch
 
@@ -197,6 +197,8 @@ class XFormersAttentionMetadata:
 class XFormersAttentionMetadataBuilder(
         AttentionMetadataBuilder[XFormersAttentionMetadata]):
 
+    reorder_batch_threshold: ClassVar[int] = 1
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -204,17 +206,19 @@ class XFormersAttentionMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         assert XFORMERS_AVAILABLE
-        self.kv_cache_spec = kv_cache_spec
         self.block_size = kv_cache_spec.block_size
         self._num_decodes = 0
         self._num_decode_tokens = 0
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(input_batch,
-                                                           scheduler_output,
-                                                           decode_threshold=1)
+        return reorder_batch_to_split_decodes_and_prefills(
+            input_batch,
+            scheduler_output,
+            decode_threshold=self.reorder_batch_threshold)
 
     def build(
         self,
@@ -223,8 +227,9 @@ class XFormersAttentionMetadataBuilder(
         fast_build: bool = False,
     ) -> XFormersAttentionMetadata:
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=1))
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold))
 
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         q_start_loc = common_attn_metadata.query_start_loc

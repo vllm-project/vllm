@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -15,7 +15,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import (DeepseekV2DecoderLayer,
@@ -43,23 +42,19 @@ class SharedHead(nn.Module):
 
 class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        prefix: str,
-        model_config: ModelConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2,
                                  config.hidden_size,
                                  bias=False)
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
-        self.mtp_block = DeepseekV2DecoderLayer(config, prefix, model_config,
-                                                cache_config, quant_config)
+        self.mtp_block = DeepseekV2DecoderLayer(vllm_config, prefix)
 
     def forward(
         self,
@@ -95,13 +90,8 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict({
             str(idx):
-            DeepSeekMultiTokenPredictorLayer(
-                config,
-                f"{prefix}.layers.{idx}",
-                model_config=vllm_config.model_config,
-                cache_config=vllm_config.cache_config,
-                quant_config=vllm_config.quant_config,
-            )
+            DeepSeekMultiTokenPredictorLayer(vllm_config,
+                                             f"{prefix}.layers.{idx}")
             for idx in range(self.mtp_start_layer_idx,
                              self.mtp_start_layer_idx + self.num_mtp_layers)
         })
@@ -133,15 +123,13 @@ class DeepSeekMultiTokenPredictor(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
         mtp_layer = self.layers[str(self.mtp_start_layer_idx +
                                     current_step_idx)]
         logits = self.logits_processor(mtp_layer.shared_head.head,
-                                       mtp_layer.shared_head(hidden_states),
-                                       sampling_metadata)
+                                       mtp_layer.shared_head(hidden_states))
         return logits
 
 
@@ -170,11 +158,9 @@ class DeepSeekMTP(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> Optional[torch.Tensor]:
-        return self.model.compute_logits(hidden_states, sampling_metadata,
-                                         spec_step_idx)
+        return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

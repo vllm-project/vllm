@@ -13,6 +13,7 @@ from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
 
+from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import QuantizationConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -236,7 +237,15 @@ class Siglip2Attention(nn.Module):
         self.use_rope = config.use_rope
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        self.attn_backend = get_vit_attn_backend(
+            head_size=self.head_dim, dtype=torch.get_default_dtype())
+        self.use_upstream_fa = False
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(
+                torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
+            self.use_upstream_fa = True
+
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA,
                 _Backend.ROCM_AITER_FA
@@ -280,7 +289,10 @@ class Siglip2Attention(nn.Module):
             if self.attn_backend == _Backend.ROCM_AITER_FA:
                 from aiter import flash_attn_varlen_func
             else:
-                from flash_attn import flash_attn_varlen_func
+                if self.use_upstream_fa:
+                    from flash_attn import flash_attn_varlen_func
+                else:
+                    from vllm.vllm_flash_attn import flash_attn_varlen_func
             attn_output = flash_attn_varlen_func(
                 queries, keys, values, cu_seqlens, cu_seqlens, max_seqlen,
                 max_seqlen).reshape(seq_length, -1)
@@ -378,12 +390,9 @@ class Siglip2EncoderLayer(nn.Module):
                 position_embeddings: torch.Tensor) -> tuple[torch.FloatTensor]:
         """
         Args:
-            hidden_states (`torch.FloatTensor`):
-                Input to the layer of shape `(batch, seq_len, embed_dim)`.
-            output_attentions (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the attentions tensors of all 
-                attention layers. See `attentions` under
-                returned tensors for more detail.
+            hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
+            cu_seqlens: Cumulative sequence lengths tensor.
+            position_embeddings: Position embeddings tensor.
         """
         residual = hidden_states
 
@@ -522,19 +531,11 @@ class Siglip2Encoder(nn.Module):
     ) -> torch.Tensor:
         r"""
         Args:
-            inputs_embeds (`torch.FloatTensor` of shape
-                `(batch_size, sequence_length, hidden_size)`):
-                Optionally, instead of passing `input_ids` you can choose to
-                directly pass an embedded representation. This is useful if
-                you want more control over how to convert `input_ids` indices
-                into associated vectors than the model's internal embedding
-                lookup matrix.
-            grid_thws (`torch.LongTensor`):
-                grid shape (num_patches, 3)
-            output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See
-                `hidden_states` under returned tensors for more detail.
-            return_dict (`bool`, *optional*):
+            inputs_embeds: Input tensor of shape 
+                (batch_size, sequence_length, hidden_size).
+                Embedded representation of the input tokens.
+            grid_thws: Grid tensor of shape (num_patches, 3) 
+                containing grid dimensions.
                 Whether or not to return a [`~utils.ModelOutput`] instead of
                 a plain tuple.
         """

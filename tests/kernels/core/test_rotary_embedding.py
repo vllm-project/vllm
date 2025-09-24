@@ -16,20 +16,14 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 def rotary_embedding_opcheck(rot,
                              positions: torch.Tensor,
                              query: torch.Tensor,
-                             key: Optional[torch.Tensor] = None,
-                             offsets: Optional[torch.Tensor] = None):
+                             key: Optional[torch.Tensor] = None):
     cos_sin_cache = rot.cos_sin_cache.to(query.device, dtype=query.dtype)
 
-    # ops.rotary_embedding()/batched_rotary_embedding()
-    # are in-place operations that update the query and key tensors.
-    if offsets is not None:
-        opcheck(torch.ops._C.batched_rotary_embedding,
-                (positions, query, key, rot.head_size, cos_sin_cache,
-                 rot.is_neox_style, rot.rotary_dim, offsets))
-    else:
-        opcheck(torch.ops._C.rotary_embedding,
-                (positions, query, key, rot.head_size, cos_sin_cache,
-                 rot.is_neox_style))
+    # ops.rotary_embedding() is a in-place operation
+    # that updates the query and key tensors.
+    opcheck(torch.ops._C.rotary_embedding,
+            (positions, query, key, rot.head_size, cos_sin_cache,
+             rot.is_neox_style))
 
 
 @pytest.mark.parametrize("device", ["cuda"])
@@ -65,10 +59,6 @@ def test_rotary_embedding_opcheck(dist_init, device, max_position,
     key = key[..., :head_size] if use_key else None
 
     rotary_embedding_opcheck(rot, positions, query, key)
-    offsets = torch.zeros(batch_size * seq_len,
-                          device=device,
-                          dtype=torch.long)
-    rotary_embedding_opcheck(rot, positions, query, key, offsets)
 
     # if we have a contiguous head stride, test the alternate
     # [..., num_heads * head_dim] shape/layout

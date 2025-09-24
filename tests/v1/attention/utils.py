@@ -139,6 +139,10 @@ def get_attention_backend(backend_name: _Backend):
         "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
         _Backend.FLASHMLA_VLLM_V1:
         "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
+        _Backend.FLASH_ATTN_MLA:
+        "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
+        _Backend.FLASHINFER_MLA:
+        "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",
         _Backend.TRITON_MLA_VLLM_V1:
         "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
     }

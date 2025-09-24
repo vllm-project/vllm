@@ -45,6 +45,32 @@ When using multi-modal inputs, vLLM normally hashes each media item by content t
         print(o.outputs[0].text)
     ```
 
+Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    from PIL import Image
+
+    # Qwen2.5-VL example with two images
+    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
+
+    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
+    img_b = Image.open("/path/to/b.jpg")
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"image": [None, img_b]},
+        # Since img_a is expected to be cached, we can skip sending the actual
+        # image entirely.
+        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+    })
+
+    for o in outputs:
+        print(o.outputs[0].text)
+    ```
+
 !!! warning
     If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
 
@@ -215,19 +241,19 @@ When loading RGBA images (images with transparency), vLLM converts them to RGB f
 
     ```python
     from vllm import LLM
-    
+
     # Default white background (no configuration needed)
     llm = LLM(model="llava-hf/llava-1.5-7b-hf")
-    
+
     # Custom black background for dark theme
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",
         media_io_kwargs={"image": {"rgba_background_color": [0, 0, 0]}}
     )
-    
+
     # Custom brand color background (e.g., blue)
     llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf", 
+        model="llava-hf/llava-1.5-7b-hf",
         media_io_kwargs={"image": {"rgba_background_color": [0, 0, 255]}}
     )
     ```
@@ -388,7 +414,7 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
 
 ## Online Serving
 
-Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
+Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). Media inputs also support optional UUIDs users can provide to uniquely identify each media, which is used to cache the media results across requests.
 
 !!! important
     A chat template is **required** to use Chat Completions API.
@@ -438,7 +464,13 @@ Then, you can use the OpenAI client as follows:
                 # NOTE: The prompt formatting with the image token `<image>` is not needed
                 # since the prompt will be processed automatically by the API server.
                 {"type": "text", "text": "What’s in this image?"},
-                {"type": "image_url", "image_url": {"url": image_url}},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        url": image_url
+                    },
+                    "uuid": image_url # Optional
+                },
             ],
         }],
     )
@@ -454,8 +486,20 @@ Then, you can use the OpenAI client as follows:
             "role": "user",
             "content": [
                 {"type": "text", "text": "What are the animals in these images?"},
-                {"type": "image_url", "image_url": {"url": image_url_duck}},
-                {"type": "image_url", "image_url": {"url": image_url_lion}},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url_duck
+                    },
+                    "uuid": image_url_duck # Optional
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url_lion
+                    },
+                    "uuid": image_url_lion # Optional
+                },
             ],
         }],
     )
@@ -522,6 +566,7 @@ Then, you can use the OpenAI client as follows:
                     "video_url": {
                         "url": video_url
                     },
+                    "uuid": video_url # Optional
                 },
             ],
         }],
@@ -613,6 +658,7 @@ Then, you can use the OpenAI client as follows:
                         "data": audio_base64,
                         "format": "wav"
                     },
+                    "uuid": audio_url # Optional
                 },
             ],
         }],
@@ -642,6 +688,7 @@ Alternatively, you can pass `audio_url`, which is the audio counterpart of `imag
                     "audio_url": {
                         "url": audio_url
                     },
+                    "uuid": audio_url # Optional
                 },
             ],
         }],
@@ -695,7 +742,8 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     model = "llava-hf/llava-1.5-7b-hf"
     embeds =  {
         "type": "image_embeds",
-        "image_embeds": f"{base64_image_embedding}" 
+        "image_embeds": f"{base64_image_embedding}",
+        "uuid": image_url # Optional
     }
 
     # Pass additional parameters (available to Qwen2-VL and MiniCPM-V)
@@ -706,6 +754,7 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
             "image_embeds": f"{base64_image_embedding}" , # Required
             "image_grid_thw": f"{base64_image_grid_thw}"  # Required by Qwen/Qwen2-VL-2B-Instruct
         },
+        "uuid": image_url # Optional
     }
     model = "openbmb/MiniCPM-V-2_6"
     embeds =  {
@@ -714,6 +763,7 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
             "image_embeds": f"{base64_image_embedding}" , # Required
             "image_sizes": f"{base64_image_sizes}"  # Required by openbmb/MiniCPM-V-2_6
         },
+        "uuid": image_url # Optional
     }
     chat_completion = client.chat.completions.create(
         messages=[
@@ -729,6 +779,39 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     ],
         model=model,
     )
+    ```
+
+For Online Serving, you can also skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
+
+    ```python
+        # Image/video/audio URL:
+        {
+            "type": "image_url",
+            "image_url": None,
+            "uuid": image_uuid,
+        },
+
+        # image_embeds
+        {
+            "type": "image_embeds",
+            "image_embeds": None,
+            "uuid": image_uuid
+        },
+
+        # input_audio:
+        {
+            "type": "input_audio",
+            "input_audio": None,
+            "uuid": audio_uuid
+        },
+
+        # PIL Image:
+        {
+            "type": "image_pil",
+            "image_pil": None
+            "uuid": image_uuid
+        }
+
     ```
 
 !!! note

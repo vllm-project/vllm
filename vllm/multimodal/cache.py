@@ -1,21 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import operator
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
+from multiprocessing.synchronize import Lock as LockType
+from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union, cast
 
 import torch
 from typing_extensions import TypeAlias, override
 
+from vllm.distributed.device_communicators.shm_object_storage import (
+    MsgpackSerde, SingleWriterShmObjectStorage, SingleWriterShmRingBuffer)
+from vllm.envs import VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, LRUCache
+from vllm.utils import GiB_bytes, LRUCache, MiB_bytes
 from vllm.utils.jsontree import (json_count_leaves, json_map_leaves,
                                  json_reduce_leaves)
 
-from .inputs import (MultiModalFeatureSpec, MultiModalFieldElem,
-                     MultiModalKwargs, MultiModalKwargsItem,
-                     MultiModalKwargsItems, NestedTensors)
+from .inputs import (MultiModalBatchedField, MultiModalFeatureSpec,
+                     MultiModalFieldElem, MultiModalKwargs,
+                     MultiModalKwargsItem, MultiModalKwargsItems,
+                     NestedTensors)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -86,26 +92,15 @@ _V = TypeVar("_V", bound=MultiModalCacheValue)
 class MultiModalCache:
 
     @classmethod
-    def get_leaf_size(
-        cls,
-        leaf: object,
-        *,
-        debug: bool = False,
-    ) -> int:
+    def get_leaf_size(cls, leaf: object) -> int:
         if isinstance(leaf, MultiModalProcessorCacheItem):
             return cls.get_leaf_size(leaf.item)
         if isinstance(leaf, MultiModalProcessorCacheItemMetadata):
             return leaf.item_size
 
         # These are not subclasses of dict
-        if isinstance(leaf, MultiModalKwargsItems):
-            return cls.get_item_size(leaf.data)  # type: ignore
-        if isinstance(leaf, MultiModalKwargsItem):
-            return cls.get_item_size(leaf.data)  # type: ignore
-        if isinstance(leaf, MultiModalKwargs):
-            return cls.get_item_size(leaf.data)  # type: ignore
-
-        if isinstance(leaf, MultiModalFieldElem):
+        if isinstance(leaf, (MultiModalKwargs, MultiModalKwargsItems,
+                             MultiModalKwargsItem, MultiModalFieldElem)):
             return cls.get_item_size(leaf.data)  # type: ignore
 
         # sys.getsizeof doesn't work for tensors
@@ -121,11 +116,8 @@ class MultiModalCache:
         *,
         debug: bool = False,
     ) -> int:
-        size = json_reduce_leaves(
-            lambda a, b: a + b,
-            json_map_leaves(lambda x: cls.get_leaf_size(x, debug=debug),
-                            value),
-        )
+        size = json_reduce_leaves(operator.add,
+                                  json_map_leaves(cls.get_leaf_size, value))
 
         if debug:
             leaf_count = json_count_leaves(value)
@@ -389,6 +381,106 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         self._cache.clear()
 
 
+class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
+    """
+    The cache which is used on P0 when IPC caching is enabled.
+
+    How to update each item:
+
+    - If the item is already in the cache, clear the input to avoid
+      unnecessary IPC.
+
+    - If the item is not in the cache, store the data in shared memory.
+    """
+
+    def __init__(self, vllm_config: "VllmConfig") -> None:
+        super().__init__()
+
+        self.world_size = vllm_config.parallel_config.world_size
+        mm_config = vllm_config.model_config.get_multimodal_config()
+
+        ring_buffer = SingleWriterShmRingBuffer(
+            data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
+            name=VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            create=True,  # sender is the writer
+        )
+        self._shm_cache = SingleWriterShmObjectStorage(
+            max_object_size=mm_config.mm_shm_cache_max_object_size_mb *
+            MiB_bytes,
+            n_readers=self.world_size,
+            ring_buffer=ring_buffer,
+            serde_class=MsgpackSerde,
+        )
+        # cache (prompt_updates, modality) for P0 only
+        self._p0_cache: dict[str, tuple[Sequence[ResolvedPromptUpdate],
+                                        str]] = {}
+
+    @override
+    def is_cached_item(self, mm_hash: str) -> bool:
+        return self._shm_cache.is_cached(mm_hash)
+
+    @override
+    def get_and_update_item(
+        self,
+        mm_item: MultiModalProcessorCacheInItem,
+        mm_hash: str,
+    ) -> MultiModalProcessorCacheOutItem:
+
+        if self._shm_cache.is_cached(mm_hash):
+            address, monotonic_id = self._shm_cache.get_cached(mm_hash)
+            prompt_updates, modality = self._p0_cache[mm_hash]
+            return self.address_as_item(address, monotonic_id,
+                                        modality), prompt_updates
+
+        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+
+        try:
+            address, monotonic_id = self._shm_cache.put(mm_hash, mm_item[0])
+            # Try to remove dangling items if p0 cache is too large.
+            if len(self._p0_cache) >= 2 * len(self._shm_cache.key_index):
+                self.remove_dangling_items()
+            self._p0_cache[mm_hash] = mm_item[1], mm_item[0].modality
+            address_item = self.address_as_item(address, monotonic_id,
+                                                mm_item[0].modality)
+            return address_item, mm_item[1]
+        except (ValueError, MemoryError) as e:
+            # put may fail if the object is too large or
+            # the cache is full.
+            # In this case we log the error and keep the original mm_input.
+            logger.debug("Failed to cache mm_input with hash %s: %s", mm_hash,
+                         e)
+            return mm_item
+
+    @override
+    def clear_cache(self) -> None:
+        self._shm_cache.clear()
+        self._p0_cache.clear()
+
+    def remove_dangling_items(self) -> None:
+        """Remove items that are no longer in the shared memory cache."""
+        cached_hashes = self._shm_cache.key_index.keys()
+        dangling_hashes = set(self._p0_cache.keys()) - cached_hashes
+        for mm_hash in dangling_hashes:
+            del self._p0_cache[mm_hash]
+
+    def address_as_item(self, address: int, monotonic_id: int,
+                        modality: str) -> MultiModalKwargsItem:
+        addr_elem = MultiModalFieldElem(
+            modality=modality,
+            key="address",
+            data=address,
+            field=MultiModalBatchedField(),
+        )
+        id_elem = MultiModalFieldElem(
+            modality=modality,
+            key="monotonic_id",
+            data=monotonic_id,
+            field=MultiModalBatchedField(),
+        )
+        mm_item = MultiModalKwargsItem.from_elems([addr_elem, id_elem])
+        return mm_item
+
+
 def _enable_processor_cache(
     model_config: "ModelConfig",
     mm_registry: "MultiModalRegistry",
@@ -402,10 +494,22 @@ def _enable_processor_cache(
 
 def _enable_ipc_cache(vllm_config: "VllmConfig") -> bool:
     parallel_config = vllm_config.parallel_config
-    supports_ipc_cache = (parallel_config.data_parallel_size == 1
+    supports_ipc_cache = ((parallel_config._api_process_count == 1
+                           and parallel_config.data_parallel_size == 1)
                           or parallel_config.data_parallel_external_lb)
 
     return supports_ipc_cache
+
+
+def _enable_mm_input_shm_cache(vllm_config: "VllmConfig") -> bool:
+    """Whether the shared memory based cache should be enabled."""
+
+    if not _enable_ipc_cache(vllm_config):
+        return False
+
+    mm_config = vllm_config.model_config.get_multimodal_config()
+
+    return mm_config.mm_processor_cache_type == "shm"
 
 
 def processor_cache_from_config(
@@ -421,7 +525,9 @@ def processor_cache_from_config(
     if not _enable_ipc_cache(vllm_config):
         return MultiModalProcessorOnlyCache(model_config)
 
-    return MultiModalProcessorSenderCache(model_config)
+    if not _enable_mm_input_shm_cache(vllm_config):
+        return MultiModalProcessorSenderCache(model_config)
+    return ShmObjectStoreSenderCache(vllm_config)
 
 
 def processor_only_cache_from_config(
@@ -491,11 +597,68 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         self._cache.clear()
 
 
-def receiver_cache_from_config(
+class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
+    """
+    The cache which is used on P1 Worker Process when IPC caching is enabled.
+
+    How to update each item:
+
+    - If the item has an address, replace the input with the cached item.
+    - If not, return the input.
+    """
+
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        shared_worker_lock: LockType,
+    ) -> None:
+        super().__init__()
+
+        self.world_size = vllm_config.parallel_config.world_size
+        mm_config = vllm_config.model_config.get_multimodal_config()
+
+        ring_buffer = SingleWriterShmRingBuffer(
+            data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
+            name=VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            create=False,  # Server is a reader
+        )
+        self._shm_cache = SingleWriterShmObjectStorage(
+            max_object_size=mm_config.mm_shm_cache_max_object_size_mb *
+            MiB_bytes,
+            n_readers=self.world_size,
+            ring_buffer=ring_buffer,
+            serde_class=MsgpackSerde,
+            reader_lock=shared_worker_lock,
+        )
+
+    @override
+    def get_and_update_item(
+        self,
+        mm_item: Optional[MultiModalKwargsItem],
+        mm_hash: str,
+    ) -> MultiModalKwargsItem:
+        assert mm_item is not None, f"Expected an address item for {mm_hash=}"
+        if "address" in mm_item:
+            address = cast(int, mm_item["address"].data)
+            monotonic_id = cast(int, mm_item["monotonic_id"].data)
+            return self._shm_cache.get(address, monotonic_id)
+
+        return mm_item
+
+    @override
+    def clear_cache(self) -> None:
+        self._shm_cache.clear()
+
+
+def engine_receiver_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
 ) -> Optional[BaseMultiModalReceiverCache]:
-    """Return a `BaseMultiModalReceiverCache`, if enabled."""
+    """
+    This is used in the engine process.
+    Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and
+    mm_processor_cache_type=="lru".
+    """
     model_config = vllm_config.model_config
 
     if not _enable_processor_cache(model_config, mm_registry):
@@ -504,4 +667,31 @@ def receiver_cache_from_config(
     if not _enable_ipc_cache(vllm_config):
         return None
 
-    return MultiModalReceiverCache(model_config)
+    if not _enable_mm_input_shm_cache(vllm_config):
+        return MultiModalReceiverCache(model_config)
+
+    return None
+
+
+def worker_receiver_cache_from_config(
+    vllm_config: "VllmConfig",
+    mm_registry: "MultiModalRegistry",
+    shared_worker_lock: LockType,
+) -> Optional[BaseMultiModalReceiverCache]:
+    """
+    This is used in the worker process.
+    Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and
+    mm_processor_cache_type=="shm".
+    """
+    model_config = vllm_config.model_config
+
+    if not _enable_processor_cache(model_config, mm_registry):
+        return None
+
+    if not _enable_ipc_cache(vllm_config):
+        return None
+
+    if not _enable_mm_input_shm_cache(vllm_config):
+        return None
+
+    return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)
