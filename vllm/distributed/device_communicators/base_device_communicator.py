@@ -28,6 +28,8 @@ class Cache:
 
 
 class All2AllManagerBase:
+    rank: int
+    world_size: int
 
     def __init__(self, cpu_group):
         self.cpu_group = cpu_group
