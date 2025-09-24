@@ -24,8 +24,8 @@ logger = init_logger(__name__)
 
 VLLM_SUBCMD_PARSER_EPILOG = (
     "For full list:            vllm {subcmd} --help=all\n"
-    "For a section:            vllm {subcmd} --help=modelconfig\n"
-    "For a flag:               vllm {subcmd} --help=max-model-len\n"
+    "For a section:            vllm {subcmd} --help=ModelConfig    (case-insensitive)\n"  # noqa: E501
+    "For a flag:               vllm {subcmd} --help=max-model-len  (_ or - accepted)\n"  # noqa: E501
     "Documentation:            https://docs.vllm.ai\n")
 
 

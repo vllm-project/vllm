@@ -32,7 +32,7 @@ DESCRIPTION = """Launch a local OpenAI-compatible API server to serve LLM
 completions via HTTP. Defaults to Qwen/Qwen3-0.6B if no model is specified.
 
 Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
---help=modelconfig, --help=frontend)
+--help=ModelConfig, --help=Frontend)
   Use `--help=all` to show all available flags at once.
 """
 
