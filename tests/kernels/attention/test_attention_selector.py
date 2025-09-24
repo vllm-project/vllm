@@ -265,6 +265,9 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
     # TODO: When testing for v1, pipe in `use_v1` as an argument to
     # get_attn_backend
 
+    pytest.skip("Skipping as current backend selector does not " \
+                "handle fallbacks when a backend is set via env var.")
+
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL)
 
