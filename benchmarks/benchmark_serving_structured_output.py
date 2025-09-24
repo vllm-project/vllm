@@ -696,11 +696,11 @@ def evaluate(ret, args):
         return re.match(args.regex, actual) is not None
 
     def _eval_correctness(expected, actual):
-        if args.structure_type == "guided_json":
+        if args.structure_type == "json":
             return _eval_correctness_json(expected, actual)
-        elif args.structure_type == "guided_regex":
+        elif args.structure_type == "regex":
             return _eval_correctness_regex(expected, actual)
-        elif args.structure_type == "guided_choice":
+        elif args.structure_type == "choice":
             return _eval_correctness_choice(expected, actual)
         else:
             return None
@@ -780,18 +780,18 @@ def main(args: argparse.Namespace):
     )
 
     if args.dataset == "grammar":
-        args.structure_type = "guided_grammar"
+        args.structure_type = "grammar"
     elif args.dataset == "regex":
-        args.structure_type = "guided_regex"
+        args.structure_type = "regex"
     elif args.dataset == "choice":
-        args.structure_type = "guided_choice"
+        args.structure_type = "choice"
     else:
-        args.structure_type = "guided_json"
+        args.structure_type = "json"
 
     if args.no_structured_output:
         args.structured_output_ratio = 0
     if args.save_results:
-        result_file_name = f"{args.structured_output_ratio}guided"
+        result_file_name = f"{args.structured_output_ratio}so"
         result_file_name += f"_{backend}"
         result_file_name += f"_{args.request_rate}qps"
         result_file_name += f"_{args.model.split('/')[-1]}"
