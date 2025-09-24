@@ -729,10 +729,13 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        # Skip unsupported output embeddings layers
-        self.skip_prefixes.append("model.predictions.")
-        self.skip_prefixes.append("model.embeddings_project.")
-        self.skip_prefixes.append("model.discriminator_predictions.")
+        # Skip unsupported/unwanted output embeddings layers
+        self.skip_prefixes.extend([
+            "model.lm_head.",
+            "model.predictions.",
+            "model.embeddings_project.",
+            "model.discriminator_predictions."
+        ])
 
         # Some encoder models have the position_ids buffer in the checkpoint.
         # vLLM will always pass position_ids as an argument, so we skip loading
