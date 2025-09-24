@@ -763,6 +763,11 @@ class FusedMoEParallelConfig:
         flatten_tp_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
         return flatten_tp_size, flatten_tp_rank
 
+    @property
+    def use_deepep_hybrid_kernels(self):
+        return (self.use_all2all_kernels
+                and envs.VLLM_ALL2ALL_BACKEND == "deepep_hybrid")
+
     @staticmethod
     def make(
         tp_size_: int,
@@ -958,6 +963,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_deepep_hybrid_kernels(self):
+        return self.moe_parallel_config.use_deepep_hybrid_kernels
 
     @property
     def use_flashinfer_cutlass_kernels(self):

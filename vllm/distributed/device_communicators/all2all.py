@@ -320,6 +320,32 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         deep_ep.Buffer.set_num_sms(num_sms)
 
 
+class DeepEPHybridAll2AllManager(DeepEPAll2AllManagerBase):
+    """
+    All2All communication based on DeepEP Hybrid kernels.
+    """
+
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
+
+    def _make_all2all_kwargs(self, kwargs) -> dict[Any, Any]:
+        extra_kwargs = dict(group=self.cpu_group,
+                            num_of_ranks_per_node = 32,
+                            num_sms_preprocessing_api = 32,
+                            num_sms_dispatch_api = 32,
+                            num_sms_combine_api = 32
+                            )
+        return {**kwargs, **extra_kwargs}
+
+    def get_handle(self, kwargs):
+        import deep_ep
+        buffer_kwargs = self._make_all2all_kwargs(**kwargs)
+        logger.debug("DeepEP all2all args %s", buffer_kwargs)
+        handle: deep_ep.Buffer = self.handle_cache.get_or_create(
+            buffer_kwargs, deep_ep.HybridEpBuffer)
+        return handle
+
+
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     """
     All2All communication based on DeepEP Low-Latency kernels.

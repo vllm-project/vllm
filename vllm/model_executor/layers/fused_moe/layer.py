@@ -729,6 +729,10 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
     @property
+    def use_deepep_hybrid_kernels(self):
+        return self.moe_parallel_config.use_deepep_hybrid_kernels
+
+    @property
     def use_flashinfer_cutlass_kernels(self):
         return (
             self.moe_quant_config is not None

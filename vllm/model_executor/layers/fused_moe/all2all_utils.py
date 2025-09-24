@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_pplx, has_hybrid_deep_ep
 
 if current_platform.is_cuda_alike():
     if has_pplx():
@@ -30,7 +30,8 @@ if current_platform.is_cuda_alike():
             DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
         )
-
+    if has_hybrid_deep_ep():
+        from .deepep_hybrid_prepare_finalize import DeepEPHybridPrepareAndFinalize
 
 def maybe_roundup_layer_hidden_size(
     hidden_size: int,
@@ -166,6 +167,27 @@ def maybe_make_prepare_finalize(
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
+        )
+    elif moe.use_deepep_hybrid_kernels:
+        assert moe.dp_size == all2all_manager.dp_world_size
+
+        use_fp8 = quant_config.use_fp8_w8a8 if quant_config is not None else False
+
+        all_to_all_args = dict(
+            hidden_dim=moe.hidden_dim,
+            max_num_of_tokens_per_dp_rank=moe.max_num_tokens,
+            num_local_experts=(moe.num_experts // all2all_manager.world_size),
+            num_experts=moe.num_experts,
+            use_fp8=use_fp8,
+        )
+
+        handle = all2all_manager.get_handle(all_to_all_args)
+        prepare_finalize = DeepEPHybridPrepareAndFinalize(
+            handle,
+            num_dispatchers=all2all_manager.world_size,
+            dp_size=all2all_manager.dp_world_size,
+            rank_expert_offset=all2all_manager.rank *
+            moe.num_local_experts,
         )
 
     return prepare_finalize
