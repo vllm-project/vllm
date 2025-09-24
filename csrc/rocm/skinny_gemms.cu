@@ -434,8 +434,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
-          // Do the matrix multiplication of activation and weight matrix
-          // - Remember the accumulation is happening for K-split of 64!
+        // Do the matrix multiplication of activation and weight matrix
+        // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
         for (uint32_t n = 0; n < N; n++) {
   #pragma unroll
@@ -736,8 +736,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           uint32_t k = k1 + k2 * THRDS * A_CHUNK;
           uint32_t k_ = k + threadIdx.x * A_CHUNK;
           if (k_ >= K) break;
-            // Do the matrix multiplication of activation and weight matrix
-            // - Remember the accumulation is happening for K-split of 64!
+          // Do the matrix multiplication of activation and weight matrix
+          // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
           for (int y = 0; y < YTILE; y++) {
             if constexpr (!use_mfma)
@@ -1055,7 +1055,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       if (m >= M) continue;
   #endif
 
-        // Fetch the weight matrix from memory!
+      // Fetch the weight matrix from memory!
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
