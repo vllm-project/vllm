@@ -567,6 +567,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                           max_model_len=4096,
                                                           min_transformers_version="4.57",
                                                           is_available_online=False),
+    "Qwen3OmniMoeThinkerForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen3-Omni-30B-A3B-Instruct", # noqa: E501
+                                                          max_model_len=4096,
+                                                          min_transformers_version="4.57"),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B",
                                                  trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B",
