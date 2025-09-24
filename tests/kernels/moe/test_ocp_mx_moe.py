@@ -10,10 +10,6 @@ import pytest
 import torch
 from packaging import version
 
-from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
-    QuarkLinearMethod, QuarkW4A4MXFP4)
-from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
-    QuarkW4A4MXFp4MoEMethod)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -68,19 +64,26 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
                      load_format="dummy",
                      cuda_graph_sizes=[16]) as llm:
 
-        def check_model(model):
-            layer = model.model.layers[0]
+        # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
+        # def check_model(model):
+        #     from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+        #         QuarkLinearMethod)
+        #     from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import QuarkOCP_MX
+        #     from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+        #         QuarkOCP_MX_MoEMethod)
 
-            qkv_proj = layer.self_attn.qkv_proj
+        #     layer = model.model.layers[0]
 
-            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-            assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
+        #     qkv_proj = layer.self_attn.qkv_proj
 
-            assert isinstance(layer.mlp.experts.quant_method,
-                              QuarkW4A4MXFp4MoEMethod)
+        #     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+        #     assert isinstance(qkv_proj.scheme, QuarkOCP_MX)
 
-        if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
-            llm.apply_model(check_model)
+        #     assert isinstance(layer.mlp.experts.quant_method,
+        #                       QuarkOCP_MX_MoEMethod)
+
+        # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
+        #     llm.apply_model(check_model)
 
         output = llm.generate_greedy("Today I am in the French Alps and",
                                      max_tokens=20)
