@@ -1624,7 +1624,6 @@ class FusedMoE(CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-        # Zero expert parameters
         global_num_experts: Optional[int] = None,
         zero_expert_num: Optional[int] = None,
         zero_expert_type: Optional[str] = None,
@@ -1715,7 +1714,8 @@ class FusedMoE(CustomOp):
 
         # Compute zero expert result if needed
         if (zero_expert_num is not None and zero_expert_num > 0
-                and zero_expert_type is not None):
+                and zero_expert_type is not None
+                and global_num_experts is not None):
             zero_expert_result = zero_experts_compute_triton(
                 expert_indices=topk_ids,
                 expert_scales=topk_weights,

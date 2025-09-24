@@ -365,7 +365,7 @@ class EagleProposer:
                     inputs_embeds=inputs_embeds,
                 )
                 if self.method in ("deepseek_mtp", "ernie_mtp",
-                                   "qwen3_next_mtp"):
+                                   "qwen3_next_mtp", "longcat_flash_mtp"):
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states
                 else:
