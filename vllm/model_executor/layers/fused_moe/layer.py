@@ -69,8 +69,6 @@ else:
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
         rocm_aiter_grouped_topk as grouped_topk)
-elif current_platform.is_cpu():
-    pass
 else:
     from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
 if current_platform.is_tpu():
@@ -800,6 +798,49 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
         for local_index, global_index in zip(local_indices, global_indices))
 
 
+def maybe_roundup_hidden_size(
+        hidden_size: int, act_dtype: torch.dtype,
+        quant_config: Optional[QuantizationConfig],
+        moe_parallel_config: FusedMoEParallelConfig) -> int:
+    """
+    Given layer hidden size and MoE configurations, round up hidden_size
+    if necessary.
+    
+    Args:
+        hidden_size(int): Layer hidden-size
+        act_dtype: Data type of the layer activations.
+        quant_config(FusedMoEQuantConfig): Fused MoE quantization configuration.
+        moe_parallel_config(FusedMoEParallelConfig): Fused MoE parallelization
+            strategy configuration.
+    
+    Return:
+        Rounded up hidden_size if rounding up is required based on the configs.
+        Original hidden size otherwise.
+    """
+
+    if (moe_parallel_config.use_deepep_ht_kernels):
+        hidden_size = (
+            DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
+                hidden_size, act_dtype))
+
+    # we are padding globally so EP buffer allocation works
+    if quant_config and quant_config.get_name() == "mxfp4":
+
+        from vllm.model_executor.layers.quantization.mxfp4 import (
+            Mxfp4Backend, get_mxfp4_backend)
+        current_mxfp4_backend = get_mxfp4_backend()
+        if (current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+                or current_mxfp4_backend
+                == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS):
+            hidden_size = round_up(hidden_size, 128)
+        elif (current_platform.is_rocm() or current_mxfp4_backend
+              == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+              or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
+            hidden_size = round_up(hidden_size, 256)
+
+    return hidden_size
+
+
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -856,6 +897,18 @@ class FusedMoE(CustomOp):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
+        vllm_config = get_current_vllm_config()
+
+        # FIXME (varun): We should have a better way of inferring the activation
+        # datatype. This works for now as the tensor datatype entering the MoE
+        # operation is typically unquantized (i.e. float16/bfloat16).
+        if vllm_config.model_config is not None:
+            moe_in_dtype = vllm_config.model_config.dtype
+        else:
+            # TODO (bnell): This is a hack to get test_mixtral_moe to work
+            # since model_config is not set in the pytest test.
+            moe_in_dtype = params_dtype
+
         tp_size_ = (tp_size if tp_size is not None else
                     get_tensor_model_parallel_world_size())
         dp_size_ = (dp_size
@@ -865,7 +918,6 @@ class FusedMoE(CustomOp):
         if self.is_sequence_parallel:
             self.sp_size = tp_size_
 
-        vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
             FusedMoEParallelConfig.make(
                 tp_size_=tp_size_,
@@ -874,19 +926,10 @@ class FusedMoE(CustomOp):
 
         self.global_num_experts = num_experts + num_redundant_experts
 
-        # we are padding globally so EP buffer allocation works
-        if quant_config and quant_config.get_name() == "mxfp4":
-            from vllm.model_executor.layers.quantization.mxfp4 import (
-                Mxfp4Backend, get_mxfp4_backend)
-            current_mxfp4_backend = get_mxfp4_backend()
-            if (current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-                    or current_mxfp4_backend
-                    == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS):
-                hidden_size = round_up(hidden_size, 128)
-            elif (current_platform.is_rocm() or current_mxfp4_backend
-                  == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM or
-                  current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
-                hidden_size = round_up(hidden_size, 256)
+        # Round up hidden size if needed.
+        hidden_size = maybe_roundup_hidden_size(hidden_size, moe_in_dtype,
+                                                quant_config,
+                                                self.moe_parallel_config)
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -927,12 +970,15 @@ class FusedMoE(CustomOp):
                         "experts. Falling back to linear expert placement.")
                     expert_placement_strategy = "linear"
 
-            self.local_num_experts, self.expert_map = determine_expert_map(
+            self.expert_map: Optional[torch.Tensor]
+            local_num_experts, expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=expert_placement_strategy,
             )
+            self.local_num_experts = local_num_experts
+            self.register_buffer("expert_map", expert_map)
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
                 "placement strategy: %s. Local/global"
@@ -967,20 +1013,13 @@ class FusedMoE(CustomOp):
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
 
-        if vllm_config.model_config is not None:
-            model_dtype = vllm_config.model_config.dtype
-        else:
-            # TODO (bnell): This is a hack to get test_mixtral_moe to work
-            # since model_config is not set in the pytest test.
-            model_dtype = params_dtype
-
         moe = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
-            in_dtype=model_dtype,
+            in_dtype=moe_in_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
         )
@@ -1116,10 +1155,12 @@ class FusedMoE(CustomOp):
         # ep_size and ep_rank should already be updated
         assert self.expert_map is not None
         with self.expert_map.device:
-            self.local_num_experts, self.expert_map = determine_expert_map(
+            local_num_experts, expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
+            self.local_num_experts = local_num_experts
+            self.register_buffer("expert_map", expert_map)
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
@@ -1997,7 +2038,6 @@ direct_register_custom_op(
     op_func=moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
@@ -2028,7 +2068,6 @@ direct_register_custom_op(
     op_func=moe_forward_shared,
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_shared_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
