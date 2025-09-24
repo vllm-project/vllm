@@ -135,10 +135,10 @@ public:
     max_splits = min(16, max_splits);
 
     // TODO: This avoids a hang when the batch size larger than 1 and 
-    // there is more than 4 kv_splits. 
+    // there is more than 1 kv_splits. 
     // Discuss with NVIDIA how this can be fixed.
     if (B > 1) {
-      max_splits = min(2, max_splits);
+      max_splits = min(1, max_splits);
     }
     
     // printf("    max_splits = %d\n", max_splits);
