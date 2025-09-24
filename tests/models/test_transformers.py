@@ -170,9 +170,14 @@ def test_embed_loading(vllm_runner, model):
     [
         # Encoder models
         "BAAI/bge-base-en-v1.5",
+        ## Popular models
         "albert/albert-base-v2",
         "almanach/camembert-base",
         "google/electra-base-discriminator",
+        ## Recommended by Red Hat
+        "sentence-transformers/all-mpnet-base-v2",
+        "deepset/roberta-base-squad2",
+        "distilbert/distilbert-base-cased-distilled-squad",
     ])
 def test_embed_correctness(hf_runner, vllm_runner, example_prompts, model):
     import transformers
