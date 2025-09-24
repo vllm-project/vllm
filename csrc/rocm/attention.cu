@@ -25,6 +25,12 @@
 #include "../attention/dtype_fp8.cuh"
 #include "../quantization/fp8/amd/quant_utils.cuh"
 
+// ROCm 6.2 compatibility: map OCP fp8 types to FNUZ variants if OCP is absent
+#if !defined(HIP_FP8_TYPE_OCP)
+using __hip_fp8_e4m3 = __hip_fp8_e4m3_fnuz;
+using __hip_fp8_e5m2 = __hip_fp8_e5m2_fnuz;
+#endif
+
 #if defined(__HIPCC__) && \
     (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__GFX9__
