@@ -291,13 +291,7 @@ class EngineCore:
                                   self.scheduler.make_stats())
             raise err
 
-    def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
-        """Schedule, execute, and make output.
-
-        Returns tuple of outputs and a flag indicating whether the model
-        was executed.
-        """
-
+    def _nsys_profile(self):
         # Profiler Start and Stop
         if self._perf_iter == self._start_perf_iter:
             logger.info_once("Starting NSYS profiler")
@@ -309,6 +303,16 @@ class EngineCore:
             profiler.stop()
             self._profiler_running = False
         self._perf_iter += 1
+
+
+    def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+        """Schedule, execute, and make output.
+
+        Returns tuple of outputs and a flag indicating whether the model
+        was executed.
+        """
+
+        self._nsys_profile()
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
@@ -353,6 +357,8 @@ class EngineCore:
         # the scheduler may return an empty batch if all requests are scheduled.
         # Note that this is not blocking.
         assert len(batch_queue) < self.batch_queue_size
+
+        self._nsys_profile()
 
         model_executed = False
         if self.scheduler.has_requests():
