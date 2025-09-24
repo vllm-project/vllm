@@ -80,7 +80,8 @@ class MultiHeadLatentAttention(CustomOp):
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
-        self.topk_tokens = mla_modules.indexer.topk_tokens
+        self.topk_tokens = mla_modules.indexer.topk_tokens \
+            if self.indexer else None
         self.use_sparse = mla_modules.is_sparse and os.getenv(
             "VLLM_MLA_SPARSE_DISABLED") != "1"
 
