@@ -1190,6 +1190,9 @@ class DPEngineCoreActor(DPEngineCoreProc):
         try:
             value = get_device_indices(device_control_env_var, local_dp_rank,
                                        world_size)
+            local_rank = value.split(",",2)[0]
+            logger.debug("Set LOCAL_RANK to %s from %s", local_rank, value)
+            os.environ["LOCAL_RANK"] = local_rank
             os.environ[device_control_env_var] = value
         except IndexError as e:
             raise Exception(
