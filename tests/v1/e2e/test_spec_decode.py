@@ -15,6 +15,8 @@ from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 
+MTP_SIMILARITY_RATE = 0.8
+
 
 def get_test_prompts(mm_enabled: bool):
     prompt_types = ["repeat", "sentence"]
@@ -295,7 +297,7 @@ def test_mtp_correctness(
 
         # Heuristic: expect at least 80% of the prompts to match exactly
         # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches > int(0.8 * len(ref_outputs))
+        assert matches > int(MTP_SIMILARITY_RATE * len(ref_outputs))
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()

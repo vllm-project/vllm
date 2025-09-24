@@ -208,10 +208,9 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
-        if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp"):
-            logger.warning(
-                "deepseek_mtp, ernie_mtp, and qwen3_next_mtp are deprecated. "
-                "Please use mtp instead.")
+        if self.method in MTP_MODEL_TYPES:
+            logger.warning("method `%s` is deprecated and replaced with mtp.",
+                           self.method)
             self.method = "mtp"
 
         if self.model is None and self.num_speculative_tokens is not None:
@@ -323,9 +322,9 @@ class SpeculativeConfig:
                     self.method = "mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
-                                "All Qwen3Next MTP models only have " \
-                                "one layer. Might need some code changes " \
-                                "to support multiple layers."
+                                "Enabling num_speculative_tokens > 1 will run" \
+                                "multiple times of forward on same MTP layer" \
+                                ",which may result in lower acceptance rate" \
                             )
                 elif (self.draft_model_config.hf_config.model_type
                       in ("longcat_flash_mtp")):
