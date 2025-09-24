@@ -43,13 +43,8 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
-    # yapf: disable
-    from .fused_moe import TritonExperts
-    from .fused_moe import (
-        eplb_map_to_physical_and_record as _eplb_map_to_physical_and_record)
-    from .fused_moe import fused_experts
-
-    # yapf: enable
+    from .fused_moe import (TritonExperts, eplb_map_to_physical_and_record,
+                            fused_experts)
     if has_pplx():
         from .pplx_prepare_finalize import (PplxPrepareAndFinalize,
                                             pplx_hidden_dim_scale_bytes)
@@ -70,6 +65,7 @@ else:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
 
+    eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
 
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -1672,7 +1668,7 @@ class FusedMoE(CustomOp):
             assert logical_to_physical_map is not None
             assert logical_replica_count is not None
 
-            topk_ids = _eplb_map_to_physical_and_record(
+            topk_ids = eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
