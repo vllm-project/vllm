@@ -3,8 +3,8 @@
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
+from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
