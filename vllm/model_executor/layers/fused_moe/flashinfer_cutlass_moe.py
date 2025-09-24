@@ -244,7 +244,7 @@ def flashinfer_cutlass_moe(
     use_dp: bool = False,
 ) -> torch.Tensor:
     fused_experts = mk.FusedMoEModularKernel(
-        FlashInferCutlassMoEPrepareAndFinalize(use_dp=use_dp),
+        create_flashinfer_prepare_finalize(use_dp=use_dp),
         FlashInferExperts(
             out_dtype=hidden_states.dtype,
             quant_config=quant_config,
