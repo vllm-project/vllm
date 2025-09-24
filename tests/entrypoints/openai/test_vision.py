@@ -34,11 +34,11 @@ EXPECTED_MM_BEAM_SEARCH_RES = [
     ],
     [
         "The image shows a Venn diagram with three over",
-        "The image shows a Venn diagram with three intersect",
+        "This image shows a Venn diagram with three over",
     ],
     [
         "This image displays a gradient of colors ranging from",
-        "The image displays a gradient of colors ranging from",
+        "This image displays a gradient of colors forming a spectrum",
     ],
 ]
 
@@ -521,6 +521,71 @@ async def test_completions_with_image_with_uuid(
         assert chat_completion.choices[0].message.content is not None
         assert isinstance(chat_completion.choices[0].message.content, str)
         assert len(chat_completion.choices[0].message.content) > 0
+
+        # Second request, with empty image but the same uuid.
+        chat_completion_with_empty_image = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {},
+                            "uuid": image_url
+                        },
+                    ],
+                },
+            ],
+            model=model_name,
+        )
+        assert chat_completion_with_empty_image.choices[
+            0].message.content is not None
+        assert isinstance(
+            chat_completion_with_empty_image.choices[0].message.content, str)
+        assert len(
+            chat_completion_with_empty_image.choices[0].message.content) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_completions_with_empty_image_with_uuid_without_cache_hit(
+    client: openai.AsyncOpenAI,
+    model_name: str,
+):
+    with pytest.raises(openai.BadRequestError):
+        _ = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {},
+                            "uuid": "uuid_not_previously_seen"
+                        },
+                    ],
+                },
+            ],
+            model=model_name,
+        )
 
 
 @pytest.mark.asyncio

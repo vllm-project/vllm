@@ -4,18 +4,12 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
-                    Protocol, Set, Tuple, Type, TypeVar)
+from typing import (Any, Dict, Generic, List, Optional, Protocol, Set, Tuple,
+                    Type, TypeVar)
 
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-from vllm.multimodal import MultiModalPlaceholderMap
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import (ModelRunnerBase,
-                                               ModelRunnerInputBase,
-                                               ModelRunnerInputBuilderBase)
 
 
 class AttentionType:
@@ -23,14 +17,14 @@ class AttentionType:
     Attention type.
     Use string to be compatible with `torch.compile`.
     """
-    # Decoder attention between previous layer Q/K/V
     DECODER = "decoder"
-    # Encoder attention between previous layer Q/K/V for encoder-decoder
+    """Decoder attention between previous layer Q/K/V."""
     ENCODER = "encoder"
-    # Encoder attention between previous layer Q/K/V
+    """Encoder attention between previous layer Q/K/V for encoder-decoder."""
     ENCODER_ONLY = "encoder_only"
-    # Attention between dec. Q and enc. K/V for encoder-decoder
+    """Encoder attention between previous layer Q/K/V."""
     ENCODER_DECODER = "encoder_decoder"
+    """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
 class AttentionBackend(ABC):
@@ -121,15 +115,6 @@ class AttentionMetadata:
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
 
-    # The index maps that relate multi-modal embeddings to the corresponding
-    # placeholders.
-    #
-    # N.B. These aren't really related to attention and don't belong on this
-    # type -- this is just a temporary solution to make them available to
-    # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[Dict[
-        str, MultiModalPlaceholderMap.IndexMap]]
-
     # Enable/disable KV scales calculation. This is so that we can disable the
     # calculation until after prefill and cuda graph capture.
     enable_kv_scales_calculation: bool
@@ -170,7 +155,7 @@ class AttentionState(ABC, Generic[T]):
     lifetime of the model runner."""
 
     @abstractmethod
-    def __init__(self, runner: "ModelRunnerBase"):
+    def __init__(self, runner: Any):
         ...
 
     @abstractmethod
@@ -210,7 +195,7 @@ class AttentionState(ABC, Generic[T]):
         ...
 
     @abstractmethod
-    def begin_forward(self, model_input: "ModelRunnerInputBase") -> None:
+    def begin_forward(self, model_input) -> None:
         """Prepare state for forward pass."""
         ...
 
@@ -219,7 +204,7 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
     """Abstract class for attention metadata builders."""
 
     @abstractmethod
-    def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
+    def __init__(self, input_builder) -> None:
         """Create the builder, remember some configuration and parameters."""
         raise NotImplementedError
 
@@ -240,6 +225,7 @@ class AttentionLayer(Protocol):
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
+    _q_scale_float: float
     _k_scale_float: float
     _v_scale_float: float
     _prob_scale: torch.Tensor

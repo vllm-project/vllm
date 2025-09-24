@@ -75,6 +75,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     nemotron="NemotronConfig",
+    olmo3="Olmo3Config",
     ovis="OvisConfig",
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
@@ -88,11 +89,6 @@ _CONFIG_ATTRS_MAPPING: dict[str, str] = {
 _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "internvl_chat": {
         "has_no_defaults_at_init": True
-    },
-    # transformers regards mllama as is_encoder_decoder=False
-    # vllm needs is_encoder_decoder=True to enable cross-attention
-    "mllama": {
-        "is_encoder_decoder": True
     },
     "NVLM_D": {
         "has_no_defaults_at_init": True
@@ -467,15 +463,29 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
-def maybe_override_with_speculators_target_model(
+def maybe_override_with_speculators(
     model: str,
     tokenizer: str,
     trust_remote_code: bool,
     revision: Optional[str] = None,
+    vllm_speculative_config: Optional[dict[str, Any]] = None,
     **kwargs,
-) -> tuple[str, str]:
+) -> tuple[str, str, Optional[dict[str, Any]]]:
     """
-    If running a speculators config, override running model with target model
+    Resolve model configuration when speculators are detected.
+
+    Checks if the provided model is a speculators model and if so, extracts
+    the target model configuration and builds the speculative config.
+
+    Args:
+        model: Model name or path
+        tokenizer: Tokenizer name or path
+        trust_remote_code: Whether to trust remote code
+        revision: Model revision
+        vllm_speculative_config: Existing vLLM speculative config
+
+    Returns:
+        Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
     is_gguf = check_gguf_file(model)
     if is_gguf:
@@ -491,11 +501,27 @@ def maybe_override_with_speculators_target_model(
         token=_get_hf_token(),
         **kwargs,
     )
-    spec_config = config_dict.get("speculators_config", None)
-    # Return the target model
-    if spec_config is not None:
-        model = tokenizer = spec_config["verifier"]["name_or_path"]
-    return model, tokenizer
+    speculators_config = config_dict.get("speculators_config")
+
+    if speculators_config is None:
+        # No speculators config found, return original values
+        return model, tokenizer, vllm_speculative_config
+
+    # Speculators format detected - process overrides
+    from vllm.transformers_utils.configs.speculators.base import (
+        SpeculatorsConfig)
+
+    vllm_speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
+        config_dict=config_dict)
+
+    # Set the draft model to the speculators model
+    vllm_speculative_config["model"] = model
+
+    # Override model and tokenizer with the verifier model from config
+    verifier_model = speculators_config["verifier"]["name_or_path"]
+    model = tokenizer = verifier_model
+
+    return model, tokenizer, vllm_speculative_config
 
 
 def get_config(
@@ -528,10 +554,10 @@ def get_config(
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "
-                    "With config_format 'auto', ensure your model has either"
-                    "config.json (HF format) or params.json (Mistral format)."
-                    "Otherwise please specify your_custom_config_format"
-                    "in engine args for customized config parser")
+                    "With config_format 'auto', ensure your model has either "
+                    "config.json (HF format) or params.json (Mistral format). "
+                    "Otherwise please specify your_custom_config_format "
+                    "in engine args for customized config parser.")
 
         except Exception as e:
             error_message = (
@@ -678,20 +704,21 @@ def get_hf_file_to_dict(file_name: str,
 
 
 @cache
-def get_pooling_config(model: str, revision: Optional[str] = 'main'):
+def get_pooling_config(model: str,
+                       revision: Optional[str] = 'main') -> Optional[dict]:
     """
     This function gets the pooling and normalize
     config from the model - only applies to
     sentence-transformers models.
 
     Args:
-        model (str): The name of the Hugging Face model.
-        revision (str, optional): The specific version
-        of the model to use. Defaults to 'main'.
+        model: The name of the Hugging Face model.
+        revision: The specific version of the model to use. 
+            Defaults to 'main'.
 
     Returns:
-        dict: A dictionary containing the pooling
-        type and whether normalization is used.
+        A dictionary containing the pooling type and whether 
+            normalization is used, or None if no pooling configuration is found.
     """
 
     modules_file_name = "modules.json"

@@ -37,10 +37,6 @@ class UltravoxConfig(transformers.PretrainedConfig):
             The initialization value for the layer normalization.
         projector_act (`str`, *optional*, defaults to `"swiglu"`):
             The activation function used by the multimodal projector.
-        text_model_lora_config (`LoraConfigSimplified`, *optional*):
-            The LoRA configuration for finetuning the text model.
-        audio_model_lora_config (`LoraConfigSimplified`, *optional*):
-            The LoRA configuration for finetuning the audio model.
         projector_ln_mid (`bool`, *optional*, defaults to `False`):
             Whether to apply layer normalization at the middle of the
             projector or at the end. Versions v0.4.1 and below
