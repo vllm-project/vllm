@@ -313,6 +313,7 @@ class ModelConfig:
         factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
+        factors.append(self.video_pruning_rate)
 
         # hf_config can control how the model looks!
         try:
