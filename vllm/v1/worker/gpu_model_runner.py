@@ -40,12 +40,15 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    is_mixture_of_experts,
                                                    supports_eagle3,
                                                    supports_mrope,
                                                    supports_multimodal_pruning,
                                                    supports_transcription)
+# yapf: enable
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
