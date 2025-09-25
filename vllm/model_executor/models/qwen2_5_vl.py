@@ -1276,8 +1276,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         Args:
             input_ids: (N,) All input tokens of the prompt (Containing
                 entire sequence).
-            multimodal_embeddings: Tuple of multimodal embeddings (
-            That fits into the prefill chunk that is being processed).
+            multimodal_embeddings: Tuple of multimodal embeddings.
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
             num_computed_tokens: A number of computed tokens so far.
