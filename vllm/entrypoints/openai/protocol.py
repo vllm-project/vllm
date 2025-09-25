@@ -348,6 +348,7 @@ class ResponsesRequest(OpenAIBaseModel):
         default_sampling_params: Optional[dict] = None,
     ) -> SamplingParams:
         if self.max_output_tokens is None:
+            # TODO: look here
             max_tokens = default_max_tokens
         else:
             max_tokens = min(self.max_output_tokens, default_max_tokens)

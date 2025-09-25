@@ -284,8 +284,19 @@ class OpenAIServingResponses(OpenAIServing):
             available_tools = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
+                # fbvscode.set_trace()
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
+                default_max_tokens = -1
+                if default_max_tokens < 0:
+                    return self.create_error_response(
+                        err_type="invalid_request_error",
+                        message=("The engine prompt length exceeds the "
+                                 "maximum model length"),
+                        status_code=HTTPStatus.BAD_REQUEST,
+                    )
+                logger.info('default_max_tokens: %d', default_max_tokens)
+                logger.info('max_model_len: %d', self.max_model_len)
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params)
 
@@ -413,6 +424,7 @@ class OpenAIServingResponses(OpenAIServing):
                 "Tool use is not supported in Responses API without Harmony")
         # Construct the input messages.
         messages = self._construct_input_messages(request, prev_response)
+        # look at what engine_prompt is
         _, request_prompts, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
