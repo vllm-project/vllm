@@ -5,8 +5,7 @@ import pytest
 import torch
 
 import vllm.plugins
-from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, RMS_OP,
-                                     FusedRMSQuantKey, RMSNormQuantFusionPass)
+from vllm.compilation.fusion import RMSNormQuantFusionPass
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (CompilationConfig, CompilationLevel, ModelConfig,
@@ -30,18 +29,18 @@ class TestModel(torch.nn.Module):
                  cuda_force_torch: bool, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cuda_force_torch = cuda_force_torch
-        self.norm = [RMSNorm(hidden_size, eps) for _ in range(3)]
-        self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
+        self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
+        self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
         group_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
         quant_scale = ScaleDesc(torch.float32, static, group_shape)
         self.key = QuantKey(dtype=FP8_DTYPE, scale=quant_scale, symmetric=True)
         if static:
-            self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
+            self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
         else:
-            self.scale = [None for _ in range(2)]
+            self.scale = [None for _ in range(3)]
         self.w = [
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
-            for _ in range(2)
+            for _ in range(3)
         ]
 
         with override_cutlass_fp8_supported(not cuda_force_torch):
@@ -64,34 +63,21 @@ class TestModel(torch.nn.Module):
                                    input_scale=self.scale[0])
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
-        # TODO another fp8 linear + rmsnorm to make sure fusion
-        #  works for residual output as well
+
         x3 = self.fp8_linear.apply(y2,
                                    self.w[1],
                                    self.wscale[1],
                                    input_scale=self.scale[1])
+
         y3, resid = self.norm[2](x3, resid)  # use resid here
-        return y3
 
-    def ops_in_model_before(self):
-        ops = []
-        if self.enable_rms_norm:
-            ops += [RMS_OP]
-        else:
-            ops += [torch.ops.aten.rsqrt.default]
+        x4 = self.fp8_linear.apply(y3,
+                                   self.w[2],
+                                   self.wscale[2],
+                                   input_scale=self.scale[2])
 
-        if self.enable_quant_fp8:
-            ops += [QUANT_OPS[self.key]]
-        else:
-            ops += [torch.ops.aten.reciprocal.default]
-
-        return ops
-
-    def ops_in_model_after(self):
-        return [
-            FUSED_OPS[FusedRMSQuantKey(self.key, False)],
-            FUSED_OPS[FusedRMSQuantKey(self.key, True)]
-        ]
+        y4, resid = self.norm[3](x4, resid)  # use resid here
+        return y4
 
 
 @pytest.mark.parametrize("dtype", [torch.float16])  #, torch.bfloat16])
@@ -123,8 +109,6 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
-            debug_dump_path=f"/home/luka/git/vllm/._workspace/"
-            f"debug_dump_{enable_rms_norm}_{enable_quant_fp8}",
             level=CompilationLevel.PIECEWISE,
             custom_ops=custom_ops,
             pass_config=PassConfig(enable_fusion=True, enable_noop=True),
@@ -156,10 +140,4 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
 
         torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
 
-        assert fusion_pass.matched_count == 2
-
-        # In pre-nodes, fp8 quant should be there and fused kernels should not
-        # backend.check_before_ops(model.ops_in_model_before())
-
-        # In post-nodes, fused kernels should be there and fp8 quant should not
-        # backend.check_after_ops(model.ops_in_model_after())
+        assert fusion_pass.matched_count == 3
