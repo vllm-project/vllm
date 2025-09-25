@@ -77,6 +77,16 @@ def test_update_config():
         new_config3 = update_config(config3, {"a": "new_value"})
 
 
+def test_model_config_recompute_hash():
+    config = ModelConfig("Qwen/Qwen2.5-1.5B-Instruct", task="auto")
+    orig_hash = config.compute_hash()
+
+    config.model = "Qwen/Qwen2.5-0.5B-Instruct"
+    new_hash = config.compute_hash()
+
+    assert orig_hash != new_hash
+
+
 # Can remove once --task option is fully deprecated
 @pytest.mark.parametrize(
     ("model_id", "expected_runner_type", "expected_convert_type",
