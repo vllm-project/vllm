@@ -493,10 +493,6 @@ class VllmConfig:
                     " Will fall back to eager execution if a batch runs "
                     "into cascade attentions")
 
-                # Temporarily disable cascade attention to eval CI
-                # TODO: remove this line later.
-                self.model_config.disable_cascade_attn = True
-
             if self.compilation_config.cudagraph_mode\
                 .requires_piecewise_compilation():
                 assert self.compilation_config.level == \
