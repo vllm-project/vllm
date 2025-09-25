@@ -210,38 +210,46 @@ class Mamba2AttentionMetadataBuilder(
             # Always return just a single block per each request:
             state_indices_tensor = common_attn_metadata.block_table_tensor[:,
                                                                            0]
+            # Additional cache-related varaiables:
+            current_last_token_block_idx = None
+            current_first_token_block_idx = None
+            last_computed_token_block_idx = None
+            last_computed_token_block_offset = None
+            seq_lens_completed = None
         else:
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
+
+            # Additional cache-related varaiables:
+            mamba_block_size = self.kv_cache_spec.block_size
+            seq_lens_pending = (
+                torch.roll(common_attn_metadata.query_start_loc, -1, -1) -
+                common_attn_metadata.query_start_loc)[:-1]
+            seq_lens_completed = common_attn_metadata.seq_lens - \
+                                 seq_lens_pending
+            last_computed_token_block_offset = \
+                seq_lens_completed % mamba_block_size
+            # Indices: last_computed <= current_first <= current_last
+            # Cases:
+            #  last_computed == current_first  if last state was partially
+            #                                  computed and needs to be updated
+            #  current_first == current_last   if no block crossing occurs, and
+            #                                  only one state will be stored
+            # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
+            current_last_token_block_idx = cdiv(
+                seq_lens_completed + seq_lens_pending, mamba_block_size) - 1
+            current_first_token_block_idx = cdiv(seq_lens_completed + 1,
+                                                 mamba_block_size) - 1
+            last_computed_token_block_idx = cdiv(seq_lens_completed,
+                                                 mamba_block_size) - 1
+            # -1 in case it's non-computed and causes later issues with indexing
+            last_computed_token_block_idx = \
+                last_computed_token_block_idx.clamp(min=0)
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold))
-
-        mamba_block_size = self.kv_cache_spec.block_size
-        seq_lens_pending = (
-            torch.roll(common_attn_metadata.query_start_loc, -1, -1) -
-            common_attn_metadata.query_start_loc)[:-1]
-        seq_lens_completed = (common_attn_metadata.seq_lens - seq_lens_pending)
-        last_computed_token_block_offset = \
-            seq_lens_completed % mamba_block_size
-        # Indices: last_computed <= current_first <= current_last
-        # Cases:
-        #  last_computed == current_first  if last state was partially
-        #                                  computed and needs to be updated
-        #  current_first == current_last   if no block crossing occurs, and
-        #                                  only one state will be stored
-        # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
-        current_last_token_block_idx = cdiv(
-            seq_lens_completed + seq_lens_pending, mamba_block_size) - 1
-        current_first_token_block_idx = cdiv(seq_lens_completed + 1,
-                                             mamba_block_size) - 1
-        last_computed_token_block_idx = cdiv(seq_lens_completed,
-                                             mamba_block_size) - 1
-        # -1 in case it's non-computed and causes later issues with indexing
-        last_computed_token_block_idx = \
-            last_computed_token_block_idx.clamp(min=0)
 
         # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
         if num_prefills > 0:
@@ -356,12 +364,6 @@ class Mamba2AttentionMetadataBuilder(
                 last_computed_token_block_offset = \
                     self.last_computed_token_block_offset[:num_input_tokens]
                 last_computed_token_block_offset[num_decodes:] = 0
-            else:
-                current_last_token_block_idx = None
-                current_first_token_block_idx = None
-                last_computed_token_block_idx = None
-                last_computed_token_block_offset = None
-                seq_lens_completed = None
 
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,
