@@ -834,7 +834,11 @@ steps:
   gpu: b200
   source_file_dependencies:
   - tests/evals/gpt_oss
+  - vllm/model_executor/models/deepseek_v2.py
   - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/models/llama4.py
+  - vllm/model_executor/layers/quantization/compressed_tensors
+  - vllm/model_executor/layers/quantization/modelopt.py
   - vllm/model_executor/layers/quantization/mxfp4.py
   - vllm/v1/attention/backends/flashinfer.py
   commands:

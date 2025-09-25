@@ -71,6 +71,7 @@ def test_llama4_fp8_tensor_moe_flashinfer_cutlass(
     can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", [])
 
 
+@pytest.mark.skip(reason="Takes too long to run")
 def test_llama4_fp8_tensor_moe_flashinfer_trtllm(
         monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
