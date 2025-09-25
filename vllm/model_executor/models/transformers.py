@@ -797,7 +797,6 @@ class TransformersMoEBase(TransformersBase):
         # Reduction kwargs
         names = ["num_experts_shared", "shared_expert_intermediate_size"]
         reduce_results = getattr_iter(text_config, names, 0) == 0
-        renormalize = getattr(text_config, "norm_topk_prob", top_k > 1)
 
         def reduce_results_hook(module, _, output):
             """Forward hook that performs all-reduce on a nn.Module's output if
@@ -809,12 +808,17 @@ class TransformersMoEBase(TransformersBase):
             return module.experts.maybe_all_reduce_tensor_model_parallel(
                 output)
 
-        # Grouped topk kwargs. We hardcode use_grouped_topk = False so that
-        # FusedMoE will use the custom_routing_function, which is necessary
-        # because the routing happens on the Transformers side
+        # Unused kwargs since we use custom_routing_function:
+        # - `scoring_func` and `e_score_correction_bias` only used for grouped
+        #    topk routing inside vLLM and are non-trivial to infer
+        #    and hard code `use_grouped_topk=False`
+        # - `renormalize` passed anyway because it's easy to infer
+        # - `num_expert_group` and `topk_group` used for inferring expert
+        #    placement strategy in FusedMoE
+        # - `apply_router_weight_on_input` is already applied in Transformers
+        renormalize = getattr(text_config, "norm_topk_prob", top_k > 1)
         num_expert_group = getattr(text_config, "n_group", None)
         topk_group = getattr(text_config, "topk_group", None)
-        use_grouped_topk = False
 
         # Expert parallel load balancing kwargs
         parallel_config = self.parallel_config
@@ -829,10 +833,6 @@ class TransformersMoEBase(TransformersBase):
                 qual_name = maybe_prefix(prefix, child_name)
                 if (child_name == "experts"
                         and isinstance(child_module, nn.ModuleList)):
-                    # Get e_score_correction_bias if present
-                    gate = getattr(module, "gate", None)
-                    e_score_correction_bias = getattr(
-                        gate, "e_score_correction_bias", None)
                     # Replace experts module with FusedMoE
                     new_module = TransformersFusedMoE(
                         num_experts=num_experts,
@@ -841,14 +841,12 @@ class TransformersMoEBase(TransformersBase):
                         intermediate_size=intermediate_size,
                         reduce_results=reduce_results,
                         renormalize=renormalize,
-                        use_grouped_topk=use_grouped_topk,
+                        # Hard coded because topk happens in Transformers
+                        use_grouped_topk=False,
                         num_expert_group=num_expert_group,
                         topk_group=topk_group,
                         quant_config=self.quant_config,
                         prefix=qual_name,
-                        # TODO: scoring_func - deepseek_v2, dots1, glm4_moe
-                        e_score_correction_bias=e_score_correction_bias,
-                        # TODO: apply_router_weight_on_input - llama4
                         # TODO: activation - grok1, gpt-oss
                         enable_eplb=enable_eplb,
                         num_redundant_experts=num_redundant_experts,
