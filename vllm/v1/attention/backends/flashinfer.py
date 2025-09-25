@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
+                        BatchPrefillWithRaggedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
@@ -258,8 +259,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                      self.kv_cache_spec.block_size)
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+        # full cuda graph理论上不影响CP，暂时关闭排除影响，后面可以打开
         self.enable_cuda_graph = (self.compilation_config.cudagraph_mode.\
-            decode_mode() == CUDAGraphMode.FULL)
+            decode_mode() == CUDAGraphMode.FULL and self.cp_world_size == 1)
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.
@@ -358,8 +360,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
-            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), get_kv_cache_layout())
+            if self.cp_world_size > 1:
+                self._prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+                    self._get_workspace_buffer(), get_kv_cache_layout())
+            else:
+                self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(), get_kv_cache_layout())
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self,
@@ -589,22 +595,40 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     prefill_start]
                 paged_kv_indptr_cpu = paged_kv_indptr_cpu[prefill_start:]
                 if not attn_metadata.prefill_use_trtllm:
-                    attn_metadata.prefill_wrapper.plan(
-                        qo_indptr_cpu,
-                        paged_kv_indptr_cpu,
-                        paged_kv_indices,
-                        paged_kv_last_page_len_cpu[prefill_start:],
-                        self.num_qo_heads,
-                        self.num_kv_heads,
-                        self.head_dim,
-                        self.page_size,
-                        causal=True,
-                        sm_scale=self.sm_scale,
-                        window_left=self.window_left,
-                        logits_soft_cap=self.logits_soft_cap,
-                        q_data_type=self.q_data_type,
-                        kv_data_type=self.kv_cache_dtype,
-                    )
+                    if self.cp_world_size > 1:
+                        # 不考虑prefix cache和chunk prefill，all gather kv后
+                        kv_indptr_cpu = qo_indptr_cpu * self.cp_world_size
+                        # TODO 计算custom_mask
+                        attn_metadata.prefill_wrapper.plan(
+                            qo_indptr_cpu,
+                            kv_indptr_cpu,
+                            self.num_qo_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            custom_mask=custom_mask,
+                            sm_scale=self.sm_scale,
+                            window_left=self.window_left,
+                            logits_soft_cap=self.logits_soft_cap,
+                            q_data_type=self.q_data_type,
+                            kv_data_type=self.kv_cache_dtype,
+                        )
+                    else:
+                        attn_metadata.prefill_wrapper.plan(
+                            qo_indptr_cpu,
+                            paged_kv_indptr_cpu,
+                            paged_kv_indices,
+                            paged_kv_last_page_len_cpu[prefill_start:],
+                            self.num_qo_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.page_size,
+                            causal=True,
+                            sm_scale=self.sm_scale,
+                            window_left=self.window_left,
+                            logits_soft_cap=self.logits_soft_cap,
+                            q_data_type=self.q_data_type,
+                            kv_data_type=self.kv_cache_dtype,
+                        )
                 else:
                     attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
                         self.device, non_blocking=True)
@@ -826,16 +850,17 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                kv_cache[:, 0],
-                kv_cache[:, 1],
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+            if self.cp_world_size == 1:
+                torch.ops._C_cache_ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    kv_cache[:, 0],
+                    kv_cache[:, 1],
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache when the kv_cache_dtype is fp8
@@ -875,13 +900,40 @@ class FlashInferImpl(AttentionImpl):
                 assert prefill_wrapper._logits_soft_cap == (
                     self.logits_soft_cap or 0.0)
                 assert prefill_wrapper._sm_scale == self.scale
-                prefill_wrapper.run(
-                    prefill_query,
-                    kv_cache_permute,
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    out=output[num_decode_tokens:],
-                )
+                if self.cp_world_size > 1:
+                    key_across_cp = get_cp_group.all_gather(
+                        key[num_decode_tokens:].contiguous())
+                    value_across_cp = get_cp_group.all_gather(
+                        value[num_decode_tokens:].contiguous())
+                    #TODO 按sequence重排KV
+
+                    torch.ops._C_cache_ops.reshape_and_cache_flash(
+                        key_across_cp,
+                        value_across_cp,
+                        kv_cache[:, 0],
+                        kv_cache[:, 1],
+                        attn_metadata.slot_mapping[num_decode_tokens:],
+                        self.kv_cache_dtype,
+                        layer._k_scale,
+                        layer._v_scale,
+                    )
+
+                    prefill_wrapper.run(
+                        prefill_query,
+                        key_across_cp,
+                        value_across_cp,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output[num_decode_tokens:],
+                    )
+                else:
+                    prefill_wrapper.run(
+                        prefill_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output[num_decode_tokens:],
+                    )
             else:
                 # prefill_query may be non-contiguous
                 prefill_query = prefill_query.contiguous()
@@ -957,6 +1009,17 @@ class FlashInferImpl(AttentionImpl):
                                                            or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
                 if self.cp_world_size > 1:
+                    torch.ops._C_cache_ops.reshape_and_cache_flash(
+                        key[:num_decode_tokens],
+                        value[:num_decode_tokens],
+                        kv_cache[:, 0],
+                        kv_cache[:, 1],
+                        attn_metadata.slot_mapping[:num_decode_tokens],
+                        self.kv_cache_dtype,
+                        layer._k_scale,
+                        layer._v_scale,
+                    )
+
                     out, lse = decode_wrapper.run(
                         decode_query,
                         kv_cache_permute,
