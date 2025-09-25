@@ -218,9 +218,7 @@ def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
 direct_register_custom_op(
     op_name="rocm_per_tensor_w8a8_scaled_mm_impl",
     op_func=rocm_per_tensor_w8a8_scaled_mm_impl,
-    mutates_args=[],
     fake_impl=rocm_per_tensor_w8a8_scaled_mm_fake,
-    dispatch_key=current_platform.dispatch_key,
 )
 
 

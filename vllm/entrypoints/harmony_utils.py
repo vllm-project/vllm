@@ -317,7 +317,8 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                 )
                 output_items.append(response_item)
         elif recipient is not None and (recipient.startswith("python")
-                                        or recipient.startswith("browser")):
+                                        or recipient.startswith("browser")
+                                        or recipient.startswith("container")):
             for content in message.content:
                 reasoning_item = ResponseReasoningItem(
                     id=f"rs_{random_uuid()}",

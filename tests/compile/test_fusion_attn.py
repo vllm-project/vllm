@@ -229,7 +229,7 @@ else:
 @pytest.mark.parametrize(
     "backend", [_Backend.FLASHINFER] if current_platform.is_cuda() else [
         _Backend.ROCM_AITER_UNIFIED_ATTN, _Backend.ROCM_ATTN_VLLM_V1,
-        _Backend.TRITON_ATTN_VLLM_V1
+        _Backend.TRITON_ATTN
     ])
 # TODO(boyuan): test inductor graph partition on rocm
 @pytest.mark.parametrize(

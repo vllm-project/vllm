@@ -40,7 +40,8 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
-from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
+from vllm.model_executor.models.interfaces import (SupportsMultiModal,
+                                                   is_mixture_of_experts,
                                                    supports_eagle3,
                                                    supports_mrope,
                                                    supports_transcription)
@@ -52,13 +53,14 @@ from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, cdiv, check_use_alibi, get_dtype_size,
                         is_pin_memory_available,
                         length_from_prompt_token_ids_or_embeds, round_up,
                         supports_dynamo)
+from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -79,7 +81,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
 # yapf: enable
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, LogprobsLists, LogprobsTensors,
-                             ModelRunnerOutput, SamplerOutput)
+                             ModelRunnerOutput, PoolerOutput, SamplerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -776,11 +778,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     mm_kwargs.append(feature.data)
 
         # Input all modalities at once
+        model = cast(SupportsMultiModal, self.model)
         mm_kwargs_combined: BatchedTensorInputs = {}
         for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
                 pin_memory=self.pin_memory,
+                merge_by_field_config=model.merge_by_field_config,
         ):
             mm_kwargs_combined.update(mm_kwargs_group)
 
@@ -1177,9 +1181,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 encoder_seq_lens=encoder_seq_lens,
             )
 
-            if self.speculative_config and \
-                spec_decode_common_attn_metadata is None:
-                spec_decode_common_attn_metadata = common_attn_metadata
+            if (self.speculative_config
+                    and spec_decode_common_attn_metadata is None):
+                if isinstance(self.drafter, EagleProposer):
+                    if (self.drafter.attn_layer_names[0]
+                            in kv_cache_group_spec.layer_names):
+                        spec_decode_common_attn_metadata = common_attn_metadata
+                else:
+                    spec_decode_common_attn_metadata = common_attn_metadata
 
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 # Prepare for cascade attention if enabled & beneficial.
@@ -1519,11 +1528,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # in the same batch while still being able to benefit from batching
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
+        model = cast(SupportsMultiModal, self.model)
         encoder_outputs = []
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
                 pin_memory=self.pin_memory,
+                merge_by_field_config=model.merge_by_field_config,
         ):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -1532,7 +1543,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            curr_group_outputs = self.model.get_multimodal_embeddings(
+            curr_group_outputs = model.get_multimodal_embeddings(
                 **mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
@@ -1617,11 +1628,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return {}
 
         # Group MM kwargs by modality and extract features
+        model = cast(SupportsMultiModal, self.model)
         encoder_features = {}
         for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
                 pin_memory=self.pin_memory,
+                merge_by_field_config=model.merge_by_field_config,
         ):
             # Add the grouped features to encoder_features dict
             # This allows the model to receive them as kwargs (e.g.,
@@ -1818,15 +1831,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                               device=hidden_states.device)
         seq_lens_cpu = self.seq_lens.cpu[:self.input_batch.num_reqs]
 
-        # Pooling models D2H & synchronize occurs in pooler.py:build_output
-        raw_pooler_output = self.model.pooler(
-            hidden_states=hidden_states, pooling_metadata=pooling_metadata)
+        model = cast(VllmModelForPooling, self.model)
+        raw_pooler_output: PoolerOutput = model.pooler(
+            hidden_states=hidden_states,
+            pooling_metadata=pooling_metadata,
+        )
+        raw_pooler_output = json_map_leaves(
+            lambda x: x.to("cpu", non_blocking=True),
+            raw_pooler_output,
+        )
+        self._sync_device()
 
         pooler_output: list[Optional[torch.Tensor]] = []
         for raw_output, seq_len, prompt_len in zip(
                 raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens):
 
-            output = raw_output.data if seq_len == prompt_len else None
+            output = raw_output if seq_len == prompt_len else None
             pooler_output.append(output)
 
         return ModelRunnerOutput(
@@ -2297,7 +2317,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         use_padded_batch_for_eagle = self.speculative_config and \
             self.speculative_config.use_eagle() and \
             not self.speculative_config.disable_padded_drafter_batch
-        if use_padded_batch_for_eagle:
+        effective_drafter_max_model_len = self.max_model_len
+        if effective_drafter_max_model_len is None:
+            effective_drafter_max_model_len = self.model_config.max_model_len
+        if (self.speculative_config
+                and self.speculative_config.draft_model_config is not None
+                and self.speculative_config.draft_model_config.max_model_len
+                is not None):
+            effective_drafter_max_model_len = (
+                self.speculative_config.draft_model_config.max_model_len)
+        input_fits_in_drafter = spec_decode_common_attn_metadata and (
+            spec_decode_common_attn_metadata.seq_lens.max() +
+            self.speculative_config.num_speculative_tokens
+            <= effective_drafter_max_model_len)
+        if use_padded_batch_for_eagle and input_fits_in_drafter:
             # EAGLE speculative decoding can use the GPU sampled tokens
             # as inputs, and does not need to wait for bookkeeping to finish.
             propose_draft_token_ids(sampler_output.sampled_token_ids)
@@ -2315,7 +2348,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                        logits, hidden_states,
                                        num_scheduled_tokens)
 
-        if self.speculative_config and not use_padded_batch_for_eagle:
+        if (self.speculative_config and not use_padded_batch_for_eagle
+                and input_fits_in_drafter):
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
@@ -2362,7 +2396,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
-        aux_hidden_states: Optional[torch.Tensor],
+        aux_hidden_states: Optional[list[torch.Tensor]],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
     ) -> Union[list[list[int]], torch.Tensor]:
@@ -2382,6 +2416,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 indices = []
                 offset = 0
+                assert spec_decode_metadata is not None
                 for num_draft, tokens in zip(
                         spec_decode_metadata.num_draft_tokens,
                         sampled_token_ids):
@@ -2432,6 +2467,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # TODO(woosuk): Support M-RoPE.
                 target_positions = self.positions.gpu[:num_scheduled_tokens]
                 if self.use_aux_hidden_state_outputs:
+                    assert aux_hidden_states is not None
                     target_hidden_states = torch.cat(
                         [h[:num_scheduled_tokens] for h in aux_hidden_states],
                         dim=-1)
@@ -2457,6 +2493,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # TODO(woosuk): Support M-RoPE.
                 target_positions = self.positions.gpu[token_indices]
                 if self.use_aux_hidden_state_outputs:
+                    assert aux_hidden_states is not None
                     target_hidden_states = torch.cat(
                         [h[token_indices] for h in aux_hidden_states], dim=-1)
                 else:
@@ -2799,7 +2836,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
-            seq_len=self.max_num_tokens,
+            seq_len=self.max_model_len,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
         )
@@ -2809,18 +2846,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_mm_item = dummy_mm_data[modality][0]
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
+        model = cast(SupportsMultiModal, self.model)
         return next(mm_kwargs_group
                     for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
                         dummy_mm_items,
                         device=self.device,
                         pin_memory=self.pin_memory,
+                        merge_by_field_config=model.merge_by_field_config,
                     ))
 
     @torch.inference_mode()
     def _dummy_run(
         self,
         num_tokens: int,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        cudagraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
         uniform_decode: bool = False,
         allow_microbatching: bool = True,
@@ -2836,6 +2875,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Args:
             num_tokens: Number of tokens to run the dummy forward pass.
             cudagraph_runtime_mode: used to control the behavior.
+                - if not set will determine the cudagraph mode based on using 
+                    the self.cudagraph_dispatcher.
                 - CUDAGraphMode.NONE: No cudagraph, for warm up and profile run
                 - CUDAGraphMode.PIECEWISE: Piecewise cudagraph.
                 - CUDAGraphMode.FULL: Full cudagraph, attention metadata is
@@ -2849,7 +2890,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
         """
-        assert cudagraph_runtime_mode in {
+        assert cudagraph_runtime_mode is None or cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
 
@@ -2891,8 +2932,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         elif uniform_decode:
             assert not create_mixed_batch
             num_reqs = cdiv(num_tokens, max_query_len)
-            assert num_reqs <= max_num_reqs, \
-                "Do not capture num_reqs > max_num_reqs for uniform batch"
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
@@ -3033,18 +3072,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens, None, False)
-            if cudagraph_runtime_mode == CUDAGraphMode.NONE:
-                batch_descriptor = None
-            else:
-                # filter out the valid batch descriptor
-                _cg_mode, batch_descriptor = \
-                    self.cudagraph_dispatcher.dispatch(
-                        BatchDescriptor(num_tokens=num_tokens,
-                                        uniform_decode=uniform_decode))
-                # sanity check
-                assert cudagraph_runtime_mode == _cg_mode, (
+
+            # filter out the valid batch descriptor
+            _cg_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
+                BatchDescriptor(num_tokens=num_tokens,
+                                uniform_decode=uniform_decode))
+            if cudagraph_runtime_mode is not None:
+                # we allow forcing NONE when the dispatcher disagrees to support
+                # warm ups for cudagraph capture
+                assert cudagraph_runtime_mode == CUDAGraphMode.NONE or \
+                    cudagraph_runtime_mode == _cg_mode, (
                     f"Cudagraph runtime mode mismatch at dummy_run. "
                     f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}.")
+            else:
+                cudagraph_runtime_mode = _cg_mode
 
             if ubatch_slices is not None:
                 num_tokens = num_tokens // 2
@@ -3223,7 +3264,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for task in self.get_supported_pooling_tasks():
             # Run a full batch with each task to ensure none of them OOMs
             output = self._dummy_pooler_run_task(hidden_states, task)
-            output_size[task] = output.get_data_nbytes()
+            output_size[task] = sum(o.nbytes for o in output)
             del output  # Allow GC
 
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
@@ -3830,9 +3871,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                          target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
+        num_attn_module = 2 \
+            if self.model_config.hf_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
-                      self.kv_caches)
+                      self.kv_caches, num_attn_module)
         return kv_caches
 
     def maybe_add_kv_sharing_layers_to_kv_cache_groups(
