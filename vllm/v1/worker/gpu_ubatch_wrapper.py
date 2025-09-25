@@ -366,7 +366,8 @@ class UBatchWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
             with self.sm_control:
                 return self._capture_ubatches(ubatch_metadata, self.model)
-        elif num_tokens in self.cudagraphs:
+        elif num_tokens in self.cudagraphs \
+            and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             cudagraph_metadata = self.cudagraphs[num_tokens]
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs
