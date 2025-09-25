@@ -2057,10 +2057,11 @@ class FusedMoE(CustomOp):
             def reduce_output(states: torch.Tensor,
                               do_combine: bool = True) -> torch.Tensor:
                 if do_naive_dispatch_combine and do_combine:
-                    states = get_ep_group().combine(states, self.is_sequence_parallel)
+                    states = get_ep_group().combine(states,
+                                                    self.is_sequence_parallel)
 
-                if self.reduce_results and (self.tp_size > 1
-                                            or self.ep_size > 1):
+                if (not self.is_sequence_parallel and self.reduce_results
+                        and (self.tp_size > 1 or self.ep_size > 1)):
                     states = self.maybe_all_reduce_tensor_model_parallel(
                         states)
 
