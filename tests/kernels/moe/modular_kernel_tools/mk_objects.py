@@ -201,6 +201,9 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
         DeepEPLLPrepareAndFinalize,
     )
+    from vllm.model_executor.layers.fused_moe.deepep_hybrid_prepare_finalize import (
+        DeepEPHybridPrepareAndFinalize,
+    )
 
     register_prepare_and_finalize(
         DeepEPHTPrepareAndFinalize,
@@ -218,11 +221,18 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
         backend="deepep_low_latency",
     )
 
+    register_prepare_and_finalize(
+        DeepEPHybridPrepareAndFinalize,
+        batched_format,
+        common_float_types,
+        blocked_quantization_support=True,
+        backend="deepep_hybrid",
+    )
+
 if has_pplx():
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
     )
-
     register_prepare_and_finalize(
         PplxPrepareAndFinalize,
         batched_format,

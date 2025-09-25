@@ -41,19 +41,14 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hidden_size_bytes = round_up(hidden_size_bytes, xfer_atom_size)
         return hidden_size_bytes // dtype.itemsize
 
-    def __init__(self, buffer: deep_ep.Buffer, num_dispatchers: int,
+    def __init__(self, buffer: deep_ep.HybridBuffer, num_dispatchers: int,
                  dp_size: int, rank_expert_offset: int):
         super().__init__()
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
-        self.async_prepare = True
-
-        # The dispatch function returns a handle that the combine function
-        # requires. Under DBO microbatching we must track one handle per
-        # micro-batch to avoid races between threads.
-        self.handles = [None, None]
+        self.handle = None
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
@@ -81,138 +76,10 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             return None
         return deep_ep.Buffer.get_combine_config(self.num_dispatchers_)
 
-    def _do_dispatch(
-        self,
-        tokens: torch.Tensor,
-        token_scales: Optional[torch.Tensor],
-        rank_topk_ids: torch.Tensor,
-        rank_topk_weights: torch.Tensor,
-        num_experts: int,
-        a1_scale: Optional[torch.Tensor],
-        quant_config: FusedMoEQuantConfig,
-    ) -> Callable:
-
-        has_scales = token_scales is not None
-
-        # We yield before launching the dispatch kernel since the dispatch
-        # kernel will block the CPU so we want to queue up all the compute
-        # for the other ubatch before the dispatch kernel starts.
-        dbo_yield_and_switch_from_compute_to_comm()
-
-        (num_tokens_per_rank, num_tokens_per_rdma_rank,
-         dispatch_expert_num_tokens, is_token_in_rank,
-         event) = self.buffer.get_dispatch_layout(
-             topk_idx=rank_topk_ids,
-             num_experts=num_experts,
-             previous_event=None,
-             async_finish=False,
-             allocate_on_comm_stream=False)
-
-        # dispatched_token,
-        #    dispatched_probs,
-        #    dispatched_scaling_factor,
-        #    num_of_tokens_for_experts_tensor,
-        #    local_expert_routing_map,
-        #    handle,
-
-        (
-            token_data, expert_probs, token_scales,
-            expert_num_tokens_per_expert, local_expert_routing_map,
-            handle
-        ) = self.buffer.dispatch(
-            tokens=tokens,
-            scaling_factor=token_scales,
-            topk_idx=rank_topk_ids,
-            topk_weights=rank_topk_weights,
-            routing_map=None, # None = generated dynamically
-            handle=None,
-            num_of_tokens_for_experts=-1, #??
-            async_mode=self.async_prepare and not dbo_enabled(),
-        )
-
-        # record the handle for this ubatch
-        a2a_idx = dbo_current_ubatch_id()
-        self.handles[a2a_idx] = handle
-
-        dbo_switch_to_compute_sync()
-
-        return lambda: self._receiver(
-            event,
-            token_data,
-            token_scales,
-            expert_topk_ids,
-            num_experts,
-            expert_num_tokens_per_expert_list,
-            expert_topk_weights,
-            a1_scale,
-            quant_config,
-        )
-
-    def _receiver(
-        self,
-        event: deep_ep.EventOverlap,
-        has_scales: bool,
-        token_data: Union[tuple[torch.Tensor, torch.Tensor], torch.Tensor],
-        expert_topk_ids: Optional[torch.Tensor],
-        num_experts: int,
-        expert_num_tokens_per_expert_list: list[int],
-        expert_topk_weights: Optional[torch.Tensor],
-        a1_scale: Optional[torch.Tensor],
-        quant_config: FusedMoEQuantConfig,
-    ) -> mk.PrepareResultType:
-        if event.event is not None:
-            event.current_stream_wait()
-
-        if has_scales:
-            expert_x, expert_x_scale = token_data
-        else:
-            expert_x, expert_x_scale = token_data, None
-
-        # The existing MOE kernels assume that all entries of topk_ids are
-        # valid. To that effect, set the -1s in expert_topk_ids to some expert
-        # outside this rank so the expert_map can remap it to -1 when safe.
-        # With Expert Parallel, the experts are divided amongst the rank
-        # sequentially. For rank 0, set it to num_experts - 1 and for all other
-        # ranks set it to 0 as we know that expert_map will have a -1 in those
-        # regions for those ranks.
-        #
-        # DeepEP's topk_ids output refers to the local experts directly. Offset
-        # the topk_ids to move it back to the global experts space so it aligns
-        # with existing vLLM interfaces.
-        assert expert_topk_ids is not None
-        expert_topk_ids = torch.where(
-            expert_topk_ids == -1,
-            num_experts - 1 if self.rank_expert_offset == 0 else 0,
-            expert_topk_ids + self.rank_expert_offset)
-
-        # Makes a GPU-CPU copy.
-        # TODO (varun): Maybe it is better to re-compute the expert_num_tokens
-        # on GPU.
-        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            expert_num_tokens_per_expert_list, device=expert_x.device)
-
-        # Dispatch and Quant
-        # DeepEP kernels only support dispatching block-quantized
-        # activation scales.
-        # Dispatch in bfloat16 and quantize afterwards
-        if not quant_config.is_block_quantized:
-            # Quantize after dispatch.
-            expert_x_scale = None
-            if expert_x.numel() != 0:
-                expert_x, expert_x_scale = moe_kernel_quantize_input(
-                    expert_x,
-                    a1_scale,
-                    quant_dtype=quant_config.quant_dtype,
-                    per_act_token_quant=False,
-                    block_shape=quant_config.block_shape)
-
-        return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
-                expert_topk_weights)
-
     def supports_async(self) -> bool:
         return False # combine async not supported
 
-    def prepare_async(
+    def prepare(
         self,
         a1: torch.Tensor,
         topk_weights: torch.Tensor,
@@ -221,7 +88,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> mk.ReceiverType:
+    ) -> mk.PrepareResultType:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -247,81 +114,49 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = quant_config.a1_scale
 
-        return self._do_dispatch(tokens=a1q,
-                                 token_scales=a1q_scale,
-                                 rank_topk_ids=topk_ids,
-                                 rank_topk_weights=topk_weights,
-                                 num_experts=num_experts,
-                                 a1_scale=a1_post_scale,
-                                 quant_config=quant_config)
-
-    def prepare(
-        self,
-        a1: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
-        quant_config: FusedMoEQuantConfig,
-    ) -> mk.PrepareResultType:
-        receiver = self.prepare_async(a1, topk_weights, topk_ids, num_experts,
-                                      expert_map, apply_router_weight_on_input,
-                                      quant_config)
-        return receiver()
-
-    def _finalize(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: mk.TopKWeightAndReduce,
-        do_async: bool,
-    ) -> Optional[Callable]:
-        handle = self.handle
-        assert handle is not None
-
-        # fused_expert_output can have 0 tokens - This happens when none of the
-        # tokens from the all2all reach this EP rank.
-        if fused_expert_output.numel() != 0:
-            if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
-                weight_and_reduce_impl = TopKWeightAndReduceContiguous()
-            fused_expert_output = weight_and_reduce_impl.apply(
-                output=None,
-                fused_expert_output=fused_expert_output,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
-        dbo_yield_and_switch_from_compute_to_comm()
-        combined_x, _, event = self.buffer.combine(
-            tensor=fused_expert_output,
-            probs=probs,
-            handle=handle,
+        (
+            expert_x, expert_probs, expert_x_scale,
+            num_tokens_per_expert, local_expert_routing_map,
+            self.handle
+        ) = self.buffer.dispatch(
+            tokens=a1,
+            scaling_factor=a1q_scale,
+            topk_idx=topk_ids,
+            topk_weights=topk_weights,
+            routing_map=None, # None = generated dynamically
+            handle=None,
+            num_of_tokens_for_experts=-1, #??
+            async_mode=False,
         )
 
-        # TODO(lucas): support this case with the refactored modular kernel
-        # Respect inplace outputs.
-        # apply weights???
-        output.copy_(combined_x, non_blocking=True)
-        return None
+        # Makes a GPU-CPU copy.
+        # TODO (varun): Maybe it is better to re-compute the expert_num_tokens
+        # on GPU.
+        expert_tokens_meta = mk.ExpertTokensMetadata(
+            num_tokens_per_expert,
+            None, #? num_tokens_per_expert.cpu(),
+        )
 
-    def finalize_async(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> Callable:
-        receiver = self._finalize(output, fused_expert_output, topk_weights,
-                                  topk_ids, apply_router_weight_on_input,
-                                  weight_and_reduce_impl, True)
-        assert receiver is not None
-        return receiver
+        # Dispatch and Quant
+        # DeepEP kernels only support dispatching block-quantized
+        # activation scales.
+        # Dispatch in bfloat16 and quantize afterwards
+        if not quant_config.is_block_quantized:
+            # Quantize after dispatch.
+            expert_x_scale = None
+            if expert_x.numel() != 0:
+                expert_x, expert_x_scale = moe_kernel_quantize_input(
+                    expert_x,
+                    a1_post_scale,
+                    quant_dtype=quant_config.quant_dtype,
+                    per_act_token_quant=False,
+                    block_shape=quant_config.block_shape)
+
+        self.expert_probs = expert_probs
+
+        return (expert_x, expert_x_scale, expert_tokens_meta,
+                topk_ids[local_expert_routing_map],
+                expert_probs)
 
     def finalize(
         self,
@@ -332,6 +167,26 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        self._finalize(output, fused_expert_output, topk_weights, topk_ids,
-                       apply_router_weight_on_input, weight_and_reduce_impl,
-                       False)
+        # fused_expert_output can have 0 tokens - This happens when none of the
+        # tokens from the all2all reach this EP rank.
+        if False and fused_expert_output.numel() != 0:
+            if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+                weight_and_reduce_impl = TopKWeightAndReduceContiguous()
+            fused_expert_output = weight_and_reduce_impl.apply(
+                output=None,
+                fused_expert_output=fused_expert_output,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+
+        combined_x, _ = self.buffer.combine(
+            tensor=fused_expert_output,
+            probs=self.expert_probs,
+            handle=self.handle,
+        )
+
+        # TODO(lucas): support this case with the refactored modular kernel
+        # Respect inplace outputs.
+        # apply weights???
+        output.copy_(combined_x, non_blocking=True)
