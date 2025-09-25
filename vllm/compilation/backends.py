@@ -3,6 +3,8 @@
 
 import ast
 import dataclasses
+import hashlib
+import json
 import os
 import pprint
 import time
@@ -485,7 +487,8 @@ class VllmBackend:
             factors = []
             # 0. factors come from the env, for example, The values of
             # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-            env_hash = envs.compute_hash()
+            from vllm.config.utils import hash_factors
+            env_hash = hash_factors(envs.compile_factors())
             factors.append(env_hash)
 
             # 1. factors come from the vllm_config (it mainly summarizes how the
@@ -497,7 +500,6 @@ class VllmBackend:
             #    it mainly summarizes how the model is used in forward pass)
             forward_code_files = list(
                 sorted(self.compilation_config.traced_files))
-            self.compilation_config.traced_files.clear()
             logger.debug(
                 "Traced files (to be considered for compilation cache):\n%s",
                 "\n".join(forward_code_files))
@@ -510,9 +512,8 @@ class VllmBackend:
                     continue
                 with open(filepath) as f:
                     hash_content.append(f.read())
-            import hashlib
-            code_hash = hashlib.md5("\n".join(hash_content).encode(),
-                                    usedforsecurity=False).hexdigest()
+            code_hash = hashlib.sha256(
+                "\n".join(hash_content).encode()).hexdigest()
             factors.append(code_hash)
 
             # 3. compiler hash
@@ -551,102 +552,71 @@ class VllmBackend:
         self.compiler_manager.initialize_cache(local_cache_dir, disable_cache,
                                                self.prefix)
 
-        # Persist normalized factors and log cache key components for
-        # visibility, and save into
-        # the cache file for post-run inspection.
         try:
-            from vllm.config.utils import normalize_value
-
-            # Build normalized environment factor map without static excludes.
-            env_factors: dict[str, object] = {}
-            for k, fn in envs.environment_variables.items():
-                env_factors[k] = normalize_value(fn())
+            vllm_config_hash = vllm_config.compute_hash()
         except Exception:
-            env_factors = {}
+            vllm_config_hash = "<unavailable>"
 
-        try:
-            config_factors: dict[str, object] = {}
+        # Derive hashes for logging and cache key.
+        from vllm.config.utils import hash_factors as _hash_factors
+        env_hash = _hash_factors(envs.compile_factors())
+        config_hash = vllm_config_hash if vllm_config_hash != "<unavailable>" \
+            else vllm_config.compute_hash()
+        compiler_hash = self.compiler_manager.compute_hash(vllm_config)
 
-            def _norm(val: object) -> object:
-                try:
-                    return normalize_value(val)
-                except Exception:
-                    # Fall back to stable summaries for nested configs or mark
-                    # as unserializable for visibility rather than dropping all.
-                    if hasattr(val, "compute_hash") and callable(
-                            val.compute_hash):
-                        try:
-                            return {"hash": val.compute_hash()}
-                        except Exception:
-                            return f"<unserializable:{type(val).__name__}>"
-                    return f"<unserializable:{type(val).__name__}>"
-
-            if dataclasses.is_dataclass(self.vllm_config):
-                for dc_field in dataclasses.fields(self.vllm_config):
-                    name = dc_field.name
-                    config_factors[name] = _norm(
-                        getattr(self.vllm_config, name, None))
-            else:
-                for name, value in getattr(self.vllm_config, "__dict__",
-                                           {}).items():
-                    config_factors[name] = _norm(value)
-        except Exception:
-            config_factors = {}
-
-        # Ensure cache key components exist before logging;
-        # reuse if computed earlier.
-        if "env_hash" not in locals():
-            env_hash = envs.compute_hash()
-        if "config_hash" not in locals():
-            config_hash = vllm_config.compute_hash()
-        if "compiler_hash" not in locals():
-            compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-        if "code_hash" not in locals():
-            forward_code_files = list(
-                sorted(self.compilation_config.traced_files))
-            self.compilation_config.traced_files.clear()
-            hash_content = []
-            for filepath in forward_code_files:
-                hash_content.append(filepath)
-                if filepath == "<string>":
-                    continue
-                try:
-                    with open(filepath) as f:
-                        hash_content.append(f.read())
-                except Exception:
-                    # If a traced file cannot be read,
-                    # skip its contents but keep its path
-                    # in the hash input for stability.
-                    continue
-            import hashlib as _hashlib
-            code_hash = _hashlib.sha256(
-                "\n".join(hash_content).encode()).hexdigest()
-        if "hash_key" not in locals():
-            import hashlib as _hashlib
-            hash_key = _hashlib.sha256(
-                str([
-                    env_hash,
-                    config_hash,
-                    code_hash,
-                    compiler_hash,
-                ]).encode()).hexdigest()[:10]
+        forward_code_files = list(sorted(self.compilation_config.traced_files))
+        self.compilation_config.traced_files.clear()
+        hash_content = []
+        for filepath in forward_code_files:
+            hash_content.append(filepath)
+            if filepath == "<string>":
+                continue
+            try:
+                with open(filepath) as f:
+                    hash_content.append(f.read())
+            except Exception:
+                continue
+        code_hash = hashlib.sha256(
+            "\n".join(hash_content).encode()).hexdigest()
+        summary_hash_key = hashlib.sha256(
+            str([env_hash, config_hash, code_hash,
+                 compiler_hash]).encode()).hexdigest()[:10]
 
         logger.info(
-            "torch.compile cache factors: "
-            "env=%s cfg=%s code=%s comp=%s key=%s dir=%s",
+            "torch.compile cache factors: env=%s cfg=%s comp=%s dir=%s",
             env_hash,
             config_hash,
-            code_hash,
             compiler_hash,
-            hash_key,
             local_cache_dir,
         )
-        logger.debug(
-            "Normalized env factors:\n%s\n"
-            "Normalized vLLM config factors:\n%s",
-            pprint.pformat(env_factors, width=120),
-            pprint.pformat(config_factors, width=120),
-        )
+        logger.debug("code hash=%s summary_key=%s", code_hash,
+                     summary_hash_key)
+
+        # Persist and log only hash-relevant factors together.
+        try:
+            env_factors = envs.compile_factors()
+            logger.debug(
+                "Compile env factors (raw):\n%s\nVllm config hash: %s",
+                pprint.pformat(env_factors, width=120),
+                config_hash,
+            )
+            meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
+            with open(meta_path, "w") as f:
+                json.dump(
+                    {
+                        "env": env_factors,  # raw factors used for env_hash
+                        "config_hash": config_hash,
+                        "code_hash": code_hash,
+                        "compiler_hash": compiler_hash,
+                        "summary_key": summary_hash_key,
+                    },
+                    f,
+                    indent=2,
+                    sort_keys=True,
+                )
+        except Exception:
+            # Best-effort only; metadata write failures are non-fatal.
+            pass
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done

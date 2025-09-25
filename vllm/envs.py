@@ -1470,48 +1470,39 @@ def set_vllm_use_v1(use_v1: bool):
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
 
 
-def compute_hash() -> str:
+def compile_factors() -> dict[str, object]:
     """
-    WARNING: Whenever a new key is added to this environment
-    variables, ensure that it is included in the factors list if
-    it affects the computation graph. For example, different values
-    of VLLM_PP_LAYER_PARTITION will generate different computation
-    graphs, so it is included in the factors list. The env vars that
-    affect the choice of different kernels or attention backends should
-    also be included in the factors list.
-
-    Opt-out env hashing for torch.compile cache keys:
-    default-include all known vLLM environment variables, exclude a
-    tiny set that clearly do not affect the compiled graph.
+    Return raw env factors for compile hashing using the legacy opt-out
+    strategy: include all known env vars except a minimal set that clearly
+    does not affect compiled graph structure or kernel routing.
     """
 
-    # Minimal exclude list: logging/diagnostics and service port.
-    ignored_factors = {
-        "VLLM_LOGGING_LEVEL",
-        "VLLM_TORCH_PROFILER_DIR",
-        "VLLM_PORT",
+    ignored_factors: set[str] = {
+        "MAX_JOBS", "VLLM_RPC_BASE_PATH", "VLLM_USE_MODELSCOPE",
+        "VLLM_RINGBUFFER_WARNING_INTERVAL", "LD_LIBRARY_PATH",
+        "VLLM_PATTERN_MATCH_DEBUG", "VLLM_SERVER_DEV_MODE",
+        "VLLM_DP_MASTER_IP", "VLLM_DP_MASTER_PORT",
+        "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "VLLM_CI_USE_S3",
+        "VLLM_MODEL_REDIRECT_PATH", "VLLM_MARLIN_USE_ATOMIC_ADD",
+        "VLLM_MXFP4_USE_MARLIN"
     }
 
-    # Local import to avoid any import-cycle surprises at module import time.
-    from vllm.config.utils import hash_factors, normalize_value
+    from vllm.config.utils import normalize_value
 
-    factors = dict()
-    for factor, value in environment_variables.items():
+    factors: dict[str, object] = {}
+    for factor, getter in environment_variables.items():
         if factor in ignored_factors:
             continue
         try:
-            factors[factor] = normalize_value(value())
+            raw = getter()
         except Exception:
-            # Skip envs that raise during retrieval.
-            # Skip values we cannot canonicalize deterministically.
-            try:
-                from vllm.logger import init_logger
-                init_logger(__name__).warning(
-                    "Env hash skip: unsupported value for '%s' — add to "
-                    "ignored_factors if expected",
-                    factor,
-                )
-            except Exception:
-                pass
+            # Do not drop the factor; mark retrieval failure deterministically.
+            factors[factor] = "<error:unavailable>"
             continue
-    return hash_factors(factors)
+        try:
+            factors[factor] = normalize_value(raw)
+        except Exception:
+            # Preserve the factor with a stable placeholder to avoid
+            # under-hashing.
+            factors[factor] = f"<unserializable:{type(raw).__name__}>"
+    return factors
