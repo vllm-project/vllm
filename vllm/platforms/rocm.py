@@ -323,6 +323,8 @@ class RocmPlatform(Platform):
         use_v1 = envs.VLLM_USE_V1
         use_aiter_rms_norm = envs.VLLM_ROCM_USE_AITER and \
              envs.VLLM_ROCM_USE_AITER_RMSNORM
+        use_aiter_linear = envs.VLLM_ROCM_USE_AITER and \
+             envs.VLLM_ROCM_USE_AITER_LINEAR
 
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
@@ -343,6 +345,10 @@ class RocmPlatform(Platform):
         if (use_v1 and use_aiter_rms_norm and not is_eager_execution
                 and "-rms_norm" not in compilation_config.custom_ops):
             compilation_config.custom_ops.append("+rms_norm")
+
+        if (use_v1 and use_aiter_linear
+                and "-quant_fp8" not in compilation_config.custom_ops):
+            compilation_config.custom_ops.append("+quant_fp8")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
