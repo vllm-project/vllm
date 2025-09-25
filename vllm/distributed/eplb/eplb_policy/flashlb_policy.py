@@ -554,7 +554,9 @@ class FlashLB(EplbPolicy):
             expert_count: [layers, num_logical_experts], number of
                 physical replicas for each logical expert
         """
-
+        assert num_ranks % num_nodes == 0
+        assert num_replicas % num_ranks == 0
+    
         expert_workload = weight.cpu().numpy()
         expert_workload += 1
         num_layer, num_expert = expert_workload.shape
@@ -565,13 +567,13 @@ class FlashLB(EplbPolicy):
             new_deployment = np.zeros(
                 (num_layer, num_ranks, num_replicas // num_ranks)
             )
-
+    
         self.register_hotness(num_layer, expert_workload)
         layers_need_update = np.arange(num_layer)
         new_par = np.zeros(layers_need_update.shape[0])
         current_par = np.ones(layers_need_update.shape[0])
         expert_count = np.zeros((num_layer, num_expert))
-
+    
         for i, layer in enumerate(layers_need_update):
             hotness = np.array(self.hotness_window[layer])
             if hotness.shape[0] > self.max_stage_window:
@@ -582,32 +584,38 @@ class FlashLB(EplbPolicy):
                 stage_weights = self.compute_stage_weight(hotness)
                 new_deployment[layer], expert_count[layer] = (
                     self.group_based_adaptive_searching(
-                        hotness, num_replicas, num_ranks,
-                        stage_weights, recorsive=False
+                        hotness,
+                        num_replicas,
+                        num_ranks,
+                        stage_weights,
+                        recorsive=False
                     )
                 )
             else:
                 (new_deployment[layer], expert_count[layer], new_par[i],
                  current_par[i]) = self.rebalance_layer(
-                    num_replicas, num_ranks, current_deployment[layer],
-                    hotness, layer_id=layer
+                    num_replicas,
+                    num_ranks,
+                    current_deployment[layer],
+                    hotness,
+                    layer_id=layer
                 )
-
+    
         priority = new_par / current_par
         priority_idx = np.argsort(priority)
         priority_idx = priority_idx[priority[priority_idx] < 1][
             :self.buffer_expert_layer_num
         ]
-
+    
         change = len(priority_idx) > 0
         if np.all(expert_workload == 1):
             for _, layer in enumerate(layers_need_update):
                 self.hotness_window[layer].pop()
             change = False
-
+    
         if old_global_expert_indices is None:
             physical_to_logical_map = np.array(
-                new_deployment, dtype=int
+                new_deployment, dtype=np.int32
             ).reshape((num_layer, num_replicas))
             maxlogcnt = int(expert_count.max())
             logical_to_physical_map = compute_logical_to_physical_map(
@@ -615,44 +623,51 @@ class FlashLB(EplbPolicy):
                 num_replicas, maxlogcnt
             )
             physical_to_logical_map = torch.tensor(
-                physical_to_logical_map, dtype=int, device=weight.device
+                physical_to_logical_map, dtype=torch.int32, 
+                device=weight.device
             )
             logical_to_physical_map = torch.tensor(
-                logical_to_physical_map, dtype=int, device=weight.device
+                logical_to_physical_map, dtype=torch.int32,
+                device=weight.device
             )
             expert_count = torch.tensor(
-                expert_count, dtype=int, device=weight.device
+                expert_count, dtype=torch.int32,
+                device=weight.device
             )
             return (physical_to_logical_map, logical_to_physical_map,
                     expert_count)
-
+    
         deployment = current_deployment.copy()
-
+    
         if change:
             for idx in priority_idx:
                 deployment[idx] = auto_fix_new_placement(
                     current_deployment[idx], new_deployment[idx]
                 )
                 self.par_history[idx] = new_par[idx]
-        physical_to_logical_map = deployment.reshape(
+        physical_to_logical_ndarray = deployment.reshape(
             (num_layer, num_replicas)
-        )
+        ).astype(np.int32)
         maxlogcnt = int(expert_count.max())
-        logical_to_physical_map = compute_logical_to_physical_map(
-            physical_to_logical_map, num_layer, num_expert,
+        logical_to_physical_ndarray = compute_logical_to_physical_map(
+            physical_to_logical_ndarray, num_layer, num_expert,
             num_replicas, maxlogcnt
         )
+
         physical_to_logical_map = torch.tensor(
-            physical_to_logical_map, dtype=int, device=weight.device
+            physical_to_logical_ndarray, dtype=torch.int32,
+            device=weight.device
         )
         logical_to_physical_map = torch.tensor(
-            logical_to_physical_map, dtype=int, device=weight.device
+            logical_to_physical_ndarray, dtype=torch.int32,
+            device=weight.device
         )
-        expert_count = torch.tensor(
-            expert_count, dtype=int, device=weight.device
+        expert_count_tensor = torch.tensor(
+            expert_count, dtype=torch.int32,
+            device=weight.device
         )
         return (physical_to_logical_map, logical_to_physical_map,
-                expert_count)
+                expert_count_tensor)
 
 
 def warmup_flashlb():
