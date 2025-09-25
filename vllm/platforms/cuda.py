@@ -163,17 +163,17 @@ class CudaPlatformBase(Platform):
 
             from vllm.attention.ops.flashmla import is_flashmla_supported
             if use_flashmla and is_flashmla_supported()[0] \
-                and cache_config.block_size != 64:
+                and cache_config.block_size % 64 != 0:
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
 
-            if use_cutlass_mla and cache_config.block_size != 128:
+            if use_cutlass_mla and cache_config.block_size % 128 != 0:
                 cache_config.block_size = 128
                 logger.info("Forcing kv cache block size to 128 for "
                             "CUTLASS_MLA backend.")
 
-            if use_flashinfer_mla and cache_config.block_size not in [32, 64]:
+            if use_flashinfer_mla and cache_config.block_size % 64 != 0:
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashInferMLA "
