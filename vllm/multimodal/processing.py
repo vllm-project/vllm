@@ -1585,7 +1585,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         *,
         mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> MultiModalHashes:
-        """Create MM hashes to be returned (only used in V1).
+        """Create MM hashes to be returned.
 
 
         Note: When overrides are provided via callers of `apply`,
@@ -2098,23 +2098,22 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         encoder_inputs: MultiModalInputs,
     ):
         tokenizer = self.info.get_tokenizer()
-        decoder_prompt = self.create_decoder_prompt(prompt, mm_data)
-        if isinstance(decoder_prompt, str):
+        decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_data)
+        if isinstance(decoder_prompt_raw, str):
+            decoder_prompt = decoder_prompt_raw
             decoder_prompt_ids = encode_tokens(tokenizer,
-                                               decoder_prompt,
+                                               decoder_prompt_raw,
                                                add_special_tokens=False)
         else:
-            decoder_prompt_ids = decoder_prompt
-            decoder_prompt = decode_tokens(tokenizer, decoder_prompt)
+            decoder_prompt = decode_tokens(tokenizer, decoder_prompt_raw)
+            decoder_prompt_ids = decoder_prompt_raw
 
         mm_inputs = MultiModalEncDecInputs(
             encoder_prompt=encoder_inputs["prompt"],
             encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
             **encoder_inputs)
-        mm_inputs.update({
-            "prompt": decoder_prompt,
-            "prompt_token_ids": decoder_prompt_ids
-        })
+        mm_inputs["prompt"] = decoder_prompt
+        mm_inputs["prompt_token_ids"] = decoder_prompt_ids
         return mm_inputs
 
     def apply(

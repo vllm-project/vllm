@@ -415,9 +415,12 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
                                        num_image_patches),
         )
+
         # Use overrides if provided; fallback to data-dependent hashing.
-        mm_hashes = (mm_uuids if mm_uuids is not None else self._hash_mm_items(
-            mm_items, hf_processor_mm_kwargs, tokenization_kwargs))
+        mm_hashes = self._hash_mm_items(mm_items,
+                                        hf_processor_mm_kwargs,
+                                        tokenization_kwargs,
+                                        mm_uuids=mm_uuids)
 
         return MultiModalInputs(
             type="multimodal",
