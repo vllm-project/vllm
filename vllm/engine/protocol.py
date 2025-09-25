@@ -16,6 +16,7 @@ from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.tasks import SupportedTask
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device, collect_from_async_generator, random_uuid
 
@@ -325,4 +326,8 @@ class EngineClient(ABC):
                              args: tuple = (),
                              kwargs: Optional[dict] = None):
         """Perform a collective RPC call to the given path."""
+        raise NotImplementedError
+
+    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        """Get supported tasks"""
         raise NotImplementedError
