@@ -435,7 +435,7 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
                 for i in range(0, search_iters):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < search_range
-                    probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n, other=avg_logit)
+                    probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n, other=-float('inf'))
 
                     larger_mask_0 = probs_blk > p_pivot_0
                     larger_mask_1 = probs_blk > p_pivot_1
