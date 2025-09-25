@@ -1464,10 +1464,11 @@ class EngineArgs:
 
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
         if self.speculative_config is not None:
+            # speculative_config could still be a dict at this point
             if isinstance(self.speculative_config, dict):
-                method = self.speculative_config.get("method")
+                method = self.speculative_config.get("method", None)
             else:
-                method = getattr(self.speculative_config, "method", None)
+                method = self.speculative_config.method
 
             if method == "draft_model":
                 raise NotImplementedError(
