@@ -283,6 +283,10 @@ WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
 
+# cuda arch list used by torch in the runtime image
+ARG torch_cuda_arch_list='7.5 8.0 8.9 9.0a 10.0a 12.0'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+
 ARG GDRCOPY_CUDA_VERSION=12.8
 # Keep in line with FINAL_BASE_IMAGE
 ARG GDRCOPY_OS_VERSION=Ubuntu22_04
@@ -458,7 +462,7 @@ RUN set -eux; \
 # Install EP kernels(pplx-kernels and DeepEP)
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 ENV CUDA_HOME=/usr/local/cuda
-RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a+PTX}" \
+RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a 10.0a+PTX}" \
     && bash install_python_libraries.sh
 
 #################### vLLM installation IMAGE ####################
