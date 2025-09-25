@@ -541,6 +541,56 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="Additional kwargs for structured outputs",
     )
+    guided_json: Optional[Union[str, dict, BaseModel]] = Field(
+        default=None,
+        description=(
+            "`guided_json` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `json` to `structured_outputs` instead."),
+    )
+    guided_regex: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_regex` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `regex` to `structured_outputs` instead."),
+    )
+    guided_choice: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "`guided_choice` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `choice` to `structured_outputs` instead."),
+    )
+    guided_grammar: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_grammar` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `grammar` to `structured_outputs` instead."),
+    )
+    structural_tag: Optional[str] = Field(
+        default=None,
+        description=(
+            "`structural_tag` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `structural_tag` to `structured_outputs` instead."),
+    )
+    guided_decoding_backend: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_decoding_backend` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please remove it from your request."),
+    )
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_whitespace_pattern` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `whitespace_pattern` to `structured_outputs` instead."
+        ),
+    )
     priority: int = Field(
         default=0,
         description=(
@@ -657,6 +707,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
+
+        # Forward deprecated guided_* parameters to structured_outputs
+        if self.structured_outputs is None:
+            kwargs = dict[str, Any](
+                json=self.guided_json,
+                regex=self.guided_regex,
+                choice=self.guided_choice,
+                grammar=self.guided_grammar,
+                whitespace_pattern=self.guided_whitespace_pattern,
+                structural_tag=self.structural_tag,
+            )
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            if len(kwargs) > 0:
+                self.structured_outputs = StructuredOutputsParams(**kwargs)
 
         response_format = self.response_format
         json_schema_from_tool = self._get_json_schema_from_tool()
@@ -839,7 +903,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if isinstance(data, ValueError):
             raise data
 
-        if "structured_outputs" not in data:
+        if data.get("structured_outputs", None) is None:
             return data
 
         structured_outputs_kwargs = data['structured_outputs']
@@ -1016,6 +1080,49 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description="Additional kwargs for structured outputs",
     )
+    guided_json: Optional[Union[str, dict, BaseModel]] = Field(
+        default=None,
+        description=(
+            "`guided_json` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `json` to `structured_outputs` instead."),
+    )
+    guided_regex: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_regex` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `regex` to `structured_outputs` instead."),
+    )
+    guided_choice: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "`guided_choice` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `choice` to `structured_outputs` instead."),
+    )
+    guided_grammar: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_grammar` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `grammar` to `structured_outputs` instead."),
+    )
+    guided_decoding_backend: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_decoding_backend` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please remove it from your request."),
+    )
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_whitespace_pattern` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `whitespace_pattern` to `structured_outputs` instead."
+        ),
+    )
     priority: int = Field(
         default=0,
         description=(
@@ -1145,6 +1252,19 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
+        # Forward deprecated guided_* parameters to structured_outputs
+        if self.structured_outputs is None:
+            kwargs = dict[str, Any](
+                json=self.guided_json,
+                regex=self.guided_regex,
+                choice=self.guided_choice,
+                grammar=self.guided_grammar,
+                whitespace_pattern=self.guided_whitespace_pattern,
+            )
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            if len(kwargs) > 0:
+                self.structured_outputs = StructuredOutputsParams(**kwargs)
+
         if (self.structured_outputs is not None
                 and self.response_format is not None
                 and self.response_format.type == "json_object"):
@@ -1189,7 +1309,7 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_structured_outputs_count(cls, data):
-        if "structured_outputs" not in data:
+        if data.get("structured_outputs", None) is None:
             return data
 
         structured_outputs_kwargs = data['structured_outputs']
