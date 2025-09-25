@@ -7,7 +7,7 @@ import os
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import requests
 from datasets import load_dataset
@@ -15,7 +15,7 @@ from PIL import Image
 
 
 def to_data_url(image_path: str, fmt: str = "JPEG") -> str:
-    """Read image from disk and convert to base64 data URL (robust for vLLM OpenAI server)."""
+    """Read image from disk and convert to base64 data URL."""
     with Image.open(image_path).convert("RGB") as img:
         buf = io.BytesIO()
         img.save(buf, format=fmt)
@@ -24,7 +24,7 @@ def to_data_url(image_path: str, fmt: str = "JPEG") -> str:
         return f"data:{mime};base64,{b64}"
 
 
-def build_messages(question_text: str, image_url: str) -> List[Dict[str, Any]]:
+def build_messages(question_text: str, image_url: str) -> list[dict[str, Any]]:
     """Mimic the SGLang prompt: one user message containing image + question text."""
     return [
         {
@@ -40,7 +40,7 @@ def build_messages(question_text: str, image_url: str) -> List[Dict[str, Any]]:
 def chat_once(
     api_base: str,
     model: str,
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     max_tokens: int = 2048,
     temperature: float = 0.0,
     top_p: float = 1.0,
@@ -49,7 +49,7 @@ def chat_once(
     seed: int = -1,
     timeout: int = 120,
     api_key: str = "",
-) -> Tuple[str, int]:
+) -> tuple[str, int]:
     """
     Send one /chat/completions request to vLLM OpenAI-compatible server.
     Return (answer_text, completion_tokens).
@@ -58,7 +58,7 @@ def chat_once(
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
@@ -130,7 +130,7 @@ def main(args):
     # Fire requests (parallel similar to num_threads in SGLang run_batch)
     tic = time.perf_counter()
     completion_tokens_sum = 0
-    answers: List[str] = [""] * len(requests_payload)
+    answers: list[str] = [""] * len(requests_payload)
 
     def submit_one(messages):
         return chat_once(
@@ -167,7 +167,8 @@ def main(args):
     # Compute throughput (tokens/s) — matches SGL's "Output throughput"
     output_throughput = completion_tokens_sum / latency if latency > 0 else 0.0
 
-    # Accept length: SGLang reports spec_verify_ct; not available via OpenAI API -> set to 1.0
+    # Accept length: SGLang reports spec_verify_ct
+    # not available via OpenAI API -> set to 1.0
     # accept_length = 1.0
 
     # Print results (same fields as SGL script)
@@ -194,7 +195,8 @@ if __name__ == "__main__":
         default="http://127.0.0.1:8080/v1",
         help="vLLM OpenAI-compatible base URL",
     )
-    # If you didn't set --served-model-name when launching vLLM, set this to your served name or path
+    # If you didn't set --served-model-name when launching vLLM,
+    # set this to your served name or path
     parser.add_argument(
         "--model",
         type=str,
@@ -223,7 +225,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--deterministic",
         action="store_true",
-        help="Force deterministic-like settings: temp=0, top_p=1, top_k=-1, rep_penalty=1, seed=42 if unset",
+        help="Force deterministic-like settings: temp=0, top_p=1, " \
+        "top_k=-1, rep_penalty=1, seed=42 if unset",
     )
 
     args = parser.parse_args()
