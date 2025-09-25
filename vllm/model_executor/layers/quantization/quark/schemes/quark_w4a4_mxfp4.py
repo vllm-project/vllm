@@ -232,9 +232,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
 
         if self.emulate:
             dq_w = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
-
             x = quant_dequant_mxfp4(x)
-
             return F.linear(x, dq_w, bias)
         else:
             return torch.ops.vllm.gemm_with_dynamic_quant(
