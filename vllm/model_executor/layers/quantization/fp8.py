@@ -459,7 +459,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.warning_once("Model is not block quantized. Not using "
                                     "DeepGemm kernels")
             elif (is_deep_gemm_supported()):
-                logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
+                logger.info_once(
+                    "DeepGemm kernels available for Fp8MoEMethod.")
                 self.allow_deep_gemm = True
             else:
                 logger.warning_once(
@@ -473,7 +474,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif (current_platform.is_cuda()
               and current_platform.is_device_capability(100)):
             logger.info_once(
-                "Using CutlassBlockScaledGroupedGemm kernels for Fp8MoEMethod."
+                "Cutlass BlockScaled GroupedGemm kernels available for Fp8MoEMethod."
             )
             self.allow_cutlass_block_scaled_grouped_gemm = True
         else:
