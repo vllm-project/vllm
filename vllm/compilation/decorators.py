@@ -11,12 +11,13 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 from packaging import version
+from torch._dynamo.aot_compile import AOTCompiledFunction
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationLevel, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import resolve_obj_by_qualname, supports_dynamo
@@ -186,6 +187,30 @@ def _model_hash_key(fn) -> str:
     return sha256_hash.hexdigest()
 
 
+def _get_hash_key(vllm_config: VllmConfig, fn) -> str:
+    from .backends import compilation_config_hash_factors
+
+    factors: list[str] = compilation_config_hash_factors(vllm_config)
+    factors.append(_model_hash_key(fn))
+    return hashlib.sha256(str(factors).encode()).hexdigest()
+
+
+def _aot_compiled_all_shapes(fn: AOTCompiledFunction) -> bool:
+    if "optimized_call" not in fn._artifacts.__dict__["compiled_fn"].__dict__:
+        return True
+
+    for name, submod in (fn._artifacts.__dict__["compiled_fn"].
+                         __dict__["optimized_call"].__dict__.items()):
+        if hasattr(submod, "to_be_compiled_sizes"):
+            if len(submod.to_be_compiled_sizes) > 0:
+                logger.debug(
+                    f"Compiled submod {name} has uncompiled shapes {submod.to_be_compiled_sizes}"
+                )
+                return False
+
+    return True
+
+
 def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, Union[int, list[int]]],
@@ -221,9 +246,14 @@ def _support_torch_compile(
         if self.do_not_compile:
             return
 
+        self.precompile_compiled_all_shapes = False
+        self.precompile_loaded_from_cache = False
+
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_level=vllm_config.compilation_config.level)
+
+        self.hash_key = _get_hash_key(vllm_config, self.forward)
 
     cls.__init__ = __init__
 
@@ -235,22 +265,24 @@ def _support_torch_compile(
             return self.forward(*args, **kwargs)
 
         if getattr(self, "aot_compiled_fn", None) is not None:
-            return self.aot_compiled_fn(self, *args, **kwargs)
+            result = self.aot_compiled_fn(self, *args, **kwargs)
+            if (not self.precompile_compiled_all_shapes
+                    and not self.precompile_loaded_from_cache
+                    and _aot_compiled_all_shapes(self.aot_compiled_fn)):
+                # defer return to later -- we can just re-use the
+                # path which will serialize the compiled fn
+                self.precompile_compiled_all_shapes = True
+            else:
+                return result
 
         cache_dir = None
         aot_compilation_path = None
         if envs.VLLM_USE_AOT_COMPILE:
-            from .backends import compilation_config_hash_factors
-            factors: list[str] = compilation_config_hash_factors(
-                self.vllm_config)
-
-            factors.append(_model_hash_key(self.forward))
-            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
 
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
                 "aot_compilation",
-                hash_key,
+                self.hash_key,
             )
 
             rank = self.vllm_config.parallel_config.rank
@@ -258,9 +290,12 @@ def _support_torch_compile(
             cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
             aot_compilation_path = os.path.join(cache_dir, "model")
             try:
-                with open(aot_compilation_path, "rb") as f:
+                with open(aot_compilation_path,
+                          "rb") as f, set_current_vllm_config(
+                              self.vllm_config):
                     loaded_fn = torch.compiler.load_compiled_function(f)
                 self.aot_compiled_fn = loaded_fn
+                self.precompile_loaded_from_cache = True
                 return self.aot_compiled_fn(self, *args, **kwargs)
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
@@ -305,7 +340,9 @@ def _support_torch_compile(
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,
         # with the overhead of guard evaluation and recompilation.
-        if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
+        if (len(self.compiled_codes) < 1 or not self.use_custom_dispatcher
+                or (envs.VLLM_USE_AOT_COMPILE
+                    and self.precompile_compiled_all_shapes)):
             # it seems Dynamo reuse the compilation across instances,
             # while we need to make sure the compiled code is not reused.
             # we need to control all the compilation of the model.
@@ -354,13 +391,19 @@ def _support_torch_compile(
                     ), maybe_use_cudagraph_partition_wrapper(
                         self.vllm_config), _torch27_patch_tensor_subclasses():
                 if envs.VLLM_USE_AOT_COMPILE:
-                    self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
+                    if getattr(self, "aot_compiled_fn", None) is None:
+                        self.aot_compiled_fn = self.aot_compile(
+                            *args, **kwargs)
                     output = self.aot_compiled_fn(self, *args, **kwargs)
-                    assert aot_compilation_path is not None
-                    assert cache_dir is not None
-                    os.makedirs(cache_dir, exist_ok=True)
-                    self.aot_compiled_fn.save_compiled_function(
-                        aot_compilation_path)
+                    if _aot_compiled_all_shapes(self.aot_compiled_fn):
+                        self.precompile_compiled_all_shapes = True
+                        assert aot_compilation_path is not None
+                        assert cache_dir is not None
+                        os.makedirs(cache_dir, exist_ok=True)
+                        logger.debug("saving aot compiled fn at %s",
+                                     aot_compilation_path)
+                        self.aot_compiled_fn.save_compiled_function(
+                            aot_compilation_path)
                 else:
                     output = self.compiled_callable(*args, **kwargs)
             return output

@@ -10,6 +10,7 @@ from typing import Callable, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import (CompilationLevel, CUDAGraphMode,
                          get_current_vllm_config)
 from vllm.logger import init_logger
