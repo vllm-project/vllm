@@ -145,7 +145,6 @@ class P2pNcclEngine:
         self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
         # Only updated by the main thread
         self.recv_request_id_to_done_tensor_ids: dict[str, set[str]] = {}
-        self.send_request_id_to_done_tensor_ids: dict[str, set[str]] = {}
 
         self.socks: dict[str, Any] = {}  # remote_address: client socket
         self.comms: dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
@@ -427,7 +426,7 @@ class P2pNcclEngine:
         if request_id not in self.recv_request_id_to_tensor_ids:
             self.recv_request_id_to_tensor_ids[request_id] = set()
         self.recv_request_id_to_tensor_ids[request_id].add(tensor_id)
-    
+
     def have_injected_tensor_id(self, tensor_id: str):
         request_id = tensor_id.split('#')[0]
         if request_id not in self.recv_request_id_to_done_tensor_ids:
@@ -521,9 +520,11 @@ class P2pNcclEngine:
             all_layers_send_done = True
             for layer_name in no_compile_layers:
                 tensor_id = request_id + "#" + layer_name
-                if tensor_id not in self.recv_request_id_to_done_tensor_ids[request_id]:
+                if tensor_id not in self.recv_request_id_to_done_tensor_ids[
+                        request_id]:
                     all_layers_recv_done = False
-                if tensor_id not in self.send_request_id_to_done_tensor_ids[request_id]:
+                if tensor_id not in self.send_request_id_to_tensor_ids[
+                        request_id]:
                     all_layers_send_done = False
                 if not all_layers_recv_done and not all_layers_send_done:
                     break
@@ -533,7 +534,6 @@ class P2pNcclEngine:
                 finished_recving.add(request_id)
             if all_layers_send_done:
                 self.send_request_id_to_tensor_ids.pop(request_id, None)
-                self.send_request_id_to_done_tensor_ids.pop(request_id, None)
                 finished_sending.add(request_id)
 
         return finished_sending or None, finished_recving or None
