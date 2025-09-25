@@ -9,7 +9,6 @@ import torch.cuda.profiler as cuda_profiler
 
 from vllm.logger import init_logger
 
-
 logger = init_logger(__name__)
 
 
@@ -17,9 +16,9 @@ logger = init_logger(__name__)
 class NsysIterationProfiler:
     """Controls Nsight Systems capture via CUDA profiler API.
 
-    This helper encapsulates iteration-based start/stop control so callers
-    can simply call `maybe_profile_now()` in their main loop and `shutdown()`
-    when exiting. All validation and logging are handled internally.
+    This helper encapsulates iteration-based start/stop control so callers can
+    simply call `maybe_profile_now()` in their main loop and `shutdown()` when
+    exiting. All validation and logging are handled internally.
 
     Args:
         start_iter: Iteration index to start capture (inclusive). -1 disables.
@@ -29,8 +28,9 @@ class NsysIterationProfiler:
         - If `start_iter` and `stop_iter` are valid, capture starts exactly
           when `current_iter == start_iter` and stops when
           `current_iter == stop_iter`.
-        - If invalid values are provided (e.g., negative start or stop <= start),
-          the profiler remains disabled and logs a single warning.
+        - If invalid values are provided (e.g., negative start or
+          stop <= start), the profiler remains disabled and logs a single
+          warning.
     """
 
     start_iter: int = -1
@@ -40,34 +40,42 @@ class NsysIterationProfiler:
     _current_iter: int = 0
 
     @staticmethod
-    def from_env_string(env_value: str) -> "NsysIterationProfiler":
+    def from_env_string(env_value: str) -> NsysIterationProfiler:
         """Construct from env value formatted as "<start>-<stop>".
 
         Any invalid value disables the profiler and logs a warning once.
         """
         if env_value == "None":
-            return NsysIterationProfiler()
+            profiler = NsysIterationProfiler()
+            profiler.maybe_profile_now = profiler._noop
+            return profiler
 
         try:
             env_value = env_value.strip()
             if "-" not in env_value:
-                return NsysIterationProfiler()
+                profiler = NsysIterationProfiler()
+                profiler.maybe_profile_now = profiler._noop
+                return profiler
             parts = env_value.split("-")
             if len(parts) != 2:
                 raise ValueError("Expected format 'start-stop'.")
             start_iter, stop_iter = map(int, parts)
             if start_iter < 0 or stop_iter <= start_iter:
                 raise ValueError(
-                    "Start must be non-negative and stop must be greater than start.")
+                    "Start must be non-negative and stop must be greater "
+                    "than start.")
             logger.info_once(
-                f"NSYS profiling will start at iteration {start_iter} and stop at iteration {stop_iter}")
+                "NSYS profiling will start at iteration %d and stop at "
+                "iteration %d", start_iter, stop_iter)
             return NsysIterationProfiler(start_iter=start_iter,
-                                        stop_iter=stop_iter)
+                                         stop_iter=stop_iter)
         except Exception as exc:  # noqa: BLE001 - preserve original reason
             logger.warning_once(
-                "Invalid VLLM_NSYS_PROFILE_START_STOP value: '%s'. Reason: %s. Disabling profiling.",
-                env_value, exc)
-            return NsysIterationProfiler()
+                "Invalid VLLM_NSYS_PROFILE_START_STOP value: '%s'. "
+                "Reason: %s. Disabling profiling.", env_value, exc)
+            profiler = NsysIterationProfiler()
+            profiler.maybe_profile_now = profiler._noop
+            return profiler
 
     def maybe_profile_now(self) -> None:
         """Start/stop CUDA profiler based on internal iteration counter."""
@@ -92,6 +100,10 @@ class NsysIterationProfiler:
         # Increment at the end of the iteration check
         self._current_iter += 1
 
+    # ---- internals ----
+    def _noop(self) -> None:
+        return None
+
     def shutdown(self) -> None:
         """Ensure profiler is stopped when shutting down."""
         if self._profiler_running:
@@ -99,9 +111,7 @@ class NsysIterationProfiler:
             try:
                 cuda_profiler.stop()
             except Exception as exc:  # noqa: BLE001
-                logger.warning_once("Failed to stop NSYS profiler during shutdown: %s",
-                                   exc)
+                logger.warning_once(
+                    "Failed to stop NSYS profiler during shutdown: %s", exc)
             finally:
                 self._profiler_running = False
-
-
