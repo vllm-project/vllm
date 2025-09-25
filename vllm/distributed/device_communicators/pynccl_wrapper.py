@@ -30,6 +30,7 @@ from typing import Any, Optional
 import torch
 from torch.distributed import ReduceOp
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import find_nccl_library
@@ -282,14 +283,20 @@ class NCCLLibrary:
                     f.argtypes = func.argtypes
                     _funcs[func.name] = f
                 except AttributeError:
-                    if current_platform.is_rocm() and func.name in [
+                    if func.name in [
                             "ncclCommWindowRegister",
                             "ncclCommWindowDeregister"
                     ]:
-                        # These symbols require NCCL >= 2.27.03, and having
-                        # an exception here on ROCm platform is not allowed
-                        # during graph capturing
-                        continue
+                        if envs.VLLM_USE_NCCL_SYMM_MEM:
+                            logger.warning_once(
+                                "The symbol %s is not found in the NCCL "
+                                "library %s. To enable VLLM_USE_NCCL_SYMM_MEM "
+                                " please update your NCCL version to >= "
+                                "2.27.03.", func.name, so_file)
+                        if current_platform.is_rocm():
+                            # Having an exception here on ROCm platform is
+                            # not allowed during graph capturing
+                            continue
                     raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
