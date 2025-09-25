@@ -247,8 +247,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const __nv_bfloat16* __restrict__ _input, fp8_type* __restrict__ _y_q,
     float* __restrict__ _y_s, const int32_t* __restrict__ tokens_per_expert,
     // sizes
-    Idx_t E,
-
+    Idx_t E, Idx_t T, Idx_t H,
     // strides (in elements)
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
     Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
@@ -260,8 +259,6 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   static constexpr int32_t COMPUTE_STAGE_SIZE = 2 * GROUP_SIZE / 4;
   static constexpr int32_t COMPUTE_STAGE_MOD = COMPUTE_STAGE_SIZE * NUM_STAGES;
-  static constexpr Idx_t H = 7168;
-  static constexpr Idx_t T = 1024;
 
   extern __shared__ __int128_t smem_128[];
 
@@ -349,7 +346,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     return;
   }
 
-  static constexpr int t_load_bound = H / (GROUP_SIZE * NUM_WARPS);
+  int t_load_bound = H / (GROUP_SIZE * NUM_WARPS);
 
   Idx_t base_i =
       (expert_id * (T * (H / 4)) + (token_id - expert_offset) * (H / 4));
@@ -420,15 +417,13 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       reinterpret_cast<__nv_fp8x4_e4m3*>(_y_q) + lane_id;
   auto y_scale_base_ptr = _y_s + warp_position_scales * stride_ys_g;
 
-  __nv_bfloat16 scale_reg{};
-
   while (token_id < tokens_upper) {
     const Idx_t base_ys = expert_id * stride_ys_e;
     auto y_s_ptr = y_scale_base_ptr + base_ys + token_offset * stride_ys_t;
     __nv_fp8x4_e4m3* y_q_ptr =
         y_q_base_ptr +
         ((expert_id * (T * H) + token_offset * H) + warp_position_yq) / 4;
-    static constexpr int COMPUTE_LIMIT = H / (GROUP_SIZE * NUM_WARPS);
+    const int COMPUTE_LIMIT = H / (GROUP_SIZE * NUM_WARPS);
 
     for (int i = 0; i < COMPUTE_LIMIT; i++) {
       cp_async_wait<NUM_STAGES - 2>();
@@ -484,13 +479,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       *y_q_ptr = __nv_fp8x4_e4m3(results_bf162[0], results_bf162[1]);
       y_q_ptr += WARP_SIZE;
 
-      if (lane_id == i) {
-        scale_reg = y_s;
+      if (!lane_id) {
+        *y_s_ptr = y_s;
+        y_s_ptr += stride_ys_g;
       }
-    }
-
-    if (lane_id < COMPUTE_LIMIT) {
-      y_s_ptr[lane_id * stride_ys_g] = scale_reg;
     }
   };
 }
@@ -910,7 +902,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
       <<<grid, block, max_shared_mem_bytes, stream>>>(                         \
           reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),                  \
           (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                       \
-          reinterpret_cast<int32_t*>(tokens_per_expert.data_ptr()), E,         \
+          reinterpret_cast<int32_t*>(tokens_per_expert.data_ptr()), E, T, H,   \
           stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,        \
           stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,                  \
           stride_counts_e);
