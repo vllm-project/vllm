@@ -1971,19 +1971,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
 
-            # Log MM→Text merge details for memory analysis
-            if envs.VLLM_TRACE_MEMORY_PHASES:
-                num_mm_embeddings = len(mm_embeds) if mm_embeds else 0
-                num_text_tokens = num_scheduled_tokens
-                logger.info(f"[MM-MERGE] Merging {num_mm_embeddings} MM embeddings "
-                           f"with {num_text_tokens} text tokens")
-
-            with phase_memory_profiling("MM_TEXT_MERGE", logger,
-                                       enabled=envs.VLLM_TRACE_MEMORY_PHASES):
-                inputs_embeds_scheduled = self.model.get_input_embeddings(
-                    input_ids=self.input_ids.gpu[:num_scheduled_tokens],
-                    multimodal_embeddings=mm_embeds or None,
-                )
+            inputs_embeds_scheduled = self.model.get_input_embeddings(
+                input_ids=self.input_ids.gpu[:num_scheduled_tokens],
+                multimodal_embeddings=mm_embeds or None,
+            )
 
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(
@@ -2301,19 +2292,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
               self.maybe_get_kv_connector_output(scheduler_output) as
               kv_connector_output):
 
-            # Log backbone forward pass details for memory analysis
-            if envs.VLLM_TRACE_MEMORY_PHASES:
-                if input_ids is not None:
-                    logger.info(f"[BACKBONE] Processing {input_ids.numel()} input tokens")
-                elif inputs_embeds is not None:
-                    logger.info(f"[BACKBONE] Processing embeddings with shape {inputs_embeds.shape}")
-
-            with phase_memory_profiling("BACKBONE_FORWARD", logger,
-                                       enabled=envs.VLLM_TRACE_MEMORY_PHASES):
-                model_output = self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
+            model_output = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
@@ -3151,22 +3133,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     batch_descriptor=batch_descriptor,
                     ubatch_slices=ubatch_slices):
 
-                # Log backbone forward pass details for memory analysis
-                if envs.VLLM_TRACE_MEMORY_PHASES:
-                    if input_ids is not None:
-                        logger.info(f"[BACKBONE] Processing {input_ids.numel()} input tokens")
-                    elif inputs_embeds is not None:
-                        logger.info(f"[BACKBONE] Processing embeddings with shape {inputs_embeds.shape}")
-
-                with phase_memory_profiling("BACKBONE_FORWARD", logger,
-                                           enabled=envs.VLLM_TRACE_MEMORY_PHASES):
-                    outputs = self.model(
-                        input_ids=input_ids,
-                        positions=positions,
-                        intermediate_tensors=intermediate_tensors,
-                        inputs_embeds=inputs_embeds,
-                        **model_kwargs,
-                    )
+                outputs = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
@@ -3334,83 +3307,71 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
     def profile_run(self) -> None:
-        # Enable phase memory tracing for profiling
-        original_trace_setting = envs.VLLM_TRACE_MEMORY_PHASES
-        envs.VLLM_TRACE_MEMORY_PHASES = True
+        logger.info("Beginning memory profiling")
 
-        try:
-            logger.info("[PROFILING-START] Beginning memory profiling with phase tracking")
-
-            # Profile with multimodal encoder & encoder cache.
-            if self.supports_mm_inputs:
-                if self.model_config.multimodal_config.skip_mm_profiling:
-                    logger.info(
-                        "Skipping memory profiling for multimodal encoder and "
-                        "encoder cache.")
-                else:
-                    mm_budget = self.mm_budget
-                    assert mm_budget is not None
-
-                    if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
-                        # NOTE: Currently model is profiled with a single non-text
-                        # modality with the max possible input tokens even when
-                        # it supports multiple.
-                        dummy_modality = mm_budget.get_modality_with_max_tokens()
-                        max_mm_items_per_batch = mm_budget \
-                            .max_items_per_batch_by_modality[dummy_modality]
-
-                        logger.info(
-                            "Encoder cache will be initialized with a budget of "
-                            "%s tokens, and profiled with %s %s items of the "
-                            "maximum feature size.",
-                            encoder_budget,
-                            max_mm_items_per_batch,
-                            dummy_modality,
-                        )
-
-                        # Create dummy batch of multimodal inputs.
-                        batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                            dummy_modality,
-                            max_mm_items_per_batch,
-                        )
-
-                        # Run multimodal encoder.
-                        if envs.VLLM_TRACE_MEMORY_PHASES:
-                            logger.info(f"[MM-INPUT] Processing {max_mm_items_per_batch} multimodal items")
-                        with phase_memory_profiling("MM_MULTIMODAL_PROCESSING", logger,
-                                                   enabled=envs.VLLM_TRACE_MEMORY_PHASES):
-                            dummy_encoder_outputs = \
-                                self.model.get_multimodal_embeddings(
-                                **batched_dummy_mm_inputs)
-
-                        sanity_check_mm_encoder_outputs(
-                            dummy_encoder_outputs,
-                            expected_num_items=max_mm_items_per_batch,
-                        )
-
-                        # Cache the dummy encoder outputs.
-                        self.encoder_cache["tmp"] = dict(
-                            enumerate(dummy_encoder_outputs))
-
-            # Add `is_profile` here to pre-allocate communication buffers
-            hidden_states, last_hidden_states \
-                = self._dummy_run(self.max_num_tokens, is_profile=True)
-            if get_pp_group().is_last_rank:
-                if self.is_pooling_model:
-                    output = self._dummy_pooler_run(hidden_states)
-                else:
-                    output = self._dummy_sampler_run(last_hidden_states)
+        # Profile with multimodal encoder & encoder cache.
+        if self.supports_mm_inputs:
+            if self.model_config.multimodal_config.skip_mm_profiling:
+                logger.info(
+                    "Skipping memory profiling for multimodal encoder and "
+                    "encoder cache.")
             else:
-                output = None
-            self._sync_device()
-            del hidden_states, output
-            self.encoder_cache.clear()
-            gc.collect()
+                mm_budget = self.mm_budget
+                assert mm_budget is not None
 
-            logger.info("[PROFILING-END] Memory profiling completed")
-        finally:
-            # Restore original trace setting
-            envs.VLLM_TRACE_MEMORY_PHASES = original_trace_setting
+                if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
+                    # NOTE: Currently model is profiled with a single non-text
+                    # modality with the max possible input tokens even when
+                    # it supports multiple.
+                    dummy_modality = mm_budget.get_modality_with_max_tokens()
+                    max_mm_items_per_batch = mm_budget \
+                        .max_items_per_batch_by_modality[dummy_modality]
+
+                    logger.info(
+                        "Encoder cache will be initialized with a budget of "
+                        "%s tokens, and profiled with %s %s items of the "
+                        "maximum feature size.",
+                        encoder_budget,
+                        max_mm_items_per_batch,
+                        dummy_modality,
+                    )
+
+                    # Create dummy batch of multimodal inputs.
+                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                        dummy_modality,
+                        max_mm_items_per_batch,
+                    )
+
+                    # Run multimodal encoder.
+                    dummy_encoder_outputs = \
+                        self.model.get_multimodal_embeddings(
+                        **batched_dummy_mm_inputs)
+
+                    sanity_check_mm_encoder_outputs(
+                        dummy_encoder_outputs,
+                        expected_num_items=max_mm_items_per_batch,
+                    )
+
+                    # Cache the dummy encoder outputs.
+                    self.encoder_cache["tmp"] = dict(
+                        enumerate(dummy_encoder_outputs))
+
+        # Add `is_profile` here to pre-allocate communication buffers
+        hidden_states, last_hidden_states \
+            = self._dummy_run(self.max_num_tokens, is_profile=True)
+        if get_pp_group().is_last_rank:
+            if self.is_pooling_model:
+                output = self._dummy_pooler_run(hidden_states)
+            else:
+                output = self._dummy_sampler_run(last_hidden_states)
+        else:
+            output = None
+        self._sync_device()
+        del hidden_states, output
+        self.encoder_cache.clear()
+        gc.collect()
+
+        logger.info("Memory profiling completed")
 
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:

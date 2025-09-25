@@ -4,12 +4,89 @@
 import hashlib
 from collections.abc import Mapping
 from dataclasses import field
-from typing import Any, Literal, Optional
+from dataclasses import dataclass as standard_dataclass
+from typing import Any, Dict, Literal, Optional, Union
 
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config.utils import config
+
+
+@standard_dataclass
+class BaseModalityOptions:
+    """Base class for modality-specific dummy data options."""
+    count: int = 1
+
+
+@standard_dataclass
+class VideoDummyOptions(BaseModalityOptions):
+    """Options for generating dummy video data during profiling."""
+    count: int = 1
+    num_frames: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+    def __post_init__(self):
+        if self.count < 0:
+            raise ValueError("count must be non-negative")
+        if self.num_frames is not None and self.num_frames <= 0:
+            raise ValueError("num_frames must be positive")
+        if self.width is not None and self.width <= 0:
+            raise ValueError("width must be positive")
+        if self.height is not None and self.height <= 0:
+            raise ValueError("height must be positive")
+
+
+@standard_dataclass
+class ImageDummyOptions(BaseModalityOptions):
+    """Options for generating dummy image data during profiling."""
+    count: int = 1
+    width: Optional[int] = None
+    height: Optional[int] = None
+    max_size: Optional[tuple[int, int]] = None
+
+    def __post_init__(self):
+        if self.count < 0:
+            raise ValueError("count must be non-negative")
+        if self.width is not None and self.width <= 0:
+            raise ValueError("width must be positive")
+        if self.height is not None and self.height <= 0:
+            raise ValueError("height must be positive")
+
+
+@standard_dataclass
+class AudioDummyOptions(BaseModalityOptions):
+    """Options for generating dummy audio data during profiling."""
+    count: int = 1
+    duration: Optional[float] = None
+    sample_rate: Optional[int] = None
+    channels: Optional[int] = None
+
+    def __post_init__(self):
+        if self.count < 0:
+            raise ValueError("count must be non-negative")
+        if self.duration is not None and self.duration <= 0:
+            raise ValueError("duration must be positive")
+        if self.sample_rate is not None and self.sample_rate <= 0:
+            raise ValueError("sample_rate must be positive")
+        if self.channels is not None and self.channels <= 0:
+            raise ValueError("channels must be positive")
+
+
+# Union type for all supported option types
+ModalityDummyOptions = Union[
+    BaseModalityOptions,
+    VideoDummyOptions,
+    ImageDummyOptions,
+    AudioDummyOptions
+]
+
+# Main configuration type supporting both legacy and enhanced formats
+LimitPerPromptType = Union[
+    Dict[str, int],  # Legacy: {"video": 1, "image": 5}
+    Dict[str, Union[int, ModalityDummyOptions]]  # Enhanced format
+]
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
@@ -20,12 +97,19 @@ MMCacheType = Literal["shm", "lru"]
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, int] = field(default_factory=dict)
-    """The maximum number of input items allowed per prompt for each modality.
+    limit_per_prompt: LimitPerPromptType = field(default_factory=dict)
+    """The maximum number of input items and options allowed per prompt for each modality.
     Defaults to 1 (V0) or 999 (V1) for each modality.
 
-    For example, to allow up to 16 images and 2 videos per prompt:
-    `{"image": 16, "video": 2}`"""
+    Legacy format (count only):
+        {"image": 16, "video": 2}
+
+    Enhanced format (with options):
+        {"video": {"count": 1, "num_frames": 32}, "image": {"count": 5, "max_size": [512, 512]}}
+
+    Mixed format (combining both):
+        {"image": 16, "video": {"count": 1, "num_frames": 32}}
+    """
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set
@@ -106,12 +190,34 @@ class MultiModalConfig:
     def get_limit_per_prompt(self, modality: str) -> int:
         """
         Get the maximum number of input items allowed per prompt
-        for the given modality.
+        for the given modality (backward compatible).
         """
-        return self.limit_per_prompt.get(
-            modality,
-            999 if envs.VLLM_USE_V1 else 1,
-        )
+        limit_data = self.limit_per_prompt.get(modality)
+
+        if limit_data is None:
+            return 999 if envs.VLLM_USE_V1 else 1
+        elif isinstance(limit_data, int):
+            return limit_data
+        elif isinstance(limit_data, BaseModalityOptions):
+            return limit_data.count
+        else:
+            raise ValueError(f"Invalid limit data type for {modality}: {type(limit_data)}")
+
+    def get_dummy_options(self, modality: str) -> Optional[ModalityDummyOptions]:
+        """
+        Get the enhanced dummy data options for a modality.
+        Returns None if no enhanced options are configured.
+        """
+        limit_data = self.limit_per_prompt.get(modality)
+
+        if isinstance(limit_data, (BaseModalityOptions, VideoDummyOptions,
+                                  ImageDummyOptions, AudioDummyOptions)):
+            return limit_data
+        elif isinstance(limit_data, int):
+            # Convert legacy format to base options
+            return BaseModalityOptions(count=limit_data)
+        else:
+            return None
 
     def merge_mm_processor_kwargs(
         self,

@@ -286,7 +286,18 @@ class MultiModalRegistry:
         """
         processor = self.create_processor(model_config, cache=cache)
         profiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts)
+
+        # Extract configurable options from multimodal config
+        mm_options = None
+        if model_config.multimodal_config:
+            mm_options = {}
+            for modality in ["image", "video", "audio"]:
+                if hasattr(model_config.multimodal_config, 'get_dummy_options'):
+                    options = model_config.multimodal_config.get_dummy_options(modality)
+                    if options is not None:
+                        mm_options[modality] = options
+
+        dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts, mm_options)
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids
@@ -312,7 +323,18 @@ class MultiModalRegistry:
         """
         processor = self.create_processor(model_config, cache=cache)
         profiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts)
+
+        # Extract configurable options from multimodal config
+        mm_options = None
+        if model_config.multimodal_config:
+            mm_options = {}
+            for modality in ["image", "video", "audio"]:
+                if hasattr(model_config.multimodal_config, 'get_dummy_options'):
+                    options = model_config.multimodal_config.get_dummy_options(modality)
+                    if options is not None:
+                        mm_options[modality] = options
+
+        dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts, mm_options)
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -10,6 +11,8 @@ import numpy.typing as npt
 from PIL import Image
 
 import vllm.envs as envs
+from vllm.config.multimodal import (ModalityDummyOptions, VideoDummyOptions,
+                                    ImageDummyOptions, AudioDummyOptions)
 from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -84,18 +87,108 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
     ) -> ProcessorInputs:
         """
         Build the input which, after processing, results in
         the maximum possible number of placeholder tokens.
+
+        Args:
+            seq_len: Sequence length
+            mm_counts: Count of items per modality
+            mm_options: Configurable options per modality (optional)
         """
         dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+
+        # Use configurable options to guide dummy data generation if provided
+        if mm_options:
+            dummy_mm_data = self._get_configurable_dummy_data(seq_len, mm_counts, mm_options)
+        else:
+            dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+
         tokenization_kwargs = {"truncation": False}
 
         return ProcessorInputs(prompt=dummy_text,
                                mm_data=dummy_mm_data,
                                tokenization_kwargs=tokenization_kwargs)
+
+    def _get_configurable_dummy_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, ModalityDummyOptions],
+    ) -> MultiModalDataDict:
+        """
+        Generate dummy data with configurable options using parameter interception.
+        """
+        dummy_data = {}
+
+        # Handle images
+        if "image" in mm_counts and mm_counts["image"] > 0:
+            # Get model defaults
+            try:
+                default_width, default_height = self.info.get_image_size_with_most_features()
+            except (AttributeError, Exception):
+                default_width, default_height = 224, 224  # Fallback
+
+            # Override with configurable options if provided
+            target_width, target_height = default_width, default_height
+            if "image" in mm_options:
+                image_opts = mm_options["image"]
+                if hasattr(image_opts, 'max_size') and image_opts.max_size:
+                    target_width, target_height = image_opts.max_size
+                elif hasattr(image_opts, 'width') and hasattr(image_opts, 'height'):
+                    if image_opts.width: target_width = image_opts.width
+                    if image_opts.height: target_height = image_opts.height
+
+            # Simple bounds checking
+            target_width = min(max(target_width, 1), default_width)
+            target_height = min(max(target_height, 1), default_height)
+
+            dummy_data["image"] = self._get_dummy_images(
+                width=target_width, height=target_height, num_images=mm_counts["image"])
+
+        # Handle videos
+        if "video" in mm_counts and mm_counts["video"] > 0:
+            # Get model defaults
+            try:
+                default_width, default_height = self.info.get_image_size_with_most_features()
+                default_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+            except (AttributeError, Exception):
+                default_width, default_height, default_frames = 224, 224, 16  # Fallback
+
+            # Override with configurable options if provided
+            target_width, target_height, target_frames = default_width, default_height, default_frames
+            if "video" in mm_options:
+                video_opts = mm_options["video"]
+                if hasattr(video_opts, 'num_frames') and video_opts.num_frames:
+                    target_frames = video_opts.num_frames
+                if hasattr(video_opts, 'width') and video_opts.width:
+                    target_width = video_opts.width
+                if hasattr(video_opts, 'height') and video_opts.height:
+                    target_height = video_opts.height
+
+            # Simple bounds checking
+            target_width = min(max(target_width, 1), default_width)
+            target_height = min(max(target_height, 1), default_height)
+            target_frames = min(max(target_frames, 1), default_frames)
+
+            dummy_data["video"] = self._get_dummy_videos(
+                width=target_width, height=target_height,
+                num_frames=target_frames, num_videos=mm_counts["video"])
+
+        # Handle audio (if needed)
+        if "audio" in mm_counts and mm_counts["audio"] > 0:
+            # Use existing audio generation logic - configurable options for audio not yet implemented
+            try:
+                dummy_audio_data = self.get_dummy_mm_data(seq_len, {"audio": mm_counts["audio"]})
+                if "audio" in dummy_audio_data:
+                    dummy_data["audio"] = dummy_audio_data["audio"]
+            except Exception:
+                # Fallback audio generation
+                dummy_data["audio"] = self._get_dummy_audios(length=16000, num_audios=mm_counts["audio"])
+
+        return dummy_data
 
     def _get_dummy_audios(
         self,
@@ -162,13 +255,14 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
     ) -> MultiModalInputs:
         if mm_counts is None:
             mm_counts = self.get_mm_limits()
 
         factory = self.dummy_inputs
         processor_inputs = factory.get_dummy_processor_inputs(
-            seq_len, mm_counts)
+            seq_len, mm_counts, mm_options)
 
         return self.processor.apply(
             prompt=processor_inputs.prompt,
@@ -195,8 +289,9 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
     ) -> DummyEncoderData:
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
         mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
 
         # For encoder-decoder models, use encoder prompt token ids instead of
@@ -228,8 +323,9 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
     ) -> DummyDecoderData:
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
@@ -248,6 +344,7 @@ class MultiModalProfiler(Generic[_I]):
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
         mm_embeddings_only: bool = True,
+        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
     ) -> Mapping[str, int]:
         if mm_counts is None:
             mm_counts = self.get_mm_limits()
@@ -259,7 +356,7 @@ class MultiModalProfiler(Generic[_I]):
         if max_tokens_per_item is not None:
             return max_tokens_per_item
 
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
         return self._get_mm_num_tokens(mm_inputs,
                                        mm_embeddings_only=mm_embeddings_only)
 
@@ -267,6 +364,7 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
     ):
         """
         Returns the maximum length of the multimodal (image placeholders+text)
@@ -274,11 +372,12 @@ class MultiModalProfiler(Generic[_I]):
 
         `<im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>`
         Returns 9, even when the number of image embeddings is 6.
-        
+
         This is important to take into account when profiling and
         initializing the encoder cache size.
         """
 
         return self._get_mm_max_tokens(seq_len,
                                        mm_counts,
-                                       mm_embeddings_only=False)
+                                       mm_embeddings_only=False,
+                                       mm_options=mm_options)
