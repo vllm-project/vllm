@@ -176,11 +176,6 @@ class ModelConfig:
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
-    max_seq_len_to_capture: int = 8192
-    """Maximum sequence len covered by CUDA graphs. When a sequence has context
-    length larger than this, we fall back to eager mode. Additionally for
-    encoder-decoder models, if the sequence length of the encoder input is
-    larger than this, we fall back to the eager mode."""
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -1002,21 +997,8 @@ class ModelConfig:
             current_platform.verify_quantization(self.quantization)
 
     def _verify_cuda_graph(self) -> None:
-        # The `max_seq_len_to_capture` was incorrectly
-        # based on the encoder's input length (448)
-        # but not the decoder's larger input length (1500).
-        # This change ensures the CUDA Graph captures the correct,
-        # larger sequence length, allowing it to work as intended.
-        effective_max_seq_len = self.max_model_len
-        if self.is_encoder_decoder:
-            effective_max_seq_len = max(
-                effective_max_seq_len,
-                getattr(self.hf_config, "max_source_positions", 0))
-        self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
-                                          effective_max_seq_len)
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
         unsupported_rocm = self.is_encoder_decoder
-
         if (unsupported_rocm and not self.enforce_eager
                 and current_platform.is_rocm()):
             logger.warning(
@@ -1127,7 +1109,8 @@ class ModelConfig:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp', 'kimi_k2'):
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp',
+              'kimi_k2', 'longcat_flash'):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
@@ -1253,6 +1236,9 @@ class ModelConfig:
                 or self.hf_config.model_type == "qwen3_next_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
+        elif (self.hf_config.model_type == "longcat_flash_mtp"):
+            total_num_hidden_layers = getattr(self.hf_text_config,
+                                              "num_nextn_predict_layers", 1)
         else:
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_hidden_layers", 0)
