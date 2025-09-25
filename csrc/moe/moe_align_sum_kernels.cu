@@ -14,6 +14,62 @@
 namespace vllm {
 namespace moe {
 
+__global__ void batched_moe_align_block_size_kernel(
+    int32_t const num_batches, int32_t const max_tokens_per_batch,
+    int32_t const block_size, int32_t const* __restrict__ batch_num_tokens,
+    int32_t* __restrict__ sorted_ids, int32_t* __restrict__ block_ids,
+    int32_t* __restrict__ num_tokens_post_pad) {
+  // TODO(varun): This is a naive implementation. Could be optimized.
+
+  size_t const batch_id = threadIdx.x;
+  size_t const stride = blockDim.x * gridDim.x;
+  int32_t const sorted_ids_size =
+      num_batches * max(block_size, max_tokens_per_batch);
+  int32_t const block_ids_size = sorted_ids_size / block_size;
+  int32_t const SENTINEL =
+      num_batches * max_tokens_per_batch;  // To denote invalid entries.
+  // Intialize sorted_ids
+  for (size_t i = threadIdx.x; i < sorted_ids_size; i += stride) {
+    sorted_ids[i] = SENTINEL;
+  }
+  // Intialize expert_ids with -1
+  for (size_t i = threadIdx.x; i < block_ids_size; i += stride) {
+    block_ids[i] = -1;
+  }
+
+  int32_t b_num_tokens = 0;
+  if (batch_id < num_batches) {
+    b_num_tokens = batch_num_tokens[batch_id];
+  }
+  int32_t const ceil_b_num_tokens =
+      CEILDIV(b_num_tokens, block_size) * block_size;
+
+  // Compute prefix sum over token counts per expert
+  using BlockScan = cub::BlockScan<int32_t, 1024>;
+  __shared__ typename BlockScan::TempStorage temp_storage;
+  int cumsum_val;
+  BlockScan(temp_storage).ExclusiveSum(ceil_b_num_tokens, cumsum_val);
+  __syncthreads();
+
+  bool const is_last_batch = batch_id == (num_batches - 1);
+  if (is_last_batch) {
+    *num_tokens_post_pad = cumsum_val + ceil_b_num_tokens;
+  }
+
+  if (batch_id < num_batches) {
+    int32_t const batch_offset = batch_id * max_tokens_per_batch;
+    for (size_t i = 0; i < b_num_tokens; ++i) {
+      sorted_ids[cumsum_val + i] = batch_offset + i;
+    }
+
+    int32_t const block_start = cumsum_val / block_size;
+    int32_t const num_blocks = ceil_b_num_tokens / block_size;
+    for (size_t i = 0; i < num_blocks; ++i) {
+      block_ids[block_start + i] = batch_id;
+    }
+  }
+}
+
 template <typename scalar_t>
 __global__ void moe_align_block_size_kernel(
     const scalar_t* __restrict__ topk_ids,
@@ -278,6 +334,36 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
               cumsum_buffer.data_ptr<int32_t>(), topk_ids.numel(), num_experts);
         }
       });
+}
+
+void batched_moe_align_block_size(int64_t max_tokens_per_batch,
+                                  int64_t block_size,
+                                  torch::Tensor const& batch_num_tokens,
+                                  torch::Tensor sorted_ids,
+                                  torch::Tensor batch_ids,
+                                  torch::Tensor num_tokens_post_pad) {
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  int32_t const B = batch_num_tokens.size(0);
+  int64_t const total_num_tokens = max_tokens_per_batch * B;
+  int64_t const sorted_ids_size =
+      std::max(max_tokens_per_batch, block_size) * B;
+
+  // This is true for almost all cases as,
+  // * block size is usually a power of 2
+  // * max_tokens_per_batch is usually a power of 2
+  TORCH_CHECK(total_num_tokens % block_size == 0,
+              "total_num_tokens should be divisible by block_size");
+  TORCH_CHECK(sorted_ids.size(0) == sorted_ids_size);
+  TORCH_CHECK(batch_ids.size(0) == sorted_ids_size / block_size);
+  TORCH_CHECK(num_tokens_post_pad.size(0) == 1);
+
+  // Note num_threads needs to be 1024 for BlockScan Reduction in the kernel.
+  int32_t const num_threads = 1024;
+
+  vllm::moe::batched_moe_align_block_size_kernel<<<1, num_threads, 0, stream>>>(
+      B, max_tokens_per_batch, block_size, batch_num_tokens.data_ptr<int32_t>(),
+      sorted_ids.data_ptr<int32_t>(), batch_ids.data_ptr<int32_t>(),
+      num_tokens_post_pad.data_ptr<int32_t>());
 }
 
 void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]
