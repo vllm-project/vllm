@@ -30,7 +30,8 @@ from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
-from vllm.model_executor.models.interfaces import supports_transcription
+from vllm.model_executor.models.interfaces import (SupportsMultiModal,
+                                                   supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -834,11 +835,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # in the same batch while still being able to benefit from batching
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
+        model = cast(SupportsMultiModal, self.model)
         encoder_outputs = []
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
                 pin_memory=self.pin_memory,
+                merge_by_field_config=model.merge_by_field_config,
         ):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -848,7 +851,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             torch_xla.sync(wait=False)
-            curr_group_outputs = self.model.get_multimodal_embeddings(
+            curr_group_outputs = model.get_multimodal_embeddings(
                 **mm_kwargs_group)
             torch_xla.sync(wait=False)
 
@@ -1810,6 +1813,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         dummy_mm_items,
                         device=self.device,
                         pin_memory=self.pin_memory,
+                        merge_by_field_config=self.model.merge_by_field_config,
                     ))
 
 
