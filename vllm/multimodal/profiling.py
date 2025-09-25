@@ -126,10 +126,13 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         # Handle images
         if "image" in mm_counts and mm_counts["image"] > 0:
             # Get model defaults
+            vid_dims_known = True
             try:
-                default_width, default_height = self.info.get_image_size_with_most_features()
+                default_width, default_height = \
+                    self.info.get_image_size_with_most_features()
             except (AttributeError, Exception):
-                default_width, default_height = 224, 224  # Fallback
+                default_width, default_height = 224, 224
+                vid_dims_known = False
 
             # Override with configurable options if provided
             target_width, target_height = default_width, default_height
@@ -142,8 +145,11 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                     if image_opts.height: target_height = image_opts.height
 
             # Simple bounds checking
-            target_width = min(max(target_width, 1), default_width)
-            target_height = min(max(target_height, 1), default_height)
+            target_width = max(target_width, 1)
+            target_height = max(target_height, 1)
+            if vid_dims_known:
+                target_width = min(target_width, default_width)
+                target_height = min(target_height, default_height)
 
             dummy_data["image"] = self._get_dummy_images(
                 width=target_width, height=target_height, num_images=mm_counts["image"])
@@ -151,11 +157,20 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         # Handle videos
         if "video" in mm_counts and mm_counts["video"] > 0:
             # Get model defaults
+            vid_dims_known = True
             try:
-                default_width, default_height = self.info.get_image_size_with_most_features()
+                default_width, default_height = \
+                    self.info.get_image_size_with_most_features()
+            except (AttributeError, Exception):
+                default_width, default_height = 224, 224
+                vid_dims_known = False
+                
+            vid_frames_known = True
+            try:
                 default_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
             except (AttributeError, Exception):
-                default_width, default_height, default_frames = 224, 224, 16  # Fallback
+                default_frames = 16
+                vid_frames_known = False
 
             # Override with configurable options if provided
             target_width, target_height, target_frames = default_width, default_height, default_frames
@@ -169,24 +184,53 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                     target_height = video_opts.height
 
             # Simple bounds checking
-            target_width = min(max(target_width, 1), default_width)
-            target_height = min(max(target_height, 1), default_height)
-            target_frames = min(max(target_frames, 1), default_frames)
+            target_width = max(target_width, 1)
+            target_height = max(target_height, 1)
+            if vid_dims_known:
+                target_width = min(target_width, default_width)
+                target_height = min(target_height, default_height)
+            target_frames = max(target_frames, 1)
+            if vid_frames_known:
+                target_frames = min(target_frames, default_frames)
 
             dummy_data["video"] = self._get_dummy_videos(
                 width=target_width, height=target_height,
                 num_frames=target_frames, num_videos=mm_counts["video"])
 
-        # Handle audio (if needed)
+        # Handle audio
         if "audio" in mm_counts and mm_counts["audio"] > 0:
-            # Use existing audio generation logic - configurable options for audio not yet implemented
+            # Get model defaults
             try:
-                dummy_audio_data = self.get_dummy_mm_data(seq_len, {"audio": mm_counts["audio"]})
-                if "audio" in dummy_audio_data:
-                    dummy_data["audio"] = dummy_audio_data["audio"]
-            except Exception:
-                # Fallback audio generation
-                dummy_data["audio"] = self._get_dummy_audios(length=16000, num_audios=mm_counts["audio"])
+                feature_extractor = self.info.get_feature_extractor()
+                default_sample_rate = int(feature_extractor.sampling_rate)
+                # Most audio processors expose chunk_length in seconds
+                default_duration_s = float(getattr(feature_extractor,
+                                                   "chunk_length", 1))
+            except (AttributeError, Exception):
+                default_sample_rate = 16000
+                default_duration_s = 1.0
+
+            # Override with configurable options if provided
+            target_sample_rate = default_sample_rate
+            target_duration_s = default_duration_s
+            target_channels = 1
+            if mm_options and "audio" in mm_options:
+                audio_opts = mm_options["audio"]
+                if hasattr(audio_opts, 'sample_rate') and audio_opts.sample_rate:
+                    target_sample_rate = int(audio_opts.sample_rate)
+                if hasattr(audio_opts, 'duration') and audio_opts.duration:
+                    target_duration_s = float(audio_opts.duration)
+                if hasattr(audio_opts, 'channels') and audio_opts.channels:
+                    target_channels = int(audio_opts.channels)
+
+            # Compute effective profiling length
+            length_per_channel = max(1, int(target_sample_rate * target_duration_s))
+            effective_length = max(1, length_per_channel * max(1, target_channels))
+
+            # Return arrays (consistent with legacy builders)
+            audios = self._get_dummy_audios(length=effective_length,
+                                            num_audios=mm_counts["audio"])
+            dummy_data["audio"] = audios
 
         return dummy_data
 

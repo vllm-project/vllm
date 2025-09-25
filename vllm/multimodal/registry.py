@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
 
+from vllm.inputs import InputProcessingContext
+from vllm.config.multimodal import (AudioDummyOptions, ImageDummyOptions,
+                                    VideoDummyOptions)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
@@ -287,15 +290,21 @@ class MultiModalRegistry:
         processor = self.create_processor(model_config, cache=cache)
         profiler = MultiModalProfiler(processor)
 
-        # Extract configurable options from multimodal config
+        # Extract configurable options from multimodal config.
+        # Only include modalities that use advanced option types so legacy
+        # count-only behavior remains unchanged.
         mm_options = None
         if model_config.multimodal_config:
             mm_options = {}
             for modality in ["image", "video", "audio"]:
                 if hasattr(model_config.multimodal_config, 'get_dummy_options'):
                     options = model_config.multimodal_config.get_dummy_options(modality)
-                    if options is not None:
+                    if isinstance(options,
+                                  (ImageDummyOptions, VideoDummyOptions,
+                                   AudioDummyOptions)):
                         mm_options[modality] = options
+            if not mm_options:
+                mm_options = None
 
         dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts, mm_options)
 
@@ -324,15 +333,21 @@ class MultiModalRegistry:
         processor = self.create_processor(model_config, cache=cache)
         profiler = MultiModalProfiler(processor)
 
-        # Extract configurable options from multimodal config
+        # Extract configurable options from multimodal config.
+        # Only include modalities that use advanced option types so legacy
+        # count-only behavior remains unchanged.
         mm_options = None
         if model_config.multimodal_config:
             mm_options = {}
             for modality in ["image", "video", "audio"]:
                 if hasattr(model_config.multimodal_config, 'get_dummy_options'):
                     options = model_config.multimodal_config.get_dummy_options(modality)
-                    if options is not None:
+                    if isinstance(options,
+                                  (ImageDummyOptions, VideoDummyOptions,
+                                   AudioDummyOptions)):
                         mm_options[modality] = options
+            if not mm_options:
+                mm_options = None
 
         dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts, mm_options)
 
