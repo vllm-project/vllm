@@ -8,7 +8,6 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, next_power_of_2
@@ -96,10 +95,6 @@ class PallasAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> type["PallasMetadata"]:
         return PallasMetadata
-
-    @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
-        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -235,7 +230,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
+            kv_cache: shape =
+                [num_blocks, block_size, num_kv_heads * 2, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -329,7 +325,7 @@ def write_to_kv_cache(
     Args:
         key: shape = [num_tokens, num_kv_heads, head_size]
         value: shape = [num_tokens, num_kv_heads, head_size]
-        kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
+        kv_cache: shape = [num_blocks, block_size, num_kv_heads * 2, head_size]
         num_slices_per_kv_cache_update_block: int
     """
     _, page_size, num_combined_kv_heads, head_size = kv_cache.shape

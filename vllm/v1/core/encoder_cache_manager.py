@@ -86,7 +86,7 @@ class EncoderCacheManager:
         Returns:
             True if the encoder output for this input is already cached
         """
-        mm_hash = request.mm_hashes[input_id]
+        mm_hash = request.mm_features[input_id].identifier
         # Not cached at all
         if mm_hash not in self.cached:
             return False
@@ -167,7 +167,7 @@ class EncoderCacheManager:
             This method assumes can_allocate() returned True for the same input.
         """
 
-        mm_hash = request.mm_hashes[input_id]
+        mm_hash = request.mm_features[input_id].identifier
         request_id = request.request_id
         if mm_hash not in self.cached:
             self.cached[mm_hash] = set()
@@ -193,8 +193,8 @@ class EncoderCacheManager:
         """
         return {
             input_id
-            for input_id in range(len(request.mm_hashes))
-            if request.mm_hashes[input_id] in self.cached
+            for input_id in range(len(request.mm_features))
+            if request.mm_features[input_id].identifier in self.cached
         }
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
@@ -208,7 +208,7 @@ class EncoderCacheManager:
         `can_allocate`).
         """
         req_id = request.request_id
-        mm_hash = request.mm_hashes[input_id]
+        mm_hash = request.mm_features[input_id].identifier
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
@@ -255,9 +255,9 @@ def compute_encoder_budget(
 
     Returns:
         - Compute budget for encoder execution, measured in number of tokens
-          from the input sequence.
+            from the input sequence.
         - Space budget for encoder cache size, measured in number of tokens
-          from the input sequence.
+            from the input sequence.
     """
     if mm_registry.supports_multimodal_inputs(model_config):
         max_tokens_by_modality = mm_registry \
@@ -303,9 +303,9 @@ def compute_mm_encoder_budget(
 
     Returns:
         - Compute budget for encoder execution, measured in number of tokens
-          from the input sequence.
+            from the input sequence.
         - Space budget for encoder cache size, measured in number of tokens
-          from the input sequence.
+            from the input sequence.
     """
 
     if not max_tokens_by_modality:

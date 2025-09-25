@@ -3,7 +3,7 @@
 """A TPU worker class."""
 
 import os
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 import torch
 import torch.distributed
@@ -30,6 +30,8 @@ from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.utils import bind_kv_cache
 
 logger = init_logger(__name__)
+
+_R = TypeVar("_R")
 
 if not USE_TPU_COMMONS:
     logger.info("tpu_commons not found, using vLLM's TPUWorker.")
@@ -250,7 +252,7 @@ class TPUWorker:
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
-        # every worker's output is needed when kv_transfer_group is setup
+        # every worker's output is needed when kv_transfer_group is set up
         return output if self.is_driver_worker or has_kv_transfer_group(
         ) else None
 
@@ -329,6 +331,13 @@ class TPUWorker:
             parallel_config.pipeline_parallel_size)
 
         ensure_kv_transfer_initialized(vllm_config)
+
+    def shutdown(self) -> None:
+        self.model_runner.ensure_kv_transfer_shutdown()
+
+    def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
+        """Apply a function on the model inside this worker."""
+        return fn(self.get_model())
 
 
 if USE_TPU_COMMONS:

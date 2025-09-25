@@ -7,7 +7,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import regex as re
 import torch
@@ -21,7 +21,6 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interns1_vit import InternS1VisionModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -32,6 +31,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -62,51 +62,60 @@ class InternS1MultiModalProjector(nn.Module):
         return hidden_states
 
 
-class InternS1ImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
+class InternS1ImagePixelInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_images * (1 + num_patches), num_channels, height, width)`
+    Dimensions:
+        - bnp: Batch size * number of images * (1 + num_patches)
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
+        - bn: Batch size * number of images
     """
+    type: Literal["pixel_values"] = "pixel_values"
+    pixel_values: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
-class InternS1ImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+class InternS1ImageEmbeddingInputs(TensorSchema):
     """
-    A tensor of shape `(num_images, total_image_feature_size, hidden_size)`
-    or a list of tensors of shape `(total_image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
+    Dimensions:
+        - ni: Number of images
+        - tifs: Total image feature size
+        - hs: Hidden size (must match language model backbone)
     """
+    type: Literal["image_embeds"] = "image_embeds"
+    data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                    TensorShape("ni", "tifs", "hs")]
 
 
 InternS1ImageInputs = Union[InternS1ImagePixelInputs,
                             InternS1ImageEmbeddingInputs]
 
 
-class InternS1VideoPixelInputs(TypedDict):
-    type: Literal["pixel_values_videos"]
-    pixel_values: torch.Tensor
+class InternS1VideoPixelInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_video * num_frames, num_channels, height, width)`
+    Dimensions:
+        - bnv: Batch size * number of videos * number of frames
+        - bn: Batch size * number of images
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
     """
+    type: Literal["pixel_values_videos"] = "pixel_values_videos"
+    pixel_values: Annotated[torch.Tensor, TensorShape("bnv", 3, "h", "w")]
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
-    num_patches: torch.Tensor
-    """Shape: `(batch_size * num_images)`"""
 
-
-class InternS1VideoEmbeddingInputs(TypedDict):
-    type: Literal["video_embeds"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+class InternS1VideoEmbeddingInputs(TensorSchema):
     """
-    A tensor of shape `(num_videos, total_video_feature_size, hidden_size)`
-    or a list of tensors of shape `(total_video_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
+    Dimensions:
+        - nv: Number of videos
+        - tvfs: Total video feature size
+        - hs: Hidden size (must match language model backbone)
     """
+    type: Literal["video_embeds"] = "video_embeds"
+    data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                    TensorShape("nv", "tvfs", "hs")]
 
 
 InternS1VideoInputs = Union[InternS1VideoPixelInputs,
@@ -482,7 +491,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
-        # transformers InternVLProcessor uses <IMG_CONTEXT> as the seperator
+        # transformers InternVLProcessor uses <IMG_CONTEXT> as the separator
         # refer to https://github.com/huggingface/transformers/blob/f90de364c2484c7c325bbe05befdcf487bd75b63/src/transformers/models/internvl/processing_internvl.py#L116
         if modality.startswith("image"):
             return '<IMG_CONTEXT>'
@@ -572,26 +581,6 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         vit_embeds = self.multi_modal_projector(vit_embeds)
         return vit_embeds
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-
-        h, w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape)
-
-            if actual_dims != expected_dims:
-                expected_expr = str(expected_dims)
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f" per patch is {expected_expr}. "
-                    f"You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[InternS1ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -627,10 +616,15 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values = flatten_bn(pixel_values, concat=True)
             image_num_patches = flatten_bn(image_num_patches, concat=True)
 
+            h, w = self.config.vision_config.image_size
             return InternS1ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(pixel_values),
+                pixel_values=pixel_values,
                 num_patches=image_num_patches,
+                resolve_bindings={
+                    "h": h,
+                    "w": w,
+                },
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -671,11 +665,15 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                  concat=True)
             video_num_patches = flatten_bn(video_num_patches, concat=True)
 
+            h, w = self.config.vision_config.image_size
             return InternS1VideoPixelInputs(
                 type="pixel_values_videos",
-                pixel_values=self._validate_pixel_values(
-                    pixel_values_flat_video),
                 num_patches=video_num_patches,
+                pixel_values=pixel_values_flat_video,
+                resolve_bindings={
+                    "h": h,
+                    "w": w,
+                },
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -739,7 +737,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
@@ -813,10 +811,8 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

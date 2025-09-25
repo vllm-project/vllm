@@ -13,16 +13,16 @@ from torch import nn
 from typing_extensions import assert_never
 
 from vllm.attention import Attention
-from vllm.config import (ModelConfig, ModelImpl, VllmConfig,
-                         set_current_vllm_config)
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.models.adapters import (as_embedding_model,
-                                                 as_reward_model,
-                                                 as_seq_cls_model)
-from vllm.model_executor.models.interfaces import SupportsQuant
+from vllm.model_executor.models.adapters import (
+    as_embedding_model, as_reward_model, as_seq_cls_model,
+    try_create_mm_pooling_model_cls)
+from vllm.model_executor.models.interfaces import (SupportsQuant,
+                                                   supports_multimodal)
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -165,25 +165,13 @@ def device_loading_context(module: torch.nn.Module,
         # New parameters or parameters already on target device are untouched
 
 
-def get_model_architecture(
+_MODEL_ARCH_BY_HASH = dict[str, tuple[type[nn.Module], str]]()
+"""Caches the outputs of `_get_model_architecture`."""
+
+
+def _get_model_architecture(
         model_config: ModelConfig) -> tuple[type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
-
-    # Special handling for quantized Mixtral.
-    # FIXME(woosuk): This is a temporary hack.
-    mixtral_supported = [
-        "fp8",
-        "compressed-tensors",
-        "gptq_marlin",
-        "awq_marlin",
-        "quark",
-        "bitsandbytes",
-    ]
-
-    if (model_config.quantization is not None
-            and model_config.quantization not in mixtral_supported
-            and "MixtralForCausalLM" in architectures):
-        architectures = ["QuantMixtralForCausalLM"]
 
     model_cls, arch = model_config.registry.resolve_model_cls(
         architectures,
@@ -191,14 +179,23 @@ def get_model_architecture(
     )
 
     if arch == model_config._get_transformers_backend_cls():
-        assert model_config.model_impl != ModelImpl.VLLM
-        if model_config.model_impl == ModelImpl.AUTO:
+        assert model_config.model_impl != "vllm"
+        if model_config.model_impl == "auto":
             logger.warning_once(
                 "%s has no vLLM implementation, falling back to Transformers "
                 "implementation. Some features may not be supported and "
                 "performance may not be optimal.", arch)
 
     convert_type = model_config.convert_type
+    if convert_type != "none" and supports_multimodal(model_cls):
+        logger.debug_once("Detected conversion of Multi Modal model.")
+        converted = try_create_mm_pooling_model_cls(model_cls)
+        if converted is not None:
+            logger.debug_once("Creating wrapper class to forward pooler.")
+            return converted, arch
+        else:
+            logger.debug_once("Attempting direct conversion.")
+
     if convert_type == "none":
         pass
     elif convert_type == "embed":
@@ -214,6 +211,17 @@ def get_model_architecture(
         assert_never(convert_type)
 
     return model_cls, arch
+
+
+def get_model_architecture(
+        model_config: ModelConfig) -> tuple[type[nn.Module], str]:
+    key = model_config.compute_hash()
+    if key in _MODEL_ARCH_BY_HASH:
+        return _MODEL_ARCH_BY_HASH[key]
+
+    model_arch = _get_model_architecture(model_config)
+    _MODEL_ARCH_BY_HASH[key] = model_arch
+    return model_arch
 
 
 def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:

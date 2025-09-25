@@ -8,7 +8,7 @@ numba == 0.61.2; python_version > '3.9'
 boto3
 botocore
 datasets
-ray>=2.10.0,<2.45.0
+ray[cgraph]>=2.48.0 # Ray Compiled Graph, required for pipeline parallelism in V1.
 peft
 pytest-asyncio
 tensorizer==2.10.1
@@ -18,3 +18,4 @@ setuptools-scm>=8
 runai-model-streamer==0.11.0
 runai-model-streamer-s3==0.11.0
 conch-triton-kernels==1.2.1
+timm>=1.0.17

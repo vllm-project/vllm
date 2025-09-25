@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from itertools import islice
 from typing import Any, Optional
 
 import torch
 import torch.nn as nn
 from transformers import Lfm2Config
 
-from vllm import envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -26,7 +26,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
@@ -297,7 +296,6 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         self.conv(
             hidden_states,
             output,
-            conv_metadata=None,
         )
         hidden_states, residual = self.ffn_norm(output, residual)
         hidden_states = self.feed_forward(hidden_states)
@@ -374,7 +372,7 @@ class Lfm2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
@@ -459,13 +457,11 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-        use_v1: bool = True,
     ) -> tuple[tuple[int, int]]:
         """ Calculate shapes for LFM2's convolutional cache.
 
         Args:
             vllm_config: vLLM config
-            use_v1: Get shapes for V1 (or V0)
 
         Returns:
             Tuple containing:
@@ -478,7 +474,6 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             tp_world_size=parallel_config.tensor_parallel_size,
             intermediate_size=hf_config.conv_dim,
             conv_kernel=hf_config.conv_L_cache,
-            use_v1=use_v1,
         )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -489,8 +484,6 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         scheduler_config = vllm_config.scheduler_config
         assert (not cache_config.enable_prefix_caching
                 ), "Lfm2 currently does not support prefix caching"
-        assert envs.VLLM_USE_V1, (
-            "Lfm2ForCausalLM doesn't support vLLM v0. Please enable v1")
 
         super().__init__()
         self.config = config
@@ -541,10 +534,8 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                                    inputs_embeds)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

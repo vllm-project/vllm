@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the marlin kernel.
 
-Run `pytest tests/kernels/marlin/test_marlin_gemm.py`.
+Run `pytest tests/kernels/quantization/test_marlin_gemm.py`.
 """
 import pytest
 import torch

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 def _histogram(input: torch.Tensor, min: int, max: int) -> torch.Tensor:
     """
-  Compute the histogram of a int32 tensor. The bin edges are defined by the
+  Compute the histogram of an int32 tensor. The bin edges are defined by the
   min and max values, with step = 1.
   """
     assert input.dtype == torch.int32, "input must be of torch.int32 dtype."

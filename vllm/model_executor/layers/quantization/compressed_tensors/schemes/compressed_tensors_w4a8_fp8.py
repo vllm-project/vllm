@@ -79,7 +79,8 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
             act_type=torch.float8_e4m3fn,  # always use fp8(e4m3)
             group_size=self.group_size,
             zero_points=not self.symmetric,
-            has_g_idx=self.has_g_idx
+            has_g_idx=self.has_g_idx,
+            out_type=params_dtype
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
@@ -122,7 +123,7 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
             torch.empty(
                 output_size_per_partition,
                 scales_and_zp_size,
-                dtype=params_dtype,
+                dtype=torch.float8_e4m3fn,
             )
         }
 
@@ -140,9 +141,17 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
                                                           dtype=torch.int64),
                                          weight_loader=weight_loader)
 
+        # per-channel scales
+        weight_chan_scale = ChannelQuantScaleParameter(
+            data=torch.empty((output_size_per_partition, 1),
+                             dtype=torch.float32),
+            output_dim=0,
+            weight_loader=weight_loader)
+
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
         layer.register_parameter("weight_shape", weight_shape)
+        layer.register_parameter("weight_chan_scale", weight_chan_scale)
 
         self.kernel = kernel_type(mp_linear_kernel_config,
                                   w_q_param_name="weight_packed",
