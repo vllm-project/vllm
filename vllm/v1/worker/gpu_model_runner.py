@@ -1969,7 +1969,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-
             inputs_embeds_scheduled = self.model.get_input_embeddings(
                 input_ids=self.input_ids.gpu[:num_scheduled_tokens],
                 multimodal_embeddings=mm_embeds or None,
@@ -2290,7 +2289,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), record_function_or_nullcontext("Forward"),
               self.maybe_get_kv_connector_output(scheduler_output) as
               kv_connector_output):
-
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -3131,7 +3129,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     ubatch_slices=ubatch_slices):
-
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -3306,7 +3303,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
     def profile_run(self) -> None:
-
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
             if self.model_config.multimodal_config.skip_mm_profiling:
@@ -3368,7 +3364,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         del hidden_states, output
         self.encoder_cache.clear()
         gc.collect()
-
 
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:

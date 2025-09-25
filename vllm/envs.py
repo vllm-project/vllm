@@ -43,7 +43,6 @@ if TYPE_CHECKING:
     VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
     VLLM_LOG_STATS_INTERVAL: float = 10.
     VLLM_TRACE_FUNCTION: int = 0
-    VLLM_TRACE_MEMORY_PHASES: bool = False
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
@@ -597,13 +596,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Useful for debugging
     "VLLM_TRACE_FUNCTION":
     lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
-
-    # Trace memory usage during different execution phases
-    # If set to 1 or true, vllm will log detailed memory usage
-    # during MM processing, merging, and backbone forward pass
-    # Useful for analyzing memory bottlenecks
-    "VLLM_TRACE_MEMORY_PHASES":
-    lambda: os.environ.get("VLLM_TRACE_MEMORY_PHASES", "0").lower() in ("1", "true"),
 
     # Backend for attention computation
     # Example options:
