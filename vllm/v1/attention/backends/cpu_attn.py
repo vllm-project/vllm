@@ -86,6 +86,9 @@ class TorchSDPABackend(AttentionBackend):
 @dataclass
 class TorchSDPAMetadata(AttentionMetadata):
     """Metadata for PagedAttention."""
+    num_prefill_tokens: int
+    num_decode_tokens: int
+    slot_mapping: torch.Tensor
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
     seq_lens_tensor: Optional[torch.Tensor]
@@ -400,7 +403,6 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         block_table_tensor = common_attn_metadata.block_table_tensor
 
         attn_metadata = TorchSDPAMetadata(
-            num_prefills=num_prompt_req,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
@@ -420,7 +422,6 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
                                                     num_prompt_req],  # prefill
             query_start_loc=query_start_loc_cpu[:num_reqs +
                                                 1],  # for logits index
-            enable_kv_scales_calculation=False,
         )
 
         return attn_metadata
