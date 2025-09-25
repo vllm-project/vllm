@@ -184,7 +184,7 @@ def _deepgemm_fp8_gemm_nt_warmup(w: torch.Tensor, ws: torch.Tensor, max_tokens: 
     out = torch.empty((max_tokens, n), device=device, dtype=torch.bfloat16)
 
     # Generate optimal M values instead of testing every token count
-    optimal_m_values = _generate_optimal_warmup_m_values(max_tokens, n)
+    optimal_m_values = _generate_optimal_warmup_m_values(max_tokens, n, device)
 
     pbar = tqdm(total=len(optimal_m_values),
                 desc=f"DeepGemm(fp8_gemm_nt) warmup (W={w.size()}) ")
