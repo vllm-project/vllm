@@ -12,7 +12,6 @@ from torch.nn import Parameter
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
-from vllm.utils import is_torch_equal_or_newer
 
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
@@ -115,15 +114,6 @@ class BasevLLMParameter(Parameter):
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
-        if not is_torch_equal_or_newer("2.8.0"):
-            logger.warning_once(
-                "Torch %s detected (<2.8.0): returning NotImplemented in "
-                "BasevLLMParameter.__torch_function__ to avoid potential "
-                "TorchDynamo issues.",
-                torch.__version__,
-            )
-            return NotImplemented
-
         if kwargs is None:
             kwargs = {}
         return super().__torch_function__(func, types, args, kwargs)
