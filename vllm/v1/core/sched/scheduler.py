@@ -1281,6 +1281,10 @@ class Scheduler(SchedulerInterface):
 
         if self.connector is not None:
             self.connector.update_connector_output(kv_connector_output)
+            events_iter = self.connector.take_events()
+            if events_iter:
+                batch = KVEventBatch(ts=time.time(), events=list(events_iter))
+                self.kv_event_publisher.publish(batch)
 
         # KV Connector:: update recv and send status from last step.
         for req_id in (kv_connector_output.finished_recving or ()):
