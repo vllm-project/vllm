@@ -13,6 +13,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclRedOpTypeEnum, ncclUniqueId)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
+import vllm.envs as envs
 from vllm.utils import current_stream
 
 logger = init_logger(__name__)
@@ -83,7 +84,7 @@ class PyNcclCommunicator:
         self.group = group
 
         # if world_size == 1, no need to create communicator
-        if self.world_size == 1:
+        if self.world_size == 1 or envs.VLLM_DISABLE_PYNCCL:
             self.available = False
             self.disabled = True
             return
