@@ -520,7 +520,7 @@ steps:
   # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
   # we can only upgrade after this is resolved
   - pip install --pre torchao==0.13.0.dev20250814 --index-url https://download.pytorch.org/whl/nightly/cu128
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/
 
 - label: LM Eval Small Models # 53min
   timeout_in_minutes: 75
@@ -827,6 +827,18 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58 --server-args '--tensor-parallel-size 2'
+
+- label: Blackwell Quantized MoE Test
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  gpu: b200
+  source_file_dependencies:
+  - tests/evals/gpt_oss
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/v1/attention/backends/flashinfer.py
+  commands:
+    - pytest -s -v tests/quantization/test_blackwell_moe.py
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
