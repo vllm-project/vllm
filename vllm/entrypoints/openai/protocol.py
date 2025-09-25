@@ -31,6 +31,8 @@ from openai.types.responses import (
     ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
     ResponseStatus, ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent, ResponseWebSearchCallSearchingEvent)
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent)
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
@@ -260,26 +262,6 @@ ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
                                            ResponseReasoningItem,
                                            ResponseFunctionToolCall]
 
-StreamingResponsesResponse: TypeAlias = Union[
-    ResponseCreatedEvent,
-    ResponseInProgressEvent,
-    ResponseCompletedEvent,
-    ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent,
-    ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent,
-    ResponseReasoningTextDeltaEvent,
-    ResponseReasoningTextDoneEvent,
-    ResponseCodeInterpreterCallInProgressEvent,
-    ResponseCodeInterpreterCallCodeDeltaEvent,
-    ResponseWebSearchCallInProgressEvent,
-    ResponseWebSearchCallSearchingEvent,
-    ResponseWebSearchCallCompletedEvent,
-    ResponseCodeInterpreterCallCodeDoneEvent,
-    ResponseCodeInterpreterCallInterpretingEvent,
-    ResponseCodeInterpreterCallCompletedEvent,
-]
-
 
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -346,6 +328,13 @@ class ResponsesRequest(OpenAIBaseModel):
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
             "to 256 bit). Not supported by vLLM engine V0."))
+
+    enable_response_messages: bool = Field(
+        default=False,
+        description=(
+            "Dictates whether or not to return messages as part of the "
+            "response object. Currently only supported for non-streaming "
+            "non-background and gpt-oss only. "))
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
@@ -552,6 +541,56 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="Additional kwargs for structured outputs",
     )
+    guided_json: Optional[Union[str, dict, BaseModel]] = Field(
+        default=None,
+        description=(
+            "`guided_json` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `json` to `structured_outputs` instead."),
+    )
+    guided_regex: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_regex` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `regex` to `structured_outputs` instead."),
+    )
+    guided_choice: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "`guided_choice` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `choice` to `structured_outputs` instead."),
+    )
+    guided_grammar: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_grammar` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `grammar` to `structured_outputs` instead."),
+    )
+    structural_tag: Optional[str] = Field(
+        default=None,
+        description=(
+            "`structural_tag` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `structural_tag` to `structured_outputs` instead."),
+    )
+    guided_decoding_backend: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_decoding_backend` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please remove it from your request."),
+    )
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_whitespace_pattern` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `whitespace_pattern` to `structured_outputs` instead."
+        ),
+    )
     priority: int = Field(
         default=0,
         description=(
@@ -668,6 +707,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
+
+        # Forward deprecated guided_* parameters to structured_outputs
+        if self.structured_outputs is None:
+            kwargs = dict[str, Any](
+                json=self.guided_json,
+                regex=self.guided_regex,
+                choice=self.guided_choice,
+                grammar=self.guided_grammar,
+                whitespace_pattern=self.guided_whitespace_pattern,
+                structural_tag=self.structural_tag,
+            )
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            if len(kwargs) > 0:
+                self.structured_outputs = StructuredOutputsParams(**kwargs)
 
         response_format = self.response_format
         json_schema_from_tool = self._get_json_schema_from_tool()
@@ -850,7 +903,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if isinstance(data, ValueError):
             raise data
 
-        if "structured_outputs" not in data:
+        if data.get("structured_outputs", None) is None:
             return data
 
         structured_outputs_kwargs = data['structured_outputs']
@@ -973,7 +1026,6 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: Optional[str] = None
     prompt: Optional[Union[list[int], list[list[int]], str, list[str]]] = None
-    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
@@ -1009,6 +1061,7 @@ class CompletionRequest(OpenAIBaseModel):
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
+    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     add_special_tokens: bool = Field(
         default=True,
         description=(
@@ -1026,6 +1079,49 @@ class CompletionRequest(OpenAIBaseModel):
     structured_outputs: Optional[StructuredOutputsParams] = Field(
         default=None,
         description="Additional kwargs for structured outputs",
+    )
+    guided_json: Optional[Union[str, dict, BaseModel]] = Field(
+        default=None,
+        description=(
+            "`guided_json` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `json` to `structured_outputs` instead."),
+    )
+    guided_regex: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_regex` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `regex` to `structured_outputs` instead."),
+    )
+    guided_choice: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "`guided_choice` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `choice` to `structured_outputs` instead."),
+    )
+    guided_grammar: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_grammar` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `grammar` to `structured_outputs` instead."),
+    )
+    guided_decoding_backend: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_decoding_backend` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please remove it from your request."),
+    )
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "`guided_whitespace_pattern` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `whitespace_pattern` to `structured_outputs` instead."
+        ),
     )
     priority: int = Field(
         default=0,
@@ -1156,6 +1252,19 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
+        # Forward deprecated guided_* parameters to structured_outputs
+        if self.structured_outputs is None:
+            kwargs = dict[str, Any](
+                json=self.guided_json,
+                regex=self.guided_regex,
+                choice=self.guided_choice,
+                grammar=self.guided_grammar,
+                whitespace_pattern=self.guided_whitespace_pattern,
+            )
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            if len(kwargs) > 0:
+                self.structured_outputs = StructuredOutputsParams(**kwargs)
+
         if (self.structured_outputs is not None
                 and self.response_format is not None
                 and self.response_format.type == "json_object"):
@@ -1200,7 +1309,7 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_structured_outputs_count(cls, data):
-        if "structured_outputs" not in data:
+        if data.get("structured_outputs", None) is None:
             return data
 
         structured_outputs_kwargs = data['structured_outputs']
@@ -1849,6 +1958,11 @@ class ResponsesResponse(OpenAIBaseModel):
     model: str
     object: Literal["response"] = "response"
     output: list[ResponseOutputItem]
+    # These are populated when enable_response_messages is set to True
+    # TODO: Currently an issue where content of harmony messages
+    # is not available when these are serialized. Metadata is available
+    input_messages: Optional[list[ChatCompletionMessageParam]] = None
+    output_messages: Optional[list[ChatCompletionMessageParam]] = None
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1878,6 +1992,8 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: Optional[ResponseUsage] = None,
+        input_messages: Optional[list[ChatCompletionMessageParam]] = None,
+        output_messages: Optional[list[ChatCompletionMessageParam]] = None,
     ) -> "ResponsesResponse":
 
         incomplete_details: Optional[IncompleteDetails] = None
@@ -1886,7 +2002,6 @@ class ResponsesResponse(OpenAIBaseModel):
         # TODO: implement the other reason for incomplete_details,
         # which is content_filter
         # incomplete_details = IncompleteDetails(reason='content_filter')
-
         return cls(
             id=request.request_id,
             created_at=created_time,
@@ -1895,6 +2010,8 @@ class ResponsesResponse(OpenAIBaseModel):
             metadata=request.metadata,
             model=model_name,
             output=output,
+            input_messages=input_messages,
+            output_messages=output_messages,
             parallel_tool_calls=request.parallel_tool_calls,
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,
@@ -1915,6 +2032,72 @@ class ResponsesResponse(OpenAIBaseModel):
             usage=usage,
         )
 
+
+# TODO: this code can be removed once
+# https://github.com/openai/openai-python/issues/2634 has been resolved
+class ResponseReasoningPartDoneEvent(OpenAIBaseModel):
+    content_index: int
+    """The index of the content part that is done."""
+
+    item_id: str
+    """The ID of the output item that the content part was added to."""
+
+    output_index: int
+    """The index of the output item that the content part was added to."""
+
+    part: ResponseReasoningTextContent
+    """The content part that is done."""
+
+    sequence_number: int
+    """The sequence number of this event."""
+
+    type: Literal["response.reasoning_part.done"]
+    """The type of the event. Always `response.reasoning_part.done`."""
+
+
+# TODO: this code can be removed once
+# https://github.com/openai/openai-python/issues/2634 has been resolved
+class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
+    content_index: int
+    """The index of the content part that is done."""
+
+    item_id: str
+    """The ID of the output item that the content part was added to."""
+
+    output_index: int
+    """The index of the output item that the content part was added to."""
+
+    part: ResponseReasoningTextContent
+    """The content part that is done."""
+
+    sequence_number: int
+    """The sequence number of this event."""
+
+    type: Literal["response.reasoning_part.added"]
+    """The type of the event. Always `response.reasoning_part.added`."""
+
+
+StreamingResponsesResponse: TypeAlias = Union[
+    ResponseCreatedEvent,
+    ResponseInProgressEvent,
+    ResponseCompletedEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent,
+    ResponseReasoningPartAddedEvent,
+    ResponseReasoningPartDoneEvent,
+    ResponseCodeInterpreterCallInProgressEvent,
+    ResponseCodeInterpreterCallCodeDeltaEvent,
+    ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent,
+    ResponseWebSearchCallCompletedEvent,
+    ResponseCodeInterpreterCallCodeDoneEvent,
+    ResponseCodeInterpreterCallInterpretingEvent,
+    ResponseCodeInterpreterCallCompletedEvent,
+]
 
 BatchRequestInputBody = Union[ChatCompletionRequest, EmbeddingRequest,
                               ScoreRequest, RerankRequest]
