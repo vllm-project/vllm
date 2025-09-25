@@ -562,6 +562,10 @@ class VllmConfig:
             if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
+        if envs.VLLM_DEBUG_DUMP_PATH is not None:
+            self.compilation_config.debug_dump_path = \
+                envs.VLLM_DEBUG_DUMP_PATH
+
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
