@@ -1934,12 +1934,10 @@ class FusedMoE(CustomOp):
 
             if not skip_result_store:
                 if self.shared_experts is None:
-                    assert len(final_hidden_states) == 1
                     full_fused_final_hidden_states[
                         chunk_start:chunk_end, :].copy_(final_hidden_states,
                                                         non_blocking=True)
                 else:
-                    assert len(final_hidden_states) == 2
                     full_shared_final_hidden_states[
                         chunk_start:chunk_end, :].copy_(final_hidden_states[0],
                                                         non_blocking=True)
