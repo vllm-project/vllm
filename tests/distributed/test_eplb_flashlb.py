@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import time
-import torch
-import pytest
-import numba
 from collections import defaultdict
+
+import pytest
+import torch
+
 from vllm.distributed.eplb.eplb_policy.flashlb_policy import FlashLB
 
 
@@ -23,8 +23,7 @@ def test_basic_rebalance():
     num_gpus = 8
     policy = FlashLB()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
-    )
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
     assert phy2log.shape == (
         2,
         16,
@@ -45,18 +44,15 @@ def test_basic_rebalance():
     assert torch.all(
         logcnt >= 1), "Each logical expert should have at least 1 replica"
     assert (
-        torch.sum(logcnt, dim=1).sum() == num_replicas * num_layers
-    ), f"Total replicas should be {num_replicas * num_layers}"
+        torch.sum(logcnt, dim=1).sum() == num_replicas *
+        num_layers), f"Total replicas should be {num_replicas * num_layers}"
     # Verify expected output
-    expected_phy2log = torch.tensor([
-        [1, 7, 4, 3, 10, 2, 10, 6, 0, 8, 11, 8, 5, 9, 5, 3],
-        [1, 3, 2, 11, 5, 0, 5, 4, 6, 7, 6, 7, 9, 8, 8, 10]
-    ])
+    expected_phy2log = torch.tensor(
+        [[1, 7, 4, 3, 10, 2, 10, 6, 0, 8, 11, 8, 5, 9, 5, 3],
+         [1, 3, 2, 11, 5, 0, 5, 4, 6, 7, 6, 7, 9, 8, 8, 10]])
     assert torch.all(phy2log == expected_phy2log)
-    expected_logcnt = torch.tensor([
-        [1, 1, 1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
-        [1, 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1]
-    ])
+    expected_logcnt = torch.tensor([[1, 1, 1, 2, 1, 2, 1, 1, 2, 1, 2, 1],
+                                    [1, 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1]])
     assert torch.all(logcnt == expected_logcnt)
 
 
@@ -70,8 +66,7 @@ def test_single_gpu_case():
     num_gpus = 1
     policy = FlashLB()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
-    )
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
     # Verify shapes
     assert phy2log.shape == (1, 4)
     assert log2phy.shape[0] == 1
@@ -92,13 +87,12 @@ def test_equal_weights():
     num_gpus = 4
     policy = FlashLB()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
-    )
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
     assert phy2log.shape == (1, 16)
     assert logcnt.shape == (1, 8)
     assert torch.all(
-        logcnt == 2
-    ), "With equal weights each expert should have exactly 2 replicas"
+        logcnt ==
+        2), "With equal weights each expert should have exactly 2 replicas"
 
 
 def test_extreme_weight_imbalance():
@@ -112,8 +106,7 @@ def test_extreme_weight_imbalance():
     num_gpus = 4
     policy = FlashLB()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
-    )
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
     assert phy2log.shape == (1, 12)
     assert logcnt.shape == (1, 8)
     # Expert with highest weight (index 0) should have more replicas
@@ -136,8 +129,7 @@ def test_multiple_layers():
     num_gpus = 4
     policy = FlashLB()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
-    )
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
     assert phy2log.shape == (3, 8)
     assert logcnt.shape == (3, 6)
     # Verify expert allocation is reasonable for each layer
@@ -158,9 +150,7 @@ def test_parameter_validation():
     FlashLB.hotness_window = {}
     weight = torch.tensor([[10, 20, 30, 40]])
     policy = FlashLB()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, 8, 3, 2, 4
-    )
+    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, 8, 3, 2, 4)
     assert phy2log.shape == (1, 8)
     assert logcnt.shape == (1, 4)
     with pytest.raises(AssertionError):
@@ -180,8 +170,7 @@ def test_small_scale_hierarchical():
     num_gpus = 4  # 4 GPUs
     policy = FlashLB()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
-    )
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
     assert phy2log.shape == (1, 12)
     assert logcnt.shape == (1, 8)
     assert torch.sum(logcnt) == num_replicas
@@ -205,8 +194,7 @@ def test_global_load_balance_fallback():
     num_gpus = 4
     policy = FlashLB()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
-    )
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
     assert phy2log.shape == (1, 8)
     assert logcnt.shape == (1, 6)
     assert torch.sum(logcnt) == num_replicas
@@ -226,39 +214,34 @@ def test_device_compatibility(device):
     num_gpus = 2
     policy = FlashLB()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus
-    )
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
     assert phy2log.shape == (1, 6)
     assert logcnt.shape == (1, 4)
 
 
-def generate_expert_map(
-    global_expert_num, world_size, num_moe_layers, num_of_redundant_expert=0
-):
+def generate_expert_map(global_expert_num,
+                        world_size,
+                        num_moe_layers,
+                        num_of_redundant_expert=0):
     base_experts = global_expert_num // world_size
     redundant_experts = num_of_redundant_expert // world_size
     remainder = global_expert_num % world_size
     local_num_experts = base_experts + remainder + redundant_experts
     expert_map_tensor = torch.full(
-        (num_moe_layers, world_size, global_expert_num),
-        -1,
-        dtype=torch.int32
-    )
+        (num_moe_layers, world_size, global_expert_num), -1, dtype=torch.int32)
     for device_id in range(world_size):
         local_ids = torch.arange(base_experts + redundant_experts,
                                  dtype=torch.int32)
-        expand_ids = torch.arange(
-            base_experts + redundant_experts,
-            local_num_experts,
-            dtype=torch.int32
-        )
+        expand_ids = torch.arange(base_experts + redundant_experts,
+                                  local_num_experts,
+                                  dtype=torch.int32)
 
         if device_id < world_size - 1:
             start = device_id * base_experts
             end = start + base_experts + redundant_experts
-            expert_map_tensor[:, device_id, start:end] = (
-                local_ids.unsqueeze(0).expand(num_moe_layers, -1)
-            )
+            expert_map_tensor[:, device_id,
+                              start:end] = (local_ids.unsqueeze(0).expand(
+                                  num_moe_layers, -1))
         else:
             if remainder > 0:
                 slice_end = -remainder
@@ -267,20 +250,18 @@ def generate_expert_map(
                 slice_start = -(base_experts + redundant_experts)
                 slice_end = None
             expert_map_tensor[:, device_id, slice_start:slice_end] = (
-                local_ids.unsqueeze(0).expand(num_moe_layers, -1)
-            )
+                local_ids.unsqueeze(0).expand(num_moe_layers, -1))
 
         if remainder > 0:
-            expert_map_tensor[:, device_id, -remainder:] = (
-                expand_ids.unsqueeze(0).expand(num_moe_layers, -1)
-            )
+            expert_map_tensor[:, device_id,
+                              -remainder:] = (expand_ids.unsqueeze(0).expand(
+                                  num_moe_layers, -1))
     expert_map = []
     for layer_id in range(num_moe_layers):
         layer_expert = []
         for device_id in range(world_size):
             valid_global_experts = torch.where(
-                expert_map_tensor[layer_id, device_id] != -1
-            )[0]
+                expert_map_tensor[layer_id, device_id] != -1)[0]
             layer_expert.append(valid_global_experts.tolist())
         expert_map.append(layer_expert)
     return torch.tensor(expert_map, dtype=int)
@@ -300,24 +281,21 @@ def test_experts_exchange():
     replicas_per_gpu = num_replicas // num_gpus
 
     weight = torch.randint(1, 1000, (num_layers, num_expert))
-    expert_map = generate_expert_map(
-        global_expert_num=num_expert,
-        world_size=num_gpus,
-        num_moe_layers=num_layers,
-        num_of_redundant_expert=num_replicas - num_expert
-    )
+    expert_map = generate_expert_map(global_expert_num=num_expert,
+                                     world_size=num_gpus,
+                                     num_moe_layers=num_layers,
+                                     num_of_redundant_expert=num_replicas -
+                                     num_expert)
     policy = FlashLB()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus, expert_map
-    )
+        weight, num_replicas, num_groups, num_nodes, num_gpus, expert_map)
     new_placement = phy2log.reshape((num_layers, num_gpus, replicas_per_gpu))
     for layer_id in range(num_layers):
         num_old_expert = torch.unique(expert_map[layer_id]).numel()
         num_new_expert = torch.unique(new_placement[layer_id]).numel()
         assert num_new_expert == num_old_expert, (
             f"There exists expert not placed on any rank "
-            f"in layer {layer_id}"
-        )
+            f"in layer {layer_id}")
 
         for gpu_id in range(num_gpus):
             new_placement_check = new_placement[layer_id][gpu_id]
@@ -328,16 +306,15 @@ def test_experts_exchange():
             assert new_placement_check.numel() == new_unique.numel(), (
                 f"Replicated experts are placed on the same NPU, "
                 f"expert placement on layer {layer_id}, "
-                f"rank {gpu_id} is invalid"
-            )
+                f"rank {gpu_id} is invalid")
 
             # Check if there is any experts movement inside one NPU
             expert_not_move = torch.isin(new_placement_check,
                                          old_placement_check)
             new_retained = new_placement_check[expert_not_move]
             old_retained = old_placement_check[expert_not_move]
-            assert torch.equal(new_retained, old_retained), (
-                f"There exists expert movement inside NPU, "
-                f"expert placement on layer {layer_id}, "
-                f"rank {gpu_id} is invalid"
-            )
+            assert torch.equal(
+                new_retained,
+                old_retained), (f"There exists expert movement inside NPU, "
+                                f"expert placement on layer {layer_id}, "
+                                f"rank {gpu_id} is invalid")
