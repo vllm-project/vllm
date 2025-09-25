@@ -29,7 +29,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             # the target_token_ids, and another forward pass for decoding
             # based on the next_token_ids. I.e. it needs 1 more forward pass.
             one_extra_forward_pass=True,
-            # the first draft_token_ids are identical to next_token_ids, so
+            # the first draft_token_ids are replaced by next_token_ids, so
             # they don't need to be returned as proposed tokens
             drop_first_drafted_tokens=True,
             runner=runner)
