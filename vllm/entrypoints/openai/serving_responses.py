@@ -22,6 +22,7 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallCompletedEvent,
     ResponseCodeInterpreterCallInProgressEvent,
     ResponseCodeInterpreterCallInterpretingEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
     ResponseCodeInterpreterToolCallParam, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
     ResponseCreatedEvent, ResponseFunctionToolCall, ResponseFunctionWebSearch,
@@ -235,6 +236,8 @@ class OpenAIServingResponses(OpenAIServing):
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
         if prev_response_id is not None:
+            if not prev_response_id.startswith("resp_"):
+                return self._make_invalid_id_error(prev_response_id)
             async with self.response_store_lock:
                 prev_response = self.response_store.get(prev_response_id)
             if prev_response is None:
@@ -458,12 +461,8 @@ class OpenAIServingResponses(OpenAIServing):
 
         async with AsyncExitStack() as exit_stack:
             try:
-                mcp_tools = {
-                    tool.server_label: tool
-                    for tool in request.tools if tool.type == "mcp"
-                }
                 await context.init_tool_sessions(self.tool_server, exit_stack,
-                                                 request.request_id, mcp_tools)
+                                                 request.request_id)
                 async for _ in result_generator:
                     pass
             except asyncio.CancelledError:
@@ -477,14 +476,9 @@ class OpenAIServingResponses(OpenAIServing):
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
 
-        input_messages = None
-        output_messages = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
-            if request.enable_response_messages:
-                input_messages = context.messages[:context.num_init_messages]
-                output_messages = context.messages[context.num_init_messages:]
             num_tool_output_tokens = context.num_tool_output_tokens
             if len(output) > 0:
                 if context.finish_reason == "length":
@@ -503,12 +497,6 @@ class OpenAIServingResponses(OpenAIServing):
             output = self._make_response_output_items(request, final_output,
                                                       tokenizer)
 
-            # TODO: context for non-gptoss models doesn't use messages
-            # so we can't get them out yet
-            if request.enable_response_messages:
-                raise NotImplementedError(
-                    "enable_response_messages is currently"
-                    " only supported for gpt-oss")
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
@@ -532,8 +520,6 @@ class OpenAIServingResponses(OpenAIServing):
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
-            input_messages=input_messages,
-            output_messages=output_messages,
             model_name=model_name,
             created_time=created_time,
             output=output,
@@ -750,16 +736,11 @@ class OpenAIServingResponses(OpenAIServing):
             # New conversation.
             reasoning_effort = (request.reasoning.effort
                                 if request.reasoning else None)
+            # Temporary: OpenAI types doesn't have container tool
+            # so we used MCP to cover that, up for change
             tool_types = [tool.type for tool in request.tools]
-
-            # Allow the MCP Tool type to enable built in tools if the
-            # server_label is allowlisted in
-            # envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
-            if envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
-                for tool in request.tools:
-                    if (tool.type == "mcp" and tool.server_label
-                            in envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS):
-                        tool_types.append(tool.server_label)
+            if envs.VLLM_GPT_OSS_USE_CONTAINER_TOOL:
+                tool_types.append("container")
             enable_browser = ("web_search_preview" in tool_types
                               and self.tool_server is not None
                               and self.tool_server.has_tool("browser"))
@@ -922,6 +903,9 @@ class OpenAIServingResponses(OpenAIServing):
         stream: Optional[bool],
     ) -> Union[ErrorResponse, ResponsesResponse, AsyncGenerator[
             StreamingResponsesResponse, None]]:
+        if not response_id.startswith("resp_"):
+            return self._make_invalid_id_error(response_id)
+
         async with self.response_store_lock:
             response = self.response_store.get(response_id)
 
@@ -939,6 +923,9 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         response_id: str,
     ) -> Union[ErrorResponse, ResponsesResponse]:
+        if not response_id.startswith("resp_"):
+            return self._make_invalid_id_error(response_id)
+
         async with self.response_store_lock:
             response = self.response_store.get(response_id)
             if response is None:
@@ -963,6 +950,13 @@ class OpenAIServingResponses(OpenAIServing):
                 logger.exception("Background task for %s was cancelled",
                                  response_id)
         return response
+
+    def _make_invalid_id_error(self, response_id: str) -> ErrorResponse:
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=(f"Invalid 'response_id': '{response_id}'. "
+                     "Expected an ID that begins with 'resp'."),
+        )
 
     def _make_not_found_error(self, response_id: str) -> ErrorResponse:
         return self.create_error_response(
@@ -1070,7 +1064,6 @@ class OpenAIServingResponses(OpenAIServing):
                                 logprobs=[],
                             ),
                         ))
-                    current_content_index += 1
                     first_delta_sent = True
                 # todo(kebe7jun) tool call support
 
@@ -1113,6 +1106,8 @@ class OpenAIServingResponses(OpenAIServing):
                             output_index=current_output_index,
                             item=reasoning_item,
                         ))
+                    current_output_index += 1
+                    current_item_id = str(uuid.uuid4())
                     yield _increment_sequence_number_and_return(
                         ResponseOutputItemAddedEvent(
                             type="response.output_item.added",
@@ -1126,8 +1121,6 @@ class OpenAIServingResponses(OpenAIServing):
                                 status="in_progress",
                             ),
                         ))
-                    current_output_index += 1
-                    current_item_id = str(uuid.uuid4())
                     yield _increment_sequence_number_and_return(
                         ResponseContentPartAddedEvent(
                             type="response.content_part.added",
@@ -1142,7 +1135,6 @@ class OpenAIServingResponses(OpenAIServing):
                                 logprobs=[],
                             ),
                         ))
-                    current_content_index += 1
                     # reset previous delta messages
                     previous_delta_messages = []
 
@@ -1172,8 +1164,6 @@ class OpenAIServingResponses(OpenAIServing):
                                 top_logprobs=request.top_logprobs,
                             ) if request.is_include_output_logprobs() else [],
                         ))
-                current_content_index += 1
-
                 previous_delta_messages.append(delta_message)
         if previous_delta_messages:
             if previous_delta_messages[-1].reasoning_content is not None:
@@ -1223,7 +1213,6 @@ class OpenAIServingResponses(OpenAIServing):
                         logprobs=[],
                         item_id=current_item_id,
                     ))
-                current_content_index += 1
                 part = ResponseOutputText(
                     text=final_content,
                     type="output_text",
@@ -1274,13 +1263,17 @@ class OpenAIServingResponses(OpenAIServing):
         current_output_index = 0
         current_item_id: str = ""
         sent_output_item_added = False
+        # Track function-call streaming state
+        func_item_id: str = ""
+        func_call_id: str = ""
+        func_name: str = ""
 
         async for ctx in result_generator:
 
             assert isinstance(ctx, StreamingHarmonyContext)
 
             if ctx.is_expecting_start():
-                current_output_index += 1
+                prev_output_index = current_output_index
                 sent_output_item_added = False
 
                 if len(ctx.parser.messages) > 0:
@@ -1305,7 +1298,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 type="response.reasoning_text.done",
                                 item_id=current_item_id,
                                 sequence_number=-1,
-                                output_index=current_output_index,
+                                output_index=prev_output_index,
                                 content_index=current_content_index,
                                 text=previous_item.content[0].text,
                             ))
@@ -1314,7 +1307,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 type="response.reasoning_part.done",
                                 sequence_number=-1,
                                 item_id=current_item_id,
-                                output_index=current_output_index,
+                                output_index=prev_output_index,
                                 content_index=current_content_index,
                                 part=content,
                             ))
@@ -1322,7 +1315,7 @@ class OpenAIServingResponses(OpenAIServing):
                             ResponseOutputItemDoneEvent(
                                 type="response.output_item.done",
                                 sequence_number=-1,
-                                output_index=current_output_index,
+                                output_index=prev_output_index,
                                 item=reasoning_item,
                             ))
                     elif previous_item.channel == "final":
@@ -1335,7 +1328,7 @@ class OpenAIServingResponses(OpenAIServing):
                             ResponseTextDoneEvent(
                                 type="response.output_text.done",
                                 sequence_number=-1,
-                                output_index=current_output_index,
+                                output_index=prev_output_index,
                                 content_index=current_content_index,
                                 text=previous_item.content[0].text,
                                 logprobs=[],
@@ -1346,7 +1339,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 type="response.content_part.done",
                                 sequence_number=-1,
                                 item_id=current_item_id,
-                                output_index=current_output_index,
+                                output_index=prev_output_index,
                                 content_index=current_content_index,
                                 part=text_content,
                             ))
@@ -1354,7 +1347,7 @@ class OpenAIServingResponses(OpenAIServing):
                             ResponseOutputItemDoneEvent(
                                 type="response.output_item.done",
                                 sequence_number=-1,
-                                output_index=current_output_index,
+                                output_index=prev_output_index,
                                 item=ResponseOutputMessage(
                                     id=current_item_id,
                                     type="message",
@@ -1364,6 +1357,10 @@ class OpenAIServingResponses(OpenAIServing):
                                 ),
                             ))
 
+                # Prepare for the next output item turn
+                current_output_index = prev_output_index + 1
+                current_content_index = -1
+
             # stream the output of a harmony message
             if ctx.parser.last_content_delta:
                 if (ctx.parser.current_channel == "final"
@@ -1371,6 +1368,8 @@ class OpenAIServingResponses(OpenAIServing):
                     if not sent_output_item_added:
                         sent_output_item_added = True
                         current_item_id = f"msg_{random_uuid()}"
+                        # Pre-seed the message with an empty output_text part so
+                        # downstream clients have content_index=0 available.
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -1380,25 +1379,18 @@ class OpenAIServingResponses(OpenAIServing):
                                     id=current_item_id,
                                     type="message",
                                     role="assistant",
-                                    content=[],
+                                    content=[
+                                        ResponseOutputText(
+                                            type="output_text",
+                                            text="",
+                                            annotations=[],
+                                            logprobs=[],
+                                        )
+                                    ],
                                     status="in_progress",
                                 ),
                             ))
-                        current_content_index += 1
-                        yield _increment_sequence_number_and_return(
-                            ResponseContentPartAddedEvent(
-                                type="response.content_part.added",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item_id=current_item_id,
-                                content_index=current_content_index,
-                                part=ResponseOutputText(
-                                    type="output_text",
-                                    text="",
-                                    annotations=[],
-                                    logprobs=[],
-                                ),
-                            ))
+                        current_content_index = 0
                     yield _increment_sequence_number_and_return(
                         ResponseTextDeltaEvent(
                             type="response.output_text.delta",
@@ -1409,6 +1401,38 @@ class OpenAIServingResponses(OpenAIServing):
                             delta=ctx.parser.last_content_delta,
                             # TODO, use logprobs from ctx.last_request_output
                             logprobs=[],
+                        ))
+                elif (ctx.parser.current_channel == "commentary"
+                      and ctx.parser.current_recipient is not None
+                      and ctx.parser.current_recipient.startswith("functions.")):
+                    # Start or continue streaming function-call arguments
+                    if not sent_output_item_added:
+                        sent_output_item_added = True
+                        func_item_id = f"fc_{random_uuid()}"
+                        func_call_id = f"call_{random_uuid()}"
+                        func_name = ctx.parser.current_recipient.split(".", 1)[1]
+                        yield _increment_sequence_number_and_return(
+                            ResponseOutputItemAddedEvent(
+                                type="response.output_item.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item=ResponseFunctionToolCall(
+                                    type="function_call",
+                                    id=func_item_id,
+                                    name=func_name,
+                                    call_id=func_call_id,
+                                    arguments="",
+                                ),
+                            ))
+                        current_content_index = 0
+                    yield _increment_sequence_number_and_return(
+                        ResponseFunctionCallArgumentsDeltaEvent(
+                            type="response.function_call_arguments.delta",
+                            sequence_number=-1,
+                            content_index=current_content_index,
+                            output_index=current_output_index,
+                            item_id=func_item_id,
+                            delta=ctx.parser.last_content_delta,
                         ))
                 elif (ctx.parser.current_channel == "analysis"
                       and ctx.parser.current_recipient is None):
@@ -1492,6 +1516,22 @@ class OpenAIServingResponses(OpenAIServing):
             # stream tool call outputs
             if ctx.is_assistant_action_turn() and len(ctx.parser.messages) > 0:
                 previous_item = ctx.parser.messages[-1]
+                # Complete a function tool call turn, if any
+                if (previous_item.recipient is not None
+                        and previous_item.recipient.startswith("functions.")):
+                    yield _increment_sequence_number_and_return(
+                        ResponseOutputItemDoneEvent(
+                            type="response.output_item.done",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item=ResponseFunctionToolCall(
+                                type="function_call",
+                                id=func_item_id or f"fc_{random_uuid()}",
+                                name=(func_name or previous_item.recipient.split(".", 1)[1]),
+                                call_id=(func_call_id or f"call_{random_uuid()}"),
+                                arguments=previous_item.content[0].text,
+                            ),
+                        ))
                 if (self.tool_server is not None
                         and self.tool_server.has_tool("browser")
                         and previous_item.recipient is not None
@@ -1647,12 +1687,8 @@ class OpenAIServingResponses(OpenAIServing):
         async with AsyncExitStack() as exit_stack:
             processer = None
             if self.use_harmony:
-                mcp_tools = {
-                    tool.server_label: tool
-                    for tool in request.tools if tool.type == "mcp"
-                }
                 await context.init_tool_sessions(self.tool_server, exit_stack,
-                                                 request.request_id, mcp_tools)
+                                                 request.request_id)
                 processer = self._process_harmony_streaming_events
             else:
                 processer = self._process_simple_streaming_events
