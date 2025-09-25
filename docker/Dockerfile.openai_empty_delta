@@ -3,7 +3,7 @@
 
 # This image layers the empty-delta streaming fix on top of the published
 # vLLM OpenAI-compatible server image.
-FROM vllm/openai:latest
+FROM vllm/vllm-openai:latest
 
 # Copy the patched OpenAI serving components into a temporary build context.
 COPY vllm/entrypoints/openai/serving_chat.py /tmp/vllm_patch/serving_chat.py
