@@ -12,6 +12,7 @@ import textwrap
 from contextlib import contextmanager
 from dataclasses import field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
+from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Literal, Optional, Protocol, TypeVar,
                     Union, cast)
 
@@ -546,12 +547,10 @@ class VllmConfig:
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = \
-            os.path.abspath(
-                self.compilation_config.debug_dump_path,
-                )
+            Path(self.compilation_config.debug_dump_path).absolute()
         if envs.VLLM_DEBUG_DUMP_PATH is not None:
-            self.compilation_config.debug_dump_path = os.path.abspath(
-                envs.VLLM_DEBUG_DUMP_PATH)
+            self.compilation_config.debug_dump_path = Path(
+                envs.VLLM_DEBUG_DUMP_PATH).absolute()
             logger.warning("Debug dump path is overridden to %s",
                            self.compilation_config.debug_dump_path)
 

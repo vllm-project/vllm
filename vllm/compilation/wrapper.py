@@ -5,7 +5,6 @@ import os
 import sys
 from abc import abstractmethod
 from contextlib import contextmanager
-from pathlib import Path
 from types import CodeType
 from typing import Callable, Optional
 
@@ -96,8 +95,8 @@ class TorchCompileWrapperWithCustomDispatcher:
 
         if self.vllm_config.compilation_config.debug_dump_path:
             rank = torch.distributed.get_rank()
-            debug_dump_dir = Path(
-                self.vllm_config.compilation_config.debug_dump_path)
+            debug_dump_dir = \
+                self.vllm_config.compilation_config.debug_dump_path
             decompiled_file = debug_dump_dir / f"rank_{rank}" \
                 / "transformed_code.py"
             if not decompiled_file.exists():
