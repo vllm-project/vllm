@@ -871,6 +871,10 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
 
+        # Store batch statistics from model runner for use in make_stats()
+        if model_runner_output.batch_stats:
+            self._current_batch_stats = model_runner_output.batch_stats
+
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
         kv_connector_stats = (kv_connector_output.kv_connector_stats
@@ -1182,15 +1186,29 @@ class Scheduler(SchedulerInterface):
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
-        return SchedulerStats(num_running_reqs=len(self.running),
-                              num_waiting_reqs=len(self.waiting),
-                              kv_cache_usage=self.kv_cache_manager.usage,
-                              prefix_cache_stats=prefix_cache_stats,
-                              spec_decoding_stats=spec_decoding_stats,
-                              num_corrupted_reqs=sum(req.is_output_corrupted
-                                                     for req in self.running),
-                              kv_connector_stats=kv_connector_stats.data
-                              if kv_connector_stats else None)
+
+        # Create SchedulerStats with basic information
+        stats = SchedulerStats(num_running_reqs=len(self.running),
+                               num_waiting_reqs=len(self.waiting),
+                               kv_cache_usage=self.kv_cache_manager.usage,
+                               prefix_cache_stats=prefix_cache_stats,
+                               spec_decoding_stats=spec_decoding_stats,
+                               num_corrupted_reqs=sum(req.is_output_corrupted
+                                                      for req in self.running),
+                               kv_connector_stats=kv_connector_stats.data
+                               if kv_connector_stats else None)
+
+        # Get batch statistics directly from model runner if available
+        current_batch_stats = getattr(self, '_current_batch_stats', None)
+        if current_batch_stats:
+            stats.prefill_batch_sizes = current_batch_stats.get(
+                'prefill_batch_sizes', [])
+            stats.decode_batch_sizes = current_batch_stats.get(
+                'decode_batch_sizes', [])
+            stats.decode_tokens_generated = current_batch_stats.get(
+                'decode_tokens_generated', 0)
+
+        return stats
 
     def make_spec_decoding_stats(
         self,

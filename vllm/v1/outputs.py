@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 import torch
 
@@ -122,6 +122,9 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
+
+    # Batch statistics for scheduler integration
+    batch_stats: Optional[dict[str, Any]] = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

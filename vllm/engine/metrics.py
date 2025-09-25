@@ -395,12 +395,18 @@ class LoggingStatLogger(StatLoggerBase):
                 # Avoid log noise on an idle production system
                 log_fn = logger.debug
 
+            # Get enhanced batch statistics if available
+            avg_prefill_bs = getattr(stats, 'avg_prefill_batch_size', 0.0)
+            avg_decode_bs = getattr(stats, 'avg_decode_batch_size', 0.0)
+
+            # Always log with batch size information
             log_fn(
                 "Avg prompt throughput: %.1f tokens/s, "
                 "Avg generation throughput: %.1f tokens/s, "
                 "Running: %d reqs, Swapped: %d reqs, "
                 "Pending: %d reqs, GPU KV cache usage: %.1f%%, "
-                "CPU KV cache usage: %.1f%%.",
+                "CPU KV cache usage: %.1f%%, "
+                "Avg prefill BS: %.1f, Avg decode BS: %.1f.",
                 prompt_throughput,
                 generation_throughput,
                 stats.num_running_sys,
@@ -408,6 +414,8 @@ class LoggingStatLogger(StatLoggerBase):
                 stats.num_waiting_sys,
                 stats.gpu_cache_usage_sys * 100,
                 stats.cpu_cache_usage_sys * 100,
+                avg_prefill_bs,
+                avg_decode_bs,
             )
             if (stats.cpu_prefix_cache_hit_rate >= 0
                     or stats.gpu_prefix_cache_hit_rate >= 0):

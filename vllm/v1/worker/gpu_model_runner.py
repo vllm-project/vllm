@@ -2328,6 +2328,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
 
+        # Track batch statistics for scheduler integration
+        self._track_batch_statistics(scheduler_output, valid_sampled_token_ids)
+
         output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
@@ -2337,6 +2340,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
+            batch_stats=self.get_batch_stats(),
         )
 
         if not self.use_async_scheduling:
@@ -2520,6 +2524,94 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
+
+    def get_batch_stats(self) -> Optional[dict[str, Any]]:
+        """Return batch statistics for scheduler integration."""
+        if not hasattr(self, '_batch_stats'):
+            return None
+        return dict(self._batch_stats)
+
+    def _track_batch_statistics(
+            self, scheduler_output: "SchedulerOutput",
+            valid_sampled_token_ids: list[list[int]]) -> None:
+        """
+        Track batch statistics and update scheduler-compatible format.
+        This connects gpu_model_runner batch analysis to the scheduler stats.
+        """
+        try:
+            # Initialize batch stats tracker if needed
+            if not hasattr(self, '_batch_stats'):
+                self._batch_stats = {
+                    'prefill_batch_sizes': [],
+                    'decode_batch_sizes': [],
+                    'decode_tokens_generated': 0,
+                }
+
+            # Quick batch analysis
+            num_reqs = self.input_batch.num_reqs
+            if num_reqs == 0:
+                return
+
+            # Classify batch and count decode tokens
+            num_prefill_reqs, num_decode_reqs, total_decode_tokens = self._classify_batch(
+                scheduler_output, valid_sampled_token_ids)
+
+            # Update batch statistics
+            if num_prefill_reqs > 0:
+                self._batch_stats['prefill_batch_sizes'].append(
+                    num_prefill_reqs)
+            if num_decode_reqs > 0:
+                self._batch_stats['decode_batch_sizes'].append(num_decode_reqs)
+                self._batch_stats[
+                    'decode_tokens_generated'] += total_decode_tokens
+
+        except Exception as e:
+            # Don't let batch tracking break the main execution
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Batch statistics tracking failed: {e}")
+
+    def _classify_batch(
+            self, scheduler_output: "SchedulerOutput",
+            valid_sampled_token_ids: list[list[int]]) -> tuple[int, int, int]:
+        """
+        Classify batch requests and count decode tokens.
+
+        Returns:
+            tuple[int, int, int]: (num_prefill_reqs, num_decode_reqs, total_decode_tokens)
+        """
+        num_prefill_reqs = 0
+        num_decode_reqs = 0
+        total_decode_tokens = 0
+
+        for req_id in self.input_batch.req_ids:
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
+            req_state = self.requests[req_id]
+            num_computed_tokens = req_state.num_computed_tokens
+            num_prompt_tokens = len(req_state.prompt_token_ids)
+
+            req_state = self.requests[req_id]
+
+            # Check if this request is doing prefill work
+            if num_computed_tokens < num_prompt_tokens:
+                num_prefill_reqs += 1
+                # Check if it also generates decode tokens in this iteration
+                if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
+                    decode_tokens_in_req = (
+                        num_computed_tokens +
+                        num_scheduled_tokens) - num_prompt_tokens
+                    total_decode_tokens += max(0, decode_tokens_in_req)
+
+            # Check if this request is doing decode work
+            if num_computed_tokens >= num_prompt_tokens:
+                num_decode_reqs += 1
+                req_index = self.input_batch.req_id_to_index[req_id]
+                if req_index < len(valid_sampled_token_ids):
+                    total_decode_tokens += len(
+                        valid_sampled_token_ids[req_index])
+
+        return num_prefill_reqs, num_decode_reqs, total_decode_tokens
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         allowed_config_names = {"load_config", "model_config"}
