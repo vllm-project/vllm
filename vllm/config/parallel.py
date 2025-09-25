@@ -63,6 +63,7 @@ class EPLBConfig:
     Choose the EPLB algorithm.
     """
 
+
 @config
 @dataclass
 class ParallelConfig:
