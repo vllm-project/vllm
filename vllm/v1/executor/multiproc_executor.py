@@ -377,6 +377,7 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    FAILED_INIT_STR = "FAILED_INIT"
 
     def __init__(
         self,
@@ -479,9 +480,9 @@ class WorkerProc:
         unready_proc_handles: list[UnreadyWorkerProcHandle]
     ) -> list[WorkerProcHandle]:
 
-        e = Exception("WorkerProc initialization failed due to "
-                      "an exception in a background process. "
-                      "See stack trace for root cause.")
+        err_msg = ("WorkerProc initialization failed due to "
+                    "an exception {}in a background process. "
+                    "See stack trace for root cause.")
 
         pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
         ready_proc_handles: list[Optional[WorkerProcHandle]] = (
@@ -494,8 +495,11 @@ class WorkerProc:
                     # Wait until the WorkerProc is ready.
                     unready_proc_handle = pipes.pop(pipe)
                     response: dict[str, Any] = pipe.recv()
-                    if response["status"] != "READY":
-                        raise e
+                    status = response["status"]
+                    if status == WorkerProc.FAILED_INIT_STR:
+                        raise Exception(err_msg.format(f"(err: {response['error_msg']}) "))
+                    elif status != WorkerProc.READY_STR:
+                        raise Exception(err_msg.format(""))
 
                     # Extract the message queue handle.
                     worker_response_mq = MessageQueue.create_from_handle(
@@ -505,6 +509,7 @@ class WorkerProc:
                             unready_proc_handle, worker_response_mq))
 
                 except EOFError:
+                    e = Exception(err_msg.format(""))
                     e.__suppress_context__ = True
                     raise e from None
 
@@ -587,13 +592,19 @@ class WorkerProc:
 
             worker.worker_busy_loop(cancel=shutdown_event)
 
-        except Exception:
+        except Exception as e:
             # NOTE: if an Exception arises in busy_loop, we send
             # a FAILURE message over the MQ RPC to notify the Executor,
             # which triggers system shutdown.
             # TODO(rob): handle case where the MQ itself breaks.
 
             if ready_writer is not None:
+                ready_writer.send({
+                    "status":
+                    WorkerProc.FAILED_INIT_STR,
+                    "error_msg":
+                    str(e),
+                })
                 logger.exception("WorkerProc failed to start.")
             elif shutdown_event.is_set():
                 logger.info("WorkerProc shutting down.")
@@ -702,7 +713,7 @@ class WorkerProc:
 
 def set_multiprocessing_worker_envs():
     """ Set up environment variables that should be used when there are workers
-    in a multiprocessing environment. This should be called by the parent 
+    in a multiprocessing environment. This should be called by the parent
     process before worker processes are created"""
 
     _maybe_force_spawn()

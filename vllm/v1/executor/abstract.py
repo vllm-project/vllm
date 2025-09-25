@@ -17,7 +17,10 @@ from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.logger import init_logger
 
+
+logger = init_logger(__name__)
 FailureCallback = Callable[[], None]
 
 
@@ -62,6 +65,8 @@ class Executor(ExecutorBase):
         else:
             raise ValueError("Unknown distributed executor backend: "
                              f"{distributed_executor_backend}")
+        logger.info(f"Using executor class: {executor_class.__name__} "
+                    f"for {distributed_executor_backend=}")
         return executor_class
 
     def initialize_from_config(self,
