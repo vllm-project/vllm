@@ -428,9 +428,8 @@ def dummy_hf_overrides(
         num_hidden_layers = (3 if model_arch
                              == "Gemma3nForConditionalGeneration" else 1)
 
-    text_config.update({
+    update_dict = {
         "num_layers": num_layers,
-        "num_hidden_layers": num_hidden_layers,
         "num_experts": num_experts,
         "num_experts_per_tok": 2,
         "num_local_experts": num_experts,
@@ -440,7 +439,14 @@ def dummy_hf_overrides(
         "n_routed_experts": num_experts,
         # For Gemma-3n
         "num_kv_shared_layers": 1,
-    })
+    }
+
+    # Update num_hidden_layers for non-Longcat architectures
+    if model_arch != "LongcatFlashForCausalLM" \
+            and model_arch != "LongCatFlashMTPModel":
+        update_dict["num_hidden_layers"] = num_hidden_layers
+
+    text_config.update(update_dict)
 
     if hasattr(hf_config, "vision_config"):
         hf_config.vision_config.update({
