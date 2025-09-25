@@ -795,7 +795,8 @@ class TransformersMoEBase(TransformersBase):
         intermediate_size = getattr_iter(text_config, names, None)
 
         # Reduction kwargs
-        reduce_results = getattr(text_config, "num_experts_shared", 0) == 0
+        names = ["num_experts_shared", "shared_expert_intermediate_size"]
+        reduce_results = getattr_iter(text_config, names, 0) == 0
         renormalize = getattr(text_config, "norm_topk_prob", top_k > 1)
 
         def reduce_results_hook(module, _, output):
@@ -803,8 +804,10 @@ class TransformersMoEBase(TransformersBase):
             tensor parallel or expert parallel is enabled. This is used for
             models with shared experts where the all reduce happens after any
             shared experts have been added to the hidden state."""
-            if (experts := module.experts).tp_size > 1 or experts.ep_size > 1:
-                return experts.maybe_all_reduce_tensor_model_parallel(output)
+            if isinstance(output, tuple):
+                output = output[0]
+            return module.experts.maybe_all_reduce_tensor_model_parallel(
+                output)
 
         # Grouped topk kwargs. We hardcode use_grouped_topk = False so that
         # FusedMoE will use the custom_routing_function, which is necessary
@@ -855,7 +858,8 @@ class TransformersMoEBase(TransformersBase):
                     log_replacement(qual_name, child_module, new_module)
                     # If results are not all-reduced in FusedMoE, ensure they
                     # are all-reduced at the end of module.forward()
-                    if not reduce_results:
+                    if not reduce_results and (new_module.tp_size > 1
+                                               or new_module.ep_size > 1):
                         module.register_forward_hook(reduce_results_hook)
                 else:
                     _fused_moe(child_module, prefix=qual_name)
