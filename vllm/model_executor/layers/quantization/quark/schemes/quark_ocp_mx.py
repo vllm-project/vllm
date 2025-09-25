@@ -82,10 +82,15 @@ class QuarkOCP_MX(QuarkScheme):
         if quant_dtype == "fp4":
             assert dim % 2 == 0
             return dim // 2
-        else:
+        elif quant_dtype in {"fp6_e3m2", "fp6_e2m3"}:
             # FP6 packs 4 * 6 = 24 bits on 3 bytes.
             assert (dim * 3) % 4 == 0
             return (dim * 3) // 4
+        else:
+            raise NotImplementedError(
+                "Unsupported quant_dtype in QuarkOCP_MX.get_packed_dim, "
+                f"got quant_dtype={quant_dtype}. Something is wrong, please "
+                "open an issue.")
 
     @classmethod
     def get_min_capability(cls) -> int:

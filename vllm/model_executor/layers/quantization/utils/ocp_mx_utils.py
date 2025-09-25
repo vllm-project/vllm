@@ -10,6 +10,7 @@ logger = init_logger(__name__)
 OCP_MX_BLOCK_SIZE = 32
 
 OCP_MX_DTYPES = {"fp4", "fp6_e3m2", "fp6_e2m3", "fp8_e4m3", "fp8_e5m2", "int8"}
+SUPPORTED_OCP_MX_DTYPES = {"fp4", "fp6_e3m2", "fp6_e2m3"}
 
 
 class OCP_MX_Scheme(str, Enum):

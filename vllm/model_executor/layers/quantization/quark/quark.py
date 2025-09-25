@@ -20,6 +20,8 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkOCP_MX, QuarkScheme, QuarkW8A8Fp8, QuarkW8A8Int8)
 from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare, should_ignore_layer)
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    SUPPORTED_OCP_MX_DTYPES)
 from vllm.platforms import current_platform
 
 __all__ = ["QuarkLinearMethod"]
@@ -240,9 +242,9 @@ class QuarkConfig(QuantizationConfig):
 
         # Input and weight dtypes need to be any of fp4,
         # fp6_e3m2 or fp6_e3m2, possibly mixed.
-        if weight_quant.get("dtype") not in [
-                "fp4", "fp6_e3m2", "fp6_e2m3"
-        ] or input_quant.get("dtype") not in ["fp4", "fp6_e3m2", "fp6_e2m3"]:
+        if weight_quant.get(
+                "dtype") not in SUPPORTED_OCP_MX_DTYPES or input_quant.get(
+                    "dtype") not in SUPPORTED_OCP_MX_DTYPES:
             logger.debug("Quark model is not in OCP MX format:"
                          " dtype not fp4, fp6_e3m2, fp6_e2m3")
             return False

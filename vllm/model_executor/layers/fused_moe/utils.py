@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize)
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
-from vllm.utils.flashinfer import nvfp4_quantize
+from vllm.utils.flashinfer import flashinfer_fp4_quantize
 
 
 @triton.jit
@@ -107,9 +107,9 @@ def _nvfp4_quantize(
     A_scale: Optional[torch.Tensor],
     is_sf_swizzled_layout: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return nvfp4_quantize(A,
-                          A_scale,
-                          is_sf_swizzled_layout=is_sf_swizzled_layout)
+    return flashinfer_fp4_quantize(A,
+                                   A_scale,
+                                   is_sf_swizzled_layout=is_sf_swizzled_layout)
 
 
 def _fp8_quantize(

@@ -298,17 +298,19 @@ class FusedMoEQuantConfig:
 
     @property
     def ocp_mx_scheme(self) -> Union[str, None]:
-        assert self._a1.dtype is None or isinstance(self._a1.dtype, str)
-        assert self._w1.dtype is None or isinstance(self._w1.dtype, str)
+        if not hasattr(self, "_ocp_mx_scheme"):
+            assert self._a1.dtype is None or isinstance(self._a1.dtype, str)
+            assert self._w1.dtype is None or isinstance(self._w1.dtype, str)
 
-        # TODO: we should not rerun this all the time during inference!
-        ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(self._a1.dtype,
-                                                       self._w1.dtype)
+            ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+                self._a1.dtype, self._w1.dtype)
 
-        if ocp_mx_scheme is not None:
-            ocp_mx_scheme = ocp_mx_scheme.value
+            if ocp_mx_scheme is not None:
+                ocp_mx_scheme = ocp_mx_scheme.value
 
-        return ocp_mx_scheme
+            self._ocp_mx_scheme = ocp_mx_scheme
+
+        return self._ocp_mx_scheme
 
     @property
     def use_mxfp4_w4a16(self) -> bool:
