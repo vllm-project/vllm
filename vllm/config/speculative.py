@@ -31,7 +31,8 @@ logger = init_logger(__name__)
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "ernie_mtp", "qwen3_next_mtp", "mimo_mtp"]
+                            "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
+                            "longcat_flash_mtp"]
 
 
 @config
@@ -186,6 +187,13 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["Qwen3NextMTP"]
             })
+        if hf_config.model_type == "longcat_flash":
+            hf_config.model_type = "longcat_flash_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["LongCatFlashMTPModel"]
+            })
 
         return hf_config
 
@@ -285,8 +293,6 @@ class SpeculativeConfig:
                     max_model_len,
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
-                    max_seq_len_to_capture=self.target_model_config.
-                    max_seq_len_to_capture,
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=SpeculativeConfig.hf_config_override,
                 )
@@ -331,6 +337,15 @@ class SpeculativeConfig:
                     if self.num_speculative_tokens > 1:
                         logger.warning(
                                 "All Qwen3Next MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
+                elif (self.draft_model_config.hf_config.model_type
+                      in ("longcat_flash_mtp")):
+                    self.method = "longcat_flash_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "LongCat MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
                             )
@@ -550,7 +565,7 @@ class SpeculativeConfig:
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp",
-                               "qwen3_next_mtp")
+                               "qwen3_next_mtp", "longcat_flash_mtp")
 
     def __repr__(self) -> str:
         method = self.method
