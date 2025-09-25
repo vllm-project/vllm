@@ -479,6 +479,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
             group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
+
     @register_fake("_C::rtn_marlin_gemm")
     def _rtn_marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
                               b_scales: torch.Tensor, workspace: torch.Tensor,
