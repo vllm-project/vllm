@@ -315,8 +315,6 @@ def _topk_kernel(LOGITS, K, B,
         if not (k == N): # All tokens are valid
             max_logit = -float('inf')
             min_logit = float('inf')
-            sum_logits = 0.0
-            pow_sum_logits = 0.0
 
             LOGITS_ROW = LOGITS + row_id * N
 
@@ -329,32 +327,35 @@ def _topk_kernel(LOGITS, K, B,
                 max_logit = tl.maximum(max_logit, tl.max(logits_blk))
                 min_logit = tl.minimum(min_logit, tl.min(logits_blk))
 
-            # Fourth passes: Binary search for pivots
-            num_iters = 0
+            # Second passes: Binary search for pivots
             k_pivot = -float('inf')
-            k_pivot_0 = 0.0
-            k_pivot_1 = 0.0
-            
-            while k_pivot == -float('inf') and num_iters < 32:
-                k_pivot_0 = (max_logit - min_logit) * 1.0 / 3.0 + min_logit
-                k_pivot_1 = (max_logit - min_logit) * 2.0 / 3.0 + min_logit
-                k_pivots_num_0 = 0.0
-                k_pivots_num_1 = 0.0
+            num_iters = 0
+
+            while k_pivot == -float('inf') and num_iters < 18:
+                k_pivot_0 = (max_logit - min_logit) * 1.0 / 4.0 + min_logit
+                k_pivot_1 = (max_logit - min_logit) * 2.0 / 4.0 + min_logit
+                k_pivot_2 = (max_logit - min_logit) * 3.0 / 4.0 + min_logit
+                k_pivots_num_0 = tl.zeros((), dtype=tl.uint32)
+                k_pivots_num_1 = tl.zeros((), dtype=tl.uint32)
+                k_pivots_num_2 = tl.zeros((), dtype=tl.uint32)
 
                 for i in range(0, NUM_TILES):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < N
                     logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float('inf'))
 
-                    larger_mask = logits_blk > k_pivot_0 
-                    k_pivots_num_0 += tl.sum(larger_mask)
-                    larger_mask = logits_blk > k_pivot_1 
-                    k_pivots_num_1 += tl.sum(larger_mask)
+                    k_pivots_num_0 += tl.sum(logits_blk > k_pivot_0)
+                    k_pivots_num_1 += tl.sum(logits_blk > k_pivot_1)
+                    k_pivots_num_2 += tl.sum(logits_blk > k_pivot_2)
 
                 if k_pivots_num_0 == k:
-                    k_pivot = k_pivot_0
+                    k_pivot = k_pivot_0 
                 elif k_pivots_num_1 == k:
                     k_pivot = k_pivot_1
+                elif k_pivots_num_2 == k:
+                    k_pivot = k_pivot_2
+                elif k_pivots_num_2 > k:
+                    min_logit = k_pivot_2
                 elif k_pivots_num_1 > k:
                     min_logit = k_pivot_1
                 elif k_pivots_num_0 > k:
@@ -364,10 +365,14 @@ def _topk_kernel(LOGITS, K, B,
                     max_logit = k_pivot_0
                 elif k_pivots_num_1 < k:
                     max_logit = k_pivot_1
-
+                elif k_pivots_num_2 < k:
+                    max_logit = k_pivot_2
+                
                 num_iters += 1
+                if num_iters >= 18:
+                    k_pivot = k_pivot_0
 
-            # Fifth pass: Apply top-k mask
+            # Third pass: Apply top-k mask
             for i in range(0, NUM_TILES):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < N
@@ -415,7 +420,7 @@ def apply_top_k_top_p(
     The logits tensor may be updated in-place.
     """
     input_logits = logits.clone()
-    original_logits = original_apply_top_k_top_p(logits, k, p)
+    original_logits = original_apply_top_k_top_p(input_logits, k, p)
     original_probs = torch.softmax(input_logits, dim=-1)
 
     batch_size, vocab_size = logits.shape
@@ -436,13 +441,11 @@ def apply_top_k_top_p(
     #     print(r_str("Error: probs are not close"))
     #     print(f"probs: {probs}")
     #     print(f"original_probs: {original_probs}")
-    
-    logits[logits < -1e-6] = -1000
-    original_logits[original_logits < -1e-6] = -1000
+
+    print(f"logits: {logits}")
+    print(f"original_logits: {original_logits}")
     if not torch.allclose(logits, original_logits):
         print(r_str("Error: logits are not close"))
-        print(f"logits: {logits}")
-        print(f"original_logits: {original_logits}")
         diff = (logits - original_logits).abs().flatten()
         diff_nonzero = diff[diff > 1e-6]
         print(f"diff_nonzero: {diff_nonzero}")
