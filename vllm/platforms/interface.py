@@ -40,34 +40,26 @@ def in_wsl() -> bool:
 
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
-    FLASH_ATTN_VLLM_V1 = enum.auto()
-    TRITON_ATTN_VLLM_V1 = enum.auto()
+    TRITON_ATTN = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     ROCM_AITER_MLA = enum.auto()  # Supported by V1
-    ROCM_AITER_MLA_VLLM_V1 = enum.auto()
     ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
-    TORCH_SDPA_VLLM_V1 = enum.auto()
     FLASHINFER = enum.auto()
-    FLASHINFER_VLLM_V1 = enum.auto()
     FLASHINFER_MLA = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
-    TRITON_MLA_VLLM_V1 = enum.auto()
     CUTLASS_MLA = enum.auto()
     FLASHMLA = enum.auto()  # Supported by V1
-    FLASHMLA_VLLM_V1 = enum.auto()
     FLASH_ATTN_MLA = enum.auto()  # Supported by V1
     PALLAS = enum.auto()
-    PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
     DIFFERENTIAL_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
-    XFORMERS_VLLM_V1 = enum.auto()
-    ROCM_ATTN_VLLM_V1 = enum.auto()
+    ROCM_ATTN = enum.auto()
 
 
 class PlatformEnum(enum.Enum):

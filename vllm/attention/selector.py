@@ -186,6 +186,14 @@ def _cached_get_attn_backend(
         # Check the environment variable and override if specified
         backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
         if backend_by_env_var is not None:
+            if backend_by_env_var.endswith("_VLLM_V1"):
+                logger.warning(
+                    "The suffix '_VLLM_V1' in the environment variable "
+                    "%s is no longer necessary as V0 backends have been "
+                    "deprecated. Please remove this suffix from your "
+                    "environment variable setting.", STR_BACKEND_ENV_VAR)
+                backend_by_env_var = backend_by_env_var.removesuffix(
+                    "_VLLM_V1")
             selected_backend = backend_name_to_enum(backend_by_env_var)
             if selected_backend is None:
                 raise ValueError(
