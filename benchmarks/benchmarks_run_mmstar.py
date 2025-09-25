@@ -1,11 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
+import base64
+import io
 import os
 import shutil
 import time
-import io
-import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import requests
 from datasets import load_dataset
@@ -146,7 +148,10 @@ def main(args):
         )
 
     with ThreadPoolExecutor(max_workers=args.parallel) as ex:
-        futures = {ex.submit(submit_one, messages): i for i, messages in enumerate(requests_payload)}
+        futures = {
+            ex.submit(submit_one, messages): i
+            for i, messages in enumerate(requests_payload)
+        }
         for fut in as_completed(futures):
             i = futures[fut]
             try:
@@ -179,22 +184,47 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Keep SGL-like knobs
     parser.add_argument("--num-questions", type=int, default=20)
-    parser.add_argument("--parallel", type=int, default=8, help="Number of concurrent requests")
+    parser.add_argument(
+        "--parallel", type=int, default=8, help="Number of concurrent requests"
+    )
     # vLLM OpenAI-compatible endpoint args
-    parser.add_argument("--api-base", type=str, default="http://127.0.0.1:8080/v1", help="vLLM OpenAI-compatible base URL")
+    parser.add_argument(
+        "--api-base",
+        type=str,
+        default="http://127.0.0.1:8080/v1",
+        help="vLLM OpenAI-compatible base URL",
+    )
     # If you didn't set --served-model-name when launching vLLM, set this to your served name or path
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct", help="Served model name or path recognized by vLLM")
-    parser.add_argument("--api-key", type=str, default="", help="Bearer token if your server requires auth")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen2.5-VL-7B-Instruct",
+        help="Served model name or path recognized by vLLM",
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default="",
+        help="*** if your server requires auth",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--timeout", type=int, default=120)
 
     # Sampling / determinism controls
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
-    parser.add_argument("--top-k", type=int, default=-1, help="-1 to disable; non-negative to enable")
+    parser.add_argument(
+        "--top-k", type=int, default=-1, help="-1 to disable; non-negative to enable"
+    )
     parser.add_argument("--repetition-penalty", type=float, default=1.0)
-    parser.add_argument("--seed", type=int, default=-1, help="Fixed RNG seed; <0 means unset")
-    parser.add_argument("--deterministic", action="store_true", help="Force deterministic-like settings: temp=0, top_p=1, top_k=-1, rep_penalty=1, seed=42 if unset")
+    parser.add_argument(
+        "--seed", type=int, default=-1, help="Fixed RNG seed; <0 means unset"
+    )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Force deterministic-like settings: temp=0, top_p=1, top_k=-1, rep_penalty=1, seed=42 if unset",
+    )
 
     args = parser.parse_args()
     main(args)
