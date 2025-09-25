@@ -1240,7 +1240,8 @@ def _insert_to_local_cache(request_local_hit_blocks, scheduler):
     scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
 
     # set threshold to 0.0 to ensure all are scheduled
-    zero_thresholds = [0.0] * num_requests_with_local_hit
+    zero_thresholds: list[Optional[float]] = [0.0
+                                              ] * num_requests_with_local_hit
     requests = create_requests(
         num_requests=num_requests_with_local_hit,
         num_tokens=[

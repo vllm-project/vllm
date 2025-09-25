@@ -237,14 +237,12 @@ class ServingScores(OpenAIServing):
             else:
                 pooling_params = (default_pooling_params)
 
-            generator = self.engine_client.encode(
-                engine_prompt,
-                pooling_params,
-                request_id_item,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                priority=request.priority,
-                cache_hit_threshold=request.cache_hit_threshold)
+            generator = self.engine_client.encode(engine_prompt,
+                                                  pooling_params,
+                                                  request_id_item,
+                                                  lora_request=lora_request,
+                                                  trace_headers=trace_headers,
+                                                  priority=request.priority)
 
             generators.append(generator)
 

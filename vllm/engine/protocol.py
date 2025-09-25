@@ -224,6 +224,7 @@ class EngineClient(ABC):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
+        cache_hit_threshold: Optional[float] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
         ...
