@@ -665,27 +665,17 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
-        architecture_family = "moe" if self.get_num_experts() > 1 else "dense"
-        transformers_backend_cls_map = {
-            "dense": {
-                "model": "TransformersModel",
-                "for_causal_lm": "TransformersForCausalLM",
-                "for_multimodal_lm": "TransformersForMultimodalLM",
-            },
-            "moe": {
-                "model": "TransformersMoEModel",
-                "for_causal_lm": "TransformersMoEForCausalLM",
-                "for_multimodal_lm": "TransformersMoEForMultimodalLM",
-            },
-        }.get(architecture_family)
-
+        prefix = "Transformers"
+        # Resolve Transformers backend pooling class
         if getattr(self, "runner_type", self.runner) == "pooling":
-            return transformers_backend_cls_map["model"]
+            return prefix + "Model"
+        # Resolve Transformers backend generate classes
+        prefix += "MoE" if self.get_num_experts() > 1 else ""
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
-            return transformers_backend_cls_map["for_multimodal_lm"]
-        return transformers_backend_cls_map["for_causal_lm"]
+            return prefix + "ForMultimodalLM"
+        return prefix + "ForCausalLM"
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers backend class."""
