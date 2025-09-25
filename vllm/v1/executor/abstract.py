@@ -19,7 +19,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.logger import init_logger
 
-
 logger = init_logger(__name__)
 FailureCallback = Callable[[], None]
 
