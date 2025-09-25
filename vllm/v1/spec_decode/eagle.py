@@ -808,8 +808,9 @@ class EagleProposer:
             try:
                 dummy_input_ids = torch.tensor([[1]],
                                                device=self.input_ids.device)
-                self.model.get_input_embeddings(dummy_input_ids)
-            except (NotImplementedError, AttributeError):
+                self.model.get_input_embeddings(dummy_input_ids,
+                                                multimodal_embeddings=None)
+            except (NotImplementedError, AttributeError, TypeError):
                 logger.warning(
                     "Draft model does not support multimodal inputs, "
                     "falling back to text-only mode")
