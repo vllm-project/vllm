@@ -590,13 +590,13 @@ class OpenAIServingResponses(OpenAIServing):
             total_tokens=num_prompt_tokens + num_generated_tokens,
             input_tokens_details=InputTokensDetails(
                 cached_tokens=num_cached_tokens, 
-                input_tokens_per_turn=[turn.input_tokens for turn in context.all_turns],
-                cached_tokens_per_turn=[turn.cached_input_tokens for turn in context.all_turns]),
+                input_tokens_per_turn=[turn.input_tokens for turn in context.all_turn_metrics],
+                cached_tokens_per_turn=[turn.cached_input_tokens for turn in context.all_turn_metrics]),
             output_tokens_details=OutputTokensDetails(
                 reasoning_tokens=num_reasoning_tokens,
                 tool_output_tokens=num_tool_output_tokens,
-                output_tokens_per_turn=[turn.output_tokens for turn in context.all_turns],
-                tool_output_tokens_per_turn=[turn.tool_output_tokens for turn in context.all_turns])
+                output_tokens_per_turn=[turn.output_tokens for turn in context.all_turn_metrics],
+                tool_output_tokens_per_turn=[turn.tool_output_tokens for turn in context.all_turn_metrics])
         )
         response = ResponsesResponse.from_request(
             request,
