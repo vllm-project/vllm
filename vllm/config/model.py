@@ -284,6 +284,7 @@ class ModelConfig:
     mm_encoder_tp_mode: InitVar[Optional[MMEncoderTPMode]] = None
     interleave_mm_strings: InitVar[Optional[bool]] = None
     skip_mm_profiling: InitVar[Optional[bool]] = None
+    video_pruning_rate: InitVar[Optional[float]] = None
 
     def compute_hash(self) -> str:
         """
