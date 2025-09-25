@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import time
+from pathlib import Path
 
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.logger import init_logger
@@ -21,10 +21,10 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig):
     if compilation_config.level == CompilationLevel.PIECEWISE and \
         compilation_config.debug_dump_path:
         import depyf
-        path = os.path.join(compilation_config.debug_dump_path,
-                            f"rank_{vllm_config.parallel_config.rank}")
+        path = Path(compilation_config.debug_dump_path) / \
+            f"rank_{vllm_config.parallel_config.rank}"
         global context_manager
-        context_manager = depyf.prepare_debug(path)
+        context_manager = depyf.prepare_debug(path.as_posix())
         context_manager.__enter__()
 
 
