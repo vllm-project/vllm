@@ -517,7 +517,8 @@ class EagleProposer:
                                 common_attn_metadata: CommonAttentionMetadata,
                                 spec_decode_metadata: SpecDecodeMetadata,
                                 valid_sampled_tokens_count: torch.Tensor) -> \
-                    tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
+                    tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor, \
+                          torch.Tensor, torch.cuda.Event]:
         """
         This function is used to prepare the inputs for speculative decoding
         It updates the common_attn_metadata for speculative decoding,
@@ -536,6 +537,9 @@ class EagleProposer:
             num_draft_tokens_gpu > 0,
             num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
             torch.zeros_like(num_draft_tokens_gpu))
+        
+        num_rejected_tokens_calc_event = torch.cuda.Event()
+        num_rejected_tokens_calc_event.record()
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
@@ -564,7 +568,8 @@ class EagleProposer:
         token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1 \
             - num_rejected_tokens_gpu
 
-        return spec_common_attn_metadata, token_indices, token_indices_to_sample
+        return spec_common_attn_metadata, token_indices, token_indices_to_sample, \
+              num_rejected_tokens_gpu, num_rejected_tokens_calc_event
 
     def propose_tree(
         self,

@@ -292,7 +292,8 @@ class EngineCore:
                 scheduler_output.total_num_scheduled_tokens > 0)
 
     def post_step(self, model_executed: bool) -> None:
-        if self.use_spec_decode and model_executed:
+        if self.use_spec_decode and model_executed \
+            and not self.vllm_config.scheduler_config.async_scheduling:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:

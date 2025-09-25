@@ -277,6 +277,8 @@ class Scheduler(SchedulerInterface):
 
                 self.kv_cache_manager.free(preempted_req)
                 self.encoder_cache_manager.free(preempted_req)
+                if self.scheduler_config.async_scheduling:
+                    preempted_req.spec_token_ids.clear()
                 preempted_req.status = RequestStatus.PREEMPTED
                 preempted_req.num_computed_tokens = 0
                 preempted_req.num_preemptions += 1
@@ -922,7 +924,7 @@ class Scheduler(SchedulerInterface):
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
-                    request, new_token_ids)
+                    request, new_token_ids, scheduled_spec_token_ids)
 
             # Stop checking for pooler models.
             pooler_output = None
@@ -1027,6 +1029,7 @@ class Scheduler(SchedulerInterface):
         self,
         request: Request,
         new_token_ids: list[int],
+        proposed_token_ids: list[int] = None,
     ) -> tuple[list[int], bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
