@@ -455,7 +455,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # which would result in up-projected context being
             #   2*(192*128)*(64*1024) = 3gb
             # (assuming 192 QK head dim, 128 heads, and fp16)
-            64 * 1024)
+            envs.VLLM_MLA_WORKSPACE_LIMIT)
 
         # Enforce that we enough for at least 1 page per request
         chunked_prefill_workspace_size = max(

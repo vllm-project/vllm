@@ -120,6 +120,7 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
+    VLLM_MLA_WORKSPACE_LIMIT: int = 65536
     VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH: int = 32
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -399,6 +400,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL":
     lambda: bool(int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))
                  ),
+
+    # If set, vLLM will allow larger chunked_prefill_workspace_size for MLA
+    # default is 64K
+    "VLLM_MLA_WORKSPACE_LIMIT":
+    lambda: int(os.getenv("VLLM_MLA_WORKSPACE_LIMIT", "65336")),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
