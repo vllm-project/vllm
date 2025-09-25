@@ -526,9 +526,14 @@ class FlashLB(EplbPolicy):
         return result / counts
 
     def rebalance_experts(
-        self, weight, num_replicas, num_groups, num_nodes,
-        num_ranks, old_global_expert_indices: torch.Tensor
-    ):
+        self,
+        weight: torch.Tensor,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
         Parameters:
@@ -549,8 +554,6 @@ class FlashLB(EplbPolicy):
             expert_count: [layers, num_logical_experts], number of
                 physical replicas for each logical expert
         """
-        assert num_ranks % num_nodes == 0
-        assert num_replicas % num_ranks == 0
 
         expert_workload = weight.cpu().numpy()
         expert_workload += 1
