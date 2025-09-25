@@ -120,7 +120,7 @@ def parse_limit_mm_per_prompt(val: str):
             # Legacy format
             result[modality] = options
         elif isinstance(options, dict):
-            # Enhanced format - convert to appropriate dataclass
+            # Configurable format - convert to appropriate dataclass
             try:
                 if modality == "video":
                     result[modality] = VideoDummyOptions(**options)

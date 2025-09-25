@@ -82,10 +82,10 @@ ModalityDummyOptions = Union[
     AudioDummyOptions
 ]
 
-# Main configuration type supporting both legacy and enhanced formats
+# Main configuration type supporting both legacy and configurable formats
 LimitPerPromptType = Union[
     Dict[str, int],  # Legacy: {"video": 1, "image": 5}
-    Dict[str, Union[int, ModalityDummyOptions]]  # Enhanced format
+    Dict[str, Union[int, ModalityDummyOptions]]  # Configurable format
 ]
 
 MMEncoderTPMode = Literal["weights", "data"]
@@ -104,7 +104,7 @@ class MultiModalConfig:
     Legacy format (count only):
         {"image": 16, "video": 2}
 
-    Enhanced format (with options):
+    Configurable format (with options):
         {"video": {"count": 1, "num_frames": 32}, "image": {"count": 5, "max_size": [512, 512]}}
 
     Mixed format (combining both):
@@ -205,8 +205,8 @@ class MultiModalConfig:
 
     def get_dummy_options(self, modality: str) -> Optional[ModalityDummyOptions]:
         """
-        Get the enhanced dummy data options for a modality.
-        Returns None if no enhanced options are configured.
+        Get the configurable dummy data options for a modality.
+        Returns None if no configurable options are configured.
         """
         limit_data = self.limit_per_prompt.get(modality)
 
