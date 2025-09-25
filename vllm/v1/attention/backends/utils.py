@@ -23,11 +23,10 @@ if TYPE_CHECKING:
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
-from vllm.attention.layer import Attention
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 
