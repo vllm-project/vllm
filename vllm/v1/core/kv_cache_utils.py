@@ -1103,7 +1103,9 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         kv_cache_spec: The kv cache spec of each attention layer in the model
     """
 
-    if is_kv_cache_spec_uniform(kv_cache_spec):
+    if is_kv_cache_spec_uniform(
+            kv_cache_spec) or UniformTypeKVCacheSpecs.is_uniform_type(
+                kv_cache_spec):
         return
 
     logger.warning(
@@ -1141,7 +1143,8 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     attention_chunk_size=spec.attention_chunk_size,
                 )
 
-    if not is_kv_cache_spec_uniform(kv_cache_spec):
+    if not (is_kv_cache_spec_uniform(kv_cache_spec)
+            or UniformTypeKVCacheSpecs.is_uniform_type(kv_cache_spec)):
         raise ValueError("Hybrid KV cache manager is disabled but failed to "
                          "convert the KV cache specs to one unified type.")
 
