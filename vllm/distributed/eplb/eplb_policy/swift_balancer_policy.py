@@ -211,7 +211,6 @@ class SwiftBalancer(EplbPolicy):
     def prepare_expert_list(updated_weights: dict[int, float],
                             redundancy_counts: np.ndarray,
                             num_redundant_experts: int) -> list:
-
         """
         Statistically selected redundant expert information
 
