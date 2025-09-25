@@ -17,7 +17,7 @@ PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
 GREEDY_TEMPERATURE: tl.constexpr = -1
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
-MAX_SPEC_LEN = 32
+MAX_SPEC_LEN = 128
 
 
 class RejectionSampler(nn.Module):
