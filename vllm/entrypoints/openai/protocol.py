@@ -768,8 +768,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
-        if self.cache_hit_threshold is not None:
-            extra_args["cache_hit_threshold"] = self.cache_hit_threshold
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -1299,8 +1297,6 @@ class CompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
-        if self.cache_hit_threshold is not None:
-            extra_args["cache_hit_threshold"] = self.cache_hit_threshold
 
         return SamplingParams.from_optional(
             n=self.n,

@@ -244,7 +244,7 @@ class ServingScores(OpenAIServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=request.priority,
-            )
+                cache_hit_threshold=request.cache_hit_threshold)
 
             generators.append(generator)
 

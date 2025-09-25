@@ -334,6 +334,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        cache_hit_threshold: Optional[float] = None,
     ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
@@ -456,6 +457,7 @@ class Processor:
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
+            cache_hit_threshold=cache_hit_threshold,
         )
 
     def _validate_model_inputs(self, encoder_inputs: Optional[SingletonInputs],

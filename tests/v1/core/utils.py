@@ -162,17 +162,14 @@ def create_requests(
                             num_tokens)
         if cache_hit_thresholds is not None \
             and cache_hit_thresholds[i] is not None:
-            sampling_params.extra_args = { \
-                "cache_hit_threshold": cache_hit_thresholds[i]
-            }
-        request = Request(
-            request_id=f"{i}",
-            prompt_token_ids=prompt_token_ids,
-            sampling_params=sampling_params,
-            pooling_params=None,
-            mm_features=mm_features if mm_features else None,
-            eos_token_id=EOS_TOKEN_ID,
-            block_hasher=block_hasher,
-        )
+            cache_hit_threshold = cache_hit_thresholds[i]
+        request = Request(request_id=f"{i}",
+                          prompt_token_ids=prompt_token_ids,
+                          sampling_params=sampling_params,
+                          pooling_params=None,
+                          mm_features=mm_features if mm_features else None,
+                          eos_token_id=EOS_TOKEN_ID,
+                          block_hasher=block_hasher,
+                          cache_hit_threshold=cache_hit_threshold)
         requests.append(request)
     return requests

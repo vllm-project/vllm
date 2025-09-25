@@ -41,6 +41,7 @@ class Request:
         cache_salt: Optional[str] = None,
         priority: int = 0,
         trace_headers: Optional[Mapping[str, str]] = None,
+        cache_hit_threshold: Optional[float] = None,
         block_hasher: Optional[Callable[["Request"],
                                         list["BlockHash"]]] = None,
     ) -> None:
@@ -64,7 +65,7 @@ class Request:
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: Optional[dict[str, Any]] = None
 
-        self.cache_hit_threshold: Optional[float] = None
+        self.cache_hit_threshold: Optional[float] = cache_hit_threshold
 
         if pooling_params is not None:
             # Pooling models.
@@ -80,8 +81,6 @@ class Request:
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = \
                     sampling_params.extra_args.get("kv_transfer_params")
-                self.cache_hit_threshold = \
-                    sampling_params.extra_args.get("cache_hit_threshold")
         else:
             raise ValueError(
                 "sampling_params and pooling_params can't both be unset")
@@ -152,6 +151,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            cache_hit_threshold=request.cache_hit_threshold
         )
 
     def append_output_token_ids(
