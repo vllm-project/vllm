@@ -93,6 +93,17 @@ direct_register_custom_op(
 
 class TransformersMoEBase(TransformersBase):
 
+    def __init__(self, *, vllm_config, prefix=""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        if self.parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "Transformers backend does not support expert parallel yet.")
+        if self.parallel_config.enable_eplb:
+            raise NotImplementedError(
+                "Transformers backend does not support expert parallel load "
+                "balancing yet.")
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         """
         Params for weights, fp8 weight scales, fp8 activation scales

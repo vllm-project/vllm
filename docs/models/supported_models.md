@@ -32,7 +32,6 @@ If the Transformers model implementation follows all the steps in [writing a cus
 - All the features listed in the [compatibility matrix](../features/compatibility_matrix.md#feature-x-feature)
 - Any combination of the following vLLM parallelisation schemes:
     - Data parallel
-    - Expert parallel
     - Pipeline parallel
     - Tensor parallel
 

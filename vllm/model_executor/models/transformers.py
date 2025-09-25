@@ -452,8 +452,9 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             QuantizationConfig] = vllm_config.quant_config
 
         if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            raise ValueError(
-                "Transformers backend does not support MXFP4 yet.")
+            raise NotImplementedError(
+                "Transformers backend does not support MXFP4 quantization yet."
+            )
 
         self.pp_group = get_pp_group()
         self.pp_size = self.pp_group.world_size
