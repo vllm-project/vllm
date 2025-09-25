@@ -339,7 +339,7 @@ def as_seq_cls_model(cls: _T) -> _T:
             })
 
         def _classifier(self, x: torch.Tensor):
-            x, _ = self.score(x.float())
+            x = self.score(x)
             return x
 
         def forward(
