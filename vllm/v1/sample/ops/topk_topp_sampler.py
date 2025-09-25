@@ -68,6 +68,8 @@ class TopKTopPSampler(nn.Module):
                     "native implementation of top-p & top-k sampling. For the "
                     "best performance, please install FlashInfer.")
                 self.forward = self.forward_native
+        elif current_platform.is_cpu():
+            self.forward = self.forward_cpu
         else:
             self.forward = self.forward_native
 
@@ -118,6 +120,45 @@ class TopKTopPSampler(nn.Module):
         # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
         # because of slicing operation in logits_processor.
         return flashinfer_sample(logits.contiguous(), k, p, generators), None
+
+    def forward_cpu(
+        self,
+        logits: torch.Tensor,
+        generators: dict[int, torch.Generator],
+        k: Optional[torch.Tensor],
+        p: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        PyTorch-native implementation of top-k and top-p sampling for CPU.
+
+        The logits tensor may be updated in-place.
+        """
+        logits = self.apply_top_k_top_p(logits, k, p)
+        logits_to_return = None
+        if self.logprobs_mode == "processed_logits":
+            logits_to_return = logits
+        elif self.logprobs_mode == "processed_logprobs":
+            logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
+
+        # Note: this is a workaround for
+        # https://github.com/pytorch/pytorch/pull/151218
+        @torch.compile(dynamic=True)
+        def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
+            probs = logits.softmax(dim=-1, dtype=torch.float32)
+            q = torch.empty_like(probs)
+            q.exponential_()
+            return probs.div(q).argmax(dim=-1).view(-1)
+
+        if len(generators) != logits.shape[0]:
+            return compiled_random_sample(logits), logits_to_return
+        else:
+            probs = logits.softmax(dim=-1, dtype=torch.float32)
+            q = torch.empty_like(probs)
+            q.exponential_()
+            for i, generator in generators.items():
+                q[i].exponential_(generator=generator)
+
+            return probs.div_(q).argmax(dim=-1).view(-1), logits_to_return
 
 
 def apply_top_k_top_p(
