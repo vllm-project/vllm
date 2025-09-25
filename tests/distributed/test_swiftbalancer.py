@@ -4,32 +4,23 @@
 import torch
 
 from vllm.distributed.eplb.eplb_policy.swift_balancer_policy import (
-    SwiftBalancer
-)
+    SwiftBalancer)
+
 
 def test_rebalance():
     """Test rebalancing functionality"""
 
     old_global_expert_indices = torch.tensor([
-        [0, 1, 2, 3, 4,
-         4, 5, 6, 7, 8,
-         8, 9, 10, 11, 12,
-         12, 13, 14, 15, 0],
-        [0, 1, 2, 3, 6,
-         4, 5, 6, 7, 9,
-         8, 9, 10, 11, 6,
-         12, 13, 14, 15, 6],
+        [0, 1, 2, 3, 4, 4, 5, 6, 7, 8, 8, 9, 10, 11, 12, 12, 13, 14, 15, 0],
+        [0, 1, 2, 3, 6, 4, 5, 6, 7, 9, 8, 9, 10, 11, 6, 12, 13, 14, 15, 6],
     ])
 
     weight = torch.tensor([
-        [90, 132, 40, 61,
-         104, 165, 39, 4,
-         73, 56, 183, 86,
-         22, 98, 65, 120],
-        [20, 107, 104, 64,
-         19, 197, 187, 157,
-         172, 86, 16, 27,
-         45, 85, 150, 164],
+        [90, 132, 40, 61, 104, 165, 39, 4, 73, 56, 183, 86, 22, 98, 65, 120],
+        [
+            20, 107, 104, 64, 19, 197, 187, 157, 172, 86, 16, 27, 45, 85, 150,
+            164
+        ],
     ])
 
     num_layers = weight.shape[0]
@@ -41,8 +32,8 @@ def test_rebalance():
     policy = SwiftBalancer()
 
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes,
-        num_rank, old_global_expert_indices)
+        weight, num_replicas, num_groups, num_nodes, num_rank,
+        old_global_expert_indices)
 
     # Verify output shapes
     assert phy2log.shape == (
@@ -71,22 +62,12 @@ def test_rebalance():
         num_layers), f"Total replicas should be {num_replicas * num_layers}"
 
     # Verify expected output
-    expected_phy2log = torch.tensor([[0, 1, 2, 3, 4,
-                                      10, 5, 6, 7, 8,
-                                      1, 9, 10, 11, 14,
-                                      12, 13, 4, 15, 5],
-                                     [0, 1, 2, 3, 6,
-                                      4, 5, 8, 7, 9,
-                                      8, 14, 10, 5, 6,
-                                      12, 13, 11, 15, 7]])
+    expected_phy2log = torch.tensor(
+        [[0, 1, 2, 3, 4, 10, 5, 6, 7, 8, 1, 9, 10, 11, 14, 12, 13, 4, 15, 5],
+         [0, 1, 2, 3, 6, 4, 5, 8, 7, 9, 8, 14, 10, 5, 6, 12, 13, 11, 15, 7]])
     assert torch.all(phy2log == expected_phy2log)
 
-    expected_logcnt = torch.tensor([[1, 2, 1, 1,
-                                     2, 2, 1, 1,
-                                     1, 1, 2, 1,
-                                     1, 1, 1, 1],
-                                    [1, 1, 1, 1,
-                                     1, 2, 2, 2,
-                                     2, 1, 1, 1,
-                                     1, 1, 1, 1]])
+    expected_logcnt = torch.tensor(
+        [[1, 2, 1, 1, 2, 2, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1],
+         [1, 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1]])
     assert torch.all(logcnt == expected_logcnt)
