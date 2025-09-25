@@ -1,0 +1,3 @@
+# Enforce LF for shell scripts to keep shebangs valid
+extras/**/*.sh text eol=lf
+*.sh text eol=lf
