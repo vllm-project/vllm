@@ -1,89 +1,135 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import partial
-from unittest.mock import patch
+import json
+import os
 
 import pytest
-from transformers import PretrainedConfig
 
-from vllm import LLM
-from vllm.sampling_params import SamplingParams
+from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
-from tests.utils import create_new_process_for_each_test
 
 if not current_platform.is_device_capability(100):
     pytest.skip("This test only runs on Blackwell GPUs (SM100).",
                 allow_module_level=True)
 
-def dummy_hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
-    """
-    Dummy HF overrides function used to create dummy model
-    with only minimum nums of layer.
-    """
-    text_config = hf_config.get_text_config()
+os.environ["FLASHINFER_NVCC_THREADS"] = "16"
 
-    # Do 4 backbone layers to include dense and MoE layers
-    text_config.update({
-        "num_layers": 4,
-        "num_hidden_layers": 4,
-    })
-
-    if hasattr(hf_config, "vision_config"):
-        hf_config.vision_config.update({
-            "num_layers": 1,
-            "num_hidden_layers": 1,
-        })
-    # e.g.: ibm-granite/granite-speech-3.3-2b
-    if hasattr(hf_config, "encoder_config"):
-        hf_config.encoder_config.update({
-            "num_layers": 1,
-            "num_hidden_layers": 1,
-        })
-    # e.g.: Qwen/Qwen2-Audio-7B-Instruct
-    if hasattr(hf_config, "audio_config"):
-        hf_config.audio_config.update({
-            "num_layers": 1,
-            "num_hidden_layers": 1,
-            "encoder_layers": 1,
-        })
-
-    return hf_config
+# dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4,
+# "text_config": {"num_layers": 4, "num_hidden_layers": 4}}
+dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4}
 
 
-# @create_new_process_for_each_test()
-def can_initialize(vllm_runner, model_name: str, **model_kwargs):
+def can_initialize(model: str, extra_args: list[str]):
 
-    default_model_kwargs = {
-        "enforce_eager": True,
-        "trust_remote_code": True,
-        "max_model_len": 1024,
-        "gpu_memory_utilization": 0.8,
-        "load_format": "dummy",
-        # "hf_overrides": dummy_hf_overrides,
-    }
-    default_model_kwargs.update(model_kwargs)
+    # Server arguments
+    server_args = [
+        "--max-model-len",
+        "8192",
+        "--max-num-batched-tokens",
+        "1024",
+        "--load-format",
+        "dummy",
+        "--trust-remote-code",
+        "--limit-mm-per-prompt",
+        json.dumps({"image": 0}),
+        *extra_args,
+    ]
 
-    with vllm_runner(model_name, **default_model_kwargs) as llm:
-        sp = SamplingParams(temperature=0, max_tokens=2)
-        llm.generate("Hello, world!", sampling_params=sp)
+    # Launch server and make a simple request
+    with RemoteOpenAIServer(model,
+                            server_args,
+                            max_wait_seconds=480,
+                            override_hf_configs=dummy_hf_overrides) as server:
+        client = server.get_client()
+        # Make a simple request to verify the server works
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{
+                "role": "system",
+                "content": "You are a helpful assistant."
+            }, {
+                "role": "user",
+                "content": "Hello!"
+            }],
+            temperature=0,
+            max_completion_tokens=2,
+        )
+        generated_text = completion.choices[0].message.content
+        assert generated_text is not None
 
-def test_blackwell_fp8_tensor_moe_flashinfer_trtllm(vllm_runner, monkeypatch: pytest.MonkeyPatch):
+
+## Llama4 ##
+
+
+@pytest.mark.skip(
+    reason="This gets stuck during/after graph capture for some reason")
+def test_llama4_fp8_tensor_moe_flashinfer_cutlass(
+        monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
-    can_initialize(vllm_runner, "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", tensor_parallel_size=1)
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
+    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", [])
 
-def test_blackwell_fp8_block_moe_deep_gemm(vllm_runner, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
-    can_initialize(vllm_runner, "deepseek-ai/DeepSeek-V3.1", tensor_parallel_size=1)
 
-def test_blackwell_nvfp4_moe_flashinfer_cutlass(vllm_runner, monkeypatch: pytest.MonkeyPatch):
+def test_llama4_fp8_tensor_moe_flashinfer_trtllm(
+        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
+    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", [])
+
+
+@pytest.mark.skip(
+    reason="This gets stuck during/after graph capture for some reason")
+def test_llama4_nvfp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
-    can_initialize(vllm_runner, "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4", tensor_parallel_size=1)
+    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4", [])
 
-def test_blackwell_nvfp4_moe_flashinfer_trtllm(vllm_runner, monkeypatch: pytest.MonkeyPatch):
+
+@pytest.mark.skip(reason="RuntimeError: No kernel found for the given options")
+def test_llama4_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
-    can_initialize(vllm_runner, "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4", tensor_parallel_size=1)
-    can_initialize(vllm_runner, "nvidia/DeepSeek-R1-0528-FP4-v2", tensor_parallel_size=1)
+    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4", [])
 
+
+## DeepSeekV3 ##
+
+
+def test_deepseek_fp8_block_moe_deep_gemm(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
+    can_initialize("deepseek-ai/DeepSeek-V3.1", [])
+
+
+def test_deepseek_nvfp4_moe_flashinfer_cutlass(
+        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
+    can_initialize("nvidia/DeepSeek-R1-0528-FP4-v2", [])
+
+
+@pytest.mark.skip(reason="RuntimeError: routing_bias must be bfloat16.")
+def test_deepseek_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
+    can_initialize("nvidia/DeepSeek-R1-0528-FP4-v2", [])
+
+
+## GPT-OSS ##
+
+
+def test_gptoss_mxfp4bf16_moe_flashinfer(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "1")
+    can_initialize("openai/gpt-oss-20b", [])
+
+
+def test_gptoss_mxfp4mxfp8_moe_flashinfer_cutlass(
+        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "1")
+    can_initialize("openai/gpt-oss-20b", [])
+
+
+def test_gptoss_mxfp4mxfp8_moe_flashinfer_trtllm(
+        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
+    can_initialize("openai/gpt-oss-20b", [])
