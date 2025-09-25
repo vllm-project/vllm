@@ -84,7 +84,7 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
             # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
             # L4 supports FA3.
-            m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+            m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         LLM(

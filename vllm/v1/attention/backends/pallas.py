@@ -86,7 +86,7 @@ class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "PALLAS_VLLM_V1"
+        return "PALLAS"
 
     @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:

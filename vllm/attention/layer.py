@@ -364,7 +364,7 @@ class Attention(nn.Module, AttentionLayerBase):
             self.impl.process_weights_after_loading(act_dtype)
 
         # FlashInfer requires attention sinks to be float32
-        if (self.backend == _Backend.FLASHINFER_VLLM_V1
+        if (self.backend == _Backend.FLASHINFER
                 and hasattr(self.impl, 'sinks')):
             from vllm.v1.attention.backends.flashinfer import FlashInferImpl
             assert isinstance(self.impl, FlashInferImpl)
@@ -420,21 +420,17 @@ class MultiHeadAttention(nn.Module):
 
             self.attn_backend = backend if backend in {
                 _Backend.TORCH_SDPA,
-                _Backend.TORCH_SDPA_VLLM_V1,
                 _Backend.XFORMERS,
-                _Backend.PALLAS_VLLM_V1,
+                _Backend.PALLAS,
                 _Backend.ROCM_AITER_FA,
                 _Backend.FLASH_ATTN,
-                _Backend.FLASH_ATTN_VLLM_V1,
             } else _Backend.TORCH_SDPA
 
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
             self.attn_backend = _Backend.TORCH_SDPA
 
-        if self.attn_backend in {
-                _Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1
-        }:
+        if self.attn_backend == _Backend.FLASH_ATTN:
             if use_upstream_fa:
                 from flash_attn import flash_attn_varlen_func
                 self._flash_attn_varlen_func = flash_attn_varlen_func
@@ -468,11 +464,7 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend in {
-                _Backend.FLASH_ATTN,
-                _Backend.FLASH_ATTN_VLLM_V1,
-        }:
-
+        if self.attn_backend == _Backend.FLASH_ATTN:
             cu_seqlens_q = torch.arange(0, (bsz + 1) * q_len,
                                         step=q_len,
                                         dtype=torch.int32,
@@ -499,8 +491,7 @@ class MultiHeadAttention(nn.Module):
                                                           key,
                                                           value,
                                                           scale=self.scale)
-        elif (self.attn_backend == _Backend.TORCH_SDPA
-              or self.attn_backend == _Backend.TORCH_SDPA_VLLM_V1):
+        elif self.attn_backend == _Backend.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
             out = F.scaled_dot_product_attention(query,
@@ -508,7 +499,7 @@ class MultiHeadAttention(nn.Module):
                                                  value,
                                                  scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend == _Backend.PALLAS_VLLM_V1:
+        elif self.attn_backend == _Backend.PALLAS:
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
             from torch_xla.experimental.custom_kernel import flash_attention

@@ -241,9 +241,8 @@ class CudaPlatformBase(Platform):
             use_flashinfermla = selected_backend == _Backend.FLASHINFER_MLA or (
                 selected_backend is None and cls.is_device_capability(100)
                 and block_size in [32, 64])
-            use_flashmla = selected_backend in [
-                _Backend.FLASHMLA, _Backend.FLASHMLA_VLLM_V1
-            ] or (selected_backend is None and is_flashmla_supported()[0])
+            use_flashmla = selected_backend == _Backend.FLASHMLA or (
+                selected_backend is None and is_flashmla_supported()[0])
             use_flashattn = selected_backend == _Backend.FLASH_ATTN_MLA or (
                 selected_backend is None and flash_attn_supports_mla())
             use_triton = selected_backend == _Backend.TRITON_MLA or (
@@ -282,7 +281,7 @@ class CudaPlatformBase(Platform):
         if use_v1:
             FLASHINFER_V1 = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"  # noqa: E501
             FLEX_ATTENTION_V1 = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
-            TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+            TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
             FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
             TREE_ATTN_V1 = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"  # noqa: E501
             XFORMERS_V1 = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"  # noqa: E501
@@ -300,16 +299,16 @@ class CudaPlatformBase(Platform):
             elif selected_backend == _Backend.FLEX_ATTENTION:
                 logger.info_once("Using FlexAttention backend on V1 engine.")
                 return FLEX_ATTENTION_V1
-            elif selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+            elif selected_backend == _Backend.TRITON_ATTN:
                 logger.info_once("Using Triton backend on V1 engine.")
-                return TRITON_ATTN_VLLM_V1
+                return TRITON_ATTN
             elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return FLASH_ATTN_V1
             elif selected_backend == _Backend.TREE_ATTN:
                 logger.info_once("Using Tree Attention backend on V1 engine.")
                 return TREE_ATTN_V1
-            elif selected_backend == _Backend.XFORMERS_VLLM_V1:
+            elif selected_backend == _Backend.XFORMERS:
                 logger.info_once("Using XFormers backend on V1 engine.")
                 return XFORMERS_V1
 
@@ -341,7 +340,7 @@ class CudaPlatformBase(Platform):
                 if (has_sink or
                         use_fp8_kv_cache) and not cls.is_device_capability(90):
                     logger.info_once("Using Triton backend on V1 engine.")
-                    return TRITON_ATTN_VLLM_V1
+                    return TRITON_ATTN
                 elif is_default_backend_supported := is_attn_backend_supported(
                         FLASH_ATTN_V1, head_size, dtype,
                         allow_import_error=False):
@@ -457,12 +456,12 @@ class CudaPlatformBase(Platform):
         else:
             # Default to FlashAttention
             if attention_backend is None:
-                attention_backend = "FLASH_ATTN_VLLM_V1"
+                attention_backend = "FLASH_ATTN"
 
             # All Blackwell backends support fp8
             if cls.is_device_capability(100):
                 supported = True
-            elif attention_backend == "FLASH_ATTN_VLLM_V1":
+            elif attention_backend == "FLASH_ATTN":
                 if fp8_attention:
                     from vllm.attention.utils.fa_utils import (
                         flash_attn_supports_fp8)
@@ -471,7 +470,7 @@ class CudaPlatformBase(Platform):
                     supported = True
             elif attention_backend == "FLASHINFER":
                 supported = True
-            elif attention_backend == "TRITON_ATTN_VLLM_V1":
+            elif attention_backend == "TRITON_ATTN":
                 supported = cls.supports_fp8()
         return supported
 

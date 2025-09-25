@@ -314,12 +314,11 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
-    if (attn_backend == "TRITON_ATTN_VLLM_V1"
-            and not current_platform.is_rocm()):
-        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+    if (attn_backend == "TRITON_ATTN" and not current_platform.is_rocm()):
+        pytest.skip("TRITON_ATTN does not support "
                     "multi-token eagle spec decode on current platform")
 
-    if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+    if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Setup draft model mock
@@ -400,16 +399,15 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
-    if (attn_backend == "TRITON_ATTN_VLLM_V1"
-            and not current_platform.is_rocm()):
-        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+    if (attn_backend == "TRITON_ATTN" and not current_platform.is_rocm()):
+        pytest.skip("TRITON_ATTN does not support "
                     "multi-token eagle spec decode on current platform")
 
     if (attn_backend == "TREE_ATTN"):
         pytest.skip("TREE_ATTN is tested separately in test_propose_tree"
                     "because it requires special input mocking.")
 
-    if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+    if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Use GPU device
@@ -510,12 +508,12 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
                                    device=device)
     sampling_metadata = mock.MagicMock()
 
-    if attn_backend == "FLASH_ATTN_VLLM_V1":
+    if attn_backend == "FLASH_ATTN":
         attn_metadata_builder_cls, _ = get_attention_backend(
-            _Backend.FLASH_ATTN_VLLM_V1)
-    elif attn_backend == "TRITON_ATTN_VLLM_V1":
+            _Backend.FLASH_ATTN)
+    elif attn_backend == "TRITON_ATTN":
         attn_metadata_builder_cls, _ = get_attention_backend(
-            _Backend.TRITON_ATTN_VLLM_V1)
+            _Backend.TRITON_ATTN)
     elif attn_backend == "TREE_ATTN":
         attn_metadata_builder_cls, _ = get_attention_backend(
             _Backend.TREE_ATTN)
