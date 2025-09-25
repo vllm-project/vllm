@@ -390,7 +390,7 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.warning(
+                        logger.info(
                             ("No available shared memory broadcast block found"
                              " in %s seconds. This typically happens when some"
                              " processes are hanging, doing some time-consuming"
