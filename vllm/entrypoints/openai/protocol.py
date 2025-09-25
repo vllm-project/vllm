@@ -643,6 +643,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
 
+    data_parallel_rank: Optional[int] = Field(
+        default=None,
+        description=(
+            "Optional data parallel rank for routing requests to specific "
+            "data parallel workers. Used by routers for load balancing "
+            "across data parallel shards. If not specified, requests are "
+            "load balanced automatically."),
+    )
+
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
         description=("Additional request parameters with string or "
@@ -1177,6 +1186,15 @@ class CompletionRequest(OpenAIBaseModel):
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
+
+    data_parallel_rank: Optional[int] = Field(
+        default=None,
+        description=(
+            "Optional data parallel rank for routing requests to specific "
+            "data parallel workers. Used by routers for load balancing "
+            "across data parallel shards. If not specified, requests are "
+            "load balanced automatically."),
+    )
 
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
