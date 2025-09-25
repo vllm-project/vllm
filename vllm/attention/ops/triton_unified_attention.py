@@ -47,6 +47,78 @@ def find_seq_idx(query_start_len_ptr, target_idx, num_seqs,
 
     return left - 1
 
+# This function is borrowed from Aiter
+@triton.jit
+def _mxfp4_quant_op(
+    x,
+    BLOCK_SIZE_N,
+    BLOCK_SIZE_M,
+    MXFP4_QUANT_BLOCK_SIZE,
+):
+    """
+    Converts given x (in fp32) to mxfp4 format.
+    x: [BLOCK_SIZE_M, BLOCK_SIZE_N], fp32
+
+    """
+    NUM_QUANT_BLOCKS: tl.constexpr = BLOCK_SIZE_N // MXFP4_QUANT_BLOCK_SIZE
+    x = x.reshape(BLOCK_SIZE_M, NUM_QUANT_BLOCKS, MXFP4_QUANT_BLOCK_SIZE)
+    # Calculate scale
+    amax = tl.max(tl.abs(x), axis=-1, keep_dims=True)
+    amax = amax.to(tl.int32, bitcast=True)
+    amax = (amax + 0x200000).to(tl.uint32, bitcast=True) & 0xFF800000
+    amax = amax.to(tl.float32, bitcast=True)
+    scale_e8m0_unbiased = tl.log2(amax).floor() - 2
+    scale_e8m0_unbiased = tl.clamp(scale_e8m0_unbiased, min=-127, max=127)
+
+    # blockscale_e8m0
+    bs_e8m0 = scale_e8m0_unbiased.to(tl.uint8) + 127  # in fp32, we have 2&(e - 127)
+
+    quant_scale = tl.exp2(-scale_e8m0_unbiased)
+
+    # Compute quantized x
+    qx = x * quant_scale
+
+    # Convert quantized fp32 tensor to uint32 before converting to mxfp4 format
+    # Note: MXFP4  S:1-bit, E:2-bit, M:1-bit
+    #   Zeros: S000 -> +/-0
+    #   Denormal Numbers: S001 -> +/- 0.5
+    #   Normal Numbers:
+    #           S010 -> +/- 1.0
+    #           S011 -> +/- 1.5
+    #           S100 -> +/- 2.0
+    #           S101 -> +/- 3.0
+    #           S110 -> +/- 4.0
+    #           S111 -> +/- 6.0
+    qx = qx.to(tl.uint32, bitcast=True)
+
+    # Extract sign, exponents and mantissa fields from FP32
+    s = qx & 0x80000000
+    e = (qx >> 23) & 0xFF
+    m = qx & 0x7FFFFF
+    E8_BIAS: tl.constexpr = 127
+    E2_BIAS: tl.constexpr = 1
+
+    # Denormal numbers
+    # If exponent is less than 127, then it's a denormal number
+    # See above, for denormal number mantissa is always 1 and we set bit 1 of mantissa
+    adjusted_exponents = tl.core.sub(E8_BIAS, e + 1, sanitize_overflow=False)
+    m = tl.where(e < E8_BIAS, (0x400000 | (m >> 1)) >> adjusted_exponents, m)
+    # For normal numbers, bias is changed from 127 to 1, and for subnormals, we keep exponent as 0.
+    # Note: E8_BIAS - E2_BIAS = 126, so for normals we subtract that.
+    e = tl.maximum(e, E8_BIAS - E2_BIAS) - (E8_BIAS - E2_BIAS)
+
+    # Combine sign, exponent, and mantissa, while saturating
+    # rounding nearest with tie breaking up by adding +1 to one bit right of the LSB, then shift right
+    e2m1_tmp = tl.minimum((((e << 2) | (m >> 21)) + 1) >> 1, 0x7)
+    e2m1_value = ((s >> 28) | e2m1_tmp).to(tl.uint8)
+    e2m1_value = tl.reshape(
+        e2m1_value, [BLOCK_SIZE_M, NUM_QUANT_BLOCKS, MXFP4_QUANT_BLOCK_SIZE // 2, 2]
+    )
+    evens, odds = tl.split(e2m1_value)
+    x_fp4 = evens | (odds << 4)
+    x_fp4 = x_fp4.reshape(BLOCK_SIZE_M, BLOCK_SIZE_N // 2)
+
+    return x_fp4, bs_e8m0.reshape(BLOCK_SIZE_M, NUM_QUANT_BLOCKS)
 
 @triton.jit
 def kernel_unified_attention_2d(
@@ -96,6 +168,7 @@ def kernel_unified_attention_2d(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    use_native_fp4: tl.constexpr = True,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -138,6 +211,9 @@ def kernel_unified_attention_2d(
         mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
         other=0.0,
     )
+
+    if use_native_fp4:
+       q_fp4, scale_q = _mxfp4_quant_op(Q, HEAD_SIZE_PADDED, BLOCK_M, 32)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -255,7 +331,23 @@ def kernel_unified_attention_2d(
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
 
-        S += scale * tl.dot(Q, K)
+        if use_native_fp4:
+           kt = tl.trans(K)
+           k_fp4, scale_k = _mxfp4_quant_op(kt, HEAD_SIZE_PADDED, TILE_SIZE, 32)
+
+           # debug info
+           pid0 = tl.program_id(axis=0)
+           pid1 = tl.program_id(axis=1)
+           if pid0 < -1 and pid1 < 1 and j == 0:
+              tl.device_print("k_fp4:",k_fp4.shape[0], k_fp4.shape[1])
+
+           # copied from triton def dot_scaled()
+           # M, K_LHS = lhs.type.shape[-2:]
+           # K_RHS, N = rhs.type.shape[-2:]
+           S = scale * tl.dot_scaled(q_fp4, scale_p, "e2m1", k_fp4, scale_v, "e2m1", S, lhs_k_pack=PACK_ALONG_K,
+                                   rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32)
+        else:
+           S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -307,7 +399,28 @@ def kernel_unified_attention_2d(
         M = m_j
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        acc += tl.dot(P.to(V.dtype), V)
+        if use_native_fp4:
+           p_fp4, scale_p = _mxfp4_quant_op(P, BLOCK_SIZE, BLOCK_M, 32)
+
+           vt = tl.trans(V)
+           v_fp4, scale_v = _mxfp4_quant_op(vt, BLOCK_SIZE, HEAD_SIZE_PADDED, 32)
+
+           v_fp4_t   =  tl.trans(v_fp4)
+           scale_v_t =  tl.trans(scale_v)
+
+           # debug info
+           pid0 = tl.program_id(axis=0)
+           pid1 = tl.program_id(axis=1)
+           if pid0 < -1 and pid1 < 1 and j == 0:
+              tl.device_print("v_fp4:",v_fp4.shape[0], v_fp4.shape[1])
+
+           # copied from triton def dot_scaled()
+           # M, K_LHS = lhs.type.shape[-2:]
+           # K_RHS, N = rhs.type.shape[-2:]
+           acc = tl.dot_scaled(p_fp4, scale_p, "e2m1", v_fp4_t, scale_v_t, "e2m1", acc, lhs_k_pack=PACK_ALONG_K,
+                                   rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32)
+        else:
+           acc += tl.dot(P.to(V.dtype), V)
 
     # epilogue
     acc = acc / L[:, None]
@@ -728,7 +841,7 @@ def unified_attention(
     BLOCK_M = 16 if num_queries_per_kv <= 16 else triton.next_power_of_2(
         num_queries_per_kv)
     BLOCK_Q = BLOCK_M // num_queries_per_kv
-
+    print("BLOK_M: ", num_queries_per_kv, BLOCK_M)
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
     # However, it is slow to realize the query_lens on cpu.

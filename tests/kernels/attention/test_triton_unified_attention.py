@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 
 NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]
-BLOCK_SIZES = [16]
+BLOCK_SIZES = [64]
 
 DTYPES = [torch.bfloat16]
 QDTYPES = [None, torch.float8_e4m3fn] if not current_platform.is_rocm() else [
