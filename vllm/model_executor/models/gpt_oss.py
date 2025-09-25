@@ -619,7 +619,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
                                 "q_a_proj",
                                 "kv_a_proj_with_mqa"
                                 ],
-                                 "gate_up_proj": ["gate_proj", "up_proj"],
+                                # "gate_up_proj": ["gate_proj", "up_proj"],
                             }
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -658,16 +658,17 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         packed_modules_mapping["experts"] = []
 
         # FIXME: Updated to match lora adapter syntax but may not be necessary
-        for _, weight_name, _, _ in expert_params_mapping:
-            weight_str = weight_name.split('.')
-            weight_name = weight_str[1] + ".mlp." + weight_str[0] + "." + weight_str[2] 
-            packed_modules_mapping["experts"].append(weight_name)
+        # for _, weight_name, _, _ in expert_params_mapping:
+        #     weight_str = weight_name.split('.')
+        #     weight_name = "model.layers." + weight_str[1] + ".mlp." + weight_str[0]  + "." + weight_str[2] + ".weight" 
+        #     packed_modules_mapping["experts"].append(weight_name)
 
-        # packed_modules_mapping["experts"] = [
-        #     #weight_name.rstrip(".")
-        #     #for _, weight_name, _, _ in expert_params_mapping
-        #     for weight_name in expert_params_mapping
-        # ]
+        # print(packed_modules_mapping)
+        packed_modules_mapping["experts"] = [
+            # weight_name.rstrip(".")
+            # for _, weight_name, _, _ in expert_params_mapping
+            "experts"
+        ]
         return packed_modules_mapping
 
     def __init__(
@@ -708,15 +709,14 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
                                        sampling_metadata)
         return logits
 
-
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        # FIXME: bf16 and gate_up_proj, down_proj only
+        # FIXME: LoRA adapter format is 'model.layers.4.mlp.experts without proj
         return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
+            ckpt_gate_proj_name="", #gate_up_proj", #"lora_A", #"gate_proj",
+            ckpt_down_proj_name="", #"down_proj",#"down_proj",
+            #ckpt_up_proj_name="",#"up_proj",
             num_experts=self.config.num_local_experts, # self.config.n_routed_experts
             num_redundant_experts=0)
 
