@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import logging
-
 from collections import defaultdict, deque
 
 import numpy as np
@@ -561,7 +559,6 @@ class FlashLB(EplbPolicy):
             new_deployment = np.zeros(
                 (num_layer, num_ranks, num_replicas // num_ranks))
 
-    
         self.register_hotness(num_layer, expert_workload)
         layers_need_update = np.arange(num_layer)
         new_par = np.zeros(layers_need_update.shape[0])
