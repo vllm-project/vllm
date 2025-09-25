@@ -114,9 +114,6 @@ WORKDIR /workspace/vllm
 RUN --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
     cp requirements/test.in requirements/cpu-test.in && \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
-    sed -i 's/^torch==.*/torch==2.6.0/g' requirements/cpu-test.in && \
-    sed -i 's/torchaudio.*/torchaudio/g' requirements/cpu-test.in && \
-    sed -i 's/torchvision.*/torchvision/g' requirements/cpu-test.in && \
     uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --torch-backend cpu
 
 RUN --mount=type=cache,target=/root/.cache/uv \
