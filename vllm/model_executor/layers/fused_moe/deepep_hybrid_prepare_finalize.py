@@ -41,7 +41,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hidden_size_bytes = round_up(hidden_size_bytes, xfer_atom_size)
         return hidden_size_bytes // dtype.itemsize
 
-    def __init__(self, buffer: deep_ep.HybridBuffer, num_dispatchers: int,
+    def __init__(self, buffer: deep_ep.HybridEpBuffer, num_dispatchers: int,
                  dp_size: int, rank_expert_offset: int):
         super().__init__()
         self.buffer = buffer
