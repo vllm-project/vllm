@@ -254,7 +254,7 @@ class EagleProposer:
             draft_token_ids = logits.argmax(dim=-1)
             return draft_token_ids.view(-1, 1)
 
-         # M-RoPE
+        # M-RoPE
         if self.uses_mrope:
             positions = target_positions[:, last_token_indices]
         else:

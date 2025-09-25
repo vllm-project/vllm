@@ -147,7 +147,7 @@ def test_ngram_correctness(
       "eagle618/eagle-deepseek-v3-random", 1), False),
 ],
                          ids=[
-                             "qwen3_eagle3", "qwen2.5_vl_eagle3",
+                             "qwen3_eagle3", "qwen2_5_vl_eagle3",
                              "llama3_eagle", "llama3_eagle3", "llama4_eagle",
                              "llama4_eagle_mm", "deepseek_eagle"
                          ])
