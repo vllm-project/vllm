@@ -79,9 +79,9 @@ def make_rand_lora_weight_tensor(
 
 
 def make_rand_tensors(
-    a_shape: tuple[int],
-    b_shape: tuple[int],
-    c_shape: tuple[int],
+    a_shape: tuple[int, ...],
+    b_shape: tuple[int, ...],
+    c_shape: tuple[int, ...],
     a_dtype: torch.dtype,
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
@@ -243,7 +243,7 @@ class OpType(Enum):
         lora_rank: int,
         num_loras: int,
         num_slices: int,
-    ) -> tuple[tuple[int], tuple[int], tuple[int]]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Given num_slices, return the shapes of the A, B, and C matrices
         in A x B = C, for the op_type

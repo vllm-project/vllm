@@ -178,7 +178,7 @@ class RayPPCommunicator(Communicator):
 
     def recv(
         self,
-        shape: tuple[int],
+        shape: tuple[int, ...],
         dtype: "torch.dtype",
         peer_rank: int,
         allocator: TorchTensorAllocator,
