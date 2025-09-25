@@ -106,7 +106,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
-    VLLM_USE_AITER_TRITON_ROPE: bool = False
+    VLLM_ROCM_USE_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -876,8 +876,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to use aiter rope.
     # By default is disabled.
-    "VLLM_USE_AITER_TRITON_ROPE":
-    lambda: (os.getenv("VLLM_USE_AITER_TRITON_ROPE", "False").lower() in
+    "VLLM_ROCM_USE_TRITON_ROPE":
+    lambda: (os.getenv("VLLM_ROCM_USE_TRITON_ROPE", "False").lower() in
              ("true", "1")),
 
     # Whether to use aiter triton fp8 bmm kernel
@@ -1441,7 +1441,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_MLA",
         "VLLM_ROCM_USE_AITER_MHA",
         "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-        "VLLM_USE_AITER_TRITON_ROPE",
+        "VLLM_ROCM_USE_TRITON_ROPE",
         "VLLM_ROCM_USE_AITER_FP8BMM",
         "VLLM_ROCM_USE_SKINNY_GEMM",
         "VLLM_ROCM_FP8_PADDING",
