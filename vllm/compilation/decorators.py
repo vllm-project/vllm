@@ -192,7 +192,6 @@ def _support_torch_compile(
     # make sure super().__init__ is called on the base class
     #  other than TorchCompileWrapperWithCustomDispatcher
     cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
-
     old_init = cls.__init__
 
     setattr(cls, IGNORE_COMPILE_KEY, False)
@@ -222,12 +221,25 @@ def _support_torch_compile(
             return
 
         compilation_counter.num_models_seen += 1
-        TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_level=vllm_config.compilation_config.level)
+        if not hasattr(self.__class__, "compiled_callable"):
+            print(f"init self for {self.__class__}")
+            # only compile the same model once
+            # NOTE: this is probably not right, since parameters can change
+            # and cause us to fall over
+            TorchCompileWrapperWithCustomDispatcher.__init__(
+                self, compilation_level=vllm_config.compilation_config.level)
+            self.__class__.compiled_callable = self.compiled_callable
+        else:
+            print("init reusing the callable")
+            TorchCompileWrapperWithCustomDispatcher.__init__(
+                self,
+                self.__class__.compiled_callable,
+                compilation_level=vllm_config.compilation_config.level)
 
     cls.__init__ = __init__
 
     def __call__(self, *args, **kwargs):
+        print(f"Call to {self.__class__} forward")
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
@@ -235,7 +247,7 @@ def _support_torch_compile(
             return self.forward(*args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked
-        if len(self.compiled_codes) < 1:
+        if len(self.__class__.compiled_codes) < 1:
             sig = inspect.signature(self.__class__.forward)
             bound_args = sig.bind(self, *args, **kwargs)
             bound_args.apply_defaults()
@@ -269,7 +281,8 @@ def _support_torch_compile(
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,
         # with the overhead of guard evaluation and recompilation.
-        if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
+        if len(self.__class__.compiled_codes
+               ) < 1 or not self.use_custom_dispatcher:
             # it seems Dynamo reuse the compilation across instances,
             # while we need to make sure the compiled code is not reused.
             # we need to control all the compilation of the model.
