@@ -381,7 +381,7 @@ def triton_apply_top_k_top_p(
     probs = torch.full_like(logits, -float('inf'))
     # print(f"Input logits: {logits}")
     if p is None:
-        _topk_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
+        _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
                                       vocab_size, BLOCK_SIZE, NUM_TILES)
     # else:
     #     _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
