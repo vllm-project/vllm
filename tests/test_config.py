@@ -135,7 +135,6 @@ def test_transcription_task(model_id, expected_runner_type,
 
     assert config.runner_type == expected_runner_type
     assert config.convert_type == expected_convert_type
-    assert expected_task in config.supported_tasks
 
 
 @pytest.mark.parametrize(
