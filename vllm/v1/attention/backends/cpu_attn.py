@@ -11,7 +11,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
@@ -64,10 +63,6 @@ class TorchSDPABackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return TorchSDPAMetadata
-
-    @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
-        return CommonAttentionState
 
     @staticmethod
     def get_builder_cls() -> type["TorchSDPAMetadataBuilderV1"]:
@@ -834,16 +829,6 @@ class _PagedAttention:
             blocksparse_block_size,
             blocksparse_head_sliding_step,
         )
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: list[torch.Tensor],
-        src_to_dists: torch.Tensor,
-        *args,
-    ) -> None:
-        key_caches = [kv_cache[0] for kv_cache in kv_caches]
-        value_caches = [kv_cache[1] for kv_cache in kv_caches]
-        ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
 class _IPEXPagedAttention(_PagedAttention):
