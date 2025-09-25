@@ -14,7 +14,6 @@ from pydantic import (ConfigDict, SkipValidation, field_validator,
                       model_validator)
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
@@ -534,9 +533,6 @@ class ModelConfig:
                     f"You can pass `--convert {convert_option} to adapt "
                     "it into a pooling model.")
 
-        self.supported_tasks = self._get_supported_tasks(
-            architectures, self.runner_type, self.convert_type)
-
         # Note: Initialize these attributes early because transformers fallback
         # may fail to load dynamic modules in child processes
         model_info, arch = registry.inspect_model_cls(architectures, self)
@@ -834,27 +830,6 @@ class ModelConfig:
 
         return convert_type
 
-    def _get_supported_generation_tasks(
-        self,
-        architectures: list[str],
-        convert_type: ConvertType,
-    ) -> list[_ResolvedTask]:
-        registry = self.registry
-
-        if registry.is_transcription_only_model(architectures, self):
-            return ["transcription"]
-
-        # TODO: Use get_supported_generation_tasks once V0 is removed
-        supported_tasks = list[_ResolvedTask]()
-        if (registry.is_text_generation_model(architectures, self)
-                or convert_type in _RUNNER_CONVERTS["generate"]):
-            supported_tasks.append("generate")
-
-        if registry.is_transcription_model(architectures, self):
-            supported_tasks.append("transcription")
-
-        return supported_tasks
-
     def _get_default_pooling_task(
         self,
         architectures: list[str],
@@ -871,42 +846,6 @@ class ModelConfig:
                 return convert_type
 
         return "embed"
-
-    def _get_supported_pooling_tasks(
-        self,
-        architectures: list[str],
-        convert_type: ConvertType,
-    ) -> list[_ResolvedTask]:
-        registry = self.registry
-
-        # TODO: Use get_supported_pooling_tasks once V0 is removed
-        supported_tasks = list[_ResolvedTask]()
-        if (registry.is_pooling_model(architectures, self)
-                or convert_type in _RUNNER_CONVERTS["pooling"]):
-            supported_tasks.append("encode")
-
-            extra_task = (self._get_default_pooling_task(architectures)
-                          if convert_type == "none" else convert_type)
-            supported_tasks.append(extra_task)
-
-        return supported_tasks
-
-    def _get_supported_tasks(
-        self,
-        architectures: list[str],
-        runner_type: RunnerType,
-        convert_type: ConvertType,
-    ) -> list[_ResolvedTask]:
-        if runner_type == "generate":
-            return self._get_supported_generation_tasks(
-                architectures, convert_type)
-        if runner_type == "pooling":
-            return self._get_supported_pooling_tasks(architectures,
-                                                     convert_type)
-        if runner_type == "draft":
-            return ["draft"]
-
-        assert_never(runner_type)
 
     def _parse_quant_hf_config(self, hf_config: PretrainedConfig):
         quant_cfg = getattr(hf_config, "quantization_config", None)

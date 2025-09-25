@@ -14,7 +14,6 @@ import torch
 from prometheus_client import start_http_server
 from tqdm import tqdm
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.protocol import EngineClient
@@ -334,12 +333,7 @@ async def run_batch(
 
     model_config = vllm_config.model_config
 
-    if envs.VLLM_USE_V1:
-        supported_tasks = await engine_client \
-            .get_supported_tasks()  # type: ignore
-    else:
-        supported_tasks = model_config.supported_tasks
-
+    supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported_tasks: %s", supported_tasks)
 
     # Create the openai serving objects.
