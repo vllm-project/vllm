@@ -14,7 +14,6 @@ import torch
 from prometheus_client import start_http_server
 from tqdm import tqdm
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.protocol import EngineClient
