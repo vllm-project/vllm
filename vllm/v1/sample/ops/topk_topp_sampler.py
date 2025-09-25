@@ -109,9 +109,9 @@ class TopKTopPSampler(nn.Module):
         # CPU-GPU synchronization while `flashinfer_sample` does.
         if (k is None and p is None) or generators:
             if generators:
-                logger.warning_once("FlashInfer 0.2.3+ does not support "
-                                    "per-request generators. Falling back to "
-                                    "PyTorch-native implementation.")
+                logger.debug_once("FlashInfer 0.2.3+ does not support "
+                                  "per-request generators. Falling back to "
+                                  "PyTorch-native implementation.")
             return self.forward_native(logits, generators, k, p)
         assert self.logprobs_mode not in (
             "processed_logits", "processed_logprobs"
