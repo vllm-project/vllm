@@ -1048,6 +1048,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
 
 class Gemma3nForCausalLM(nn.Module):
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

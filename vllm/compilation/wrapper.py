@@ -53,7 +53,7 @@ class TorchCompileWrapperWithCustomDispatcher:
 
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
-        self.compiled_codes: list[CodeType] = []
+        self.__class__.compiled_codes = []  # type: ignore[attr-defined]
         torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
 
         # read the env var to determine whether to use the custom dispatcher
@@ -91,8 +91,8 @@ class TorchCompileWrapperWithCustomDispatcher:
         if frame.f_locals["self"] is not self:
             return
 
-        self.compiled_codes.append(new_code)
-
+        self.__class__.compiled_codes.append(  # type: ignore[attr-defined]
+            new_code)
         path = self.vllm_config.compile_debug_dump_path()
         if path:
             decompiled_file = path / "transformed_code.py"
@@ -130,6 +130,7 @@ class TorchCompileWrapperWithCustomDispatcher:
 
         See https://dev-discuss.pytorch.org/t/what-is-the-relationship-requirement-among-original-bytecode-transformed-bytecode-and-bytecode-returned-by-hooks-in-dynamo/1693/7 for more details.
         """ # noqa
-        self.__class__.forward.__code__ = self.compiled_codes[index]
+        self.__class__.forward.__code__ = self.__class__.compiled_codes[  # type: ignore[attr-defined]
+            index]
         yield
         self.__class__.forward.__code__ = self.original_code_object

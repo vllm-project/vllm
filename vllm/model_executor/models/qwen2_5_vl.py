@@ -452,10 +452,10 @@ class Qwen2_5_VisionBlock(nn.Module):
         return x
 
 
-@set_model_tag("Qwen2_5_VisionPatchEmbed")
-@support_torch_compile(dynamic_arg_dims={
-    "x": 0,
-})
+# @set_model_tag("Qwen2_5_VisionPatchEmbed")
+# @support_torch_compile(dynamic_arg_dims={
+#     "x": 0,
+# })
 class Qwen2_5_VisionPatchEmbed(nn.Module):
 
     def __init__(
@@ -485,10 +485,10 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         return x
 
 
-@set_model_tag("Qwen2_5_VisionPatchMerger")
-@support_torch_compile(dynamic_arg_dims={
-    "x": 0,
-})
+# @set_model_tag("Qwen2_5_VisionPatchMerger")
+# @support_torch_compile(dynamic_arg_dims={
+#     "x": 0,
+# })
 class Qwen2_5_VisionPatchMerger(nn.Module):
 
     def __init__(
