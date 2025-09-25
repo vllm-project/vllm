@@ -677,7 +677,7 @@ def warmup_flashlb():
     expert_tensor = generate_layered_experts(num_layers=58, layer_shape=(32, 9)) 
     hotness = torch.randint(1, 100, (58, 256)) 
     physical_to_logical_map, _, _ = algo.rebalance_experts(
-        hotness, 288, 4, 2, 32
+        hotness, 288, 4, 2, 32, expert_tensor
     ) 
     expert_tensor = physical_to_logical_map.reshape((58, 32, 9)) 
     for _ in range(3):
