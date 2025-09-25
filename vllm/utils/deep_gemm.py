@@ -234,7 +234,7 @@ def fp8_paged_mqa_logits(
         block_tables,
         schedule_metadata,
         max_model_len,
-        clean_logits=False
+        clean_logits=True
     )
 
 
