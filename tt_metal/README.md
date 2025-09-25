@@ -144,6 +144,17 @@ To send a request to the server:
 curl http://localhost:8000/v1/completions -H "Content-Type: application/json" -d '{ "model": "meta-llama/Llama-3.1-70B-Instruct", "prompt": "San Francisco is a", "max_tokens": 32, "temperature": 1, "top_p": 0.9, "top_k": 10 }'
 ```
 
+### Compatibility sampling mode, guided decoding, structured outputs
+
+Sampling parameters beyond `temperature`, `top_k`, `top_p` require the compatibility sampling mode which is only available with `sample_on_device_mode=None`.
+To use these, do not pass `--override_tt_config '{"sample_on_device_mode": "all"}'` even when running with `TT_LLAMA_TEXT_VER="llama3_70b_galaxy"`.
+
+Some parameters, such as guided_decoding / strucured outputs require additionally setting `num_scheduler_steps=1`.
+
+Be aware that both of these settings will incur performance penalties.
+
+The compatibility sampling pathway is selected per batch when any request in the batch requires it. It can also be force-enabled for testing purposes with `--override_tt_config '{"always_compat_sampling": true}'`
+
 ### Llama-3.2 (11B and 90B) and Qwen-2.5-VL (32B and 72B) Vision models
 
 First, start the server following the instructions above with the correct model through `--model`.
