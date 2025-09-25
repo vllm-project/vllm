@@ -87,7 +87,7 @@ is ineffective.
 
 While ongoing efforts like [#17419](gh-issue:17419)
 address the long build time at its source, the current workaround is to set `VLLM_CI_BRANCH`
-to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/use_postmerge_q`)
+to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/long_build`)
 when manually triggering a build on Buildkite. This branch accomplishes two things:
 
 1. Increase the timeout limit to 10 hours so that the build doesn't time out.
