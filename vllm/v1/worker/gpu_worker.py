@@ -155,6 +155,7 @@ class Worker(WorkerBase):
 
     def init_device(self):
         if self.device_config.device.type == "cuda":
+            current_platform.set_cpu_affinity(self.local_rank)
             # torch.distributed.all_reduce does not free the input tensor until
             # the synchronization point. This causes the memory usage to grow
             # as the number of all_reduce calls increases. This env var disables

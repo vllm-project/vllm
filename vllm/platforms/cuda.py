@@ -605,6 +605,66 @@ class NvmlCudaPlatform(CudaPlatformBase):
                     ", ".join(device_names),
                 )
 
+    @classmethod
+    @with_nvml_context
+    def set_cpu_affinity(cls, device_id: int) -> None:
+        """
+        Set CPU affinity for the current process based on GPU device ID.
+        """
+        try:
+            import psutil
+        except ImportError:
+            logger.warning(
+                "psutil is not available. Cannot set CPU affinity. "
+                "Install psutil to enable NUMA affinity optimization.")
+            return
+
+        try:
+            physical_device_id = cls.device_id_to_physical_device_id(device_id)
+            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+
+            # Get CPU affinity for this GPU
+            # We need to determine the CPU set size first
+            cpu_count = os.cpu_count()
+            if cpu_count is None:
+                logger.warning(
+                    "Cannot determine CPU count. Skipping CPU affinity setting."
+                )
+                return
+
+            cpu_set_size = (cpu_count + 63) // 64
+
+            # Get CPU affinity from NVML
+            cpu_affinity_mask = pynvml.nvmlDeviceGetCpuAffinity(
+                handle, cpu_set_size)
+
+            # Convert the bitmask to a list of CPU IDs
+            cpu_ids = []
+            for i, mask in enumerate(cpu_affinity_mask):
+                for bit in range(64):
+                    cpu_id = i * 64 + bit
+                    if cpu_id >= cpu_count:
+                        break
+                    if mask & (1 << bit):
+                        cpu_ids.append(cpu_id)
+
+            if cpu_ids:
+                # Set CPU affinity using psutil
+                current_process = psutil.Process()
+                current_process.cpu_affinity(cpu_ids)
+                logger.info(
+                    "Set CPU affinity for process %d to " \
+                    "CPUs %s for GPU devices %s",
+                    current_process.pid, cpu_ids, device_id)
+            else:
+                logger.warning(
+                    "No CPU affinity information available for GPU devices %s",
+                    device_id)
+
+        except Exception as e:
+            logger.warning("Failed to set CPU affinity for GPU devices %s: %s",
+                           device_id, str(e))
+
 
 class NonNvmlCudaPlatform(CudaPlatformBase):
 
@@ -629,6 +689,14 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
             "NVLink detection not possible, as context support was"
             " not found. Assuming no NVLink available.")
         return False
+
+    @classmethod
+    def set_cpu_affinity(cls, device_id: int) -> None:
+        """
+        Set CPU affinity for the current process based on GPU device ID.
+        This is a no-op for NonNvmlCudaPlatform.
+        """
+        pass
 
 
 # Autodetect either NVML-enabled or non-NVML platform
