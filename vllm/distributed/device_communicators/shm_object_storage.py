@@ -30,7 +30,7 @@ class SingleWriterShmRingBuffer:
     - Maintains metadata for each allocated buffer chunk in the writer process
     - Supports custom "is_free_fn" functions to determine when buffers can be
       reused
-    - Each buffer chunk contains: [4-byte id][4-byte size][actual_data]
+    - Each buffer chunk contains: `[4-byte id][4-byte size][actual_data]`
     
     Key Concepts:
     - monotonic_id_start/end: Track the range of active buffer IDs
@@ -99,7 +99,7 @@ class SingleWriterShmRingBuffer:
     - Writer handles garbage collection (free_buf) based on reader feedback
     
     Memory Layout per Buffer Chunk:
-    [4-byte monotonic_id][4-byte chunk_size][actual_data...]
+    `[4-byte monotonic_id][4-byte chunk_size][actual_data...]`
     ^metadata_start                         ^data_start
     
     The monotonic_id ensures data integrity - readers can verify they're
@@ -185,7 +185,7 @@ class SingleWriterShmRingBuffer:
         '''
         Allocate a buffer `MD_SIZE` + `size` bytes in the shared memory.
         Memory layout:
-        [4-byte monotonic_id][4-byte size][buffer data...]
+        `[4-byte monotonic_id][4-byte size][buffer data...]`
         '''
         assert self.is_writer, "Only the writer can allocate buffers."
         assert size > 0, "Size must be greater than 0"
@@ -253,7 +253,7 @@ class SingleWriterShmRingBuffer:
 
         Args:
             nbytes (int, optional): The size of the buffer to free. If None,
-            frees the maximum size of the ring buffer.
+                frees the maximum size of the ring buffer.
         '''
 
         assert self.is_writer, "Only the writer can free buffers."
@@ -413,7 +413,7 @@ class SingleWriterShmObjectStorage:
       allocation
 
     Memory Layout per Object:
-    [4-byte reference_count][metadata_size][serialized_object_data]
+    `[4-byte reference_count][metadata_size][serialized_object_data]`
     
     Thread Safety:
     - Writer operations (put, clear) are single-threaded by design

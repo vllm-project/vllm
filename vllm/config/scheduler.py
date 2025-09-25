@@ -3,7 +3,7 @@
 
 import hashlib
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import Any, Literal, Union
 
 from pydantic import SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
@@ -15,14 +15,9 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                         POOLING_MODEL_MAX_NUM_BATCHED_TOKENS)
 
-if TYPE_CHECKING:
-    from vllm.config import RunnerType
-else:
-    RunnerType = Any
-
 logger = init_logger(__name__)
 
-PreemptionMode = Literal["swap", "recompute"]
+RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority"]
 
 
@@ -82,10 +77,6 @@ class SchedulerConfig:
     3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
 
-    delay_factor: float = 0.0
-    """Apply a delay (of delay factor multiplied by previous
-    prompt latency) before scheduling next prompt."""
-
     enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
@@ -106,14 +97,6 @@ class SchedulerConfig:
 
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
-
-    preemption_mode: Optional[PreemptionMode] = None
-    """Whether to perform preemption by swapping or
-    recomputation. If not specified, we determine the mode as follows:
-    We use recomputation by default since it incurs lower overhead than
-    swapping. However, when the sequence group has multiple sequences
-    (e.g., beam search), recomputation is not currently supported. In
-    such a case, we use swapping instead."""
 
     send_delta_data: bool = False
     """Private API. If used, scheduler sends delta data to

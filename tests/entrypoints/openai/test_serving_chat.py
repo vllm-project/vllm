@@ -194,6 +194,7 @@ async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI,
     assert tc.function is not None and tc.function.name == "get_current_weather"
     args1 = tc.function.arguments
     assert args1 is not None and len(args1) > 0
+    assert not first_msg.content
 
     messages.append({"role": "assistant", "content": args1})
     messages.append({
@@ -333,7 +334,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):
@@ -378,7 +378,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):
@@ -433,7 +432,6 @@ async def test_serving_chat_should_set_correct_max_tokens():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):
@@ -489,7 +487,6 @@ async def test_serving_chat_could_load_correct_generation_config():
             "role": "user",
             "content": "what is 1+1?"
         }],
-        guided_decoding_backend="outlines",
     )
 
     with suppress(Exception):

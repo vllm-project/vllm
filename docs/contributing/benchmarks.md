@@ -156,7 +156,6 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```bash
 vllm bench serve \
   --backend openai-chat \
-  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -230,7 +229,6 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```bash
 vllm bench serve \
   --backend openai-chat \
-  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -245,7 +243,6 @@ vllm bench serve \
 ```bash
 vllm bench serve \
   --backend openai-chat \
-  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -683,7 +680,7 @@ vllm bench serve \
   --save-result \
   --result-dir ~/vllm_benchmark_results \
   --save-detailed \
-  --endpoint /v1/chat/completion
+  --endpoint /v1/chat/completions
 ```
 
 ##### Videos (ShareGPT4Video)
@@ -710,7 +707,7 @@ vllm bench serve \
   --save-result \
   --result-dir ~/vllm_benchmark_results \
   --save-detailed \
-  --endpoint /v1/chat/completion
+  --endpoint /v1/chat/completions
 ```
 
 ##### Synthetic Random Images (random-mm)

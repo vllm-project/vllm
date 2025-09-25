@@ -8,8 +8,8 @@ to launch the vLLM OpenAI API server:
 
 On the client side, run:
     vllm bench serve \
-        --endpoint-type <endpoint_type. Default 'openai'> \
-        --label <benchmark result label. Default using endpoint_type> \
+        --backend <backend or endpoint type. Default 'openai'> \
+        --label <benchmark result label. Default using backend> \
         --model <your_model> \
         --dataset-name <dataset_name. Default 'random'> \
         --request-rate <request_rate. Default inf> \
@@ -50,6 +50,21 @@ MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
 TERM_PLOTLIB_AVAILABLE = ((importlib.util.find_spec("termplotlib") is not None)
                           and (shutil.which("gnuplot") is not None))
+
+
+# TODO: Remove this in v0.11.0
+class DeprecatedEndpointTypeAction(argparse.Action):
+    """Argparse action for the deprecated --endpoint-type flag.
+    """
+
+    def __call__(self, _, namespace, values, option_string=None):
+        warnings.warn(
+            "'--endpoint-type' is deprecated and will be removed in v0.11.0. "
+            "Please use '--backend' instead or remove this argument if you "
+            "have already set it.",
+            stacklevel=1,
+        )
+        setattr(namespace, self.dest, values)
 
 
 class TaskType(Enum):
@@ -470,7 +485,7 @@ async def benchmark(
         else:
             request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
     else:
-        raise ValueError(f"Unknown endpoint_type: {endpoint_type}")
+        raise ValueError(f"Unknown backend: {endpoint_type}")
 
     # Reuses connections across requests to reduce TLS handshake overhead.
     connector = aiohttp.TCPConnector(
@@ -516,18 +531,22 @@ async def benchmark(
         extra_body=extra_body,
     )
 
-    test_output = await wait_for_endpoint(
-        request_func,
-        test_input,
-        session,
-        timeout_seconds=ready_check_timeout_sec,
-    )
-    if not test_output.success:
-        raise ValueError(
-            "Initial test run failed - Please make sure benchmark arguments "
-            f"are correctly specified. Error: {test_output.error}")
+    if ready_check_timeout_sec > 0:
+        test_output = await wait_for_endpoint(
+            request_func,
+            test_input,
+            session,
+            timeout_seconds=ready_check_timeout_sec,
+        )
+        if not test_output.success:
+            raise ValueError(
+                "Initial test run failed - Please make sure benchmark "
+                "arguments are correctly specified. "
+                f"Error: {test_output.error}")
+        else:
+            print("Initial test run completed. Starting main benchmark run...")
     else:
-        print("Initial test run completed. Starting main benchmark run...")
+        print("Skipping endpoint ready check.")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
@@ -851,23 +870,27 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
 def add_cli_args(parser: argparse.ArgumentParser):
     add_dataset_parser(parser)
     parser.add_argument(
-        "--endpoint-type",
-        type=str,
-        default="openai",
-        choices=list(ASYNC_REQUEST_FUNCS.keys()),
-    )
-    parser.add_argument(
         "--label",
         type=str,
         default=None,
         help="The label (prefix) of the benchmark results. If not specified, "
-        "the endpoint type will be used as the label.",
+        "the value of '--backend' will be used as the label.",
     )
     parser.add_argument(
         "--backend",
         type=str,
-        default="vllm",
+        default="openai",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
+        help="The type of backend or endpoint to use for the benchmark."
+    )
+    parser.add_argument(
+        "--endpoint-type",
+        type=str,
+        default=None,
+        choices=list(ASYNC_REQUEST_FUNCS.keys()),
+        action=DeprecatedEndpointTypeAction,
+        help="'--endpoint-type' is deprecated and will be removed in v0.11.0. "
+        "Please use '--backend' instead.",
     )
     parser.add_argument(
         "--base-url",
@@ -1132,7 +1155,8 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=int,
         default=600,
         help="Maximum time to wait for the endpoint to become ready "
-        "in seconds (default: 600 seconds / 10 minutes).",
+        "in seconds (default: 600 seconds / 10 minutes). If set to 0, "
+        "the ready check will be skipped."
     )
 
 
@@ -1165,7 +1189,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 "For exponential ramp-up, the start RPS cannot be 0.")
 
-    endpoint_type = args.endpoint_type
     label = args.label
     model_id = args.model
     model_name = args.served_model_name
@@ -1228,7 +1251,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     gc.freeze()
 
     benchmark_result = await benchmark(
-        endpoint_type=args.endpoint_type,
+        endpoint_type=args.backend,
         api_url=api_url,
         base_url=base_url,
         model_id=model_id,
@@ -1262,7 +1285,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Setup
     current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
     result_json["date"] = current_dt
-    result_json["endpoint_type"] = args.endpoint_type
+    result_json["endpoint_type"] = args.backend # for backward compatibility
+    result_json["backend"] = args.backend
     result_json["label"] = label
     result_json["model_id"] = model_id
     result_json["tokenizer_id"] = tokenizer_id
@@ -1312,7 +1336,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
                                if args.max_concurrency is not None else "")
-        label = label or endpoint_type
+        label = label or args.backend
         if args.ramp_up_strategy is not None:
             file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
         else:

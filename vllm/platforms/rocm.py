@@ -119,6 +119,12 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_gfx950() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx950"])
+
+
+@cache
 def use_rocm_custom_paged_attention(
         qtype: torch.dtype,
         head_size: int,
@@ -191,6 +197,11 @@ class RocmPlatform(Platform):
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink) -> str:
         if use_mla:
+            if not use_v1:
+                raise RuntimeError(
+                    "MLA attention backends require the V1 engine. "
+                    "Set VLLM_USE_V1=1 to enable them.")
+
             from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
                 is_aiter_mla_enabled)
 
@@ -201,39 +212,24 @@ class RocmPlatform(Platform):
 
             if selected_backend == _Backend.TRITON_MLA:
                 if block_size != 1:
-                    if use_v1:
-                        logger.info_once(
-                            "Using Triton MLA backend on V1 engine.")
-                        return ("vllm.v1.attention.backends.mla."
-                                "triton_mla.TritonMLABackend")
-                    else:
-                        logger.info("Using Triton MLA backend.")
-                        return "vllm.attention.backends.triton_mla.TritonMLABackend"  # noqa: E501
-                else:
-                    raise ValueError(
-                        f" The selected backend, {selected_backend.name},"
-                        f"does not support block size {block_size}.")
-            elif selected_backend == _Backend.ROCM_AITER_MLA \
-                or selected_backend == _Backend.ROCM_AITER_MLA_VLLM_V1:
-                if block_size == 1:
-                    if use_v1:
-                        logger.info("Using AITER MLA backend on V1 engine.")
-                        return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
-                    else:
-                        logger.info("Using AITER MLA backend")
-                        return "vllm.attention.backends.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
-                else:
-                    raise ValueError(
-                        f" The selected backend, {selected_backend.name},"
-                        f"does not support block size {block_size}."
-                        "(currently only supports block size 1)")
-            else:
+                    logger.info_once("Using Triton MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "triton_mla.TritonMLABackend")
                 raise ValueError(
                     f" The selected backend, {selected_backend.name},"
-                    f"is not MLA type while requested for MLA backend.")
-
-        if selected_backend is None or selected_backend == _Backend.FLASH_ATTN:
-            selected_backend = _Backend.ROCM_FLASH
+                    f"does not support block size {block_size}.")
+            if selected_backend in (_Backend.ROCM_AITER_MLA,
+                                    _Backend.ROCM_AITER_MLA_VLLM_V1):
+                if block_size == 1:
+                    logger.info("Using AITER MLA backend on V1 engine.")
+                    return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+                raise ValueError(
+                    f" The selected backend, {selected_backend.name},"
+                    f"does not support block size {block_size}."
+                    "(currently only supports block size 1)")
+            raise ValueError(
+                f" The selected backend, {selected_backend.name},"
+                f"is not MLA type while requested for MLA backend.")
 
         if envs.VLLM_USE_V1:
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
@@ -241,18 +237,23 @@ class RocmPlatform(Platform):
                 logger.info("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "rocm_aiter_fa.AiterFlashAttentionBackend")
+            elif (envs.VLLM_ROCM_USE_AITER and
+                envs.VLLM_USE_AITER_UNIFIED_ATTENTION) or \
+                    envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION or \
+                        selected_backend == _Backend.ROCM_ATTN_VLLM_V1:
+                # rocm specific backend, with aiter and/or
+                #   triton prefix-prefill
+                logger.info("Using Rocm/Aiter Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "rocm_attn.RocmAttentionBackend")
             else:
+                # default case, using triton unified attention
                 logger.info("Using Triton Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "triton_attn.TritonAttentionBackend")
-        if selected_backend == _Backend.ROCM_FLASH:
-            if not cls.has_device_capability(90):
-                # not Instinct series GPUs.
-                logger.info("flash_attn is not supported on NAVI GPUs.")
-        else:
-            logger.info("%s is not supported in AMD GPUs.", selected_backend)
-        logger.info("Using ROCmFlashAttention backend.")
-        return "vllm.attention.backends.rocm_flash_attn.ROCmFlashAttentionBackend"  # noqa: E501
+        raise RuntimeError(
+            "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
+            "to select a supported backend.")
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -311,16 +312,6 @@ class RocmPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        if enforce_eager and not envs.VLLM_USE_V1:
-            logger.warning(
-                "To see benefits of async output processing, enable CUDA "
-                "graph. Since, enforce-eager is enabled, async output "
-                "processor cannot be used")
-            return False
-        return True
-
-    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         from vllm.config.compilation import CUDAGraphMode
 
@@ -349,7 +340,8 @@ class RocmPlatform(Platform):
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
-        if use_v1 and use_aiter_rms_norm and not is_eager_execution:
+        if (use_v1 and use_aiter_rms_norm and not is_eager_execution
+                and "-rms_norm" not in compilation_config.custom_ops):
             compilation_config.custom_ops.append("+rms_norm")
 
     @classmethod
@@ -410,11 +402,6 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fnuz
         else:
             return torch.float8_e4m3fn
-
-    @classmethod
-    def supports_v1(cls, model_config: "ModelConfig") -> bool:
-        # V1 support on AMD gpus is experimental
-        return True
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
@@ -501,4 +488,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
         return True
