@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
@@ -793,7 +794,8 @@ class EagleProposer:
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
         target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
+            get_layers_from_vllm_config(self.vllm_config,
+                                        AttentionLayerBase).keys())
 
         from vllm.compilation.backends import set_model_tag
         with set_model_tag("eagle_head"):
@@ -801,7 +803,8 @@ class EagleProposer:
                                    model_config=draft_model_config)
 
         draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
+            get_layers_from_vllm_config(self.vllm_config,
+                                        AttentionLayerBase).keys() -
             target_attn_layer_names)
 
         self.attn_layer_names = list(draft_attn_layer_names)

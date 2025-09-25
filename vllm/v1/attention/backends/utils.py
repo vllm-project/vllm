@@ -24,6 +24,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
 from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
@@ -392,7 +393,8 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+    layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase,
+                                         layer_names)
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
