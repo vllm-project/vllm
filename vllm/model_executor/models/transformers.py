@@ -124,7 +124,7 @@ def can_enable_torch_compile(vllm_config: VllmConfig) -> bool:
 def replace_linear_class(
     linear: nn.Linear,
     style: Literal["colwise", "rowwise"],
-    quant_config: QuantizationConfig,
+    quant_config: Optional[QuantizationConfig],
     *,
     prefix: str = "",
 ) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
@@ -132,16 +132,20 @@ def replace_linear_class(
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
     Args:
-        linear (nn.Linear): `nn.Linear` to be replaced.
-        style (str): Tensor parallel style of the new linear, e.g. "colwise".
-        quant_config (QuantConfig): Quantization config for the new linear.
+        linear: `nn.Linear` to be replaced.
+        style: Tensor parallel style of the new linear, e.g. "colwise".
+        quant_config: Quantization config for the new linear.
     Returns:
-        Union[ColumnParallelLinear, RowParallelLinear]: The new linear.
+        The new linear.
     """
 
     if not isinstance(style, str):
         raise ValueError(
             f"Unsupported parallel style type {type(style)}, expected str")
+
+    # MXFP4 linear layer is not implemented
+    if quant_config is not None and quant_config.get_name() == "mxfp4":
+        quant_config = None
 
     vllm_linear_cls, vllm_linear_kwargs = {
         "colwise": (ColumnParallelLinear, {}),
@@ -620,6 +624,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         start, end = get_pp_indices(self.text_config.num_hidden_layers,
                                     self.pp_rank, self.pp_size)
 
+        # MXFP4 attention layer is not implemented
+        quant_config = self.quant_config
+        if quant_config is not None and quant_config.get_name() == "mxfp4":
+            quant_config = None
+
         attention_instances = {}
         for i in range(start, end):
             # Handle interleaved sliding window attention
@@ -636,7 +645,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 scale=head_size**-0.5,
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
-                quant_config=self.quant_config,
+                quant_config=quant_config,
                 per_layer_sliding_window=per_layer_sliding_window,
                 prefix=f"{i}.attn",
                 attn_type=attn_type)
