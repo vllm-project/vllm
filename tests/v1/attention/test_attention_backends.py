@@ -21,16 +21,15 @@ from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLASHINFER_VLLM_V1,
-    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1, _Backend.TREE_ATTN,
-    "FLEX_ATTENTION_SLOW"
+    _Backend.FLASH_ATTN, _Backend.FLASHINFER, _Backend.FLEX_ATTENTION,
+    _Backend.TRITON_ATTN, _Backend.TREE_ATTN, "FLEX_ATTENTION_SLOW"
 ]
 
 # Remove flashinfer from the list if it's not available
 try:
     import flashinfer  # noqa: F401
 except ImportError:
-    BACKENDS_TO_TEST.remove(_Backend.FLASHINFER_VLLM_V1)
+    BACKENDS_TO_TEST.remove(_Backend.FLASHINFER)
 
 
 def _convert_dtype_to_torch(dtype):
@@ -214,7 +213,7 @@ def run_attention_backend(
     builder_cls, impl_cls = get_attention_backend(actual_backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
-    if actual_backend == _Backend.FLASHINFER_VLLM_V1:
+    if actual_backend == _Backend.FLASHINFER:
         import unittest.mock
 
         from vllm.v1.attention.backends.utils import PerLayerParameters
@@ -434,7 +433,7 @@ def _test_backend_correctness(
         #   [num_blocks, 2, block_size, num_kv_heads, head_size]
         # Select the appropriate KV cache format for each backend
         kv_cache_for_backend = kv_cache
-        if backend_name == _Backend.FLASHINFER_VLLM_V1:
+        if backend_name == _Backend.FLASHINFER:
             kv_cache_for_backend = kv_cache.transpose(0, 1)
 
             # For FlashInfer default to HND layout and
@@ -518,8 +517,8 @@ def test_causal_backend_correctness(batch_spec_name: str, model: str):
 
 
 SLIDING_WINDOW_BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLEX_ATTENTION,
-    _Backend.TRITON_ATTN_VLLM_V1, "FLEX_ATTENTION_SLOW"
+    _Backend.FLASH_ATTN, _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN,
+    "FLEX_ATTENTION_SLOW"
 ]
 
 
