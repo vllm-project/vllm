@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.utils.deep_gemm import fp8_gemm_nt, m_grouped_fp8_gemm_nt_contiguous
 
 
-def _generate_optimal_warmup_m_values(max_tokens: int, n: int) -> list[int]:
+def _generate_optimal_warmup_m_values(max_tokens: int, n: int, device: torch.device) -> list[int]:
     """
     Generate M values that cover all possible DeepGEMM kernel configurations.
     Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee15a82dd5fad5cd9beaa393c1f755e6b55/csrc/jit_kernels/heuristics/common.hpp
@@ -32,6 +32,7 @@ def _generate_optimal_warmup_m_values(max_tokens: int, n: int) -> list[int]:
     Args:
         max_tokens: Maximum number of tokens to warmup for
         n: The actual N dimension from the weight tensor
+        device: The torch device to get properties from.
     """
 
     def ceil_div(a: int, b: int) -> int:
@@ -40,7 +41,7 @@ def _generate_optimal_warmup_m_values(max_tokens: int, n: int) -> list[int]:
     # DeepGEMM's possible block sizes
     block_ms = [64, 128, 256]
     block_ns = list(range(16, min(257, n + 1), 16))
-    num_sms = torch.cuda.get_device_properties(0).multi_processor_count
+    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
 
     m_values = set()
 
