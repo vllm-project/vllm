@@ -63,13 +63,12 @@ ConvertType = Literal["none", "embed", "classify", "reward"]
 ConvertOption = Literal["auto", ConvertType]
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription", "draft"]
-_ResolvedTask = Literal["generate", "transcription", "encode", "embed",
-                        "classify", "reward", "draft"]
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal["raw_logits", "raw_logprobs", "processed_logits",
                        "processed_logprobs"]
-HfOverrides = Union[dict[str, Any], Callable[[type], type]]
+HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
+                                             PretrainedConfig]]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 
 _RUNNER_TASKS: dict[RunnerType, list[TaskOption]] = {
