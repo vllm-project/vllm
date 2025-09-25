@@ -16,9 +16,9 @@ from vllm.config import ModelConfig, PoolerConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.pooling_params import PoolingParams
-from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
 from vllm.tasks import PoolingTask
 from vllm.utils import current_stream, resolve_obj_by_qualname
+from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata
 
 logger = init_logger(__name__)
@@ -199,8 +199,7 @@ def build_output(
         all_data = all_data.to("cpu", non_blocking=True)
     current_stream().synchronize()
 
-    all_outputs = [PoolingSequenceGroupOutput(data) for data in all_data]
-    return PoolerOutput(outputs=all_outputs)
+    return all_data
 
 
 class PoolingMethod(nn.Module, ABC):
@@ -708,7 +707,7 @@ class DispatchPooler(Pooler):
     ) -> PoolerOutput:
         poolers_by_task = self.poolers_by_task
 
-        outputs = list[PoolingSequenceGroupOutput]()
+        outputs = list[torch.Tensor]()
         offset = 0
         for task, group in groupby(get_tasks(pooling_metadata)):
             if not (pooler := poolers_by_task.get(task)):
@@ -722,10 +721,10 @@ class DispatchPooler(Pooler):
                 pooling_metadata[offset:offset + num_items],
             )
 
-            outputs.extend(group_output.outputs)
+            outputs.extend(group_output)
             offset += num_items
 
-        return PoolerOutput(outputs)
+        return outputs
 
     def extra_repr(self) -> str:
         s = f"supported_task={self.get_supported_tasks()}"
