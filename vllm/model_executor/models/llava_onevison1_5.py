@@ -147,7 +147,7 @@ class LlavaOnevision1_5_VisionMLP(nn.Module):
             raise ValueError(
                 "LlavaOnevision1_5 is not support quantization for now")
         super().__init__()
-        self.act_fn = act_fn
+        self.act_fn = act_fn()
         mlp_up_proj = (ReplicatedLinear
                        if use_data_parallel else ColumnParallelLinear)
         mlp_down_proj = (ReplicatedLinear
