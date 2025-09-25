@@ -833,10 +833,11 @@ steps:
   working_dir: "/vllm-workspace/"
   gpu: b200
   source_file_dependencies:
-  - tests/evals/gpt_oss
+  - tests/quantization/test_blackwell_moe.py
   - vllm/model_executor/models/deepseek_v2.py
   - vllm/model_executor/models/gpt_oss.py
   - vllm/model_executor/models/llama4.py
+  - vllm/model_executor/layers/fused_moe
   - vllm/model_executor/layers/quantization/compressed_tensors
   - vllm/model_executor/layers/quantization/modelopt.py
   - vllm/model_executor/layers/quantization/mxfp4.py
