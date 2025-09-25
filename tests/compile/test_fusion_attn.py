@@ -315,19 +315,36 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
                                      out_dtype=attn_output.dtype)
 
 
+MODELS_FP8 = []
+MODELS_FP4 = []
+HEADS = []
+SPLIT_ATTENTION = []
+BACKENDS: list[_Backend] = []
+
 if current_platform.is_cuda():
-    MODELS = [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
-               TestAttentionFp8StaticQuantPatternModel),
-              ("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
-               TestAttentionNvfp4QuantPatternModel)]
+    MODELS_FP8 = [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+                   TestAttentionFp8StaticQuantPatternModel)]
     HEADS = [(64, 8), (40, 8)]
+    SPLIT_ATTENTION = [False]
+    BACKENDS = []  # TODO [_Backend.TRITON_ATTN]
+
+    if current_platform.is_device_capability((10, 0)):
+        BACKENDS += [_Backend.FLASHINFER]
+        MODELS_FP4 += [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+                        TestAttentionNvfp4QuantPatternModel)]
+
 elif current_platform.is_rocm():
-    MODELS = [("amd/Llama-3.1-8B-Instruct-FP8-KV",
-               TestAttentionFp8StaticQuantPatternModel)]
+    MODELS_FP8 = [("amd/Llama-3.1-8B-Instruct-FP8-KV",
+                   TestAttentionFp8StaticQuantPatternModel)]
     HEADS = [(32, 8), (40, 8)]
+    SPLIT_ATTENTION = [False, True]
+    BACKENDS = [_Backend.TRITON_ATTN]
+
+# TODO(boyuan/luka): test inductor graph partition on rocm
+if is_torch_equal_or_newer("2.9.0.dev") and current_platform.is_cuda():
+    USE_INDUCTOR_GRAPH_PARTITION = [False, True]
 else:
-    MODELS = []
-    HEADS = []
+    USE_INDUCTOR_GRAPH_PARTITION = [False]
 
 
 @pytest.mark.parametrize("num_qo_heads, num_kv_heads", HEADS)
@@ -335,38 +352,28 @@ else:
 @pytest.mark.parametrize("batch_size",
                          [7, 256, 533] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("model_name, model_class", MODELS)
-@pytest.mark.parametrize("backend",
-                         [_Backend.FLASHINFER] if current_platform.is_cuda()
-                         else [_Backend.TRITON_ATTN])
 @pytest.mark.parametrize(
-    "split_attention",
-    [False, True] if current_platform.is_rocm() else [False])
-# TODO(boyuan): test inductor graph partition on rocm
-@pytest.mark.parametrize(
-    "use_inductor_graph_partition",
-    [False] if current_platform.is_rocm() else [False, True])
+    "model_name, model_class, custom_ops",
+    # Test attention+quant_fp8 fusion with custom and torch impls
+    [(*model, c) for model in MODELS_FP8 for c in ["+quant_fp8", "-quant_fp8"]]
+    # quant_fp4 only has the custom impl
+    + [(*model, c) for model in MODELS_FP4 for c in [""]])
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("split_attention", SPLIT_ATTENTION)
+@pytest.mark.parametrize("use_inductor_graph_partition",
+                         USE_INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(not current_platform.is_cuda_alike(),
                     reason="Only test ROCm or CUDA")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
-@pytest.mark.skipif(current_platform.is_cuda()
-                    and not current_platform.is_device_capability((10, 0)),
-                    reason="On CUDA only test on SM100(Blackwell)")
-@pytest.mark.skipif(not current_platform.is_cuda_alike(),
-                    reason="Only test ROCm or CUDA")
-def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
-                                 head_size: int, batch_size: int,
-                                 dtype: torch.dtype, model_name: str,
-                                 model_class: type[AttentionQuantPatternModel],
-                                 backend: _Backend, split_attention: bool,
-                                 use_inductor_graph_partition: bool,
-                                 monkeypatch, dist_init, caplog_vllm):
+def test_attention_quant_pattern(
+        num_qo_heads: int, num_kv_heads: int, head_size: int, batch_size: int,
+        dtype: torch.dtype, custom_ops: str, model_name: str,
+        model_class: type[AttentionQuantPatternModel], backend: _Backend,
+        split_attention: bool, use_inductor_graph_partition: bool, monkeypatch,
+        dist_init, caplog_vllm):
     """Test AttentionStaticQuantPattern fusion pass"""
 
-    if use_inductor_graph_partition and not is_torch_equal_or_newer(
-            "2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available "
-                    "in PyTorch 2.9+")
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
     if split_attention:
@@ -384,7 +391,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         scheduler_config=SchedulerConfig(max_num_seqs=1024),
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
-            custom_ops=["+quant_fp8"],
+            custom_ops=custom_ops_list,
             use_inductor_graph_partition=use_inductor_graph_partition,
         ),
         cache_config=CacheConfig(cache_dtype="fp8"))
@@ -483,13 +490,11 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         layer.impl.fused_output_quant_supported(quant_key) for key, layer in
         vllm_config.compilation_config.static_forward_context.items()
     ]
-    if any(attn_fusion_supported):
-        # Check quantization ops in the graph before and after fusion
-        test_backend.check_before_ops([QUANT_OPS[quant_key]],
-                                      fully_replaced=True)
+    assert sum(attn_fusion_supported) == len(attn_fusion_supported), \
+        "All layers should support attention fusion"
 
     # access the underlying `AttnFusionPass` on the `LazyInitPass`
-    assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
+    assert attn_pass.pass_.matched_count == 1
 
     # Check attention ops in the graph before and after fusion
     attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
