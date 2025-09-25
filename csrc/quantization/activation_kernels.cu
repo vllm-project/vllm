@@ -114,14 +114,18 @@ __global__ void act_and_mul_quant_kernel(
 }
 
 __device__ __forceinline__ float silu(float x) {
-  return (__fdividef(x, (1.f + expf(-x))));
+  return __fdividef(x, (1.f + expf(-x)));
 }
 
 __device__ __forceinline__ float2 silu2(float2 x) {
   return make_float2(silu(x.x), silu(x.y));
 }
 
-#ifndef USE_ROCM
+__device__ __forceinline__ __nv_bfloat162 silu2_v2(float2 x) {
+  return make_bfloat162(__float2bfloat16_rn(silu(x.x)),
+                        __float2bfloat16_rn(silu(x.y)));
+}
+
 __device__ __forceinline__ float warp_max(float v) {
   static constexpr unsigned FULL_MASK = 0xffffffffu;
   for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
@@ -137,107 +141,375 @@ __device__ __forceinline__ __nv_bfloat16 warp_max(__nv_bfloat16 v) {
   }
   return v;
 }
-#endif
 
 template <typename T, typename U>
 __device__ __forceinline__ void cp_async4(T* _smem_ptr, const U* _glob_ptr) {
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   auto smem_ptr = reinterpret_cast<void*>(_smem_ptr);
   auto glob_ptr = reinterpret_cast<const void*>(_glob_ptr);
-  const int BYTES = 16;
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  static constexpr int BYTES = 16;
+  int32_t smem = static_cast<int32_t>(__cvta_generic_to_shared(smem_ptr));
+  // TODO: Add prefetch here?
   asm volatile(
       "{\n"
       "   cp.async.cg.shared.global [%0], [%1], %2;\n"
       "}\n" ::"r"(smem),
       "l"(glob_ptr), "n"(BYTES));
-#else
-  _smem_ptr[0] = _glob_ptr[0];
-#endif
 }
 
 __device__ __forceinline__ void cp_async_fence() {
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.commit_group;\n" ::);
-#else
-#endif
 }
 
 template <int N>
 __device__ __forceinline__ void cp_async_wait() {
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
-#else
-#endif
 }
 
 template <>
 __device__ __forceinline__ void cp_async_wait<0>() {
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.wait_all;\n" ::);
-#else
-#endif
 }
 
-__device__ __forceinline__ float clip(float v, float mmin, float mmax) {
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
-  return fminf(mmax, fmaxf(v, mmin));
-#else
-#endif
-}
-
-__device__ __forceinline__ __nv_bfloat16 clip(__nv_bfloat16 v,
-                                              __nv_bfloat16 mmin,
-                                              __nv_bfloat16 mmax) {
+__device__ __forceinline__ __nv_bfloat16 clip(const __nv_bfloat16& v,
+                                              const __nv_bfloat16& mmin,
+                                              const __nv_bfloat16& mmax) {
   return __hmin(mmax, __hmax(v, mmin));
 }
 
-__device__ __forceinline__ __nv_bfloat162 clip(__nv_bfloat162 v,
-                                               __nv_bfloat162 mmin,
-                                               __nv_bfloat162 mmax) {
+__device__ __forceinline__ __nv_bfloat162 clip(const __nv_bfloat162& v,
+                                               const __nv_bfloat162& mmin,
+                                               const __nv_bfloat162& mmax) {
   return __hmin2(mmax, __hmax2(v, mmin));
 }
 
 // We use the following values for fp8 min/max:
 //  __nv_fp8_e4m3 = (-448, +448)
-//  __nv_fp8_e4m3uz = (-240.0, +240.0)
-// It is currently assumed that only
+//  __nv_fp8_e5m2 = (-57344.0, 57344.0)
+//  __nv_fp8_e8m0 = (5.877471754111438e-39, 1.7014118346046923e+38)
 template <class T>
 constexpr __nv_bfloat16 get_fp8_max() {
-  static_assert(std::is_same_v<T, c10::Float8_e4m3fn> ||
-                std::is_same_v<T, c10::Float8_e4m3fnuz>);
-  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn>) {
+  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn> ||
+                std::is_same_v<T, c10::Float8_e4m3fnuz>) {
     return __nv_bfloat16(__nv_bfloat16_raw{.x = 17376});
+  } else if constexpr (std::is_same_v<T, c10::Float8_e5m2> ||
+                       std::is_same_v<T, c10::Float8_e5m2fnuz>) {
+    return __nv_bfloat16(__nv_bfloat16_raw{.x = 18272});
   } else {
-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 17264});
+    return __nv_bfloat16(__nv_bfloat16_raw{.x = 32512});
   }
 }
-
 template <class T>
 constexpr __nv_bfloat16 get_fp8_min() {
-  static_assert(std::is_same_v<T, c10::Float8_e4m3fn> ||
-                std::is_same_v<T, c10::Float8_e4m3fnuz>);
-  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn>) {
+  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn> ||
+                std::is_same_v<T, c10::Float8_e4m3fnuz>) {
     return __nv_bfloat16(__nv_bfloat16_raw{.x = 50144});
+  } else if constexpr (std::is_same_v<T, c10::Float8_e5m2> ||
+                       std::is_same_v<T, c10::Float8_e5m2fnuz>) {
+    return __nv_bfloat16(__nv_bfloat16_raw{.x = 51040});
   } else {
-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 50032});
+    return __nv_bfloat16(__nv_bfloat16_raw{.x = 64});
   }
 }
-#ifndef USE_ROCM
-template <typename fp8_type, int32_t NUM_WARPS, typename Idx_t,
-          int NUM_PARALLEL_TOKENS, bool USE_UE8M0, int GROUP_SIZE = 128,
-          int NUM_STAGES = 3>
+
+template <typename Idx_t>
+__device__ __forceinline__ int __search(int idx, int n,
+                                        const Idx_t* __restrict__ input,
+                                        Idx_t val) {
+  const Idx_t* input_ptr = input + idx;
+  int base_offset = 0;
+
+  for (;;) {
+    bool move_on = (idx < n && *input_ptr <= val);
+
+    unsigned mask = __ballot_sync(0xffffffff, move_on);
+
+    if (mask != 0xffffffffu) {
+      int last_lane = 31 - __clz(mask);
+      return base_offset + last_lane;
+    }
+
+    input_ptr += 32;
+    base_offset += 32;
+    idx += 32;
+  }
+}
+
+__device__ __forceinline__ unsigned get_lane_id() {
+  unsigned id;
+  asm("mov.u32 %0, %%laneid;" : "=r"(id));
+  return id;
+}
+
+static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;
+template <typename fp8_type, int THREADS, typename Idx_t, bool USE_UE8M0,
+          int GROUP_SIZE = 128, int NUM_STAGES = 3>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const __nv_bfloat16* __restrict__ _input, fp8_type* __restrict__ _y_q,
-    float* __restrict__ _y_s, const int32_t* __restrict__ counts,
-
+    float* __restrict__ _y_s, const int32_t* __restrict__ tokens_per_expert,
     // sizes
-    int H, int G,
+    Idx_t E,
 
     // strides (in elements)
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
     Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
     Idx_t stride_ys_g, Idx_t stride_counts_e) {
+  static constexpr int64_t NUM_WARPS = THREADS / WARP_SIZE;
+
+  static constexpr int32_t LOAD_STAGE_SIZE = 2 * GROUP_SIZE / 8;
+  static constexpr int32_t LOAD_STAGE_MOD = NUM_STAGES * LOAD_STAGE_SIZE;
+
+  static constexpr int32_t COMPUTE_STAGE_SIZE = 2 * GROUP_SIZE / 4;
+  static constexpr int32_t COMPUTE_STAGE_MOD = COMPUTE_STAGE_SIZE * NUM_STAGES;
+  static constexpr Idx_t H = 7168;
+  static constexpr Idx_t T = 1024;
+
+  extern __shared__ __int128_t smem_128[];
+
+  static constexpr int MAX_EXPERTS = 256;
+  __shared__ int s_expert_offsets[MAX_EXPERTS + 1];
+
+  static constexpr __nv_bfloat16 fp8_min = get_fp8_min<fp8_type>();
+  static constexpr __nv_bfloat16 fp8_max = get_fp8_max<fp8_type>();
+  // We assign EPS with it's 16-bit unsigned counterpart to allow constexpr.
+  static constexpr __nv_bfloat16 EPS = (__nv_bfloat16_raw{.x = 11996});
+  int tid = threadIdx.x;
+  int warp_id = tid >> 5;
+  int lane_id = tid & 0x1f;
+
+  int running_sum{};
+  if (!warp_id) {
+    for (int i = 0; i < E; i += WARP_SIZE) {
+      bool valid = i + threadIdx.x < E;
+      int value = (valid ? tokens_per_expert[i + threadIdx.x] : 0) +
+                  (!lane_id ? running_sum : 0);
+
+      for (int offset = 1; offset < 32; offset *= 2) {
+        int n = __shfl_up_sync(0xFFFFFFFFu, value, offset);
+        if (lane_id >= offset) value += n;
+      }
+
+      if (valid) {
+        s_expert_offsets[i + threadIdx.x + 1] = value;
+      }
+
+      running_sum = __shfl_sync(0xFFFFFFFFu, value, WARP_SIZE - 1);
+    }
+
+    if (!lane_id) {
+      s_expert_offsets[0] = 0;
+    }
+  }
+
+  __syncthreads();
+
+  int32_t total_tokens = s_expert_offsets[E];
+
+  const int warp_position_yq = warp_id * (H / NUM_WARPS);
+  const int warp_position_scales = warp_id * (H / (GROUP_SIZE * NUM_WARPS));
+
+  // A single block will handle tokens_per_block tokens.
+  // Each block i iterates over tokens of a slice of n_tokens =
+  // expert_counts[i], with the size of chunk being
+  // (n_tokens / NUM_PARALLEL_TOKENS) + residual, instead of
+  // updiv(n_tokens, NUM_PARALLEL_TOKENS) for better scheduling.
+
+  // Each warp will get space to store its hidden dim for gate and up.
+  __int128_t* s_hidden_load = smem_128 + warp_id * ((2 * 128 / 8) * NUM_STAGES);
+  __int128_t* smem_load_ptr = s_hidden_load + lane_id;
+
+  const __nv_bfloat16 fp8_inv = __hdiv(__float2bfloat16(1.f), fp8_max);
+
+  int32_t compute_pipeline_offset_64 = 0;
+  int32_t load_stage_offset{};
+  const __nv_bfloat16 one_bf16 = __float2bfloat16_rn(1.f);
+
+  __int64_t* smem_compute_ptr = reinterpret_cast<__int64_t*>(smem_128) +
+                                warp_id * (2 * (GROUP_SIZE / 4) * NUM_STAGES) +
+                                lane_id;
+  __int64_t* s_gate64_ptr = smem_compute_ptr;
+  __int64_t* s_up64_ptr = smem_compute_ptr + GROUP_SIZE / 4;
+
+#define updiv(x, y) ((x + y - 1) / y)
+  int tokens_to_process = updiv(total_tokens, SILU_V2_BLOCK_COUNT);
+#undef updiv
+
+  int tokens_lower = blockIdx.x * tokens_to_process;
+  int tokens_upper = std::min(total_tokens, tokens_lower + tokens_to_process);
+
+  Idx_t expert_id{}, expert_offset{}, next_expert_offset{};
+  int token_id = tokens_lower;
+  int32_t t_load{};
+
+  if (token_id < tokens_upper) {
+    expert_id = __search<int>(lane_id, E, s_expert_offsets, token_id);
+    expert_offset = s_expert_offsets[expert_id];
+    next_expert_offset = s_expert_offsets[expert_id + 1];
+  } else {
+    // This thread block has no work to do.
+    return;
+  }
+
+  static constexpr int t_load_bound = H / (GROUP_SIZE * NUM_WARPS);
+
+  Idx_t base_i =
+      (expert_id * (T * (H / 4)) + (token_id - expert_offset) * (H / 4));
+  const Idx_t gate_warp_offset =
+      warp_id * (H / (8 * NUM_WARPS)) + (lane_id & 0b1111);
+
+  const __int128_t* input_128_ptr =
+      reinterpret_cast<const __int128_t*>(_input) + gate_warp_offset +
+      ((lane_id < 16) ? 0 : (H / 8));
+  __int128_t* load_ptr = const_cast<__int128_t*>(input_128_ptr + base_i);
+
+  auto token_offset = token_id - expert_offset;
+
+  auto load_and_advance_y_pred = [&] {
+    if (t_load < t_load_bound) {
+      auto smem_load_ptr_staged = smem_load_ptr + load_stage_offset;
+
+      // It is very important that LOAD_STAGE_SIZE is constexpr to avoid
+      // unnecessary ALU ops.
+      load_stage_offset += LOAD_STAGE_SIZE;
+      load_stage_offset %= LOAD_STAGE_MOD;
+
+      cp_async4(smem_load_ptr_staged, load_ptr);
+      load_ptr += GROUP_SIZE / 8;
+      ++t_load;
+    } else {
+      ++token_id;
+      if (token_id < tokens_upper) {
+        t_load = 0;
+
+        if (token_id >= next_expert_offset) {
+          ++expert_id;
+          // This skips 1 memory read.
+          expert_offset = next_expert_offset;
+          next_expert_offset = s_expert_offsets[expert_id + 1];
+          base_i = expert_id * (T * (H / 4));
+          token_offset = 0;
+        } else {
+          base_i += H / 4;
+          token_offset++;
+        }
+
+        load_ptr = const_cast<__int128_t*>(input_128_ptr + base_i);
+
+        auto smem_load_ptr_staged = smem_load_ptr + load_stage_offset;
+
+        // It is very important that LOAD_STAGE_SIZE is constexpr to avoid
+        // unnecessary ALU ops.
+        load_stage_offset += LOAD_STAGE_SIZE;
+        load_stage_offset %= LOAD_STAGE_MOD;
+
+        cp_async4(smem_load_ptr_staged, load_ptr);
+        load_ptr += GROUP_SIZE / 8;
+        ++t_load;
+      }
+    }
+    // We fence even if there is nothing to load to simplify pipelining.
+    cp_async_fence();
+  };
+
+// We need to warm-up the pipeline.
+#pragma unroll
+  for (int i = 0; i < NUM_STAGES - 1; i++) {
+    load_and_advance_y_pred();
+  }
+
+  __nv_fp8x4_e4m3* y_q_base_ptr =
+      reinterpret_cast<__nv_fp8x4_e4m3*>(_y_q) + lane_id;
+  auto y_scale_base_ptr = _y_s + warp_position_scales * stride_ys_g;
+
+  __nv_bfloat16 scale_reg{};
+
+  while (token_id < tokens_upper) {
+    const Idx_t base_ys = expert_id * stride_ys_e;
+    auto y_s_ptr = y_scale_base_ptr + base_ys + token_offset * stride_ys_t;
+    __nv_fp8x4_e4m3* y_q_ptr =
+        y_q_base_ptr +
+        ((expert_id * (T * H) + token_offset * H) + warp_position_yq) / 4;
+    static constexpr int COMPUTE_LIMIT = H / (GROUP_SIZE * NUM_WARPS);
+
+    for (int i = 0; i < COMPUTE_LIMIT; i++) {
+      cp_async_wait<NUM_STAGES - 2>();
+      __syncthreads();
+      load_and_advance_y_pred();
+
+      __int64_t* gate64_ptr = s_gate64_ptr + compute_pipeline_offset_64;
+      __int64_t* up64_ptr = s_up64_ptr + compute_pipeline_offset_64;
+
+      // COMPUTE_STAGE_SIZE/MOD must also be constexpr!
+      compute_pipeline_offset_64 += COMPUTE_STAGE_SIZE;
+      compute_pipeline_offset_64 %= COMPUTE_STAGE_MOD;
+
+      __int64_t gate64 = *gate64_ptr;
+      __int64_t up64 = *up64_ptr;
+
+      // Compute
+      __nv_bfloat162 results_bf162[2];
+      __nv_bfloat162* s_up_compute_32 =
+          reinterpret_cast<__nv_bfloat162*>(&up64);
+      __nv_bfloat162* s_gate_compute_32 =
+          reinterpret_cast<__nv_bfloat162*>(&gate64);
+
+#pragma unroll
+      for (int j = 0; j < 2; j++) {
+        __nv_bfloat162 gate =
+            silu2_v2(__bfloat1622float2(s_gate_compute_32[j]));
+        results_bf162[j] = __hmul2(gate, s_up_compute_32[j]);
+      }
+
+      auto _y_max2 =
+          __hmax2(__habs2(results_bf162[0]), __habs2(results_bf162[1]));
+
+      _y_max2.x = __hmax(__hmax(_y_max2.x, _y_max2.y), EPS);
+
+      __nv_bfloat16 y_s = __hmul(warp_max(_y_max2.x), fp8_inv);
+
+      if constexpr (USE_UE8M0) {
+        y_s = hexp2(hceil(hlog2(y_s)));
+      }
+
+      __nv_bfloat16 inv_y = __hdiv(one_bf16, y_s);
+
+      auto y_s2 = make_bfloat162(inv_y, inv_y);
+
+#pragma unroll
+      for (int32_t j = 0; j < 2; ++j) {
+        results_bf162[j] =
+            clip(__hmul2(results_bf162[j], y_s2), __bfloat162bfloat162(fp8_min),
+                 __bfloat162bfloat162(fp8_max));
+      }
+
+      *y_q_ptr = __nv_fp8x4_e4m3(results_bf162[0], results_bf162[1]);
+      y_q_ptr += WARP_SIZE;
+
+      if (lane_id == i) {
+        scale_reg = y_s;
+      }
+    }
+
+    if (lane_id < COMPUTE_LIMIT) {
+      y_s_ptr[lane_id * stride_ys_g] = scale_reg;
+    }
+  };
+}
+
+template <typename fp8_type, int32_t NUM_WARPS, typename Idx_t,
+          int NUM_PARALLEL_TOKENS, bool USE_UE8M0, int GROUP_SIZE = 128,
+          int NUM_STAGES = 3>
+__global__ void silu_v1(const __nv_bfloat16* __restrict__ _input,
+                        fp8_type* __restrict__ _y_q, float* __restrict__ _y_s,
+                        const int32_t* __restrict__ counts,
+
+                        // sizes
+                        int H, int G,
+
+                        // strides (in elements)
+                        Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h,
+                        Idx_t stride_yq_e, Idx_t stride_yq_t, Idx_t stride_yq_h,
+                        Idx_t stride_ys_e, Idx_t stride_ys_t, Idx_t stride_ys_g,
+                        Idx_t stride_counts_e) {
   static constexpr __nv_bfloat16 fp8_min = get_fp8_min<fp8_type>();
   static constexpr __nv_bfloat16 fp8_max = get_fp8_max<fp8_type>();
   // We assign EPS with its 16-bit unsigned counterpart to allow constexpr.
@@ -354,7 +626,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     cp_async_fence();
   };
 
-  #pragma unroll
+#pragma unroll
   for (int i = 0; i < NUM_STAGES - 1; i++) {
     load_and_advance_y_pred();
   }
@@ -394,14 +666,14 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     __int64_t up64 = *s_up_compute_64;
     __nv_bfloat162* s_up_compute_32 = reinterpret_cast<__nv_bfloat162*>(&up64);
 
-  #pragma unroll
+#pragma unroll
     for (int i = 0; i < 2; i++) {
       // For silu, we make sure that div is emitted.
       float2 gate = silu2(__bfloat1622float2(s_gate_compute_32[i]));
       results_bf162[i] = __float22bfloat162_rn(gate);
     }
 
-  #pragma unroll
+#pragma unroll
     for (int i = 0; i < 2; i++) {
       results_bf162[i] = __hmul2(results_bf162[i], s_up_compute_32[i]);
     }
@@ -423,7 +695,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
     auto y_s2 = make_bfloat162(inv_y, inv_y);
 
-  #pragma unroll
+#pragma unroll
     for (int32_t i = 0; i < 2; ++i) {
       results_bf162[i] =
           clip(__hmul2(results_bf162[i], y_s2), __bfloat162bfloat162(fp8_min),
@@ -440,7 +712,6 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     }
   }
 }
-#endif
 
 }  // namespace vllm
 
@@ -475,12 +746,12 @@ void silu_and_mul_quant(torch::Tensor& out,    // [..., d]
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
 }
 
-void silu_mul_fp8_quant_deep_gemm_cuda(
-    const at::Tensor& input,   // (E, T, 2*H)
-    const at::Tensor& counts,  // (E)
-    at::Tensor& y_q,           // (E, T, H) [OUT]
-    at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
-    int64_t group_size, bool use_ue8m0, int64_t num_parallel_tokens) {
+void silu_v1_cuda(const at::Tensor& input,   // (E, T, 2*H)
+                  const at::Tensor& counts,  // (E)
+                  at::Tensor& y_q,           // (E, T, H) [OUT]
+                  at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
+                  int64_t group_size, bool use_ue8m0,
+                  int64_t num_parallel_tokens) {
 #ifndef USE_ROCM
   // This kernel relies heavily on cp.async and fp8 support.
   // This kernel currently only supports H % 128 == 0 and assumes a
@@ -516,8 +787,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
 
   #define KERNEL_FN                                                         \
     if (use_ue8m0) {                                                        \
-      vllm::silu_mul_fp8_quant_deep_gemm_kernel<fp8_t, NUM_WARPS, Idx_t,    \
-                                                NUM_PARALLEL_TOKENS, true>  \
+      vllm::silu_v1<fp8_t, NUM_WARPS, Idx_t, NUM_PARALLEL_TOKENS, true>     \
           <<<grid, block, 0, stream>>>(                                     \
               reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),           \
               (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                \
@@ -526,8 +796,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
               stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,           \
               stride_counts_e);                                             \
     } else {                                                                \
-      vllm::silu_mul_fp8_quant_deep_gemm_kernel<fp8_t, NUM_WARPS, Idx_t,    \
-                                                NUM_PARALLEL_TOKENS, false> \
+      vllm::silu_v1<fp8_t, NUM_WARPS, Idx_t, NUM_PARALLEL_TOKENS, false>    \
           <<<grid, block, 0, stream>>>(                                     \
               reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),           \
               (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                \
@@ -587,4 +856,67 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
                           [&] { KERNEL_CALL_TOP_LEVEL });
 
 #endif
+}
+
+void silu_mul_fp8_quant_deep_gemm_cuda(
+    const at::Tensor& input,              // (E, T, 2*H)
+    const at::Tensor& tokens_per_expert,  // (E)
+    at::Tensor& y_q,                      // (E, T, H) [OUT]
+    at::Tensor& y_s,                      // (E, T, H//group_size) [OUT]
+    int64_t group_size, bool use_ue8m0, int64_t num_parallel_tokens) {
+  // This kernel currently only supports H % 128 == 0 and assumes a
+  // fixed GROUP_SIZE of 128.
+  TORCH_CHECK(input.dtype() == torch::kBFloat16);
+  TORCH_CHECK(y_q.dtype() == torch::kFloat8_e4m3fn ||
+              y_q.dtype() == torch::kFloat8_e4m3fnuz);
+  TORCH_CHECK(y_s.dtype() == torch::kFloat32);
+  TORCH_CHECK(input.size(-1) % 256 == 0);
+
+  using Idx_t = int64_t;
+
+  Idx_t E = input.size(0);
+  Idx_t T = input.size(1);
+  Idx_t H = input.size(2) / 2;
+  Idx_t stride_i_e = input.stride(0);
+  Idx_t stride_i_t = input.stride(1);
+  Idx_t stride_i_h = input.stride(2);
+  Idx_t stride_yq_e = y_q.stride(0);
+  Idx_t stride_yq_t = y_q.stride(1);
+  Idx_t stride_yq_h = y_q.stride(2);
+  Idx_t stride_ys_e = y_s.stride(0);
+  Idx_t stride_ys_t = y_s.stride(1);
+  Idx_t stride_ys_g = y_s.stride(2);
+
+  Idx_t stride_counts_e = tokens_per_expert.stride(0);
+
+  static constexpr int GROUP_SIZE = 128;
+
+  static constexpr int THREAD_COUNT = 256;
+
+  static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;
+
+  static constexpr int NUM_STAGES = 4;
+
+  int sms = vllm::SILU_V2_BLOCK_COUNT;  // Hardcoded for Hopper.
+
+  static constexpr int max_shared_mem_bytes =
+      GROUP_SIZE * 2 * NUM_STAGES * NUM_WARPS * 2;  // 2 bytes
+
+  dim3 grid(sms), block(THREAD_COUNT);
+
+#define KERNEL_FN                                                              \
+  vllm::silu_mul_fp8_quant_deep_gemm_kernel<fp8_t, THREAD_COUNT, Idx_t, false, \
+                                            GROUP_SIZE, NUM_STAGES>            \
+      <<<grid, block, max_shared_mem_bytes, stream>>>(                         \
+          reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),                  \
+          (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),                       \
+          reinterpret_cast<int32_t*>(tokens_per_expert.data_ptr()), E,         \
+          stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,        \
+          stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g,                  \
+          stride_counts_e);
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  VLLM_DISPATCH_FP8_TYPES(y_q.scalar_type(),
+                          "silu_mul_fp8_quant_deep_gemm_kernel",
+                          [&] { KERNEL_FN });
 }
