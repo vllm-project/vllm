@@ -144,7 +144,7 @@ def replace_linear_class(
             f"Unsupported parallel style type {type(style)}, expected str")
 
     # MXFP4 linear layer is not implemented
-    if quant_config is not None and quant_config.get_name() == "mxfp4":
+    if quant_config and quant_config.get_name() == "mxfp4":
         quant_config = None
 
     vllm_linear_cls, vllm_linear_kwargs = {
@@ -451,6 +451,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.quant_config: Optional[
             QuantizationConfig] = vllm_config.quant_config
 
+        if self.quant_config and self.quant_config.get_name() == "mxfp4":
+            raise ValueError(
+                "Transformers backend does not support MXFP4 yet.")
+
         self.pp_group = get_pp_group()
         self.pp_size = self.pp_group.world_size
         self.pp_rank = self.pp_group.rank_in_group
@@ -626,7 +630,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         # MXFP4 attention layer is not implemented
         quant_config = self.quant_config
-        if quant_config is not None and quant_config.get_name() == "mxfp4":
+        if quant_config and quant_config.get_name() == "mxfp4":
             quant_config = None
 
         attention_instances = {}
