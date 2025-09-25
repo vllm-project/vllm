@@ -41,7 +41,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -412,10 +411,8 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.model.embed_tokens, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.model.embed_tokens, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

@@ -36,7 +36,7 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
     def __init__(self, data: _T, modality: str) -> None:
         super().__init__()
 
-        self.data = data
+        self.data: _T = data
         self.modality = modality
 
     def __repr__(self) -> str:
@@ -177,7 +177,9 @@ class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
 
 class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
 
-    def __init__(self, data: Sequence[HfAudioItem]) -> None:
+    def __init__(self, data: Optional[Sequence[HfAudioItem]]) -> None:
+        if data is None:
+            data = [None]
         super().__init__(data, "audio")
 
     def get_audio_length(self, item_idx: int) -> int:
@@ -198,7 +200,9 @@ class ImageSize(NamedTuple):
 
 class ImageProcessorItems(ProcessorBatchItems[HfImageItem]):
 
-    def __init__(self, data: Sequence[HfImageItem]) -> None:
+    def __init__(self, data: Optional[Sequence[HfImageItem]]) -> None:
+        if data is None:
+            data = [None]
         super().__init__(data, "image")
 
     def get_image_size(self, item_idx: int) -> ImageSize:
@@ -223,10 +227,12 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
 
     def __init__(
         self,
-        data: Sequence[HfVideoItem],
+        data: Optional[Sequence[HfVideoItem]],
         metadata: Optional[Union[dict[str, Any],
                                  list[Optional[dict[str, Any]]]]] = None,
     ) -> None:
+        if data is None:
+            data = [None]
         super().__init__(data, "video")
         self.metadata = metadata
 
@@ -385,6 +391,9 @@ class MultiModalDataParser:
         self,
         data: ModalityData[AudioItem],
     ) -> Optional[ModalityDataItems[Any, Any]]:
+        if data is None:
+            return AudioProcessorItems(None)
+
         # also check single audio item with sampling rate
         if self._is_empty(data) or (isinstance(data, tuple)
                                     and self._is_empty(data[0])):
@@ -420,6 +429,9 @@ class MultiModalDataParser:
         self,
         data: ModalityData[ImageItem],
     ) -> Optional[ModalityDataItems[Any, Any]]:
+        if data is None:
+            return ImageProcessorItems(None)
+
         if self._is_empty(data):
             return None
 
@@ -441,6 +453,9 @@ class MultiModalDataParser:
         self,
         data: ModalityData[VideoItem],
     ) -> Optional[ModalityDataItems[Any, Any]]:
+        if data is None:
+            return VideoProcessorItems(None)
+
         if self._is_empty(data):
             return None
 

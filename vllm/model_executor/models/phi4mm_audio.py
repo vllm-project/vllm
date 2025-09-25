@@ -100,7 +100,7 @@ class ConformerEncoderLayer(nn.Module):
             activation function for glu used in the multihead attention,
              default "swish".
         activation_checkpointing: str, optional
-            a dictionarry of {"module","interval","offload"}, where
+            a dictionary of {"module","interval","offload"}, where
                 "module": str
                     accept ["transformer", "attention"] to select
                     which module should do activation checkpointing.

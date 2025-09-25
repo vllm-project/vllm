@@ -40,8 +40,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     ssm_state_indices,
     num_accepted_tokens,
     scale,
-    N: tl.constexpr,  # num of sequences
-    T: tl.constexpr,  # num of tokens
+    N: tl.int64,  # num of sequences
+    T: tl.int64,  # num of tokens
     B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
@@ -116,8 +116,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_g = tl.load(p_g).to(tl.float32)
 
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q)) + 1e-6)
-            b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
+            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
         # [BK, BV]
         b_h *= exp(b_g)

@@ -30,6 +30,7 @@ docker run \
     bash -c '
     set -e
     echo $ZE_AFFINITY_MASK
+    pip install tblib==3.1.0
     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager
     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --block-size 64 -O3 -O.cudagraph_mode=NONE
     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager -tp 2 --distributed-executor-backend ray

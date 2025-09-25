@@ -13,14 +13,11 @@ from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
-from vllm import envs
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -37,8 +34,7 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings,
-                    merge_multimodal_embeddings_from_map)
+                    merge_multimodal_embeddings)
 
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
 _MAX_ENCODER_BATCH_SIZE = 16
@@ -276,7 +272,7 @@ class UltravoxProjector(nn.Module):
         else:
             self.act = get_act_fn(config.projector_act)
 
-        dim_out = config.text_hidden_size
+        dim_out = config.text_config.hidden_size
         self.linear_2 = nn.Linear(dim_mid, dim_out, bias=False)
 
         # Ultravox v0.4.1 and below use layer_norm after the second linear layer
@@ -418,7 +414,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config: UltravoxConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multi_modal_config = multimodal_config
@@ -438,7 +434,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self.multi_modal_projector = UltravoxProjector(config)
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            hf_config=config.text_config,
+            hf_config=config.wrapped_model_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
         if config.text_model_id is not None:
@@ -568,17 +564,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             safe_input_ids)
         if multimodal_embeddings is not None and len(
                 multimodal_embeddings) > 0:
-
-            # TODO(ywang96): remove this block after v0 is deprecated.
-            if not envs.VLLM_USE_V1:
-                attn_metadata = get_forward_context().attn_metadata
-                merge_multimodal_embeddings_from_map(
-                    inputs_embeds, multimodal_embeddings,
-                    attn_metadata.multi_modal_placeholder_index_maps["audio"])
-            else:
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, multimodal_embeddings,
-                    self.config.audio_token_index)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.audio_token_index)
         return inputs_embeds
 
     def forward(self,
@@ -597,10 +585,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         with the `input_ids`.
 
         Args:
-            audio_features: A batch of audio input chunks [B, N, 80, M].
-            audio_lens: Length of audio frames for each audio chunk [B].
-            audio_token_len: Length of audio tokens for each audio chunk [B'].
-                Note: batch dim is different from batch dim in audio chunks.
+            input_ids: Flattened (concatenated) input_ids corresponding to a
+                batch.
+            positions: Position indices for the input tokens.
+            intermediate_tensors: Intermediate tensors from prior forward pass.
+            inputs_embeds: Optional tensor of input embeddings.
 
         """
 
@@ -626,10 +615,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
                                              inputs_embeds=inputs_embeds)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -661,7 +648,7 @@ def pad_and_concat_to_dim3(
     max_len = max(f.shape[-1] for f in features)
     # Ensure all features have dim=3
     features = [f.view(-1, *f.shape[-2:]) for f in features]
-    # Pad and oncatenate:
+    # Pad and concatenate:
     # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
     features = [F.pad(f, (0, max_len - f.shape[-1])) for f in features]
     return torch.cat(features)

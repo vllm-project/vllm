@@ -6,10 +6,10 @@ Script to test add_lora, remove_lora, pin_lora, list_loras functions.
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
 from vllm.lora.request import LoRARequest
+from vllm.v1.engine.llm_engine import LLMEngine
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 LORA_MODULE_PATH = "yard1/llama-2-7b-sql-lora-test"

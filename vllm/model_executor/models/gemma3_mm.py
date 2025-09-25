@@ -14,7 +14,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -512,7 +511,11 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             architectures=["Gemma3ForCausalLM"],
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.language_model.logits_processor.scale *= logit_scale
+
+        if hasattr(self.language_model, "logits_processor"):
+            # The logits processor can be unset if we're using
+            # automatic conversion to pooling model.
+            self.language_model.logits_processor.scale *= logit_scale
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
@@ -684,7 +687,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
             global_attn_masks.append(global_attn_mask)
 
-            if (sliding_window := self.config.sliding_window) is not None:
+            sliding_window = self.config.text_config.sliding_window
+            if sliding_window is not None:
                 # Create a local causal mask with sliding window (1024).
                 local_attn_mask = torch.ones_like(global_attn_mask)
                 local_attn_mask = torch.tril(local_attn_mask,
@@ -699,10 +703,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

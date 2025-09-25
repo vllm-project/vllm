@@ -51,6 +51,7 @@ class _Backend(enum.Enum):
     TORCH_SDPA_VLLM_V1 = enum.auto()
     FLASHINFER = enum.auto()
     FLASHINFER_VLLM_V1 = enum.auto()
+    FLASHINFER_MLA = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
     TRITON_MLA_VLLM_V1 = enum.auto()
     CUTLASS_MLA = enum.auto()
@@ -66,6 +67,7 @@ class _Backend(enum.Enum):
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
     XFORMERS_VLLM_V1 = enum.auto()
+    ROCM_ATTN_VLLM_V1 = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
@@ -191,7 +193,8 @@ class Platform:
             return device_id
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+    def get_vit_attn_backend(cls, head_size: int,
+                             dtype: torch.dtype) -> _Backend:
         return _Backend.TORCH_SDPA
 
     @classmethod
@@ -271,13 +274,6 @@ class Platform:
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         """Get the total memory of a device in bytes."""
-        raise NotImplementedError
-
-    @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        """
-        Check if the current platform supports async output.
-        """
         raise NotImplementedError
 
     @classmethod
@@ -487,20 +483,6 @@ class Platform:
                 == "external_launcher")
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
-        return False
-
-    @classmethod
-    def default_v1(cls, model_config: ModelConfig) -> bool:
-        """
-        Returns whether the current platform supports v1 by default.
-        """
-        return cls.supports_v1(model_config)
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         """
         Returns if custom allreduce is supported on the current platform
@@ -584,6 +566,58 @@ class Platform:
         Check if the dtype is supported by the current platform.
         """
         raise NotImplementedError
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        """
+        Returns if the hybrid kv cache is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        """
+        Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def use_sync_weight_loader(cls) -> bool:
+        """
+        Returns if the current platform needs to sync weight loader.
+        """
+        return False
+
+    @classmethod
+    def make_synced_weight_loader(cls, original_weight_loader):
+        """
+        Wrap the original weight loader to make it synced.
+        """
+        if not cls.use_sync_weight_loader():
+            return original_weight_loader
+
+        def _synced_weight_loader(param, *args, **kwargs):
+            out = original_weight_loader(param, *args, **kwargs)
+            if param.device != torch.device("cpu"):
+                torch._sync(param)
+            return out
+
+        return _synced_weight_loader
+
+    @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        """
+        Returns a mapping from device_type to a tuple of supported 
+        kv_buffer_device for nixl.
+        """
+        return {}
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> Optional[str]:
+        """
+        Returns the nixl memory type for the current platform.
+        """
+        return None
 
 
 class UnspecifiedPlatform(Platform):

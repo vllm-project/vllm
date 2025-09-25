@@ -16,7 +16,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
-from .op import exp, safe_exp
+from .op import exp
 from .utils import FLA_GDN_FIX_BT, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
@@ -112,10 +112,11 @@ def chunk_fwd_kernel_o(
         p_g = tl.make_block_ptr(g, (T, ), (H, ), (i_t * BT, ), (BT, ), (0, ))
         b_g = tl.load(p_g, boundary_check=(0, ))
         b_o = b_o * exp(b_g)[:, None]
-        b_A = b_A * safe_exp(b_g[:, None] - b_g[None, :])
+        b_A = b_A * exp(b_g[:, None] - b_g[None, :])
 
-    o_i = tl.arange(0, BT)
-    m_A = o_i[:, None] >= o_i[None, :]
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
 
     p_v = tl.make_block_ptr(v, (T, V), (H * V, 1), (i_t * BT, i_v * BV),

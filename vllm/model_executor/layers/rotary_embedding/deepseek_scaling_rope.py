@@ -88,7 +88,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
-    def forward(
+    def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
@@ -97,15 +97,13 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
+        self._match_cos_sin_cache_dtype(query)
         query_rot = query[..., :self.rotary_dim]
         key_rot = key[..., :self.rotary_dim]
         if self.rotary_dim < self.head_size:
             query_pass = query[..., self.rotary_dim:]
             key_pass = key[..., self.rotary_dim:]
 
-        if self.cos_sin_cache.device != positions.device:
-            self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(
-                positions.device)
         cos_sin = self.cos_sin_cache[torch.add(positions, offsets)
                                      if offsets is not None else positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
@@ -129,3 +127,12 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             query = query_rot
             key = key_rot
         return query, key
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return self.forward_native(positions, query, key, offsets)

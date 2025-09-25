@@ -50,7 +50,6 @@ from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -1117,7 +1116,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _process_multimodal_inputs(self, modalities: dict):
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
@@ -1194,9 +1193,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.llm.compute_logits(hidden_states, sampling_metadata)
+        return self.llm.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

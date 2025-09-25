@@ -25,7 +25,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.gemma3n import Gemma3nForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -461,9 +460,6 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multimodal_config = multimodal_config
         self.vocab_size = config.text_config.vocab_size
 
-        self.sliding_window = getattr(config.text_config,
-                                      "interleaved_sliding_window", None)
-
         self.vision_tower = AutoModel.from_config(config=config.vision_config)
         self.audio_tower = AutoModel.from_config(config=config.audio_config)
         self.embed_vision = Gemma3nMultimodalEmbedder(config.vision_config,
@@ -586,10 +582,10 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # ruff: noqa
         # The Gemma3nProcessor expects all audio will be 30s in length and inserts 188 audio soft tokens into the
-        # text to account for this. However, the audio preprocessing and encoder do not gurarantee they will
+        # text to account for this. However, the audio preprocessing and encoder do not guarantee they will
         # produce 188 soft tokens; they will produce at most that many tokens, but they may produce fewer tokens
         # depending on the length of the longest audio input in the batch. When we encounter this situation, we pad
-        # the audio feature out to 188 soft tokens with the emebedding of the last token in the embed_audio vocab.
+        # the audio feature out to 188 soft tokens with the embedding of the last token in the embed_audio vocab.
         # TODO precompute and cache padding
         audio_padding_toks = torch.tensor([[self.vocab_size - 1]],
                                           dtype=torch.long,
@@ -688,10 +684,8 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

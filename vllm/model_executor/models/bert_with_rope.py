@@ -15,8 +15,8 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import (get_act_and_mul_fn,
                                                    get_act_fn)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk, torch_vllm_outplace_fused_experts)
+from vllm.model_executor.layers.fused_moe import (activation_without_mul,
+                                                  fused_topk)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -230,7 +230,7 @@ class NomicMoE(nn.Module):
         self.hidden_size = hidden_size
         self.total_intermediate_size = intermediate_size
         self.intermediate_size = divide(intermediate_size, self.tp_size)
-        self.hidden_act = hidden_act
+        self.hidden_act = activation_without_mul(hidden_act)
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -297,14 +297,14 @@ class NomicMoE(nn.Module):
                                                router_logits,
                                                self.top_k,
                                                renormalize=False)
-        final_hidden_states = torch_vllm_outplace_fused_experts(
+
+        final_hidden_states = torch.ops.vllm.outplace_fused_experts(
             hidden_states=hidden_states,
             w1=self.w1,
             w2=self.w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=self.hidden_act,
-            is_act_and_mul=False,
         )
 
         if self.tp_size > 1:

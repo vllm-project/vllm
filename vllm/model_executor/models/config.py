@@ -245,45 +245,32 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
         }
 
 
-class GraniteMoeHybridModelConfig(VerifyAndUpdateConfig):
-
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config
-        config.max_seq_len_to_capture = config.max_model_len
-        logger.info(
-            "Setting max_seq_len_to_capture to %d "
-            "to ensure that CUDA graph capture "
-            "covers sequences of length up to max_model_len.",
-            config.max_model_len)
-
-
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        decoding_config = vllm_config.decoding_config
-        if decoding_config.reasoning_backend == "":
-            decoding_config.reasoning_backend = "openai_gptoss"
+        structured_outputs_config = vllm_config.structured_outputs_config
+        if structured_outputs_config.reasoning_parser == "":
+            structured_outputs_config.reasoning_parser = "openai_gptoss"
 
-        # Increase the max capture size from 512 to 1024 for performance.
+        # Increase the max capture size from 512 to 992 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
-        # from 67 to 83.
+        # from 67 to 81.
         scheduler_config = vllm_config.scheduler_config
         if len(scheduler_config.cuda_graph_sizes) == 1:
             max_capture_size = scheduler_config.cuda_graph_sizes[0]
             # FIXME(woosuk): When using full cuda graph with FA3, the max
             # supported size is 992.
-            if max_capture_size < 1024:
+            if max_capture_size < 992:
                 cuda_graph_sizes = [1, 2, 4]
                 # Step size 8 for small batch sizes
                 cuda_graph_sizes += [i for i in range(8, 256, 8)]
                 # Step size 16 for larger batch sizes
-                cuda_graph_sizes += [i for i in range(256, 1025, 16)]
+                cuda_graph_sizes += [i for i in range(256, 993, 16)]
                 scheduler_config.cuda_graph_sizes = cuda_graph_sizes
                 logger.info(
                     "Overriding max cuda graph capture size to "
-                    "%d for performance.", 1024)
+                    "%d for performance.", 992)
 
 
 class MambaModelConfig(VerifyAndUpdateConfig):
@@ -312,7 +299,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         # TODO(tdoublep): remove as full cuda graph support is added
         FCG_NOT_SUPPORTED_MODELS = [
-            "Lfm2ForCausalLM", "MiniMaxText01ForCausalLM"
+            "Lfm2ForCausalLM",
+            "MiniMaxText01ForCausalLM",
         ]
 
         if (model_config.architecture not in FCG_NOT_SUPPORTED_MODELS
@@ -425,7 +413,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
-    "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "MambaForCausalLM": MambaModelConfig,
     "Mamba2ForCausalLM": MambaModelConfig,

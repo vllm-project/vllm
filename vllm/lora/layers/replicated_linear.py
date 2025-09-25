@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
 from .base_linear import BaseLinearLayerWithLoRA
@@ -18,7 +18,6 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
     def __init__(self, base_layer: ReplicatedLinear) -> None:
         super().__init__(base_layer, )
         # To ensure interface compatibility, set to 1 always.
-        self.tp_size = 1
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
 

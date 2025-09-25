@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from math import log2
 from typing import Optional
 
 import torch
@@ -7,9 +8,12 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (fp8_m_grouped_gemm_nt_masked,
                                   is_deep_gemm_e8m0_used)
@@ -24,35 +28,28 @@ def _silu_mul_fp8_quant_deep_gemm(
     y_q_ptr,  # fp8 quantized activations (E, T, H)
     y_s_ptr,  # 16-bit scales (E, T, G)
     counts_ptr,  # int32 num tokens per expert (E)
-
     # Sizes ---------------------------------------------------------------
     H: tl.constexpr,  # hidden dimension (per output)
     GROUP_SIZE: tl.constexpr,  # elements per group (usually 128)
-
     # Strides for input (elements) ---------------------------------------
     stride_i_e,
     stride_i_t,
     stride_i_h,
-
     # Strides for y_q (elements) -----------------------------------------
     stride_yq_e,
     stride_yq_t,
     stride_yq_h,
-
     # Strides for y_s (elements) -----------------------------------------
     stride_ys_e,
     stride_ys_t,
     stride_ys_g,
-
     # Stride for counts (elements)
     stride_counts_e,
-
     # Numeric params ------------------------------------------------------
     eps: tl.constexpr,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
-
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
@@ -101,17 +98,15 @@ def _silu_mul_fp8_quant_deep_gemm(
         tl.store(y_s_ptr + base_ys_offset + t * stride_ys_t, y_s)
 
 
-def silu_mul_fp8_quant_deep_gemm(
+def silu_mul_fp8_quant_deep_gemm_cuda(
     y: torch.Tensor,  # (E, T, 2*H)
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
+    num_parallel_tokens=16,
     group_size: int = 128,
-    eps: float = 1e-10,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
-
-    y has shape (E, T, 2*H). The first half of the last dimension is 
+    y has shape (E, T, 2*H). The first half of the last dimension is
     silu-activated, multiplied by the second half, then quantized into FP8.
-
     Returns `(y_q, y_s)` where
     * `y_q`: FP8 tensor, shape (E, T, H), same layout as y[..., :H]
     * `y_s`: FP32 tensor, shape (E, T, H // group_size), strides (T*G, 1, T)
@@ -120,22 +115,17 @@ def silu_mul_fp8_quant_deep_gemm(
     E, T, H2 = y.shape
     assert H2 % 2 == 0, "last dim of y must be even (2*H)"
     H = H2 // 2
-    G = H // group_size
-    assert H % group_size == 0, "H must be divisible by group_size"
-    assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E, \
-        "tokens_per_expert must be shape (E,)"
+    G = (H + group_size - 1) // group_size
+    assert H % 8 == 0, "H must be divisible by 8"
+    assert group_size == 128, "H must be divisible by 8"
+    assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
+
     tokens_per_expert = tokens_per_expert.to(device=y.device,
                                              dtype=torch.int32)
 
-    # allocate outputs
     fp8_dtype = torch.float8_e4m3fn
     y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
 
-    # strides (elements)
-    stride_i_e, stride_i_t, stride_i_h = y.stride()
-    stride_yq_e, stride_yq_t, stride_yq_h = y_q.stride()
-
-    # desired scale strides (elements): (T*G, 1, T)
     stride_ys_e = T * G
     stride_ys_t = 1
     stride_ys_g = T
@@ -144,68 +134,100 @@ def silu_mul_fp8_quant_deep_gemm(
                               dtype=torch.float32,
                               device=y.device)
 
-    stride_cnt_e = tokens_per_expert.stride()[0]
+    use_ue8m0 = is_deep_gemm_e8m0_used()
 
-    # Static grid over experts and H-groups.
-    # A loop inside the kernel handles the token dim
-    grid = (E * G, )
+    if E <= 16:
+        max_empirical_parallelism = 64
+    elif E <= 32:
+        max_empirical_parallelism = 16
+    else:
+        max_empirical_parallelism = 4
 
-    f_info = torch.finfo(fp8_dtype)
-    fp8_max = f_info.max
-    fp8_min = f_info.min
+    # We never want to launch more than Tx number of threads
+    # This computes the clip.
+    num_parallel_tokens = max(
+        1,
+        min(max_empirical_parallelism, 2**int(log2(min(num_parallel_tokens,
+                                                       T)))))
+    cuda_arch = current_platform.get_device_capability(
+        device_id=y.device.index).to_int()
 
-    _silu_mul_fp8_quant_deep_gemm[grid](
-        y,
-        y_q,
-        y_s,
-        tokens_per_expert,
-        H,
-        group_size,
-        stride_i_e,
-        stride_i_t,
-        stride_i_h,
-        stride_yq_e,
-        stride_yq_t,
-        stride_yq_h,
-        stride_ys_e,
-        stride_ys_t,
-        stride_ys_g,
-        stride_cnt_e,
-        eps,
-        fp8_min,
-        fp8_max,
-        is_deep_gemm_e8m0_used(),
-        BLOCK=group_size,
-        NUM_STAGES=4,
-        num_warps=1,
-    )
+    if cuda_arch >= 80:
+        torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert,
+                                                       y_q, y_s, group_size,
+                                                       use_ue8m0,
+                                                       num_parallel_tokens)
+    else:
+        # Default to triton if not on cuda or if arch is too old
+        y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
+
+        stride_cnt_e = tokens_per_expert.stride()[0]
+
+        # Static grid over experts and H-groups.
+        # A loop inside the kernel handles the token dim
+        grid = (E * G, )
+        # strides (elements)
+        stride_i_e, stride_i_t, stride_i_h = y.stride()
+        stride_yq_e, stride_yq_t, stride_yq_h = y_q.stride()
+
+        # desired scale strides (elements): (T*G, 1, T)
+        stride_ys_e = T * G
+        stride_ys_t = 1
+        stride_ys_g = T
+        y_s = torch.empty_strided(
+            (E, T, G),
+            (stride_ys_e, stride_ys_t, stride_ys_g),
+            dtype=torch.float32,
+            device=y.device,
+        )
+        f_info = torch.finfo(fp8_dtype)
+        fp8_max = f_info.max
+        fp8_min = f_info.min
+        eps: float = 1e-10
+        _silu_mul_fp8_quant_deep_gemm[grid](
+            y,
+            y_q,
+            y_s,
+            tokens_per_expert,
+            H,
+            group_size,
+            stride_i_e,
+            stride_i_t,
+            stride_i_h,
+            stride_yq_e,
+            stride_yq_t,
+            stride_yq_h,
+            stride_ys_e,
+            stride_ys_t,
+            stride_ys_g,
+            stride_cnt_e,
+            eps,
+            fp8_min,
+            fp8_max,
+            is_deep_gemm_e8m0_used(),
+            BLOCK=group_size,
+            NUM_STAGES=4,
+            num_warps=1,
+        )
 
     return y_q, y_s
 
 
 class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
-    # The Deep Gemm kernels only support block size of 128
-    DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
-
-    def __init__(self,
-                 max_num_tokens: int,
-                 num_dispatchers: int,
-                 block_shape: list[int],
-                 per_act_token_quant=False):
+    def __init__(
+        self,
+        max_num_tokens: int,
+        num_dispatchers: int,
+        quant_config: FusedMoEQuantConfig,
+    ):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
         num_dispatchers: The number of DP dispatchers.
-        block_shape: Block quantization block shape.
-        per_act_token_quant: Per activation token quantization flag.
+        quant_config: Quantization configuration
         """
-        super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=per_act_token_quant,
-                block_shape=block_shape,
-            ))
-        assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
+        super().__init__(quant_config)
+        assert self.block_shape == deep_gemm_block_shape()
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -263,10 +285,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
@@ -294,11 +312,11 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
         expected_m = max_num_tokens
-        fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, w1_scale),
+        fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, self.w1_scale),
                                      workspace1, expert_num_tokens, expected_m)
 
-        a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm(workspace1,
-                                                      expert_num_tokens)
+        a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm_cuda(
+            workspace1, expert_num_tokens)
 
-        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale), output,
-                                     expert_num_tokens, expected_m)
+        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, self.w2_scale),
+                                     output, expert_num_tokens, expected_m)

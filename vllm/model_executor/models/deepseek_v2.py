@@ -56,8 +56,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv, direct_register_custom_op
 
@@ -142,9 +140,7 @@ def sequence_parallel_chunk_fake(x: torch.Tensor) -> torch.Tensor:
 direct_register_custom_op(
     op_name="sequence_parallel_chunk",
     op_func=sequence_parallel_chunk,
-    mutates_args=[],
     fake_impl=sequence_parallel_chunk_fake,
-    dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
@@ -479,7 +475,8 @@ class DeepseekV2MLAAttention(nn.Module):
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
     (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
     
-    For more info see MLACommonImpl in: vllm/attention/backends/mla/utils.py
+        For more info see MLACommonImpl in:
+        vllm/v1/attention/backends/mla/utils.py
     """
 
     def __init__(
@@ -688,7 +685,7 @@ class DeepseekV2DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
-            residual = hidden_states
+            residual = hidden_states.clone()
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(
@@ -823,9 +820,12 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
         self.model = DeepseekV2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.hidden_size,
-                                          quant_config=quant_config)
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -911,10 +911,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

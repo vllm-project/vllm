@@ -50,10 +50,7 @@ class ClassificationMixin(OpenAIServing):
             return None
 
         try:
-            ctx.lora_request = self._maybe_get_adapters(ctx.request)
-
-            ctx.tokenizer = await self.engine_client.get_tokenizer(
-                ctx.lora_request)
+            ctx.tokenizer = await self.engine_client.get_tokenizer()
 
             renderer = self._get_renderer(ctx.tokenizer)
             ctx.engine_prompts = await renderer.render_prompt(
@@ -146,7 +143,7 @@ class ServingClassification(ClassificationMixin):
         request: ClassificationRequest,
         raw_request: Request,
     ) -> Union[ClassificationResponse, ErrorResponse]:
-        model_name = self._get_model_name(request.model)
+        model_name = self.models.model_name()
         request_id = (f"{self.request_id_prefix}-"
                       f"{self._base_request_id(raw_request)}")
 
