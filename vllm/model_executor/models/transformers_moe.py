@@ -1,0 +1,255 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Copyright 2024 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Wrapper around `transformers` MoE models."""
+from collections.abc import Iterable
+from typing import Any
+
+import torch
+import torch.nn as nn
+
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config.utils import getattr_iter
+from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
+
+from .transformers import (TransformersBase, TransformersForCausalLM,
+                           TransformersForMultimodalLM, TransformersModel,
+                           can_enable_torch_compile, log_replacement)
+from .utils import AutoWeightsLoader, maybe_prefix
+
+
+@CustomOp.register("transformers_fused_moe")
+class TransformersFusedMoE(FusedMoE):
+    """Custom FusedMoE for the Transformers backend."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._top_k_index: torch.Tensor = None
+
+        def custom_routing_function(hidden_states, gating_output, topk,
+                                    renormalize):
+            """Return `top_k_weights` from `gating_output` and the
+            `top_k_index` we stored in the layer earlier."""
+            return gating_output, self._top_k_index
+
+        self.custom_routing_function = custom_routing_function
+
+    def forward(self, hidden_states: torch.Tensor, top_k_index: torch.Tensor,
+                top_k_weights: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        """In Transformers `experts.forward` will have this signature.
+
+        We discard any extra kwargs because we cannot use them here."""
+        return torch.ops.vllm.transformers_moe_forward(hidden_states,
+                                                       top_k_index,
+                                                       top_k_weights,
+                                                       self.layer_name)
+
+
+def transformers_moe_forward(hidden_states: torch.Tensor,
+                             top_k_index: torch.Tensor,
+                             top_k_weights: torch.Tensor,
+                             layer_name: str) -> torch.Tensor:
+    """Store the `top_k_index` in the layer and call the actual forward."""
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._top_k_index = top_k_index
+    # Clone hidden_states because it will be mutated in-place in FusedMoE
+    return self.forward_impl(hidden_states.clone(), top_k_weights)
+
+
+def transformers_moe_forward_fake(hidden_states: torch.Tensor,
+                                  top_k_index: torch.Tensor,
+                                  top_k_weights: torch.Tensor,
+                                  layer_name: str) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="transformers_moe_forward",
+    op_func=transformers_moe_forward,
+    mutates_args=["hidden_states"],
+    fake_impl=transformers_moe_forward_fake,
+    dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)
+
+
+class TransformersMoEBase(TransformersBase):
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        """
+        Params for weights, fp8 weight scales, fp8 activation scales
+        (param_name, weight_name, expert_id, shard_id)
+        """
+        ckpt_names = [
+            # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
+            ("gate_proj", "down_proj", "up_proj"),  # Most common MoE style
+            ("w1", "w2", "w3"),  # Granite, Mixtral, Phi MoE style
+            ("linear", "linear_1", "linear_v"),  # Grok1 style
+        ]
+        expert_mapping = []
+        for gate_proj, down_proj, up_proj in ckpt_names:
+            expert_mapping.extend(
+                FusedMoE.make_expert_params_mapping(
+                    ckpt_gate_proj_name=gate_proj,
+                    ckpt_down_proj_name=down_proj,
+                    ckpt_up_proj_name=up_proj,
+                    num_experts=self.model_config.get_num_experts(),
+                    num_redundant_experts=0,  # TODO: enable EPLB
+                ))
+        return expert_mapping
+
+    def init_hook(self):
+        """Initialize the MoE layers.
+        
+        It is important that this happens:
+        
+        - After pipeline parallelism so only the `FusedMoE` layers for this
+        pipeline stage are created.
+        - Before tensor parallelism so vLLM `Linear` layers are not created for
+        the unfused `Linear` layers inside the Transformers MoE layers.
+        """
+        text_config = self.text_config
+
+        # Positional arguments
+        num_experts = self.model_config.get_num_experts()
+        top_k = text_config.num_experts_per_tok
+        hidden_size = text_config.hidden_size
+        names = ["moe_intermediate_size", "intermediate_size"]
+        intermediate_size = getattr_iter(text_config, names, None)
+
+        # Reduction kwargs
+        names = ["num_experts_shared", "shared_expert_intermediate_size"]
+        reduce_results = getattr_iter(text_config, names, 0) == 0
+
+        def reduce_results_hook(module, _, output):
+            """Forward hook that performs all-reduce on a nn.Module's output if
+            tensor parallel or expert parallel is enabled. This is used for
+            models with shared experts where the all reduce happens after any
+            shared experts have been added to the hidden state."""
+            if isinstance(output, tuple):
+                output = output[0]
+            return module.experts.maybe_all_reduce_tensor_model_parallel(
+                output)
+
+        # Unused kwargs since we use custom_routing_function:
+        # - `scoring_func` and `e_score_correction_bias` only used for grouped
+        #    topk routing inside vLLM and are non-trivial to infer
+        #    and hard code `use_grouped_topk=False`
+        # - `renormalize` passed anyway because it's easy to infer
+        # - `num_expert_group` and `topk_group` used for inferring expert
+        #    placement strategy in FusedMoE
+        # - `apply_router_weight_on_input` is already applied in Transformers
+        renormalize = getattr(text_config, "norm_topk_prob", top_k > 1)
+        num_expert_group = getattr(text_config, "n_group", None)
+        topk_group = getattr(text_config, "topk_group", None)
+
+        # MoE activation function
+        activation = "silu"
+        wrapped_arch = self.config.architectures[0].lower()
+        if "gptoss" in wrapped_arch:
+            activation = "swigluoai"
+        elif "grok1" in wrapped_arch:
+            activation = "gelu"
+
+        # Expert parallel load balancing kwargs
+        parallel_config = self.parallel_config
+        eplb_config = parallel_config.eplb_config
+
+        enable_eplb = parallel_config.enable_eplb
+        num_redundant_experts = eplb_config.num_redundant_experts
+
+        # Recursively fuse MoE layers
+        def _fused_moe(module: nn.Module, prefix: str = ""):
+            for child_name, child_module in module.named_children():
+                qual_name = maybe_prefix(prefix, child_name)
+                if (child_name == "experts"
+                        and isinstance(child_module, nn.ModuleList)):
+                    # Do the experts have biases
+                    has_bias = False
+                    for param_name, _ in child_module.named_parameters():
+                        if "bias" in param_name:
+                            has_bias = True
+                            break
+                    # Replace experts module with FusedMoE
+                    new_module = TransformersFusedMoE(
+                        num_experts=num_experts,
+                        top_k=top_k,
+                        hidden_size=hidden_size,
+                        intermediate_size=intermediate_size,
+                        reduce_results=reduce_results,
+                        renormalize=renormalize,
+                        # Hard coded because topk happens in Transformers
+                        use_grouped_topk=False,
+                        num_expert_group=num_expert_group,
+                        topk_group=topk_group,
+                        quant_config=self.quant_config,
+                        prefix=qual_name,
+                        activation=activation,
+                        enable_eplb=enable_eplb,
+                        num_redundant_experts=num_redundant_experts,
+                        has_bias=has_bias,
+                    )
+                    setattr(module, child_name, new_module)
+                    log_replacement(qual_name, child_module, new_module)
+                    # If results are not all-reduced in FusedMoE, ensure they
+                    # are all-reduced at the end of module.forward()
+                    if not reduce_results and (new_module.tp_size > 1
+                                               or new_module.ep_size > 1):
+                        module.register_forward_hook(reduce_results_hook)
+                else:
+                    _fused_moe(child_module, prefix=qual_name)
+
+        _fused_moe(self.model)
+
+    def load_weights(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> set[str]:
+        loader = AutoWeightsLoader(self, skip_prefixes=self.skip_prefixes)
+        return loader.load_weights(
+            weights,
+            mapper=self.hf_to_vllm_mapper,
+            expert_mapping=self.get_expert_mapping(),
+        )
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersMoEModel(TransformersMoEBase, TransformersModel):
+    pass
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersMoEForCausalLM(TransformersMoEBase, TransformersForCausalLM):
+    pass
+
+
+@support_torch_compile(
+    # set `positions` to last dim to support Qwen-mrope
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    },
+    enable_if=can_enable_torch_compile)
+class TransformersMoEForMultimodalLM(TransformersMoEForCausalLM,
+                                     TransformersForMultimodalLM):
+    pass

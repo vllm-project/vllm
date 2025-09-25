@@ -305,11 +305,11 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
 
 _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersModel": ("transformers", "TransformersModel"),
-    "TransformersMoEModel": ("transformers", "TransformersMoEModel"),
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
-    "TransformersMoEForCausalLM": ("transformers", "TransformersMoEForCausalLM"),  # noqa: E501
     "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
-    "TransformersMoEForMultimodalLM": ("transformers", "TransformersMoEForMultimodalLM"),  # noqa: E501
+    "TransformersMoEModel": ("transformers_moe", "TransformersMoEModel"),
+    "TransformersMoEForCausalLM": ("transformers_moe", "TransformersMoEForCausalLM"),  # noqa: E501
+    "TransformersMoEForMultimodalLM": ("transformers_moe", "TransformersMoEForMultimodalLM"),  # noqa: E501
 }
 # yapf: enable
 
