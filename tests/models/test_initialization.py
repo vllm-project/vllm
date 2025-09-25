@@ -123,12 +123,15 @@ def test_can_initialize_small_subset(model_arch: str,
 def test_can_initialize_large_subset(model_arch: str,
                                      monkeypatch: pytest.MonkeyPatch):
     """Test initializing large subset of supported models
-    
+
     This test covers the complement of the tests covered in the "small subset"
     test.
     """
     if model_arch == "Lfm2ForCausalLM":
         pytest.skip("Skipping until test supports V1-only models")
+    if model_arch == "InternS1ForConditionalGeneration":
+        pytest.skip(
+            "Skipping as the model is failing on the Transformers Nightly")
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
