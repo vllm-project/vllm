@@ -4,7 +4,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import (Annotated, Final, Literal, Optional, Protocol, TypeVar,
-                    Union, cast)
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -490,11 +490,8 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
         pixel_values: Union[torch.Tensor, list[torch.Tensor]],
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         # From vLLM LLaVA, vision tower output handling
-        image_hidden_states = vision_tower(pixel_values)
-        if not isinstance(image_hidden_states, torch.Tensor):
-            raise TypeError(
-                f"image_hidden_states type: {type(image_hidden_states)}"
-                " is not supported")
+        image_hidden_states: Union[torch.Tensor, tuple[torch.Tensor, ...]] = \
+            vision_tower(pixel_values)
 
         def select_features_fn(leaf: torch.Tensor):
             return self._select_image_features(
@@ -502,11 +499,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
                 strategy=self.config.vision_feature_select_strategy,
             )
 
-        selected_features = cast(
-            Union[torch.Tensor, tuple[torch.Tensor, ...]],
-            json_map_leaves(select_features_fn, image_hidden_states),
-        )
-        return selected_features
+        return json_map_leaves(select_features_fn, image_hidden_states)
 
     def _add_tarsier_split_tokens(
             self, projected_image_features: torch.Tensor) -> torch.Tensor:
