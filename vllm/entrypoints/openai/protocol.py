@@ -1254,7 +1254,7 @@ class CompletionRequest(OpenAIBaseModel):
 
         # Forward deprecated guided_* parameters to structured_outputs
         if self.structured_outputs is None:
-            kwargs = dictstr, Any](
+            kwargs = dict[str, Any](
                 json=self.guided_json,
                 regex=self.guided_regex,
                 choice=self.guided_choice,
