@@ -56,8 +56,10 @@ class TestBackend:
         self.inductor_config["post_grad_custom_post_pass"] = self.post_pass
 
         if compile_config.debug_dump_path:
-            self.debug_dump_path = (Path(compile_config.debug_dump_path) /
-                                    f"rank_{vllm_config.parallel_config.rank}")
+            self.debug_dump_path = (
+                Path(compile_config.debug_dump_path)
+                / f"rank_{vllm_config.parallel_config.rank}"
+            )
             self.ctx = depyf.prepare_debug(str(self.debug_dump_path))
             self.ctx.__enter__()
         else:
