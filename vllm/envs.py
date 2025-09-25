@@ -513,7 +513,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_PATTERN_MATCH_DEBUG", None),
 
     # Dump fx graphs to the given directory.
-    # It will overrides the config-specified path if set.
+    # It will override CompilationConfig.debug_dump_path if set.
     "VLLM_DEBUG_DUMP_PATH":
     lambda: os.environ.get("VLLM_DEBUG_DUMP_PATH", None),
 
