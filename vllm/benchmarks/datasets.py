@@ -2758,9 +2758,8 @@ class MMStarDataset(HuggingFaceDataset):
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests: list[SampleRequest] = []
-        ind = 0
 
-        for item in self.data:
+        for ind, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             # Split the question text from options
@@ -2797,7 +2796,6 @@ class MMStarDataset(HuggingFaceDataset):
                     request_id=request_id_prefix + str(ind),
                 )
             )
-            ind += 1
 
         self.maybe_oversample_requests(
             sampled_requests, num_requests, request_id_prefix, no_oversample
