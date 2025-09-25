@@ -156,8 +156,8 @@ def is_online_quantization(quantization: Any) -> bool:
 
 
 NEEDS_HELP = (
-    "--help" in (argv := sys.argv)  # vllm SUBCOMMAND --help
-    or (argv0 := argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
+    any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
+    or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
     or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
 )
 
@@ -1465,12 +1465,18 @@ class EngineArgs:
             return False
 
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        if (self.speculative_config is not None
-                and self.speculative_config.get("method") == "draft_model"):
-            raise NotImplementedError(
-                "Speculative decoding with draft model is not supported yet. "
-                "Please consider using other speculative decoding methods "
-                "such as ngram, medusa, eagle, or deepseek_mtp.")
+        if self.speculative_config is not None:
+            # speculative_config could still be a dict at this point
+            if isinstance(self.speculative_config, dict):
+                method = self.speculative_config.get("method", None)
+            else:
+                method = self.speculative_config.method
+
+            if method == "draft_model":
+                raise NotImplementedError(
+                    "Draft model speculative decoding is not supported yet. "
+                    "Please consider using other speculative decoding methods "
+                    "such as ngram, medusa, eagle, or deepseek_mtp.")
 
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1",
