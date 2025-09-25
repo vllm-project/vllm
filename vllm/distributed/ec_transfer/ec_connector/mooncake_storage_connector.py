@@ -23,15 +23,12 @@ logger = init_logger(__name__)
 class MMMeta:
     mm_hash: str
     num_token: int
-    # Is store or load
-    is_store: bool
 
     @staticmethod
-    def make_meta(mm_hash, num_token, is_store) -> "MMMeta":
+    def make_meta(mm_hash, num_token) -> "MMMeta":
         return MMMeta(
             mm_hash=mm_hash,
             num_token=num_token,
-            is_store=is_store,
         )
 
 
@@ -49,8 +46,8 @@ class ECMooncakeStorageConnectorMetadata(ECConnectorMetadata):
 class ECMooncakeStorageConnector(ECConnectorBase):
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
-        # req_id -> index -> mm_hash
-        self._mm_datas_need_loads: dict[str, dict[int, MMMeta]] = {}
+        # mm_hash -> num_tokens
+        self._mm_datas_need_loads: dict[str, int] = {}
         self.store = ECMooncakeStore(vllm_config)
 
     def start_load_caches(self, **kwargs) -> None:
@@ -76,8 +73,8 @@ class ECMooncakeStorageConnector(ECConnectorBase):
 
         for mm_hash, ec_cache in zip(mm_hashes, tensors):
             encoder_cache[mm_hash] = ec_cache
-            logger.debug(("Failed" if ec_cache is None else "Succeeded")\
-                        + f" load hash for {mm_hash}")
+            assert ec_cache is not None, f"Load failed for {mm_hash}"
+            logger.debug(f"Load tensor for {mm_hash} successfully")
 
     def save_caches(self, **kwargs) -> None:
         """Start saving the KV cache of the layer from encoder cache
@@ -142,7 +139,7 @@ class ECMooncakeStorageConnector(ECConnectorBase):
         """
         meta = ECMooncakeStorageConnectorMetadata()
         for mm_hash, num_encoder_token in self._mm_datas_need_loads.items():
-            meta.add_mm_data(MMMeta.make_meta(mm_hash, num_encoder_token, False))
+            meta.add_mm_data(MMMeta.make_meta(mm_hash, num_encoder_token))
         self._mm_datas_need_loads.clear()
         return meta
 

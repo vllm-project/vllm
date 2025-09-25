@@ -97,14 +97,18 @@ trap cleanup EXIT INT TERM ERR
 
 ###############################################################################
 # Initialize Mooncake
+# Read more about Mooncake config at 
+# https://kvcache-ai.github.io/Mooncake/deployment/mooncake-store-deployment-guide.html
 ###############################################################################
 mooncake_master \
   --rpc_port $MOONCAKE_MASTER_PORT \
   --enable_http_metadata_server=true \
   --http_metadata_server_host=0.0.0.0 \
   --http_metadata_server_port=$MOONCAKE_METADATA_PORT \
-  --rpc_thread_num 8\
-  --default_kv_lease_ttl 0\
+  --rpc_thread_num 4 \
+  --default_kv_lease_ttl 1000 \
+  --eviction_ratio 0.05 \
+  --eviction_high_watermark_ratio 0.9 \
   >"$MOONCAKE_MASTER_LOG" 2>&1 &
 PIDS+=($!)
 

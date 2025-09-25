@@ -30,7 +30,12 @@ DEFAULT_TENSOR_POOL_SIZE = 1073741824  # 1.0 GiB
 # View map for unsupported dtypes (add more as needed, e.g., for future types)
 VIEW_MAP = {
     torch.bfloat16: torch.uint16,
-    # Example: if complex32 unsupported, map to uint32 or similar
+    torch.complex32: torch.uint32,
+    torch.float8_e4m3fn: torch.uint8,
+    torch.float8_e4m3fnuz: torch.uint8,
+    torch.float8_e5m2: torch.uint8,
+    torch.float8_e5m2fnuz: torch.uint8,
+    torch.float8_e8m0fnu: torch.uint8,
 }
 
 logger = init_logger(__name__)
@@ -370,7 +375,7 @@ class ECMooncakeStore:
                 f"Failed to put keys {",".join(keys)} using batch_put_from: "
                 f"{type(e).__name__}: {str(e)}"
             )
-        
+                
         with self.put_queue_cv:
             self.put_queue.difference_update(keys)
             if not self.put_queue:
@@ -430,6 +435,7 @@ class ECMooncakeStore:
         evicted_buffer = self.fifo_pool_queue.popleft()
         self.tensor_pool.free(evicted_buffer.addr)
         self.store.remove(evicted_buffer.key)
+        self.store.remove(self.metadata_key(evicted_buffer.key))
         # Currently stall the process with mooncake 0.3.6
         # count = self.store.remove_by_regex(
         #     f"^(?:{evicted_buffer.key}|{self.metadata_key(evicted_buffer.key)})$"
