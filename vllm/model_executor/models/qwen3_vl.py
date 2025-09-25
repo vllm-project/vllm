@@ -1249,7 +1249,7 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                          rope_type="rope_3d")
             else:
                 video_embeds = self.visual(pixel_values_videos,
-                                           grid_thw=grid_thw)
+                                           grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each video item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
