@@ -825,10 +825,11 @@ def wait_for_engine_startup(
                     *start_pending,
                 )
             continue
-        if len(events) > 1 or events[0][0] != handshake_socket:
+        if len(events) > 1 or (len(events) == 1 and events[0][0] != handshake_socket):
             # coord_process processes exited.
+            finished = {}
             if coord_process is not None and coord_process.exitcode is not None:
-                finished = {coord_process.name: coord_process.exitcode}
+                finished[coord_process.name] = coord_process.exitcode
             raise RuntimeError("Engine core initialization failed. "
                                "See root cause above. "
                                f"Failed core proc(s): {finished}")
