@@ -13,7 +13,6 @@ on how the EPLB algorithm works.
 """
 
 import torch
-from typing import Optional
 
 from .abstract_policy import EplbPolicy
 
@@ -41,7 +40,8 @@ class DefaultEplb(EplbPolicy):
         if groups_per_pack == 1:
             pack_index = torch.arange(weight.size(-1),
                                       dtype=torch.int64,
-                                      device=weight.device).expand(weight.shape)
+                                      device=weight.device).expand(
+                                          weight.shape)
             rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
             return pack_index, rank_in_pack
 
@@ -56,8 +56,8 @@ class DefaultEplb(EplbPolicy):
             pack_items = [0] * num_packs
             for group in indices[i]:
                 pack = min(
-                    (i
-                     for i in range(num_packs) if pack_items[i] < groups_per_pack),
+                    (i for i in range(num_packs)
+                     if pack_items[i] < groups_per_pack),
                     key=pack_weights.__getitem__,
                 )
                 assert pack_items[pack] < groups_per_pack
@@ -69,8 +69,7 @@ class DefaultEplb(EplbPolicy):
 
 
     def replicate_experts(
-            self,
-            weight: torch.Tensor,
+            self, weight: torch.Tensor,
             num_phy: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Replicate `num_log` experts to `num_phy` replicas, such that the maximum
@@ -138,20 +137,22 @@ class DefaultEplb(EplbPolicy):
             inv.scatter_(
                 1,
                 perm,
-                torch.arange(perm.size(1), dtype=torch.int64,
+                torch.arange(perm.size(1),
+                             dtype=torch.int64,
                              device=perm.device).expand(perm.shape),
             )
             return inv
 
         # Step 1: pack groups to nodes
-        tokens_per_group = weight.unflatten(-1, (num_groups, group_size)).sum(-1)
+        tokens_per_group = weight.unflatten(-1,
+                                            (num_groups, group_size)).sum(-1)
         group_pack_index, group_rank_in_pack = self.balanced_packing(
             tokens_per_group, num_nodes)
-        log2mlog = (((group_pack_index * groups_per_node + group_rank_in_pack) *
-                     group_size).unsqueeze(-1) +
-                    torch.arange(group_size,
-                                 dtype=torch.int64,
-                                 device=group_pack_index.device)).flatten(-2)
+        log2mlog = (
+            ((group_pack_index * groups_per_node + group_rank_in_pack) *
+             group_size).unsqueeze(-1) + torch.arange(
+                 group_size, dtype=torch.int64,
+                 device=group_pack_index.device)).flatten(-2)
         mlog2log = inverse(log2mlog)
 
         # Step 2: construct redundant experts within nodes
@@ -164,8 +165,8 @@ class DefaultEplb(EplbPolicy):
         # Step 3: pack physical_experts to GPUs
         # [num_layers * num_nodes, num_physical_experts // num_nodes]
         tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-        pack_index, rank_in_pack = self.balanced_packing(tokens_per_phy,
-                                                    num_gpus // num_nodes)
+        pack_index, rank_in_pack = self.balanced_packing(
+            tokens_per_phy, num_gpus // num_nodes)
         phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
         pphy2phy = inverse(phy2pphy)
 
@@ -184,13 +185,8 @@ class DefaultEplb(EplbPolicy):
 
 
     def rebalance_experts(
-        self,
-        weight: torch.Tensor,
-        num_replicas: int,
-        num_groups: int,
-        num_nodes: int,
-        num_ranks: int,
-        old_global_expert_indices: torch.Tensor
+        self, weight: torch.Tensor, num_replicas: int, num_groups: int,
+        num_nodes: int, num_ranks: int, old_global_expert_indices: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
@@ -236,7 +232,8 @@ class DefaultEplb(EplbPolicy):
         log2phy.view(num_layers, -1).scatter_(
             -1,
             phy2log * maxlogcnt + phyrank,
-            torch.arange(num_replicas, dtype=torch.int64,
+            torch.arange(num_replicas,
+                         dtype=torch.int64,
                          device=log2phy.device).expand(num_layers, -1),
         )
         return phy2log, log2phy, logcnt
