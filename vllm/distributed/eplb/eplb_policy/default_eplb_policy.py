@@ -67,7 +67,6 @@ class DefaultEplb(EplbPolicy):
                 pack_items[pack] += 1
         return pack_index, rank_in_pack
 
-
     def replicate_experts(
             self, weight: torch.Tensor,
             num_phy: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -99,7 +98,6 @@ class DefaultEplb(EplbPolicy):
             rank[:, i] = logcnt[arangen, redundant_indices]
             logcnt[arangen, redundant_indices] += 1
         return phy2log, rank, logcnt
-
 
     def rebalance_experts_hierarchical(
         self,
@@ -182,7 +180,6 @@ class DefaultEplb(EplbPolicy):
         pphyrank = phyrank.gather(-1, pphy2phy).view(num_layers, -1)
         logcnt = mlogcnt.view(num_layers, -1).gather(-1, log2mlog)
         return pphy2log, pphyrank, logcnt
-
 
     def rebalance_experts(
         self, weight: torch.Tensor, num_replicas: int, num_groups: int,
