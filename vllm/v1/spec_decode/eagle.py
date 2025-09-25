@@ -361,11 +361,11 @@ class EagleProposer:
             block_ids = block_ids.view(-1)
             # M-RoPE
             if self.uses_mrope:
-                attn_metadata.slot_mapping = (
+                common_attn_metadata.slot_mapping = (
                     block_ids * self.block_size +
                     clamped_positions[0] % self.block_size)
             else:
-                attn_metadata.slot_mapping = (
+                common_attn_metadata.slot_mapping = (
                     block_ids * self.block_size +
                     clamped_positions % self.block_size)
             # Mask out the slot mappings that exceed the max model length.
