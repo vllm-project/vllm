@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
-from vllm.utils import current_stream, resolve_obj_by_qualname
+from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata
 
@@ -188,18 +188,6 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
         return PoolerActivation.wraps(fn)
 
     return PoolerClassify()
-
-
-def build_output(
-    all_data: Union[torch.Tensor, list[torch.Tensor]], ) -> PoolerOutput:
-    # Pooling models D2H & synchronize occurs here
-    if isinstance(all_data, list):
-        all_data = [d.to("cpu", non_blocking=True) for d in all_data]
-    else:
-        all_data = all_data.to("cpu", non_blocking=True)
-    current_stream().synchronize()
-
-    return all_data
 
 
 class PoolingMethod(nn.Module, ABC):
@@ -555,7 +543,7 @@ class SimplePooler(Pooler):
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
-        return build_output(pooled_data)
+        return pooled_data
 
 
 class StepPooler(Pooler):
@@ -606,7 +594,7 @@ class StepPooler(Pooler):
     ) -> PoolerOutput:
         pooled_data = self.extract_states(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
-        return build_output(pooled_data)
+        return pooled_data
 
 
 class ClassifierPooler(Pooler):
@@ -677,7 +665,7 @@ class ClassifierPooler(Pooler):
             ]
 
         # scores shape: [batchsize, num_labels]
-        return build_output(scores)
+        return scores
 
 
 class DispatchPooler(Pooler):

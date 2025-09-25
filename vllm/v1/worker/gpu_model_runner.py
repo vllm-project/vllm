@@ -59,6 +59,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available,
                         length_from_prompt_token_ids_or_embeds, round_up,
                         supports_dynamo)
+from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -1823,9 +1824,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                               device=hidden_states.device)
         seq_lens_cpu = self.seq_lens.cpu[:self.input_batch.num_reqs]
 
-        # Pooling models D2H & synchronize occurs in pooler.py:build_output
-        raw_pooler_output: PoolerOutput = self.model.pooler(
-            hidden_states=hidden_states, pooling_metadata=pooling_metadata)
+        model = cast(VllmModelForPooling, self.model)
+        raw_pooler_output: PoolerOutput = model.pooler(
+            hidden_states=hidden_states,
+            pooling_metadata=pooling_metadata,
+        )
+        raw_pooler_output = json_map_leaves(
+            lambda x: x.to("cpu", non_blocking=True),
+            raw_pooler_output,
+        )
+        self._sync_device()
 
         pooler_output: list[Optional[torch.Tensor]] = []
         for raw_output, seq_len, prompt_len in zip(
