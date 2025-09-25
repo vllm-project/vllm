@@ -14,7 +14,6 @@ from vllm.multimodal.inputs import (MultiModalFeatureSpec,
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -1130,138 +1129,141 @@ def _iterate_until_done(scheduler: Scheduler):
         scheduler.update_from_output(scheduler_output, model_runner_output)
 
 
-def test_cache_hit_threshold():
-    # Setup Scheduler.
+@pytest.mark.parametrize(
+    "global_threshold,"
+    "request_num_tokens,"
+    "request_local_hit_blocks,"
+    "request_external_hit_blocks,"
+    "request_thresholds,"
+    "request_expected_scehduled",
+    [
+        (
+            0.0,
+            [57, 34, 28],
+            [1, 1, 0],
+            [0, 1, 0],
+            # expected hit ratio: [0.281, 0.941, 0.0]
+            [None, 0.4, 0.1],
+            [True, True, False],
+        ),
+        (
+            0.3,
+            [157, 134, 128, 20],
+            [4, 1, 0, 0],
+            [2, 4, 0, 1],
+            # expected hit ratio: [0.61, 0.597, 0.0, 0.8]
+            [0.8, 0.4, 0.1, None],
+            [False, True, False, True],
+        ),
+    ],
+)
+def test_cache_hit_threshold(
+    global_threshold: float,
+    request_num_tokens: list[int],
+    request_thresholds: list[Optional[float]],
+    request_local_hit_blocks: list[int],
+    request_external_hit_blocks: list[int],
+    request_expected_scehduled: list[bool],
+):
+    assert (len(request_num_tokens) == len(request_thresholds) ==
+            len(request_local_hit_blocks) == len(request_external_hit_blocks)
+            == len(request_expected_scehduled))
+
     scheduler = create_scheduler(
         enable_prefix_caching=True,
-        global_cache_hit_threshold=0.0,
+        global_cache_hit_threshold=global_threshold,
         use_kv_connector=True,
     )
-    NUM_TOTAL_BLOCKS = (
-        scheduler.kv_cache_manager.block_pool.get_num_free_blocks())
+
+    _insert_to_local_cache(request_local_hit_blocks, scheduler)
+    _mock_external_cache_hit(request_external_hit_blocks, scheduler)
+
+    requests, scheduler_output = _create_and_schedule_requests(
+        request_num_tokens, request_thresholds, scheduler)
+
+    # assert all requests expected to be scheduled are indeed scheduled
+    assert [r.request_id for r, expected in \
+        zip(requests, request_expected_scehduled) if expected] == \
+       [s.req_id for s in scheduler_output.scheduled_new_reqs]
+
+    # assert others are finished due to cache threshold
+    requests_expected_not_scheduled = [r for r, expected in \
+        zip(requests, request_expected_scehduled) if not expected]
+    assert all(r.status == RequestStatus.FINISHED_CACHE_HIT_BELOW_THRESHOLD \
+        for r in requests_expected_not_scheduled)
+
+    _iterate_until_done(scheduler)
+    assert_scheduler_empty(scheduler)
+
+
+def _create_and_schedule_requests(request_num_tokens: list[int],
+                                  request_thresholds: list[Optional[float]],
+                                  scheduler: Scheduler):
+    num_requests = len(request_num_tokens)
+    requests = create_requests(num_requests=num_requests,
+                               num_tokens=request_num_tokens,
+                               block_size=scheduler.cache_config.block_size,
+                               cache_hit_thresholds=request_thresholds)
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+    model_runner_output = make_output(scheduler)
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    return requests, scheduler_output
+
+
+def _mock_external_cache_hit(request_external_hit_blocks, scheduler):
+    BLOCK_SIZE = scheduler.cache_config.block_size
+    scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
+    scheduler.connector.get_num_new_matched_tokens.side_effect = [
+        (i * BLOCK_SIZE, False) for i in request_external_hit_blocks
+    ]
+
+
+def _insert_to_local_cache(request_local_hit_blocks, scheduler):
+    ''' Schedule requests to fill in the local cache
+    '''
     BLOCK_SIZE = scheduler.cache_config.block_size
 
-    # Mock no external Cache Hit for now.
+    requests_with_local_hit = [i for i, hit_blocks in \
+        enumerate(request_local_hit_blocks) if hit_blocks > 0]
 
+    num_requests_with_local_hit = len(requests_with_local_hit)
+    if num_requests_with_local_hit == 0:
+        # nothing to do
+        return
+
+    # Mock no external Cache Hit
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
 
-    NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
-
-    ######################################################
-    # FIRST SET OF REQUESTS
-    NUM_REQUESTS = 3
-    NUM_TOKENS = NUM_MATCHED_NEW_TOKENS * 2
-    MAX_TOKENS = 3
-    # cache hit thresholds for each request.
-    # Requests 0 & 1 should succeed, request 3 should fail
-    # Also test global threshold is used when request doesn't have a threshold
-    CACHE_HIT_THRESHOLDS1 = [0.0, None, 0.5]
-    requests = create_requests(num_requests=NUM_REQUESTS,
-                               num_tokens=NUM_TOKENS,
-                               max_tokens=MAX_TOKENS,
-                               block_size=BLOCK_SIZE,
-                               cache_hit_thresholds=CACHE_HIT_THRESHOLDS1)
+    # set threshold to 0.0 to ensure all are scheduled
+    zero_thresholds = [0.0] * num_requests_with_local_hit
+    requests = create_requests(
+        num_requests=num_requests_with_local_hit,
+        num_tokens=[
+            request_local_hit_blocks[i] * BLOCK_SIZE
+            for i in requests_with_local_hit
+        ],
+        block_size=BLOCK_SIZE,
+        cache_hit_thresholds=zero_thresholds,
+    )
 
     for request in requests:
         scheduler.add_request(request)
 
     scheduler_output = scheduler.schedule()
 
-    # Ensure ScheduleOutput is correct.
-    # Just request 0 & 1 should be running.
-    assert len(scheduler_output.scheduled_new_reqs) == 2
-    assert len(scheduler.running) == 2
-    assert scheduler_output.scheduled_new_reqs[0].req_id == \
-        requests[0].request_id
-    assert scheduler_output.scheduled_new_reqs[1].req_id == \
-        requests[1].request_id
+    # verify all were indeed scheduled
+    assert (len(
+        scheduler_output.scheduled_new_reqs) == num_requests_with_local_hit)
 
     model_runner_output = make_output(scheduler)
     scheduler.update_from_output(scheduler_output, model_runner_output)
-
-    # request 1 should be finished due to cache threshold
-    assert requests[2].status == \
-        RequestStatus.FINISHED_CACHE_HIT_BELOW_THRESHOLD
-    assert requests[2].get_finished_reason() == FinishReason.CACHE_THRESHOLD
-
     _iterate_until_done(scheduler)
-
-    # Confirm memory was cleaned up.
-    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
-        == NUM_TOTAL_BLOCKS
-
-    ######################################################
-    # SECOND SET OF REQUESTS - longer with shared prefix to previous
-    NUM_TOKENS_PREFIX = NUM_TOKENS
-    # We will get a local prefix cache hit for requests 0 & 1
-    # NUM_TOKENS_PREFIX tokens since they are used above.
-    NUM_TOKENS = NUM_TOKENS_PREFIX * 2
-
-    CACHE_HIT_THRESHOLDS2 = [0.8, 0.5, 0.5]
-    requests = create_requests(num_requests=NUM_REQUESTS,
-                               num_tokens=NUM_TOKENS,
-                               max_tokens=MAX_TOKENS,
-                               block_size=BLOCK_SIZE,
-                               cache_hit_thresholds=CACHE_HIT_THRESHOLDS2)
-
-    for request in requests:
-        scheduler.add_request(request)
-
-    scheduler_output = scheduler.schedule()
-    model_runner_output = make_output(scheduler)
-    scheduler.update_from_output(scheduler_output, model_runner_output)
-
-    # We should get a cache hit of 0.5 for requests 0 & 1, since NUM_TOKENS
-    #  is doubled in this round and previous NUM_TOKENS were all cached.
-    # Request 2 was not scheduled before so should get a cache hit of 0.0
-    #  and thus not scheduled due to the 0.5 threshold.
-    # Only request 1 should be scheduled since it meets the 0.5 threshold.
-
-    assert len(scheduler.running) == 1
-    assert len(scheduler_output.scheduled_new_reqs) == 1
-    assert scheduler_output.scheduled_new_reqs[0].req_id == \
-        requests[1].request_id
-
-    assert requests[0].status == \
-        RequestStatus.FINISHED_CACHE_HIT_BELOW_THRESHOLD
-    assert requests[2].status == \
-        RequestStatus.FINISHED_CACHE_HIT_BELOW_THRESHOLD
-
-    _iterate_until_done(scheduler)
-
-    ######################################################
-    # THIRD SET OF REQUESTS - longer with shared prefix to previous
-    # Mock external KV cache hit
-    scheduler.connector.get_num_new_matched_tokens.return_value = (int(
-        NUM_TOKENS / 2), False)
-
-    NUM_TOKENS_PREFIX = NUM_TOKENS
-    # We will get a local prefix cache hit for requests 0 & 1
-    # NUM_TOKENS_PREFIX tokens since they are used above.
-    NUM_TOKENS = NUM_TOKENS_PREFIX * 2
-
-    CACHE_HIT_THRESHOLDS3 = [0.8, 0.5, 0.2]
-    requests = create_requests(num_requests=NUM_REQUESTS,
-                               num_tokens=NUM_TOKENS,
-                               max_tokens=MAX_TOKENS,
-                               block_size=BLOCK_SIZE,
-                               cache_hit_thresholds=CACHE_HIT_THRESHOLDS3)
-
-    for request in requests:
-        scheduler.add_request(request)
-
-    scheduler_output = scheduler.schedule()
-    model_runner_output = make_output(scheduler)
-    scheduler.update_from_output(scheduler_output, model_runner_output)
-
-    assert len(scheduler.running) == 2
-    assert len(scheduler_output.scheduled_new_reqs) == 2
-    assert scheduler_output.scheduled_new_reqs[0].req_id == \
-        requests[1].request_id
-
-    assert requests[0].status == \
-        RequestStatus.FINISHED_CACHE_HIT_BELOW_THRESHOLD
+    assert_scheduler_empty(scheduler)
 
 
 def make_output(scheduler: Scheduler):
@@ -1329,13 +1331,7 @@ def test_memory_leak():
         model_runner_output = make_output(scheduler)
         scheduler.update_from_output(scheduler_output, model_runner_output)
 
-    # Iterate until done.
-    while True:
-        scheduler_output = scheduler.schedule()
-        if len(scheduler.running) == 0:
-            break
-        model_runner_output = make_output(scheduler)
-        scheduler.update_from_output(scheduler_output, model_runner_output)
+    _iterate_until_done(scheduler)
 
     # Confirm no memory leak.
     assert_scheduler_empty(scheduler)
@@ -2045,6 +2041,7 @@ def test_priority_scheduling_preemption_when_out_of_kv():
     assert output.scheduled_cached_reqs.req_ids[0] == request_high.request_id
     assert len(scheduler.waiting) == 1
     assert len(scheduler.running) == 1
+
 
 
 @pytest.mark.parametrize(

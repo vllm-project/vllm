@@ -123,7 +123,7 @@ _none_hash_initialized = False
 
 def create_requests(
     num_requests: int,
-    num_tokens: int = 10,
+    num_tokens: Union[int, list[int]] = 10,
     mm_positions: Optional[list[list[PlaceholderRange]]] = None,
     max_tokens: int = 16,
     stop_token_ids: Optional[list[int]] = None,
@@ -136,7 +136,8 @@ def create_requests(
     if not _none_hash_initialized:
         init_none_hash(sha256)
         _none_hash_initialized = True
-    assert len(cache_hit_thresholds) == num_requests
+    if cache_hit_thresholds is not None:
+        assert len(cache_hit_thresholds) == num_requests
     block_hasher = get_request_block_hasher(block_size, sha256)
     sampling_params = SamplingParams(ignore_eos=False,
                                      max_tokens=max_tokens,
@@ -157,12 +158,14 @@ def create_requests(
                     identifier=identifier,
                     modality="image")
                 mm_features.append(mm_feature)
-
-        prompt_token_ids = ([0] * num_tokens if same_prompt else [i] *
-                            num_tokens)
-        if cache_hit_thresholds is not None \
-            and cache_hit_thresholds[i] is not None:
+        request_num_tokens: int = (num_tokens[i] if isinstance(
+            num_tokens, list) else num_tokens)
+        prompt_token_ids = ([0] * request_num_tokens if same_prompt else [i] *
+                            request_num_tokens)
+        if cache_hit_thresholds is not None:
             cache_hit_threshold = cache_hit_thresholds[i]
+        else:
+            cache_hit_threshold = None
         request = Request(request_id=f"{i}",
                           prompt_token_ids=prompt_token_ids,
                           sampling_params=sampling_params,
