@@ -19,6 +19,11 @@ class MemoryBlock:
     addr: int
 
 
+class InsufficientMemoryError(ValueError):
+    """Raised when there is insufficient memory in the tensor pool."""
+    pass
+
+
 """A memory pool for managing pinned host memory allocations for tensors.
 
 This class implements a buddy allocation system to efficiently manage pinned
@@ -132,7 +137,7 @@ class TensorMemoryPool:
                 return block.addr
             current_size *= 2
 
-        raise ValueError("Insufficient memory")
+        raise InsufficientMemoryError("Insufficient memory")
 
     def _split_block(self, block: MemoryBlock, required_size: int):
         while (block.size > required_size

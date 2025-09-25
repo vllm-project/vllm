@@ -19,7 +19,7 @@ import math
 import threading
 
 from vllm.distributed.ec_transfer.utils.tensor_memory_pool import (
-    TensorMemoryPool)
+    InsufficientMemoryError, TensorMemoryPool)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
@@ -447,27 +447,19 @@ class ECMooncakeStore:
 
         while True:
             try:
-                addr = self.tensor_pool.allocate(size)
-                return addr
-            except ValueError as e:
-                if str(e) != "Insufficient memory":
-                    raise ValueError(e)
-
+                return self.tensor_pool.allocate(size)
+            except InsufficientMemoryError:
                 if not self.fifo_pool_queue:
-                    raise ValueError("Insufficient memory")
+                    raise
 
                 self._pool_eviction()
     
     def _pool_store_tensor(self, tensor: torch.Tensor) -> int:
         while True:
             try:
-                addr = self.tensor_pool.store_tensor(tensor)
-                return addr
-            except ValueError as e:
-                if str(e) != "Insufficient memory":
-                    raise ValueError(e)
-
+                return self.tensor_pool.store_tensor(tensor)
+            except InsufficientMemoryError:
                 if not self.fifo_pool_queue:
-                    raise ValueError("Insufficient memory")
+                    raise
 
                 self._pool_eviction()
