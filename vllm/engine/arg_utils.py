@@ -1131,15 +1131,7 @@ class EngineArgs:
          )
         model_config = self.create_model_config()
 
-        # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
-        #   and fall back to V0 for experimental or unsupported features.
-        # * If VLLM_USE_V1=1, we enable V1 for supported + experimental
-        #   features and raise error for unsupported features.
-        # * If VLLM_USE_V1=0, we disable V1.
-        use_v1 = False
-        try_v1 = envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1")
-        if try_v1 and self._is_v1_supported_oracle(model_config):
-            use_v1 = True
+        use_v1 = envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1")
 
         # If user explicitly set VLLM_USE_V1, sanity check we respect it.
         if envs.is_set("VLLM_USE_V1"):
@@ -1436,100 +1428,6 @@ class EngineArgs:
         )
 
         return config
-
-    def _is_v1_supported_oracle(self, model_config: ModelConfig) -> bool:
-        """Oracle for whether to use V0 or V1 Engine by default."""
-
-        #############################################################
-        # Unsupported Feature Flags on V1.
-
-        if (self.logits_processor_pattern
-                != EngineArgs.logits_processor_pattern):
-            _raise_or_fallback(feature_name="--logits-processor-pattern",
-                               recommend_to_remove=False)
-            return False
-
-        # No Mamba or Encoder-Decoder so far.
-        if not model_config.is_v1_compatible:
-            _raise_or_fallback(feature_name=model_config.architectures,
-                               recommend_to_remove=False)
-            return False
-
-        # No Concurrent Partial Prefills so far.
-        if (self.max_num_partial_prefills
-                != SchedulerConfig.max_num_partial_prefills
-                or self.max_long_partial_prefills
-                != SchedulerConfig.max_long_partial_prefills):
-            _raise_or_fallback(feature_name="Concurrent Partial Prefill",
-                               recommend_to_remove=False)
-            return False
-
-        # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        if self.speculative_config is not None:
-            # speculative_config could still be a dict at this point
-            if isinstance(self.speculative_config, dict):
-                method = self.speculative_config.get("method", None)
-            else:
-                method = self.speculative_config.method
-
-            if method == "draft_model":
-                raise NotImplementedError(
-                    "Draft model speculative decoding is not supported yet. "
-                    "Please consider using other speculative decoding methods "
-                    "such as ngram, medusa, eagle, or deepseek_mtp.")
-
-        V1_BACKENDS = [
-            "FLASH_ATTN_VLLM_V1",
-            "FLASH_ATTN",
-            "PALLAS",
-            "PALLAS_VLLM_V1",
-            "TRITON_ATTN_VLLM_V1",
-            "TRITON_MLA",
-            "CUTLASS_MLA",
-            "FLASHMLA",
-            "FLASHMLA_VLLM_V1",
-            "FLASH_ATTN_MLA",
-            "FLASHINFER",
-            "FLASHINFER_VLLM_V1",
-            "FLASHINFER_MLA",
-            "ROCM_AITER_MLA",
-            "TORCH_SDPA_VLLM_V1",
-            "FLEX_ATTENTION",
-            "TREE_ATTN",
-            "XFORMERS_VLLM_V1",
-            "ROCM_ATTN_VLLM_V1",
-        ]
-        if (envs.is_set("VLLM_ATTENTION_BACKEND")
-                and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
-            name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
-            _raise_or_fallback(feature_name=name, recommend_to_remove=True)
-            return False
-
-        #############################################################
-        # Experimental Features - allow users to opt in.
-
-        if self.pipeline_parallel_size > 1:
-            supports_pp = getattr(self.distributed_executor_backend,
-                                  'supports_pp', False)
-            if not supports_pp and self.distributed_executor_backend not in (
-                    ParallelConfig.distributed_executor_backend, "ray", "mp",
-                    "external_launcher"):
-                name = "Pipeline Parallelism without Ray distributed " \
-                        "executor or multiprocessing executor or external " \
-                        "launcher"
-                _raise_or_fallback(feature_name=name,
-                                   recommend_to_remove=False)
-                return False
-
-        if (current_platform.is_cpu()
-                and model_config.get_sliding_window() is not None):
-            _raise_or_fallback(feature_name="sliding window (CPU backend)",
-                               recommend_to_remove=False)
-            return False
-
-        #############################################################
-
-        return True
 
     def _set_default_args(self, usage_context: UsageContext,
                           model_config: ModelConfig) -> None:
