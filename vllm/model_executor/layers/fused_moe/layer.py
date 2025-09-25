@@ -489,7 +489,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=apply_router_weight_on_input)
         elif self.fused_experts is not None:
             if self.has_bias:
-                raise ValueError( # TODO: Check this line
+                raise ValueError(
                     "FusedMoEModularKernel does not support bias.")
             return self.fused_experts(
                 hidden_states=x,
@@ -1718,7 +1718,7 @@ class FusedMoE(CustomOp):
             cls,
             ckpt_gate_proj_name: str,
             ckpt_down_proj_name: str,
-            ckpt_up_proj_name: str, # TODO: Remove for OSS
+            ckpt_up_proj_name: str,
             num_experts: int,
             num_redundant_experts: int = 0) -> list[tuple[str, str, int, str]]:
 
@@ -1740,7 +1740,7 @@ class FusedMoE(CustomOp):
             for shard_id, weight_name in [
                 ("w1", ckpt_gate_proj_name),
                 ("w2", ckpt_down_proj_name),
-                ("w3", ckpt_up_proj_name), # TODO: Remove for OSS
+                ("w3", ckpt_up_proj_name),
             ]
         ]
 

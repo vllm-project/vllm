@@ -22,7 +22,6 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
 
     tensor_ptrs = []
     for lora_weight in lora_weights:
-        # print(lora_weight)
         tensor_ptrs.append(lora_weight.data_ptr())
     ptr_tensor = torch.tensor(tensor_ptrs, device=device)
 
@@ -91,12 +90,9 @@ def fused_moe_lora(
         return
 
     # get the expert_id to process curr shard
-    # tl.device_print("expert_ids_ptr", expert_ids_ptr)
-    # tl.device_print("lora_idx", lora_idx)
-    # tl.device_print("stride", stride_el)
-    # tl.device_print("pid_m", pid_m)
     # FIXME: Memory error here
-    expert_id = tl.load(expert_ids_ptr + lora_idx * stride_el + pid_m)
+    ind = lora_idx * stride_el + pid_m
+    expert_id = tl.load(expert_ids_ptr + ind, ind < top_k*stride_el, 0.0)
     if expert_id >= num_experts:
         return
 
@@ -111,8 +107,8 @@ def fused_moe_lora(
 
     offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(
         tl.int64)
-    offs_token = tl.load(sorted_token_ids_ptr + stride_tl * lora_idx +
-                         offs_token_id)
+    token_ind = stride_tl * lora_idx + offs_token_id
+    offs_token = tl.load(sorted_token_ids_ptr + token_ind, token_ind < top_k*stride_tl, 0.0)
     token_mask = offs_token < num_valid_tokens
 
     # get a_ptrs,b_ptrs
@@ -211,9 +207,7 @@ def invoke_fused_moe_lora_kernel(
         a_intermediate_size:].view(num_slices, M, top_k_num,
                                    w1_output_dim_size)
 
-    #print("lora_a", lora_a_stacked)
     b_ptr = _get_ptr(lora_a_stacked, device)
-    print("b_ptr", b_ptr)
 
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(
@@ -221,11 +215,6 @@ def invoke_fused_moe_lora_kernel(
         len(lora_a_stacked),
         lora_a_stacked[0].shape[0],
     )
-    print("lora_a", len(lora_a_stacked), lora_a_stacked[0].shape[0])
-    print("lora_b", len(lora_b_stacked), lora_b_stacked[0].shape[0])
-    # print("lora_b_stacked", lora_b_stacked)
-    print(N, K, EM, num_tokens, num_experts, top_k_num)
-    print(expert_ids, expert_ids.shape, expert_ids.stride(0))
     fused_moe_lora[grid](qcurr_hidden_states,
                          b_ptr,
                          a_intermediate_cache1,

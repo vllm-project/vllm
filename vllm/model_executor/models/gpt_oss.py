@@ -9,7 +9,6 @@ from torch import nn
 from transformers import GptOssConfig
 
 
-from vllm.distributed.eplb.eplb_state import EplbState  
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -664,14 +663,12 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             weight_str = weight_name.split('.')
             weight_name = weight_str[1] + ".mlp." + weight_str[0] + "." + weight_str[2] 
             packed_modules_mapping["experts"].append(weight_name)
-        print(len(expert_params_mapping))
 
         # packed_modules_mapping["experts"] = [
         #     #weight_name.rstrip(".")
         #     #for _, weight_name, _, _ in expert_params_mapping
         #     for weight_name in expert_params_mapping
         # ]
-        print(packed_modules_mapping)
         return packed_modules_mapping
 
     def __init__(

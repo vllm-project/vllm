@@ -1333,7 +1333,6 @@ def outplace_fused_experts(
     w1_bias: Optional[torch.Tensor] = None,
     w2_bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    print("outplace")
     return fused_experts_impl(
         hidden_states, w1, w2, topk_weights, topk_ids, False, activation,
         is_act_and_mul, apply_router_weight_on_input, use_fp8_w8a8,
@@ -1662,7 +1661,6 @@ def fused_experts_impl(
                                 block_shape=block_shape,
                                 B_bias=w1_bias)
 
-        print("GOT_OSS") # Non-lora version calls this same GPT_OSS call this
         # Activation function with multiplication
         if activation == "silu" and is_act_and_mul:
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1931,7 +1929,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             assert hidden_states.size(-1) == w1.size(2), \
                 (f"Hidden size mismatch {hidden_states.size(-1)} "
                  f"!= {w1.size(2)}")
-        print("HERE!")
 
         assert hidden_states.is_contiguous(
         ), "Hidden_states must be contiguous"
@@ -2021,7 +2018,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=self.block_shape,
             B_bias=None  # TODO support B_bias
         )
-        # print("HERE!", use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16, use_int4_w4a16)
 
         self.activation(activation, intermediate_cache2,
                         intermediate_cache1.view(-1, N))
@@ -2072,7 +2068,6 @@ def modular_triton_fused_moe(
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> mk.FusedMoEModularKernel:
-    print("MOD")
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         TritonExperts(
