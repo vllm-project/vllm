@@ -165,7 +165,7 @@ def device_loading_context(module: torch.nn.Module,
         # New parameters or parameters already on target device are untouched
 
 
-_MODEL_ARCH_BY_HASH = dict[str, tuple[type[nn.Module], str]]()
+_MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
 """Caches the outputs of `_get_model_architecture`."""
 
 
@@ -215,7 +215,14 @@ def _get_model_architecture(
 
 def get_model_architecture(
         model_config: ModelConfig) -> tuple[type[nn.Module], str]:
-    key = model_config.compute_hash()
+    key = hash((
+        model_config.model,
+        model_config.convert_type,
+        model_config.runner_type,
+        model_config.trust_remote_code,
+        model_config.model_impl,
+        tuple(getattr(model_config.hf_config, "architectures", [])),
+    ))
     if key in _MODEL_ARCH_BY_HASH:
         return _MODEL_ARCH_BY_HASH[key]
 
