@@ -99,6 +99,7 @@ from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.tasks import encode2pooling_task
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
@@ -1725,11 +1726,13 @@ async def init_app_state(
         engine_client,
         vllm_config,
         state.openai_serving_models,
+        pooling_task=encode2pooling_task(supported_tasks),
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         log_error_stack=args.log_error_stack,
-    ) if "encode" in supported_tasks else None
+    ) if ("token_embed" in supported_tasks
+          or "token_classify" in supported_tasks) else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,

@@ -489,8 +489,10 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
         return DispatchPooler({
-            "encode": Pooler.for_encode(pooler_config),
-            "embed": Pooler.for_embed(pooler_config),
+            "token_embed":
+            Pooler.for_token_embed(pooler_config),
+            "embed":
+            Pooler.for_embed(pooler_config),
         })
 
 
@@ -570,22 +572,17 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
         assert pooler_config is not None
 
         self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
+            "token_classify":
+            Pooler.for_token_classify(pooler_config,
+                                      classifier=self.classifier),
             "classify":
-            ClassifierPooler(
-                pooling=self.bert.pooler,
-                classifier=self.classifier,
-                act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                    vllm_config.model_config),
-            ),
+            ClassifierPooler(pooling=self.bert.pooler,
+                             classifier=self.classifier,
+                             act_fn="classify"),
             "score":
-            ClassifierPooler(
-                pooling=self.bert.pooler,
-                classifier=self.classifier,
-                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                    vllm_config.model_config),
-            ),
+            ClassifierPooler(pooling=self.bert.pooler,
+                             classifier=self.classifier,
+                             act_fn="score"),
         })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -620,21 +617,21 @@ class BertForTokenClassification(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        self.head_dtype = vllm_config.model_config.head_dtype
         self.num_labels = config.num_labels
         self.bert = BertModel(vllm_config=vllm_config,
                               prefix=maybe_prefix(prefix, "bert"),
                               embedding_class=BertEmbedding)
         self.classifier = nn.Linear(config.hidden_size,
                                     config.num_labels,
-                                    dtype=self.head_dtype)
+                                    dtype=vllm_config.model_config.head_dtype)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
         self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
+            "token_classify":
+            Pooler.for_token_classify(pooler_config=pooler_config,
+                                      classifier=self.classifier),
         })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -660,6 +657,4 @@ class BertForTokenClassification(nn.Module):
                                   positions=positions,
                                   inputs_embeds=inputs_embeds,
                                   intermediate_tensors=intermediate_tensors)
-
-        hidden_states = hidden_states.to(self.head_dtype)
-        return self.classifier(hidden_states)
+        return hidden_states

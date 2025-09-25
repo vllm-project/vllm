@@ -985,7 +985,7 @@ class VllmRunner:
         return [req_output.outputs.embedding for req_output in req_outputs]
 
     def encode(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.llm.encode(prompts)
+        req_outputs = self.llm.encode(prompts, pooling_task="encode")
         return [req_output.outputs.data for req_output in req_outputs]
 
     def reward(self, prompts: list[str]) -> list[list[float]]:

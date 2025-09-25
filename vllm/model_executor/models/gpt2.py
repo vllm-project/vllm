@@ -345,10 +345,16 @@ class GPT2ForSequenceClassification(nn.Module):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
+            "token_classify":
+            Pooler.for_token_classify(pooler_config, classifier=self.score),
             "classify":
-            Pooler.for_classify(pooler_config, classifier=self.score),
+            Pooler.for_classify(pooler_config,
+                                classifier=self.score,
+                                act_fn="classify"),
+            "score":
+            Pooler.for_classify(pooler_config,
+                                classifier=self.score,
+                                act_fn="score"),
         })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

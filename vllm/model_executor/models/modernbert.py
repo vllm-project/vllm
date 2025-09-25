@@ -315,22 +315,17 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         assert pooler_config is not None
 
         self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
+            "token_classify":
+            Pooler.for_token_classify(pooler_config,
+                                      classifier=self.classifier),
             "classify":
-            ClassifierPooler(
-                pooling=self.pooling,
-                classifier=self.classifier,
-                act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                    vllm_config.model_config),
-            ),
+            ClassifierPooler(pooling=self.pooling,
+                             classifier=self.classifier,
+                             act_fn="classify"),
             "score":
-            ClassifierPooler(
-                pooling=self.pooling,
-                classifier=self.classifier,
-                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                    vllm_config.model_config),
-            ),
+            ClassifierPooler(pooling=self.pooling,
+                             classifier=self.classifier,
+                             act_fn="score"),
         })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

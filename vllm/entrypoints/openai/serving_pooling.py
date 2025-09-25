@@ -33,6 +33,7 @@ from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.plugins.io_processors import get_io_processor
+from vllm.tasks import SupportedTask
 from vllm.utils import merge_async_iterators
 
 logger = init_logger(__name__)
@@ -61,6 +62,7 @@ class OpenAIServingPooling(OpenAIServing):
         engine_client: EngineClient,
         vllm_config: VllmConfig,
         models: OpenAIServingModels,
+        pooling_task: SupportedTask,
         *,
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
@@ -77,6 +79,7 @@ class OpenAIServingPooling(OpenAIServing):
         self.chat_template_content_format: Final = chat_template_content_format
         io_processor_plugin = self.model_config.io_processor_plugin
         self.io_processor = get_io_processor(vllm_config, io_processor_plugin)
+        self.pooling_task = pooling_task
 
     async def create_pooling(
         self,
@@ -164,7 +167,7 @@ class OpenAIServingPooling(OpenAIServing):
             pooling_params = request.to_pooling_params()
 
             try:
-                pooling_params.verify("encode", self.model_config)
+                pooling_params.verify(self.pooling_task, self.model_config)
             except ValueError as e:
                 return self.create_error_response(str(e))
 
