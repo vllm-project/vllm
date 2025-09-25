@@ -2667,7 +2667,9 @@ def direct_register_custom_op(
     my_lib.define(op_name + schema_str, tags=tags)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
-        my_lib._register_fake(op_name, fake_impl)
+        torch.library.register_fake(f"{my_lib.ns}::{op_name}",
+                                    fake_impl,
+                                    lib=my_lib)
 
 
 def resolve_obj_by_qualname(qualname: str) -> Any:
