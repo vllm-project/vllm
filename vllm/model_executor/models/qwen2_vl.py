@@ -82,7 +82,7 @@ from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 logger = init_logger(__name__)
 
 # For profile run
-_MAX_FRAMES_PER_VIDEO = 600
+_MAX_FRAMES_PER_VIDEO = 32
 
 # === Vision Inputs === #
 

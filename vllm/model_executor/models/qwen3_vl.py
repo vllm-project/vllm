@@ -715,6 +715,18 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             video_items.append(video_item)
         return video_items
 
+    def get_dummy_processor_inputs(self, seq_len, mm_counts):
+        processor_inputs = super().get_dummy_processor_inputs(
+            seq_len, mm_counts)
+        # HACK(Isotr0py): We set do_resize to False here to reuse Qwen2-VL's
+        # profiling logic, which will be problematic for configurable mm
+        # profiling.
+        # TODO(Isotr0py): Switch to the implementation in
+        # https://github.com/vllm-project/vllm/pull/25557
+        # after supporting configurable mm profiling.
+        processor_inputs.hf_processor_mm_kwargs = {"do_resize": False}
+        return processor_inputs
+
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
                                  ):
