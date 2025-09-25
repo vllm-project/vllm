@@ -601,22 +601,33 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         kv_indptr_cpu = qo_indptr_cpu * self.cp_world_size
                         # init custom mask for head-tail query order
                         mask_arr = []
-                        q_lens = (qo_indptr_cpu[1:] - \
-                            qo_indptr_cpu[:-1]).cpu().tolist()
                         total_lens = seq_lens_cpu[prefill_start:
                                         prefill_start + num_prefills
                                         ].to(torch.int64).tolist()
                         q_ids = common_attn_metadata.input_ids[1:]
                         for i in range(num_prefills):
-                            Q = int(q_lens[i])
+                            # |----<C>-----|-<Q0>-|-<Q1>-|
+                            # |-----------<T>------------|
+                            # T = 12
+                            # Q = 2
+                            # cp_world_size = 2
+                            # C = 8
+                            # cur_q_ids = [0,3]
+                            # context_mask_i.shape = (2, 8)
+                            # upper = [0,1,2,3]
+                            # local_mask_i = [[True, False, False, False], 
+                            #                 [True, True, True, True]], size=(2, 4)
+                            # mask_i.shape = (2, 12)
+                            cur_q_ids = q_ids[qo_indptr_cpu[i]:qo_indptr_cpu[i+1]]
                             T = int(total_lens[i])
-                            cur_q_ids = q_ids[qo_indptr[i]:qo_indptr[i+1]]
+                            Q = len(cur_q_ids)
+                            C = T - Q * self.cp_world_size
                             if Q <= 0:
                                 mask_arr.append(torch.zeros(0, dtype=torch.bool))
                                 continue
-                            context_mask_i = torch.ones((len(cur_q_ids), T), dtype=torch.bool)
-                            upper = torch.arange(Q)
-                            local_mask_i = (cur_q_ids.unsqueeze(0) <= upper.unsqueeze(1))
+                            context_mask_i = torch.ones((Q, C), dtype=torch.bool)
+                            upper = torch.arange(Q*self.cp_world_size)
+                            local_mask_i = (upper.unsqueeze(0) <= cur_q_ids.unsqueeze(1))
                             mask_i = torch.cat([context_mask_i, local_mask_i], dim=1)
                             mask_arr.append(mask_i.flatten())
                         custom_mask = torch.cat(mask_arr, dim=0).to(self.device)
