@@ -19,7 +19,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -539,6 +540,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         v_head_dim: int,
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
+        kv_b_proj: ColumnParallelLinear,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -588,6 +590,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             qk_rope_head_dim=self.qk_rope_head_dim,
             qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
             v_head_dim=self.v_head_dim,
+            kv_b_proj=kv_b_proj,
         )
 
         self.use_direct_call = not current_platform.opaque_attention_op()

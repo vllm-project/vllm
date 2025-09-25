@@ -6,6 +6,7 @@ from typing import Generic, List, Optional, Protocol, Tuple, Type, TypeVar
 
 import torch
 
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
@@ -204,6 +205,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
+        kv_b_proj: ColumnParallelLinear,
     ) -> None:
         raise NotImplementedError
 
