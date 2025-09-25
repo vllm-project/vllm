@@ -15,7 +15,6 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
-from vllm import envs
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
@@ -32,7 +31,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
@@ -41,8 +39,6 @@ if TYPE_CHECKING:
 
 import torch
 import torch.distributed
-
-from vllm.model_executor.models.minimax_cache import MinimaxCacheParams
 
 
 class MiniMaxText01RMSNormTP(CustomOp):
@@ -225,11 +221,10 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                                         self.tp_heads:(self.tp_rank + 1) *
                                         self.tp_heads].contiguous()
 
-        if envs.VLLM_USE_V1:
-            compilation_config = get_current_vllm_config().compilation_config
-            if prefix in compilation_config.static_forward_context:
-                raise ValueError(f"Duplicate layer name: {prefix}")
-            compilation_config.static_forward_context[prefix] = self
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
 
     @staticmethod
     def weight_direct_load(param: torch.Tensor,
@@ -268,8 +263,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                 break
             if _prefill_idx >= len(state_indices_tensor):
                 break
-            # prefills are packed at end of batch in V1
-            offset = attn_metadata.num_decode_tokens if envs.VLLM_USE_V1 else 0
+            offset = attn_metadata.num_decode_tokens
             _start = attn_metadata.query_start_loc[offset + _prefill_idx]
             _end = attn_metadata.query_start_loc[offset + _prefill_idx + 1]
             slot_id = state_indices_tensor[offset + _prefill_idx]
@@ -291,10 +285,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
             hidden_decode = self._decode_infer(q, k, v, kv_cache,
                                                state_indices_tensor,
                                                attn_metadata)
-            if envs.VLLM_USE_V1:
-                hidden.insert(0, hidden_decode)
-            else:
-                hidden.append(hidden_decode)
+            hidden.insert(0, hidden_decode)
 
         if not hidden:
             return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
@@ -304,40 +295,28 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor,
                       attn_metadata):
-        if not envs.VLLM_USE_V1:
-            q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-            k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-            v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-            num_prefills = getattr(attn_metadata, "num_prefills", 0)
-            slot_id = state_indices_tensor[num_prefills:]
-        else:
-            q = q[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-            k = k[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-            v = v[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
-            slot_id = state_indices_tensor[:attn_metadata.num_decodes]
+        q = q[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
+        k = k[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
+        v = v[:attn_metadata.num_decode_tokens].unsqueeze(2).contiguous()
+        slot_id = state_indices_tensor[:attn_metadata.num_decodes]
         hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
                                               slot_id, 32)
         return hidden
 
     def forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
-                positions: torch.Tensor,
-                kv_caches: MinimaxCacheParams) -> None:
-        if not envs.VLLM_USE_V1:
-            self._forward(hidden_states, output, positions, kv_caches)
-        else:
-            torch.ops.vllm.linear_attention(
-                hidden_states,
-                output,
-                positions,
-                self.prefix,
-            )
+                positions: torch.Tensor) -> None:
+        torch.ops.vllm.linear_attention(
+            hidden_states,
+            output,
+            positions,
+            self.prefix,
+        )
 
     def _forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
-                 positions: torch.Tensor,
-                 kv_caches: Optional[MinimaxCacheParams]) -> None:
+                 positions: torch.Tensor) -> None:
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if envs.VLLM_USE_V1 and attn_metadata is not None:
+        if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
             assert isinstance(attn_metadata, LinearAttentionMetadata)
@@ -351,32 +330,26 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         qkvact = torch.nn.functional.silu(qkv32)
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
-        if envs.VLLM_USE_V1:
-            if attn_metadata is not None:
-                kv_cache = self.kv_cache[forward_context.virtual_engine][0]
-                state_indices_tensor = attn_metadata.state_indices_tensor
+        if attn_metadata is not None:
+            kv_cache = self.kv_cache[forward_context.virtual_engine][0]
+            state_indices_tensor = attn_metadata.state_indices_tensor
 
-                num_prefills = getattr(attn_metadata, "num_prefills", 0)
-                if num_prefills > 0:
-                    num_decode_tokens = getattr(attn_metadata,
-                                                "num_decode_tokens", 0)
-                    for prefill_idx in range(num_prefills):
-                        q_start = attn_metadata.query_start_loc[
-                            num_decode_tokens + prefill_idx]
-                        q_end = attn_metadata.query_start_loc[num_decode_tokens
-                                                              + prefill_idx +
-                                                              1]
-                        query_len = q_end - q_start
-                        context_len = attn_metadata.seq_lens[
-                            num_decode_tokens + prefill_idx] - query_len
-                        if context_len == 0:
-                            block_to_clear = state_indices_tensor[
-                                num_decode_tokens + prefill_idx]
-                            kv_cache[block_to_clear, ...] = 0
-        else:
-            assert kv_caches is not None
-            kv_cache = kv_caches.minimax_cache
-            state_indices_tensor = kv_caches.state_indices_tensor
+            num_prefills = getattr(attn_metadata, "num_prefills", 0)
+            if num_prefills > 0:
+                num_decode_tokens = getattr(attn_metadata, "num_decode_tokens",
+                                            0)
+                for prefill_idx in range(num_prefills):
+                    q_start = attn_metadata.query_start_loc[num_decode_tokens +
+                                                            prefill_idx]
+                    q_end = attn_metadata.query_start_loc[num_decode_tokens +
+                                                          prefill_idx + 1]
+                    query_len = q_end - q_start
+                    context_len = attn_metadata.seq_lens[
+                        num_decode_tokens + prefill_idx] - query_len
+                    if context_len == 0:
+                        block_to_clear = state_indices_tensor[num_decode_tokens
+                                                              + prefill_idx]
+                        kv_cache[block_to_clear, ...] = 0
 
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
         if attn_metadata is None:
@@ -410,8 +383,7 @@ def linear_attention(
     self = forward_context.no_compile_layers[layer_name]
     self._forward(hidden_states=hidden_states,
                   output=output,
-                  positions=positions,
-                  kv_caches=None)
+                  positions=positions)
 
 
 def linear_attention_fake(
@@ -428,5 +400,4 @@ direct_register_custom_op(
     op_func=linear_attention,
     mutates_args=["output"],
     fake_impl=linear_attention_fake,
-    dispatch_key=current_platform.dispatch_key,
 )

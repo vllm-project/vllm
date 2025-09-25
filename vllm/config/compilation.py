@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
-import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -75,11 +74,11 @@ class PassConfig:
     don't all have access to full configuration - that would create a cycle as
     the `PassManager` is set as a property of config."""
 
-    enable_fusion: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
+    enable_fusion: bool = False
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
     enable_attn_fusion: bool = False
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
+    enable_noop: bool = False
     """Whether to enable the custom no-op elimination pass."""
     enable_sequence_parallelism: bool = False
     """Whether to enable sequence parallelism."""
@@ -228,15 +227,14 @@ class CompilationConfig:
     The mode of the cudagraph:
 
     - NONE, no cudagraph capture.
-    - PIECEWISE. (v1 default)
+    - PIECEWISE.
     - FULL.
     - FULL_DECODE_ONLY.
-    - FULL_AND_PIECEWISE.
+    - FULL_AND_PIECEWISE. (v1 default)
 
     PIECEWISE mode build piecewise cudagraph only, keeping the cudagraph
     incompatible ops (i.e. some attention ops) outside the cudagraph
     for general flexibility.
-    This is the default mode.
 
     FULL mode: Capture full cudagraph for all batches. Can be good for small
     models or workloads with small prompts; not supported by many backends.
@@ -249,7 +247,7 @@ class CompilationConfig:
     
     FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
     piecewise cudagraph for prefill and mixed prefill-decode batches.
-    This is like the most performant mode for most models.
+    This is the most performant mode for most models and is the default.
 
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 
