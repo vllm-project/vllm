@@ -45,7 +45,6 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -84,7 +83,7 @@ from .qwen2_vl import Qwen2VLProcessingInfo
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import get_vit_attn_backend
+from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
 
@@ -406,25 +405,39 @@ class Qwen3_VisionTransformer(nn.Module):
             dh = h_idxs - h_floor
             dw = w_idxs - w_floor
 
-            w00 = ((1 - dh)[:, None] * (1 - dw)[None, :]).reshape(-1)
-            w01 = ((1 - dh)[:, None] * dw[None, :]).reshape(-1)
-            w10 = (dh[:, None] * (1 - dw)[None, :]).reshape(-1)
-            w11 = (dh[:, None] * dw[None, :]).reshape(-1)
+            # Create meshgrid view for all h, w vars
+            dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing='ij')
+            h_floor_grid, w_floor_grid = torch.meshgrid(h_floor,
+                                                        w_floor,
+                                                        indexing='ij')
+            h_ceil_grid, w_ceil_grid = torch.meshgrid(h_ceil,
+                                                      w_ceil,
+                                                      indexing='ij')
+            h_floor_grid_idx = h_floor_grid * num_grid_per_side
+            h_ceil_grid_idx = h_ceil_grid * num_grid_per_side
 
-            idx00 = (h_floor[:, None] * num_grid_per_side +
-                     w_floor[None, :]).reshape(-1)
-            idx01 = (h_floor[:, None] * num_grid_per_side +
-                     w_ceil[None, :]).reshape(-1)
-            idx10 = (h_ceil[:, None] * num_grid_per_side +
-                     w_floor[None, :]).reshape(-1)
-            idx11 = (h_ceil[:, None] * num_grid_per_side +
-                     w_ceil[None, :]).reshape(-1)
+            # original computation of weights
+            # w00 = (1 - dh_grid) * (1 - dw_grid)
+            # w01 = (1 - dh_grid) * dw_grid
+            # w10 = dh_grid * (1 - dw_grid)
+            # w11 = dh_grid * dw_grid
+            # we reuse w11 here to avoid duplicate
+            # dh_grid * dw_grid computation
+            w11 = dh_grid * dw_grid
+            w10 = dh_grid - w11
+            w01 = dw_grid - w11
+            w00 = 1 - dh_grid - dw_grid + w11
 
-            indices = torch.stack([idx00, idx01, idx10, idx11], dim=0)
+            idx00 = h_floor_grid_idx + w_floor_grid
+            idx01 = h_floor_grid_idx + w_ceil_grid
+            idx10 = h_ceil_grid_idx + w_floor_grid
+            idx11 = h_ceil_grid_idx + w_ceil_grid
+
+            indices = torch.stack([idx00, idx01, idx10, idx11],
+                                  dim=0).reshape(4, -1)
             weights = torch.stack([w00, w01, w10, w11],
-                                  dim=0).to(dtype=self.dtype,
-                                            device=self.device)
-            weights = weights.unsqueeze(-1)
+                                  dim=0).reshape(4, -1, 1)
+            weights = weights.to(dtype=self.dtype, device=self.device)
 
             embeds = self.pos_embed(indices)
             weighted_embeds = embeds * weights
@@ -701,6 +714,18 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             video_item = (video.copy(), video_metadata)
             video_items.append(video_item)
         return video_items
+
+    def get_dummy_processor_inputs(self, seq_len, mm_counts):
+        processor_inputs = super().get_dummy_processor_inputs(
+            seq_len, mm_counts)
+        # HACK(Isotr0py): We set do_resize to False here to reuse Qwen2-VL's
+        # profiling logic, which will be problematic for configurable mm
+        # profiling.
+        # TODO(Isotr0py): Switch to the implementation in
+        # https://github.com/vllm-project/vllm/pull/25557
+        # after supporting configurable mm profiling.
+        processor_inputs.hf_processor_mm_kwargs = {"do_resize": False}
+        return processor_inputs
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
@@ -1201,8 +1226,6 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
-                from vllm.multimodal.utils import (
-                    run_dp_sharded_mrope_vision_model)
                 return run_dp_sharded_mrope_vision_model(self.visual,
                                                          pixel_values,
                                                          grid_thw_list,
@@ -1232,15 +1255,13 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
             if self.use_data_parallel:
-                from vllm.multimodal.utils import (
-                    run_dp_sharded_mrope_vision_model)
                 return run_dp_sharded_mrope_vision_model(self.visual,
                                                          pixel_values_videos,
                                                          grid_thw_list,
                                                          rope_type="rope_3d")
             else:
                 video_embeds = self.visual(pixel_values_videos,
-                                           grid_thw=grid_thw)
+                                           grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each video item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
@@ -1436,14 +1457,18 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 **NOTE**: If mrope is enabled (default setting for Qwen3VL
                 opensource models), the shape will be `(3, seq_len)`,
                 otherwise it will be `(seq_len,).
-            pixel_values: Pixel values to be fed to a model.
-                `None` if no images are passed.
-            image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in LLM.
-                `None` if no images are passed.
-            pixel_values_videos: Pixel values of videos to be fed to a model.
-                `None` if no videos are passed.
-            video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM.
-                `None` if no videos are passed.
+            intermediate_tensors: Intermediate tensors from previous pipeline
+                stages.
+            inputs_embeds: Pre-computed input embeddings.
+            **kwargs: Additional keyword arguments including:
+                - pixel_values: Pixel values to be fed to a model.
+                    `None` if no images are passed.
+                - image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in
+                    LLM. `None` if no images are passed.
+                - pixel_values_videos: Pixel values of videos to be fed to a
+                    model. `None` if no videos are passed.
+                - video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in
+                    LLM. `None` if no videos are passed.
         """
 
         if intermediate_tensors is not None:
@@ -1493,10 +1518,8 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

@@ -48,10 +48,10 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
                               initialize_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.sequence import Logprob
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import set_default_torch_num_threads
 
@@ -1079,7 +1079,7 @@ def dummy_llava_path():
                           local_dir=_dummy_llava_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
-                              "*.msgpack"
+                              "*.msgpack", "*.safetensors"
                           ])
         assert os.path.exists(json_path)
         with open(json_path) as f:
@@ -1098,7 +1098,7 @@ def dummy_gemma2_embedding_path():
                           local_dir=_dummy_gemma2_embedding_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
-                              "*.msgpack"
+                              "*.msgpack", "*.safetensors"
                           ])
         assert os.path.exists(json_path)
         with open(json_path) as f:
