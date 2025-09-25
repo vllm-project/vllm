@@ -4,6 +4,8 @@
 import time
 from pathlib import Path
 
+import torch
+
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 
@@ -21,8 +23,9 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig):
     if compilation_config.level == CompilationLevel.PIECEWISE and \
         compilation_config.debug_dump_path:
         import depyf
-        path = Path(compilation_config.debug_dump_path) / \
-            f"rank_{vllm_config.parallel_config.rank}"
+        rank = torch.distributed.get_rank()
+        path = Path(compilation_config.debug_dump_path) / f"rank_{rank}"
+        path.mkdir(parents=True, exist_ok=True)
         global context_manager
         context_manager = depyf.prepare_debug(path.as_posix())
         context_manager.__enter__()

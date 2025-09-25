@@ -100,7 +100,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
         if not debug_dump_path:
             return
 
-        rank = config.parallel_config.rank
+        rank = torch.distributed.get_rank()
         debug_dump_path = Path(debug_dump_path) / f"rank_{rank}"
         debug_dump_path.mkdir(parents=True, exist_ok=True)
 

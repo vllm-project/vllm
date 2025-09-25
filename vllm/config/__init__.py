@@ -544,10 +544,16 @@ class VllmConfig:
                     # Hybrid KV cache manager is not yet supported with chunked
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
-
-        if envs.VLLM_DEBUG_DUMP_PATH is not None:
+        if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = \
-                envs.VLLM_DEBUG_DUMP_PATH
+            os.path.abspath(
+                self.compilation_config.debug_dump_path,
+                )
+        if envs.VLLM_DEBUG_DUMP_PATH is not None:
+            self.compilation_config.debug_dump_path = os.path.abspath(
+                envs.VLLM_DEBUG_DUMP_PATH)
+            logger.warning("Debug dump path is overridden to %s",
+                           self.compilation_config.debug_dump_path)
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
