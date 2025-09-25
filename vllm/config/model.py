@@ -339,17 +339,19 @@ class ModelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(
-            self,
-            # Multimodal config init vars
-            limit_mm_per_prompt: Optional[dict[str, int]],
-            media_io_kwargs: Optional[dict[str, dict[str, Any]]],
-            mm_processor_kwargs: Optional[dict[str, Any]],
-            mm_processor_cache_gb: Optional[float],
-            mm_processor_cache_type: Optional[MMCacheType],
-            mm_shm_cache_max_object_size_mb: Optional[int],
-            mm_encoder_tp_mode: Optional[MMEncoderTPMode],
-            interleave_mm_strings: Optional[bool],
-            skip_mm_profiling: Optional[bool]) -> None:
+        self,
+        # Multimodal config init vars
+        limit_mm_per_prompt: Optional[dict[str, int]],
+        media_io_kwargs: Optional[dict[str, dict[str, Any]]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+        mm_processor_cache_gb: Optional[float],
+        mm_processor_cache_type: Optional[MMCacheType],
+        mm_shm_cache_max_object_size_mb: Optional[int],
+        mm_encoder_tp_mode: Optional[MMEncoderTPMode],
+        interleave_mm_strings: Optional[bool],
+        skip_mm_profiling: Optional[bool],
+        video_pruning_rate: Optional[float],
+    ) -> None:
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
@@ -613,6 +615,7 @@ class ModelConfig:
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
+                video_pruning_rate=video_pruning_rate,
             )
 
             mm_config_kwargs = {
