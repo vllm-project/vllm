@@ -323,10 +323,11 @@ def _topk_kernel(LOGITS, PROBS, K, P, B,
             offs = tl.arange(0, BLOCK_SIZE)
             mask_n = offs < N
             logits_blk = tl.load(LOGITS_ROW + offs, mask=mask_n, other=0.0)
-            avg_logit = tl.mean(logits_blk)
-            std_logit = tl.std(logits_blk)
+            avg_logit = tl.sum(logits_blk) / N
+            sq_avg_logit = tl.sum(logits_blk * logits_blk) / N
+            std_logit = tl.sqrt(sq_avg_logit - avg_logit * avg_logit)
 
-            outlier_pivot = avg_logit + 3 * std_logit
+            outlier_pivot = avg_logit + 2.5 * std_logit
             num_outliers = tl.zeros((), dtype=tl.uint32)
             # First pass: compute max and min logits (for numerical stability)
             for i in range(0, NUM_TILES):
@@ -340,10 +341,14 @@ def _topk_kernel(LOGITS, PROBS, K, P, B,
                 num_blk_outliers = tl.sum(outlier_mask)
                 num_outliers += num_blk_outliers
                 outlier_idx = tl.where(outlier_mask, offs, -1)
-                gathered_outliers = tl.gather(logits_blk, outlier_idx)
-                tl.store(PROBS_ROW + num_outliers + tl.arange(0, num_blk_outliers), 
-                         gathered_outliers)
+                gathered_outliers = tl.gather(logits_blk, outlier_idx, axis=0)
+                off_outliers = tl.arange(0, BLOCK_SIZE)
+                mask_outliers = off_outliers < num_blk_outliers
+                tl.store(PROBS_ROW + num_outliers + off_outliers, 
+                         gathered_outliers, mask=mask_outliers)
                 
+            if num_outliers > k:
+                min_logit = outlier_pivot
 
             # Second passes: Quaternary search for pivots (nlog_4(n))
             k_pivot = -float('inf')
