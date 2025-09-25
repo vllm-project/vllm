@@ -658,17 +658,16 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         packed_modules_mapping["experts"] = []
 
         # FIXME: Updated to match lora adapter syntax but may not be necessary
-        # for _, weight_name, _, _ in expert_params_mapping:
-        #     weight_str = weight_name.split('.')
-        #     weight_name = "model.layers." + weight_str[1] + ".mlp." + weight_str[0]  + "." + weight_str[2] + ".weight" 
-        #     packed_modules_mapping["experts"].append(weight_name)
+        for _, weight_name, _, _ in expert_params_mapping:
+            weight_str = weight_name.split('.')
+            weight_name = "model.layers." + weight_str[1] + ".mlp." + weight_str[0] #  + "." + "experts" #weight_str[2]# + ".weight" 
+            packed_modules_mapping["experts"].append(weight_name)
 
         # print(packed_modules_mapping)
-        packed_modules_mapping["experts"] = [
-            # weight_name.rstrip(".")
-            # for _, weight_name, _, _ in expert_params_mapping
-            "experts"
-        ]
+        # packed_modules_mapping["experts"] = [
+        #     weight_name.rstrip(".")
+        #     for _, weight_name, _, _ in expert_params_mapping
+        # ]
         return packed_modules_mapping
 
     def __init__(
