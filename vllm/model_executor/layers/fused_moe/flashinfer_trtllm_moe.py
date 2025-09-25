@@ -92,7 +92,6 @@ def flashinfer_fused_moe_blockscale_fp8_fake(
 direct_register_custom_op(
     op_name="flashinfer_fused_moe_blockscale_fp8",
     op_func=flashinfer_fused_moe_blockscale_fp8,
-    mutates_args=[],
     fake_impl=flashinfer_fused_moe_blockscale_fp8_fake,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
