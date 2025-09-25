@@ -79,7 +79,6 @@ class SwiftBalancer(EplbPolicy):
             self, weights: np.ndarray, num_redundant_experts: int,
             num_experts: int, node_id: int,
             per_node_route_expert_num: int) -> tuple[np.ndarray, dict]:
-
         """
         Each time, select the expert with the highest load,
         generate a redundant expert, and then update the load.
@@ -530,7 +529,6 @@ class SwiftBalancer(EplbPolicy):
         expert_from_device: np.ndarray, nodes_num: int,
         is_node_redundant: bool, rendun_pos: list
     ) -> tuple[list[dict[str, Any]], int, list[dict[int, int]]]:
-
         """
         Choose different methods based on whether
         it is node internal redundancy.
@@ -603,10 +601,8 @@ class SwiftBalancer(EplbPolicy):
         report, max_load = self.generate_allocation_report(
             device_assignments, device_weights, device_loads, device_counts)
 
-        report, max_load = self.generate_allocation_report(device_assignments,
-                                                           device_weights,
-                                                           device_loads,
-                                                           device_counts)
+        report, max_load = self.generate_allocation_report(
+            device_assignments, device_weights, device_loads, device_counts)
 
         return report, max_load, com_between_devices
 
