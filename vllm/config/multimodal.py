@@ -16,13 +16,13 @@ from vllm.config.utils import config
 @standard_dataclass
 class BaseModalityOptions:
     """Base class for modality-specific dummy data options."""
-    count: int = 1
+    count: int = 999
 
 
 @standard_dataclass
 class VideoDummyOptions(BaseModalityOptions):
     """Options for generating dummy video data during profiling."""
-    count: int = 1
+    count: int = 999
     num_frames: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
@@ -41,7 +41,7 @@ class VideoDummyOptions(BaseModalityOptions):
 @standard_dataclass
 class ImageDummyOptions(BaseModalityOptions):
     """Options for generating dummy image data during profiling."""
-    count: int = 1
+    count: int = 999
     width: Optional[int] = None
     height: Optional[int] = None
     max_size: Optional[tuple[int, int]] = None
@@ -58,7 +58,7 @@ class ImageDummyOptions(BaseModalityOptions):
 @standard_dataclass
 class AudioDummyOptions(BaseModalityOptions):
     """Options for generating dummy audio data during profiling."""
-    count: int = 1
+    count: int = 999
     duration: Optional[float] = None
     sample_rate: Optional[int] = None
     channels: Optional[int] = None
@@ -96,7 +96,7 @@ class MultiModalConfig:
     limit_per_prompt: LimitPerPromptType = field(default_factory=dict)
     """The maximum number of input items and options allowed per 
         prompt for each modality.
-    Defaults to 1 (V0) or 999 (V1) for each modality.
+    Defaults to 999 for each modality.
 
     Legacy format (count only):
         {"image": 16, "video": 2}
