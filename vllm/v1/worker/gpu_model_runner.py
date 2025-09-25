@@ -2435,7 +2435,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 token_indices_to_sample = None
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
-                # TODO(woosuk): Support M-RoPE.
                 # M-RoPE
                 if self.uses_mrope:
                     target_positions = \
@@ -2467,7 +2466,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             valid_sampled_tokens_count)
 
                 target_token_ids = self.input_ids.gpu[token_indices]
-                # TODO(woosuk): Support M-RoPE.
                 # M-RoPE
                 if self.uses_mrope:
                     target_positions = \
