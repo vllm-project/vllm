@@ -71,7 +71,6 @@ async def test_request_cancellation(server, model_name):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(reason="Server always returns 400 for wrong content type")
 async def test_request_wrong_content_type(server, model_name):
 
     chat_input = [{"role": "user", "content": "Write a long story"}]
