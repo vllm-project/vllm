@@ -169,7 +169,6 @@ class EagleProposer:
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
-
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
         self.input_ids[:num_tokens - 1] = target_token_ids[1:]
@@ -223,7 +222,8 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
-            if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp"):
+            if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp",
+                               "longcat_flash_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
@@ -237,7 +237,10 @@ class EagleProposer:
             return draft_token_ids.view(-1, 1)
 
         positions = target_positions[last_token_indices]
-        hidden_states = hidden_states[last_token_indices]
+        if self.method in ("deepseek_mtp", "ernie_mtp", "longcat_flash_mtp"):
+            hidden_states = self.hidden_states[last_token_indices]
+        else:
+            hidden_states = hidden_states[last_token_indices]
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
@@ -350,7 +353,7 @@ class EagleProposer:
                     inputs_embeds=inputs_embeds,
                 )
                 if self.method in ("deepseek_mtp", "ernie_mtp",
-                                   "qwen3_next_mtp"):
+                                   "qwen3_next_mtp", "longcat_flash_mtp"):
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states
                 else:
