@@ -23,7 +23,7 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            PerTensorScaleParameter)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv, direct_register_custom_op
+from vllm.utils import direct_register_custom_op
 from vllm.utils.deep_gemm import (is_deep_gemm_e8m0_used,
                                   is_deep_gemm_supported,
                                   should_use_deepgemm_for_fp8_linear)
@@ -747,70 +747,6 @@ def w8a8_triton_block_scaled_mm(
     )
 
     return C
-
-
-# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/0c88cd01392c1073c7049a97d6328c7bba9b3947
-# TODO(wentao): remove this function when DeepGEMM exposes this function
-def get_tma_aligned_size(x: int, element_size: int) -> int:
-    """
-    Global memory address of TMA must be 16-byte aligned.
-    Since we use column-major layout for the LHS scaling tensor,
-        the M-axis of the LHS scaling tensor needs to be padded to a multiple of
-        16 bytes.
-
-    Arguments:
-        x: original M-axis shape of the LHS scaling tensor.
-        element_size: element size of the LHS scaling tensor.
-
-    Returns:
-        M-axis shape of the LHS scaling tensor after padding.
-    """
-    tma_alignment_bytes = 16
-    assert tma_alignment_bytes % element_size == 0
-    alignment = tma_alignment_bytes // element_size
-    return cdiv(x, alignment) * alignment
-
-
-# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/0c88cd01392c1073c7049a97d6328c7bba9b3947
-# TODO(wentao): remove this function when DeepGEMM exposes this function
-def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
-    """
-    Returns TMA-aligned transposed format of the input tensor. `torch.transpose`
-        will be called if necessary.
-    If the input tensor is already column-major layout and 16-byte aligned along
-        the M axis (thus meets the requirement of LHS scaling tensor in
-        DeepGEMM), this function will do nothing.
-
-    Arguments:
-        x: usually the LHS scaling tensor in GEMM.
-
-    Returns:
-        The LHS scaling tensor of TMA-aligned transposed format.
-    """
-    # NOTES: for the extreme performance, you may rewrite/fuse this function in
-    # CUDA
-    assert x.dim() in (2, 3)
-    remove_dim = False
-    m, n = x.shape[-2], x.shape[-1]
-    aligned_m = get_tma_aligned_size(m, x.element_size())
-    if x.dim() == 2:
-        if x.stride(0) == 1 and x.stride(1) == aligned_m:
-            return x
-        x, remove_dim = x.unsqueeze(0), True
-
-    b = x.shape[0]
-
-    # The last kernel gives a column-major TMA aligned layout
-    if x.stride(0) == aligned_m * n and x.stride(1) == 1 and x.stride(
-            2) == aligned_m:
-        return x.squeeze(0) if remove_dim else x
-
-    # Normal layout requires transposing
-    aligned_x = torch.transpose(
-        torch.empty((b, n, aligned_m), device=x.device, dtype=x.dtype), 1, 2)
-    aligned_x[:, :m, :] = x
-    aligned_x = aligned_x[:, :m, :]
-    return aligned_x.squeeze(0) if remove_dim else aligned_x
 
 
 def requant_weight_ue8m0_inplace(
