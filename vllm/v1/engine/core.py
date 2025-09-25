@@ -475,9 +475,9 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
-        with self._perform_handshakes(handshake_address, identity,
-                                      local_client, vllm_config,
-                                      client_handshake_address) as (addresses, zmq_socket):
+        with self._perform_handshakes(
+                handshake_address, identity, local_client, vllm_config,
+                client_handshake_address) as (addresses, zmq_socket):
             self.client_count = len(addresses.outputs)
 
             # Set up data parallel environment.
@@ -497,7 +497,7 @@ class EngineCoreProc(EngineCore):
 
             try:
                 super().__init__(vllm_config, executor_class, log_stats,
-                                executor_fail_callback)
+                                 executor_fail_callback)
 
                 # Background Threads and Queues for IO. These enable us to
                 # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -505,17 +505,17 @@ class EngineCoreProc(EngineCore):
                 # model forward pass.
                 # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
                 ready_event = threading.Event()
-                input_thread = threading.Thread(target=self.process_input_sockets,
-                                                args=(addresses.inputs,
-                                                    addresses.coordinator_input,
-                                                    identity, ready_event),
-                                                daemon=True)
+                input_thread = threading.Thread(
+                    target=self.process_input_sockets,
+                    args=(addresses.inputs, addresses.coordinator_input,
+                          identity, ready_event),
+                    daemon=True)
                 input_thread.start()
 
                 self.output_thread = threading.Thread(
                     target=self.process_output_sockets,
                     args=(addresses.outputs, addresses.coordinator_output,
-                        self.engine_index),
+                          self.engine_index),
                     daemon=True)
                 self.output_thread.start()
 
@@ -526,15 +526,21 @@ class EngineCoreProc(EngineCore):
                         raise RuntimeError(
                             "Input socket thread died during startup")
                     assert addresses.coordinator_input is not None
-                    logger.info("Waiting for READY message from DP Coordinator...")
+                    logger.info(
+                        "Waiting for READY message from DP Coordinator...")
 
             except Exception as e:
-                zmq_socket.send(msgspec.msgpack.encode({
-                    "status": "FAILED",
-                    "local": local_client and client_handshake_address is None,
-                    "headless": not local_client,
-                    "error_msg": str(e),
-                }))
+                zmq_socket.send(
+                    msgspec.msgpack.encode({
+                        "status":
+                        "FAILED",
+                        "local":
+                        local_client and client_handshake_address is None,
+                        "headless":
+                        not local_client,
+                        "error_msg":
+                        str(e),
+                    }))
                 raise
 
 
