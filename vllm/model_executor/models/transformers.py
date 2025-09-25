@@ -34,7 +34,9 @@ from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import get_pp_indices
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
@@ -51,8 +53,9 @@ from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_list_of
+from vllm.utils import direct_register_custom_op, is_list_of
 
 from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
@@ -707,6 +710,54 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+@CustomOp.register("transformers_fused_moe")
+class TransformersFusedMoE(FusedMoE):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._top_k_index: torch.Tensor = None
+
+        def custom_routing_function(hidden_states, gating_output, topk,
+                                    renormalize, *extra):
+            return gating_output, self._top_k_index
+
+        self.custom_routing_function = custom_routing_function
+
+    def forward(self, hidden_states: torch.Tensor, top_k_index: torch.Tensor,
+                top_k_weights: torch.Tensor):
+        return torch.ops.vllm.transformers_moe_forward(hidden_states,
+                                                       top_k_index,
+                                                       top_k_weights,
+                                                       self.layer_name)
+
+
+def transformers_moe_forward(hidden_states: torch.Tensor,
+                             top_k_index: torch.Tensor,
+                             top_k_weights: torch.Tensor,
+                             layer_name: str) -> torch.Tensor:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._top_k_index = top_k_index
+    return self.forward_impl(hidden_states.clone(), top_k_weights)
+
+
+def transformers_moe_forward_fake(hidden_states: torch.Tensor,
+                                  top_k_index: torch.Tensor,
+                                  top_k_weights: torch.Tensor,
+                                  layer_name: str) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="transformers_moe_forward",
+    op_func=transformers_moe_forward,
+    mutates_args=["hidden_states"],
+    fake_impl=transformers_moe_forward_fake,
+    dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)
+
+
 class TransformersMoEBase(TransformersBase):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
@@ -762,38 +813,6 @@ class TransformersMoEBase(TransformersBase):
         topk_group = getattr(text_config, "topk_group", None)
         use_grouped_topk = False
 
-        class CustomFusedMoE(FusedMoE):
-
-            def forward(self, hidden_states: torch.Tensor,
-                        top_k_index: torch.Tensor,
-                        top_k_weights: torch.Tensor):
-                """Custom forward which allows us to bypass the routing inside
-                FusedMoE. Instead, we use the top_k_index and top_k_weights
-                computed on the Transformers side.
-                
-                On the Transformers side the schema for `args` is
-                `[hidden_states, top_k_index, top_k_weights]`.
-                
-                On the vLLM side these correspond to
-                `[hidden_states, topk_ids, topk_weights]` respectively."""
-
-                def custom_routing_function(
-                    hidden_states: torch.Tensor,
-                    gating_output: torch.Tensor,
-                    topk: int,
-                    renormalize: bool,
-                ) -> tuple[torch.Tensor, torch.Tensor]:
-                    # gating_output is actually topk_weights
-                    topk_weights = gating_output
-                    # Use the saved topk_ids
-                    return topk_weights, top_k_index
-
-                self.custom_routing_function = custom_routing_function
-
-                # Call the parent forward method with hidden_states and
-                # topk_weights as gating_output
-                return super().forward(hidden_states, top_k_weights)
-
         # Expert parallel load balancing kwargs
         parallel_config = self.parallel_config
         eplb_config = parallel_config.eplb_config
@@ -812,7 +831,7 @@ class TransformersMoEBase(TransformersBase):
                     e_score_correction_bias = getattr(
                         gate, "e_score_correction_bias", None)
                     # Replace experts module with FusedMoE
-                    new_module = CustomFusedMoE(
+                    new_module = TransformersFusedMoE(
                         num_experts=num_experts,
                         top_k=top_k,
                         hidden_size=hidden_size,
