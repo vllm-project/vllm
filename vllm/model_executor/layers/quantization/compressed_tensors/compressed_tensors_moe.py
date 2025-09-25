@@ -546,7 +546,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             self.weight_quant, self.input_quant)
         self.use_cutlass = not self.block_quant and (
             quant_config._is_fp8_w8a8_sm90(self.weight_quant, self.input_quant)
-            or self.is_fp8_w8a8_sm100)
+            or self.is_fp8_w8a8_sm100) and not envs.VLLM_DISABLE_CUTLASS_MOE
         self.disable_expert_map = False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,

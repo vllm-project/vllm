@@ -143,6 +143,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0_HOPPER: bool = False
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_DISABLE_CUTLASS_MOE: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput",
@@ -1138,6 +1139,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK":
     lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))),
 
+    # Whether to disable CUTLASS MoE kernel and use Triton instead.
+    "VLLM_DISABLE_CUTLASS_MOE":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_CUTLASS_MOE", "0"))),
+
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
@@ -1501,6 +1506,7 @@ def compute_hash() -> str:
         "VLLM_USE_AITER_UNIFIED_ATTENTION",
         "VLLM_ATTENTION_BACKEND",
         "VLLM_USE_FLASHINFER_SAMPLER",
+        "VLLM_DISABLE_CUTLASS_MOE",
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
