@@ -90,7 +90,6 @@ class LoggingStatLogger(StatLoggerBase):
                iteration_stats: Optional[IterationStats],
                engine_idx: int = 0):
         """Log Stats to standard output."""
-
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
 
