@@ -6,5 +6,7 @@
     "protocol": "tcp",
     "device_name": "",
     "master_server_address": "localhost:${MOONCAKE_MASTER_PORT}",
-    "zero_copy": ${MOONCAKE_ZEROCOPY}
+    "replica_num": ${MOONCAKE_REPLICA_NUM},
+    "fast_transfer": ${MOONCAKE_FAST_TRANSFER},
+    "fast_transfer_buffer_size": ${MOONCAKE_FAST_TRANSFER_BUFFER_SIZE}
 }

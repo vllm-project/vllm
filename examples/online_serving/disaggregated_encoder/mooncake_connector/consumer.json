@@ -6,5 +6,7 @@
     "protocol": "tcp",
     "device_name": "",
     "master_server_address": "localhost:50051",
-    "zero_copy": true
+    "replica_num": 1,
+    "fast_transfer": true,
+    "fast_transfer_buffer_size": 1
 }

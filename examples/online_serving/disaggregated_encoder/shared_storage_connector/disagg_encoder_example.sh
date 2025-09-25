@@ -5,15 +5,15 @@ set -euo pipefail
 ###############################################################################
 # Configuration -- override via env before running
 ###############################################################################
-MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
+MODEL="${MODEL:-/workspace/vllm/Qwen2.5-VL-3B-Instruct/}"
 
 LOG_PATH="${LOG_PATH:-./logs}"
 ENCODE_PORT="${ENCODE_PORT:-19534}"
 PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19535}"
 PROXY_PORT="${PROXY_PORT:-10001}"
 
-GPU_E="${GPU_E:-0}"
-GPU_PD="${GPU_PD:-1}"
+GPU_E="${GPU_E:-6}"
+GPU_PD="${GPU_PD:-7}"
 
 SHARED_STORAGE_PATH="${SHARED_STORAGE_PATH:-/tmp/}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
@@ -150,11 +150,12 @@ python benchmark_serving.py \
   --backend           openai-chat \
   --model             $MODEL \
   --dataset-name      hf \
-  --dataset-path      lmarena-ai/VisionArena-Chat \
-  --seed              0 \
+  --dataset-path      /workspace/lmarena-ai/VisionArena-Chat \
+  --seed              40 \
   --endpoint          /v1/chat/completions \
-  --num-prompts       10 \
+  --num-prompts       $1 \
   --port              $PROXY_PORT \
-  --host              127.0.0.1
+  --host              127.0.0.1 \
+  --request-rate      $2
 ###############################################################################
 cleanup

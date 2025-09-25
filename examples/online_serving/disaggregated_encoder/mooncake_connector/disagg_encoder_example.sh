@@ -18,9 +18,11 @@ GPU_PD="${GPU_PD:-7}"
 SHARED_STORAGE_PATH="${SHARED_STORAGE_PATH:-/tmp/}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
 
-MOONCAKE_ZEROCOPY=$1
 MOONCAKE_MASTER_PORT=50051
 MOONCAKE_METADATA_PORT=8080
+MOONCAKE_REPLICA_NUM=1
+MOONCAKE_FAST_TRANSFER=true
+MOONCAKE_FAST_TRANSFER_BUFFER_SIZE=1 # GB
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
@@ -110,11 +112,15 @@ export MC_MS_AUTO_DISC=0
 
 sed -e "s/\${MOONCAKE_MASTER_PORT}/$MOONCAKE_MASTER_PORT/"\
     -e "s/\${MOONCAKE_METADATA_PORT}/$MOONCAKE_METADATA_PORT/"\
-    -e "s/\${MOONCAKE_ZEROCOPY}/$MOONCAKE_ZEROCOPY/"\
+    -e "s/\${MOONCAKE_REPLICA_NUM}/$MOONCAKE_REPLICA_NUM/"\
+    -e "s/\${MOONCAKE_FAST_TRANSFER}/$MOONCAKE_FAST_TRANSFER/"\
+    -e "s/\${MOONCAKE_FAST_TRANSFER_BUFFER_SIZE}/$MOONCAKE_FAST_TRANSFER_BUFFER_SIZE/"\
     mooncake_config/producer_template.json > producer.json
 sed -e "s/\${MOONCAKE_MASTER_PORT}/$MOONCAKE_MASTER_PORT/"\
     -e "s/\${MOONCAKE_METADATA_PORT}/$MOONCAKE_METADATA_PORT/"\
-    -e "s/\${MOONCAKE_ZEROCOPY}/$MOONCAKE_ZEROCOPY/"\
+    -e "s/\${MOONCAKE_REPLICA_NUM}/$MOONCAKE_REPLICA_NUM/"\
+    -e "s/\${MOONCAKE_FAST_TRANSFER}/$MOONCAKE_FAST_TRANSFER/"\
+    -e "s/\${MOONCAKE_FAST_TRANSFER_BUFFER_SIZE}/$MOONCAKE_FAST_TRANSFER_BUFFER_SIZE/"\
     mooncake_config/consumer_template.json > consumer.json
 
 ###############################################################################
@@ -166,7 +172,7 @@ wait_for_server "$PREFILL_DECODE_PORT"
 ###############################################################################
 # Proxy
 ###############################################################################
-python $2 \
+python disagg_encoder_proxy_old.py \
   --host "127.0.0.1" \
   --port "$PROXY_PORT" \
   --encode-servers-urls "http://localhost:$ENCODE_PORT" \
@@ -188,9 +194,9 @@ python benchmark_serving.py \
   --dataset-path      /workspace/lmarena-ai/VisionArena-Chat \
   --seed              40 \
   --endpoint          /v1/chat/completions \
-  --num-prompts       $3 \
+  --num-prompts       10 \
   --port              $PROXY_PORT \
   --host              127.0.0.1 \
-  --request-rate      $4
+  --request-rate      10
 ###############################################################################
 cleanup

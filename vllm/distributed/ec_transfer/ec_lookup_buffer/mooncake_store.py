@@ -25,7 +25,7 @@ from vllm.logger import init_logger
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
-DEFAULT_TENSOR_POOL_SIZE = int(1073741824 * 3)  # 1.0 GiB
+DEFAULT_TENSOR_POOL_SIZE = 1073741824  # 1.0 GiB
 
 # View map for unsupported dtypes (add more as needed, e.g., for future types)
 VIEW_MAP = {
@@ -47,7 +47,9 @@ class MooncakeStoreConfig:
     master_server_address: str
     storage_root_dir: str
     transfer_timeout: int
-    zero_copy: bool
+    replica_num: int
+    fast_transfer: bool
+    fast_transfer_buffer_size: int
 
     @staticmethod
     def from_file(file_path: str) -> 'MooncakeStoreConfig':
@@ -66,12 +68,24 @@ class MooncakeStoreConfig:
             master_server_address=config.get("master_server_address"),
             storage_root_dir=config.get("storage_root_dir", ""),
             transfer_timeout=int(config.get("transfer_timeout", 1)),
-            zero_copy=bool(config.get("zero_copy", True))
+            replica_num=int(config.get("replica_num", 1)),
+            fast_transfer=bool(config.get("fast_transfer", True)),
+            fast_transfer_buffer_size=int(float(config.get("fast_transfer_buffer_size", 1))
+                                          * DEFAULT_TENSOR_POOL_SIZE)
         )
 
 
 @dataclass
 class ECMooncakeTensorPoolMetadata:
+    """
+    Metadata element for a buffer in the tensor pool. This stores:
+
+        key: ECMooncakeStore key of (key, value) pair
+        addr: addr of the buffer in the tensor pool
+
+    Those elements are maintained for zero-copy put method (fast_transfer mode),
+    and evicted by FIFO eviction policy.
+    """
     key: str
     addr: str
 
@@ -120,7 +134,10 @@ class ECMooncakeStore:
             logger.info(f"  device_name: {self.config.device_name}")
             logger.info(f"  master_server_address: {self.config.master_server_address}")
             logger.info(f"  transfer_timeout: {self.config.transfer_timeout}")
-            logger.info(f"  zero_copy: {self.config.zero_copy}")
+            logger.info(f"  replica_num: {self.config.replica_num}")
+            logger.info(f"  fast_transfer: {self.config.fast_transfer}")
+            logger.info(f"  fast_transfer_buffer_size: \
+                        {self.config.fast_transfer_buffer_size}")
 
             self.store.setup(self.config.local_hostname,
                              self.config.metadata_server,
@@ -139,16 +156,18 @@ class ECMooncakeStore:
 
         # Initialize ReplicateConfig
         self.replica_config = ReplicateConfig()
-        self.replica_config.replica_num = 1
+        self.replica_config.replica_num = self.config.replica_num
 
         logger.info("MooncakeConnector initialized successfully.")
 
-        # Zero copy init
-        if self.config.zero_copy:
+        # Fast transfer init (Use zero-copy methods of mooncake)
+        if self.config.fast_transfer:
             self.tensor_pool = TensorMemoryPool(
-                max_block_size=DEFAULT_TENSOR_POOL_SIZE)
+                max_block_size=self.config.fast_transfer_buffer_size)
             self.store.register_buffer(
-                self.tensor_pool.base_address, DEFAULT_TENSOR_POOL_SIZE)
+                self.tensor_pool.base_address,
+                self.config.fast_transfer_buffer_size
+            )
             self.fifo_pool_queue = deque()
         
         # Put async init
@@ -156,7 +175,7 @@ class ECMooncakeStore:
         self.put_queue_cv = threading.Condition()
 
     def close(self):
-        if self.config.zero_copy:
+        if self.config.fast_transfer:
             self.store.unregister_buffer(
                 self.tensor_pool.base_address, DEFAULT_TENSOR_POOL_SIZE)
             self.tensor_pool.cleanup()
@@ -180,7 +199,7 @@ class ECMooncakeStore:
         )
     
     def batch_get(self, keys: List[str]) -> List[Optional[torch.Tensor]]:
-        if self.config.zero_copy:
+        if self.config.fast_transfer:
             return self._zero_copy_batch_get(keys)
         
         return self._batch_get(keys)
@@ -286,7 +305,7 @@ class ECMooncakeStore:
         with self.put_queue_cv:
             self.put_queue.update(keys)
 
-        if self.config.zero_copy:
+        if self.config.fast_transfer:
             return await self._zero_copy_batch_put(keys, tensors)
         return await self._batch_put(keys, tensors)
 
