@@ -139,6 +139,56 @@ direct_register_custom_op(
 )
 
 
+def _padded_cutlass(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    pad_multiple = 4
+    dim = qx.shape[0]
+    padded = dim if dim % pad_multiple == 0 else dim + pad_multiple - (
+        dim % pad_multiple)
+
+    padded_shape = [padded, *qx.shape[1:]]
+    padded_qx = torch.zeros(padded_shape, device=qx.device, dtype=qx.dtype)
+    padded_qx[0:qx.shape[0], ...].copy_(qx)
+
+    padded_x_scale_shape = [*x_scale.shape[1:], padded]
+    padded_x_scale = torch.ones(padded_x_scale_shape,
+                                device=x_scale.device,
+                                dtype=x_scale.dtype).permute(-1, -2)
+    padded_x_scale[0:x_scale.shape[0], ...].copy_(x_scale)
+
+    output = cutlass_scaled_mm(padded_qx, weight, padded_x_scale, weight_scale,
+                               block_size, output_dtype, True)
+    return output[0:qx.shape[0], ...]
+
+
+def _padded_cutlass_fake(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty((qx.size(0), weight.size(0)),
+                       dtype=output_dtype,
+                       device=qx.device)
+
+
+direct_register_custom_op(
+    "padded_cutlass",
+    _padded_cutlass,
+    mutates_args=[],
+    fake_impl=_padded_cutlass_fake,
+    dispatch_key="CUDA",
+)
+
+
 # TODO fix ROCm->Triton custom path:
 #  https://github.com/vllm-project/vllm/issues/14397
 class W8A8BlockFp8LinearOp:
@@ -225,19 +275,15 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.input_quant_op is not None
+        q_input, x_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
-            # We pad unconditionally (even if shape is already divisible by 4)
-            # to support dynamic shape for input_2d.shape[0] in torch.compile
-            x = torch.nn.functional.pad(input_2d,
-                                        (0, 0, 0, -input_2d.shape[0] % 4))
+            output = torch.ops.vllm.padded_cutlass(
+                q_input, weight, x_scale, weight_scale,
+                list(self.weight_group_shape), input_2d.dtype)
         else:
-            x = input_2d
-
-        q_input, x_scale = self.input_quant_op(x)
-        output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
-                                   list(self.weight_group_shape),
-                                   input_2d.dtype, self.is_hopper)
-        output = output[0:input_2d.shape[0], ...]
+            output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
+                                       list(self.weight_group_shape),
+                                       input_2d.dtype, False)
         return output
 
     def _run_aiter(
