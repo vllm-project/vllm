@@ -34,7 +34,7 @@ class ReasoningParser:
     It is used to extract reasoning content from the model output.
     """
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
         self.model_tokenizer = tokenizer
 
     @cached_property

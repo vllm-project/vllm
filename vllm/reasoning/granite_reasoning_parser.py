@@ -24,8 +24,8 @@ class GraniteReasoningParser(ReasoningParser):
     and "Here is my response:" to separate its thinking / response outputs.
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+        super().__init__(tokenizer, *args, **kwargs)
 
         # NOTE: There have been some observed occurrences of quantized
         # instances of the current models using "Here's" instead of "Here is",
