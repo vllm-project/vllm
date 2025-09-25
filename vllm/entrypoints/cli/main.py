@@ -30,7 +30,7 @@ def main():
 
     parser = FlexibleArgumentParser(
         description="vLLM CLI",
-        epilog=VLLM_SUBCMD_PARSER_EPILOG,
+        epilog=VLLM_SUBCMD_PARSER_EPILOG.format(subcmd="[subcommand]"),
     )
     parser.add_argument(
         '-v',

@@ -569,8 +569,8 @@ class MultiModalFieldConfig:
         Args:
             modality: The modality of the multi-modal item that uses this
                 keyword argument.
-            slices: For each multi-modal item, the size of the slice that
-                is used to extract the data corresponding to it.
+            size_per_item: For each multi-modal item, the size of the slice
+                that is used to extract the data corresponding to it.
             dim: The dimension to slice, default to 0.
 
         Example:
@@ -590,7 +590,7 @@ class MultiModalFieldConfig:
 
         ```
         Given:
-            slices: [3, 4, 2]
+            size_per_item: [3, 4, 2]
             dim: 1
 
         Input:

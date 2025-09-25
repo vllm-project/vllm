@@ -12,7 +12,7 @@ from transformers import AutoModelForCausalLM
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config import RunnerOption
-from vllm.sequence import SampleLogprobs
+from vllm.logprobs import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .....conftest import (AUDIO_ASSETS, IMAGE_ASSETS, HfRunner, ImageAsset,
