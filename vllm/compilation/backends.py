@@ -15,6 +15,7 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
+from vllm.compilation.nanoflow import manager as nano_manager
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -605,7 +606,12 @@ class VllmBackend:
 
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE or \
             not self.compilation_config.cudagraph_copy_inputs:
-            return self.split_gm
+            if self.compilation_config.enable_nano_batch_split:
+                return nano_manager.get_callable(self.split_gm,
+                                                 self.compilation_config,
+                                                 local_cache_dir)
+            else:
+                return self.split_gm
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode

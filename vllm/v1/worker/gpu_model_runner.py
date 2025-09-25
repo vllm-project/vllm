@@ -59,6 +59,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available,
                         length_from_prompt_token_ids_or_embeds, round_up,
                         supports_dynamo)
+from vllm.utils.nano_split import prepare_nano_split_and_set_hooks
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -1236,6 +1237,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
                 max_num_scheduled_tokens, ubatch_slices,
                 num_tokens_after_padding)
+
+    def _prepare_nano_split(self, scheduler_output: "SchedulerOutput"):
+        prepare_nano_split_and_set_hooks(scheduler_output=scheduler_output,
+                                         input_batch=self.input_batch,
+                                         attn_groups=self.attn_groups,
+                                         kv_cache_config=self.kv_cache_config)
 
     def _compute_cascade_attn_prefix_len(
         self,

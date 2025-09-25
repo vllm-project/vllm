@@ -590,7 +590,6 @@ class EngineArgs:
                                  **model_kwargs["logits_processors"])
         model_group.add_argument("--io-processor-plugin",
                                  **model_kwargs["io_processor_plugin"])
-
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
         load_group = parser.add_argument_group(

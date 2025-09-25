@@ -329,6 +329,27 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
+        if self.compilation_config.enable_nano_batch_split:
+            if self.model_config.enforce_eager:
+                logger.info("nano batch split is not supported with "
+                            "enforce_eager. Disabling nano batch split.")
+                self.compilation_config.enable_nano_batch_split = False
+            elif self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                logger.info("nano batch split is currently not supported with "
+                            "cudagraph. Disabling nano batch split.")
+                self.compilation_config.enable_nano_batch_split = False
+            elif self.compilation_config.full_cuda_graph:
+                logger.info("full_cuda_graph is not supported with "
+                            "nano batch split. Disabling nano batch split.")
+                self.compilation_config.enable_nano_batch_split = False
+            elif self.compilation_config.splitting_ops:
+                logger.info("splitting_ops is not supported with "
+                            "nano batch split. Disabling nano batch split.")
+                self.compilation_config.enable_nano_batch_split = False
+            else:
+                self.compilation_config.splitting_ops = [
+                    "vllm.all_reduce",
+                ]
         # If the user does not explicitly set a compilation level, then
         # we use the default level. The default level depends on other
         # settings (see the below code).
