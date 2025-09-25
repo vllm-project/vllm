@@ -22,9 +22,8 @@ def test_basic_rebalance():
     num_gpus = 8
 
     policy = DefaultEplb()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, num_replicas,
-                                                        num_groups, num_nodes,
-                                                        num_gpus)
+    phy2log, log2phy, logcnt = policy.rebalance_experts(
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
 
     # Verify output shapes
     assert phy2log.shape == (
@@ -73,9 +72,8 @@ def test_single_gpu_case():
     num_gpus = 1
 
     policy = DefaultEplb()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, num_replicas,
-                                                        num_groups, num_nodes,
-                                                        num_gpus)
+    phy2log, log2phy, logcnt = policy.rebalance_experts(
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
 
     # Verify shapes
     assert phy2log.shape == (1, 4)
@@ -96,9 +94,8 @@ def test_equal_weights():
     num_gpus = 4
 
     policy = DefaultEplb()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, num_replicas,
-                                                        num_groups, num_nodes,
-                                                        num_gpus)
+    phy2log, log2phy, logcnt = policy.rebalance_experts(
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
 
     # Verify shapes
     assert phy2log.shape == (1, 8)
@@ -120,9 +117,8 @@ def test_extreme_weight_imbalance():
     num_gpus = 4
 
     policy = DefaultEplb()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, num_replicas,
-                                                        num_groups, num_nodes,
-                                                        num_gpus)
+    phy2log, log2phy, logcnt = policy.rebalance_experts(
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
 
     # Verify shapes
     assert phy2log.shape == (1, 12)
@@ -147,9 +143,8 @@ def test_multiple_layers():
     num_gpus = 4
 
     policy = DefaultEplb()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, num_replicas,
-                                                        num_groups, num_nodes,
-                                                        num_gpus)
+    phy2log, log2phy, logcnt = policy.rebalance_experts(
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
 
     # Verify shapes
     assert phy2log.shape == (3, 8)
@@ -195,9 +190,8 @@ def test_small_scale_hierarchical():
     num_gpus = 4  # 4 GPUs
 
     policy = DefaultEplb()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, num_replicas,
-                                                        num_groups, num_nodes,
-                                                        num_gpus)
+    phy2log, log2phy, logcnt = policy.rebalance_experts(
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
 
     # Verify basic constraints
     assert phy2log.shape == (1, 12)
@@ -222,9 +216,8 @@ def test_global_load_balance_fallback():
     num_gpus = 4
 
     policy = DefaultEplb()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, num_replicas,
-                                                        num_groups, num_nodes,
-                                                        num_gpus)
+    phy2log, log2phy, logcnt = policy.rebalance_experts(
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
 
     # Should work normally, just using global load balancing strategy
     assert phy2log.shape == (1, 8)
@@ -245,9 +238,8 @@ def test_device_compatibility(device):
     num_gpus = 2
 
     policy = DefaultEplb()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, num_replicas,
-                                                        num_groups, num_nodes,
-                                                        num_gpus)
+    phy2log, log2phy, logcnt = policy.rebalance_experts(
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
 
     # Function will convert to CPU internally, but should handle different
     # device inputs normally
@@ -263,7 +255,8 @@ def test_additional_cases():
         [[50, 100, 75, 120, 90, 60, 80, 110, 40, 70, 95, 85, 65, 55, 45, 35]])
 
     policy = DefaultEplb()
-    phy2log1, log2phy1, logcnt1 = policy.rebalance_experts(weight1, 24, 8, 4, 8)
+    phy2log1, log2phy1, logcnt1 = policy.rebalance_experts(
+        weight1, 24, 8, 4, 8)
 
     assert phy2log1.shape == (1, 24)
     assert logcnt1.shape == (1, 16)
@@ -274,7 +267,8 @@ def test_additional_cases():
         [200, 150, 100, 50, 25, 12],  # Decreasing weights
         [12, 25, 50, 100, 150, 200],  # Increasing weights
     ])
-    phy2log2, log2phy2, logcnt2 = policy.rebalance_experts(weight2, 10, 3, 1, 2)
+    phy2log2, log2phy2, logcnt2 = policy.rebalance_experts(
+        weight2, 10, 3, 1, 2)
 
     assert phy2log2.shape == (2, 10)
     assert logcnt2.shape == (2, 6)
@@ -297,9 +291,8 @@ if __name__ == "__main__":
     num_gpus = 8
 
     policy = DefaultEplb()
-    phy2log, log2phy, logcnt = policy.rebalance_experts(weight, num_replicas,
-                                                        num_groups, num_nodes,
-                                                        num_gpus)
+    phy2log, log2phy, logcnt = policy.rebalance_experts(
+        weight, num_replicas, num_groups, num_nodes, num_gpus)
     print(phy2log)
 
     test_basic_rebalance()
