@@ -387,22 +387,20 @@ class MessageQueue:
                     # Release the processor to other threads
                     sched_yield()
 
-                    # if we wait for a long time, log a message
-                    if (time.monotonic() - start_time
-                            > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.info(
-                            ("No available shared memory broadcast block found"
-                             " in %s seconds. This typically happens when some"
-                             " processes are hanging, doing some time-consuming"
-                             " work (e.g. compilation), or sitting idle."),
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
-                        )
-                        n_warning += 1
-
                     # if we time out, raise an exception
-                    if (timeout is not None
-                            and time.monotonic() - start_time > timeout):
+                    elapsed = time.monotonic() - start_time
+                    if timeout is not None and elapsed > timeout:
                         raise TimeoutError
+
+                    # if we wait for a long time, log a message
+                    if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
+                        logger.info(
+                            "No available shared memory broadcast block found"
+                            " in %s seconds. This typically happens when some"
+                            " processes are hanging or doing some"
+                            " time-consuming work (e.g. compilation)",
+                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        n_warning += 1
 
                     continue
                 # found a block that is either
@@ -453,25 +451,25 @@ class MessageQueue:
                     # Release the processor to other threads
                     self._read_spin_timer.spin()
 
-                    # if we wait for a long time, log a message
+                    if cancel is not None and cancel.is_set():
+                        raise RuntimeError("cancelled")
+
+                    # if we time out, raise an exception
                     elapsed = time.monotonic() - start_time
+                    if timeout is not None and elapsed > timeout:
+                        raise TimeoutError
+
+                    # if we wait for a long time, log a message
                     if not indefinite and (elapsed
                                            > VLLM_RINGBUFFER_WARNING_INTERVAL *
                                            n_warning):
                         logger.info(
                             "No available shared memory broadcast block found"
                             " in %s seconds. This typically happens when some"
-                            " processes are hanging, doing some time-consuming"
-                            " work (e.g. compilation), or sitting idle.",
+                            " processes are hanging or doing some"
+                            " time-consuming work (e.g. compilation).",
                             VLLM_RINGBUFFER_WARNING_INTERVAL)
                         n_warning += 1
-
-                    if cancel is not None and cancel.is_set():
-                        raise RuntimeError("cancelled")
-
-                    # if we time out, raise an exception
-                    if timeout is not None and elapsed > timeout:
-                        raise TimeoutError
 
                     continue
                 # found a block that is not read by this reader
