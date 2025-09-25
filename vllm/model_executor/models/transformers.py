@@ -747,6 +747,12 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
         # it if it exists
         self.skip_substrs.append("score.bias")
 
+        # roberta-like models an extra padding in positions.
+        # FIXME(Isotr0py): This is quite hacky for roberta edge case,
+        # we should find a better way to handle this.
+        self.is_roberta = "roberta" in self.text_config.model_type
+        self.padding_idx = self.text_config.pad_token_id
+
     def create_attention_instances(
             self, attn_type: AttentionType = AttentionType.DECODER):
         # TODO(hmellor): Better way to detect encoder models
@@ -769,6 +775,21 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
                     f"transformers>={required}, but got {installed}")
 
         return super().create_attention_instances(attn_type)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if self.is_roberta:
+            # RoBERTa-specific positions padding
+            positions += self.padding_idx + 1
+        return super().forward(input_ids=input_ids,
+                               positions=positions,
+                               intermediate_tensors=intermediate_tensors,
+                               inputs_embeds=inputs_embeds)
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
