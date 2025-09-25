@@ -210,7 +210,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.enable_prompt_embeds = model_config.enable_prompt_embeds
         self.is_multimodal_raw_input_only_model = (
             model_config.is_multimodal_raw_input_only_model)
-
+        # This will be overridden in load_model()
+        self.is_multimodal_pruning_enabled = False
         self.max_model_len = model_config.max_model_len
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
@@ -2667,6 +2668,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
 
+        self.is_multimodal_pruning_enabled = (supports_multimodal_pruning(
+            self.model) and self.model_config.multimodal_config.
+                                              is_multimodal_pruning_enabled())
+
         if is_mixture_of_experts(
                 self.model) and self.parallel_config.enable_eplb:
             logger.info("EPLB is enabled for model %s.",
@@ -2692,9 +2697,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # for other compilation levels, cudagraph behavior is controlled by
         # CudagraphWraper and CudagraphDispatcher of vllm.
 
-        self.is_multimodal_pruning_enabled = (supports_multimodal_pruning(
-            self.model) and self.model_config.multimodal_config.
-                                              is_multimodal_pruning_enabled())
         # wrap the model with full cudagraph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs() \
             and not self.parallel_config.enable_dbo:
