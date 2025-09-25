@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
-import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -75,11 +74,11 @@ class PassConfig:
     don't all have access to full configuration - that would create a cycle as
     the `PassManager` is set as a property of config."""
 
-    enable_fusion: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
+    enable_fusion: bool = False
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
     enable_attn_fusion: bool = False
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
+    enable_noop: bool = False
     """Whether to enable the custom no-op elimination pass."""
     enable_sequence_parallelism: bool = False
     """Whether to enable sequence parallelism."""
