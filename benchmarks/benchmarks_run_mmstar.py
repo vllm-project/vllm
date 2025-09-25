@@ -225,7 +225,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--deterministic",
         action="store_true",
-        help="Force deterministic-like settings: temp=0, top_p=1, " \
+        help="Force deterministic-like settings: temp=0, top_p=1, "
         "top_k=-1, rep_penalty=1, seed=42 if unset",
     )
 
