@@ -1131,14 +1131,14 @@ def has_module_attribute(module_name, attribute_name):
 
 def get_attn_backend_list_based_on_platform() -> list[str]:
     if current_platform.is_cuda():
-        return ["FLASH_ATTN_VLLM_V1", "TRITON_ATTN_VLLM_V1", "TREE_ATTN"]
+        return ["FLASH_ATTN", "TRITON_ATTN", "TREE_ATTN"]
     elif current_platform.is_rocm():
-        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
+        attn_backend_list = ["TRITON_ATTN"]
         try:
             import aiter  # noqa: F401
-            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
+            attn_backend_list.append("FLASH_ATTN")
         except Exception:
-            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
 
         return attn_backend_list
     else:
