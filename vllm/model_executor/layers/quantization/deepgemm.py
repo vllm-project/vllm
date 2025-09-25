@@ -42,7 +42,7 @@ def prepare_block_fp8_matmul_inputs(
     return M, N, K, C
 
 
-def w8a8_deepgemm_block_scaled_mm(
+def w8a8_block_fp8_matmul_deepgemm(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -58,7 +58,7 @@ def w8a8_deepgemm_block_scaled_mm(
     return C
 
 
-def w8a8_deepgemm_block_scaled_mm_fake(
+def w8a8_block_fp8_matmul_deepgemm_fake(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -72,7 +72,7 @@ def w8a8_deepgemm_block_scaled_mm_fake(
 
 
 direct_register_custom_op(
-    op_name="w8a8_deepgemm_block_scaled_mm",
-    op_func=w8a8_deepgemm_block_scaled_mm,
-    fake_impl=w8a8_deepgemm_block_scaled_mm_fake,
+    op_name="w8a8_block_fp8_matmul_deepgemm",
+    op_func=w8a8_block_fp8_matmul_deepgemm,
+    fake_impl=w8a8_block_fp8_matmul_deepgemm_fake,
 )

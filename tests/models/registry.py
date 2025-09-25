@@ -196,6 +196,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "Cohere2ForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r7b-12-2024", # noqa: E501
                                          trust_remote_code=True),
+    "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", # noqa: E501
+                                      trust_remote_code=True,
+                                      is_available_online=False),
     "DbrxForCausalLM": _HfExamplesInfo("databricks/dbrx-instruct"),
     "DeciLMForCausalLM": _HfExamplesInfo("nvidia/Llama-3_3-Nemotron-Super-49B-v1", # noqa: E501
                                          trust_remote_code=True),
@@ -273,6 +276,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                         is_available_online=False),
     "Llama4ForCausalLM": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct", # noqa: E501
                                          is_available_online=False),
+    "LongcatFlashForCausalLM": _HfExamplesInfo
+                ("meituan-longcat/LongCat-Flash-Chat", trust_remote_code=True),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
     "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1",
                                          min_transformers_version="4.55.3",
@@ -639,6 +644,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                         speculative_model="zai-org/GLM-4.5",
                                         min_transformers_version="4.54",
                                         is_available_online=False),
+    "LongCatFlashMTPModel": _HfExamplesInfo(
+        "meituan-longcat/LongCat-Flash-Chat",
+        trust_remote_code=True,
+        speculative_model="meituan-longcat/LongCat-Flash-Chat"),
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                     trust_remote_code=True,
                                     speculative_model="XiaomiMiMo/MiMo-7B-RL"),
