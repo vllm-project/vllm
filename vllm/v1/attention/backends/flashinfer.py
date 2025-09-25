@@ -433,8 +433,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         block_table_tensor = common_attn_metadata.block_table_tensor
 
         if self.cp_world_size > 1:
-            seq_lens_np = seq_lens_np // self.cp_world_size + \
-                (self.cp_rank < seq_lens_np % self.cp_world_size)
+            seq_lens_np[:num_decodes] = seq_lens_np[:num_decodes] // \
+                self.cp_world_size + (self.cp_rank < seq_lens_np[:num_decodes] \
+                                      % self.cp_world_size)
 
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
