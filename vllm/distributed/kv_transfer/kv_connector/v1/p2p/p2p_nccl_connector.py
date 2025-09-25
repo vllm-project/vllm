@@ -362,10 +362,12 @@ class P2pNcclConnector(KVConnectorBase_V1):
         num_external_tokens = (len(request.prompt_token_ids) - 1 -
                                num_computed_tokens)
 
+        async_transfer = self._async_transfer
         if num_external_tokens < 0:
             num_external_tokens = 0
+            async_transfer = False
 
-        return num_external_tokens, False
+        return num_external_tokens, async_transfer
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
