@@ -137,6 +137,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             kv_cache: torch.Tensor,
             block_ids: torch.Tensor,
             request_id: str,
+            tensor_id: str,
         ) -> None:
             """
             Inject KV cache data into a given attention layer tensor.
@@ -157,6 +158,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 kv_cache (torch.Tensor): The KV cache tensor to inject.
                 block_ids (torch.Tensor): Indices of the blocks to update.
                 request_id (str): Request identifier used for logging.
+                tensor_id (str): The id of the tensor.
 
             Returns:
                 None. The function modifies `layer` in-place.
@@ -185,6 +187,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
                         "🚧kv_cache does not match, block_ids:%d, "
                         "num_block:%d, request_id:%s", len(block_ids),
                         num_block, request_id)
+            else:
+                raise NotImplementedError(
+                    "Unsupported layer layout: %s", layer.shape)
+            self.p2p_nccl_engine.have_injected_tensor_id(tensor_id)
 
         # Get the metadata
         metadata: KVConnectorMetadata = \
@@ -211,8 +217,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
                 layer = kv_cache[forward_context.virtual_engine]
 
+                tensor_id = request.request_id + "#" + layer_name
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "#" + layer_name,
+                    tensor_id,
                     remote_address,
                     self._async_transfer)
 
@@ -224,9 +231,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     else:
                         logger.warning("🚧kv_cache is None, %s", request.request_id)
                         continue
-
-                inject_kv_into_layer(layer, kv_cache, request.block_ids,
-                                     request.request_id)
+                
+                if isinstance(kv_cache, torch.Tensor):
+                    inject_kv_into_layer(layer, kv_cache, request.block_ids,
+                                        request.request_id, tensor_id)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
