@@ -6,11 +6,11 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
                     const int64_t rows_per_block);
 
 torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
-                       const c10::optional<at::Tensor>& in_bias,
+                       const std::optional<at::Tensor>& in_bias,
                        const int64_t CuCount);
 
 void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
-               const c10::optional<at::Tensor>& in_bias, at::Tensor& out_c,
+               const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
                const at::Tensor& scale_a, const at::Tensor& scale_b,
                const int64_t CuCount);
 
