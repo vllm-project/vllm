@@ -6,8 +6,8 @@ import json
 import warnings
 from dataclasses import InitVar, field
 from importlib.util import find_spec
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
-                    Union, cast, get_args)
+from typing import (TYPE_CHECKING, Any, Callable, Literal, Optional, Union,
+                    cast, get_args)
 
 import torch
 from pydantic import (ConfigDict, SkipValidation, field_validator,
@@ -285,28 +285,6 @@ class ModelConfig:
     interleave_mm_strings: InitVar[Optional[bool]] = None
     skip_mm_profiling: InitVar[Optional[bool]] = None
 
-    _hash: Optional[str] = None
-    """The cached hash value, or `None` if not cached."""
-
-    _HASH_FACTORS: ClassVar[tuple[str, ...]] = (
-        "model",
-        "dtype",
-        "quantization",
-        "revision",
-        "code_revision",
-        "max_model_len",
-        "max_logprobs",
-        "disable_sliding_window",
-        "trust_remote_code",
-        "generation_config",
-        "model_impl",
-        "override_generation_config",
-        "rope_scaling",
-        "rope_theta",
-        "hf_config",
-    )
-    """Used to determine whether the hash needs to be recomputed."""
-
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -319,9 +297,6 @@ class ModelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        if self._hash is not None:
-            return self._hash
-
         factors: list[Any] = []
         factors.append(self.model)
         factors.append(self.dtype)
@@ -361,17 +336,7 @@ class ModelConfig:
 
         str_factors = str(factors)
         assert_hashable(str_factors)
-
-        out_hash = hashlib.sha256(str_factors.encode()).hexdigest()
-        self._hash = out_hash
-        return out_hash
-
-    def __setattr__(self, name: str, value: Any, /) -> None:
-        super().__setattr__(name, value)
-
-        # Trigger recomputation next time compute_hash is called
-        if name in self._HASH_FACTORS:
-            self._hash = None
+        return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(
             self,
