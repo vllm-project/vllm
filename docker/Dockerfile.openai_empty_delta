@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# This image layers the empty-delta streaming fix on top of the published
+# vLLM OpenAI-compatible server image.
+FROM vllm/openai:latest
+
+# Copy the patched OpenAI serving components into a temporary build context.
+COPY vllm/entrypoints/openai/serving_chat.py /tmp/vllm_patch/serving_chat.py
+COPY vllm/entrypoints/openai/streaming_utils.py /tmp/vllm_patch/streaming_utils.py
+
+# Update the installed vLLM package with the patched streaming helpers.
+RUN python - <<'PY'
+import pathlib
+import shutil
+import vllm
+
+pkg_dir = pathlib.Path(vllm.__file__).resolve().parent
+openai_dir = pkg_dir / "entrypoints" / "openai"
+openai_dir.mkdir(parents=True, exist_ok=True)
+
+shutil.copyfile("/tmp/vllm_patch/serving_chat.py", openai_dir / "serving_chat.py")
+shutil.copyfile("/tmp/vllm_patch/streaming_utils.py",
+                openai_dir / "streaming_utils.py")
+PY
