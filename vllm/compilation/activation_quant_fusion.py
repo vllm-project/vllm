@@ -36,8 +36,13 @@ if silu_and_mul_nvfp4_quant_supported:
     FUSED_OPS[
         kNvfp4Quant] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
 
-if current_platform.is_rocm(
-) and envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
+
+def is_rocm_aiter_linear_enabled() -> bool:
+    return current_platform.is_rocm(
+    ) and envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
+
+
+if is_rocm_aiter_linear_enabled():
     import aiter as rocm_aiter
     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
@@ -268,8 +273,7 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
-        if current_platform.is_rocm(
-        ) and envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
+        if is_rocm_aiter_linear_enabled():
             pattern_silu_mul_aiter_block_fp8 = AiterSiluMulFp8BlockQuantPattern(
             )
             pattern_silu_mul_aiter_block_fp8.register(self.patterns)
