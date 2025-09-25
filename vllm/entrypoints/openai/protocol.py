@@ -903,7 +903,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if isinstance(data, ValueError):
             raise data
 
-        if "structured_outputs" not in data:
+        if data.get("structured_outputs", None) is None:
             return data
 
         structured_outputs_kwargs = data['structured_outputs']
@@ -1309,7 +1309,7 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_structured_outputs_count(cls, data):
-        if "structured_outputs" not in data:
+        if data.get("structured_outputs", None) is None:
             return data
 
         structured_outputs_kwargs = data['structured_outputs']
