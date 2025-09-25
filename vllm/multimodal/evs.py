@@ -96,9 +96,9 @@ def compute_retention_mask(
 def compute_mrope_for_media(
     video_size_thw: torch.LongTensor,
     spatial_merge_size: int,
-    tokens_per_second=1,
-    video_second_per_grid=1,
-):
+    tokens_per_second: float = 1.0,
+    video_second_per_grid: float = 1.0,
+) -> torch.Tensor:
     """
     Computes the mrope for video embeddings based on the grid dimensions.
     Computed mrope positions match original qwen 2.5 implementation,
@@ -113,8 +113,7 @@ def compute_mrope_for_media(
     Returns:
         Tensor of shape `(T * H * W, 4)` where last dimension
         represents mrope positions [0:3), while the last channel
-        contains value of llm_grid_w repeated for all positions
-        (Required in mrope recomputation to compute correct offsets)
+        contains value of llm_grid_w repeated for all positions.
     """
     llm_grid_t = video_size_thw[0]
     llm_grid_h = video_size_thw[1] // spatial_merge_size
@@ -171,11 +170,10 @@ def recompute_mrope_positions(
 
     Args:
         input_ids: (N,) All input tokens of the prompt (entire sequence).
-        multimodal_positions: List of mrope positsions for each media
-        (That fits into the prefill chunk that is being processed).
-        mrope_positions: Existing mrope positions (4, N) for entire sequence
+        multimodal_positions: List of mrope positsions for each media.
+        mrope_positions: Existing mrope positions (4, N) for entire sequence.
         num_computed_tokens: A number of computed tokens so far.
-        vision_start_token_id: Token indicating start of vision media
+        vision_start_token_id: Token indicating start of vision media.
         image_token_id: Image token id
         video_token_id: Video token id
 
