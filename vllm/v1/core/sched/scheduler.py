@@ -118,6 +118,9 @@ class Scheduler(SchedulerInterface):
             self.policy = SchedulingPolicy.PRIORITY
         elif self.scheduler_config.policy == "fcfs":
             self.policy = SchedulingPolicy.FCFS
+        elif self.scheduler_config.policy == "mlfq":
+            # MLFQ policy is handled by MLFQScheduler, not the base scheduler
+            self.policy = SchedulingPolicy.FCFS  # Use FCFS as fallback
         else:
             raise ValueError(
                 f"Unknown scheduling policy: {self.scheduler_config.policy}")

@@ -441,6 +441,15 @@ class EngineArgs:
         ObservabilityConfig.collect_detailed_traces
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
+    
+    # MLFQ-specific parameters
+    mlfq_num_levels: int = SchedulerConfig.mlfq_num_levels
+    mlfq_base_quantum: int = SchedulerConfig.mlfq_base_quantum
+    mlfq_quantum_multiplier: float = SchedulerConfig.mlfq_quantum_multiplier
+    mlfq_skip_join_base: int = SchedulerConfig.mlfq_skip_join_base
+    mlfq_starvation_threshold: int = SchedulerConfig.mlfq_starvation_threshold
+    mlfq_eta: int = SchedulerConfig.mlfq_eta
+    
 
     pooler_config: Optional[PoolerConfig] = ModelConfig.pooler_config
     override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
@@ -1367,6 +1376,13 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            # MLFQ-specific parameters
+            mlfq_num_levels=self.mlfq_num_levels,
+            mlfq_base_quantum=self.mlfq_base_quantum,
+            mlfq_quantum_multiplier=self.mlfq_quantum_multiplier,
+            mlfq_skip_join_base=self.mlfq_skip_join_base,
+            mlfq_starvation_threshold=self.mlfq_starvation_threshold,
+            mlfq_eta=self.mlfq_eta,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

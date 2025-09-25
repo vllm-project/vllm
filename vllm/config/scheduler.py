@@ -17,8 +17,10 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
 
 logger = init_logger(__name__)
 
+
+PreemptionMode = Literal["swap", "recompute"]
+SchedulerPolicy = Literal["fcfs", "priority", "mlfq"]
 RunnerType = Literal["generate", "pooling", "draft"]
-SchedulerPolicy = Literal["fcfs", "priority"]
 
 
 @config
@@ -109,7 +111,9 @@ class SchedulerConfig:
     - "fcfs" means first come first served, i.e. requests are handled in order
     of arrival.\n
     - "priority" means requests are handled based on given priority (lower
-    value means earlier handling) and time of arrival deciding any ties)."""
+    value means earlier handling) and time of arrival deciding any ties).\n
+    - "mlfq" means multi-level feedback queue with skip-join mechanism for
+    reducing head-of-line blocking and improving latency."""
 
     chunked_prefill_enabled: bool = field(init=False)
     """True if chunked prefill is enabled."""
@@ -141,6 +145,26 @@ class SchedulerConfig:
     async scheduling is currently not supported with some features such as
     structured outputs, speculative decoding, and pipeline parallelism.
     """
+
+    # MLFQ-specific configuration parameters
+    mlfq_num_levels: int = 6
+    """Number of priority levels in MLFQ scheduler."""
+
+    mlfq_base_quantum: int = 1
+    """Base quantum (iterations) for the highest priority level in MLFQ."""
+
+    mlfq_quantum_multiplier: float = 2.0
+    """Multiplier for quantum at each MLFQ level."""
+
+    mlfq_skip_join_base: int = 128
+    """Base token count for skip-join calculation in MLFQ."""
+
+    mlfq_starvation_threshold: int = 100
+    """Number of iterations before starvation promotion in MLFQ."""
+
+    mlfq_eta: int = 2
+    """Number of levels to skip during demotion in MLFQ."""
+
 
     def compute_hash(self) -> str:
         """
