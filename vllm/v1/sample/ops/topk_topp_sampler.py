@@ -304,7 +304,7 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
                 tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
 
 @triton.jit
-def _topk_kernel(LOGITS, K, B, 
+def _topk_kernel(LOGITS, PROBS, K, P, B, 
                  N: tl.constexpr,
                  BLOCK_SIZE: tl.constexpr,
                  NUM_TILES: tl.constexpr):
@@ -317,7 +317,17 @@ def _topk_kernel(LOGITS, K, B,
             min_logit = float('inf')
 
             LOGITS_ROW = LOGITS + row_id * N
+            PROBS_ROW = PROBS + row_id * N
 
+            # Zeroth pass: Compute avg and std from a sample block
+            offs = tl.arange(0, BLOCK_SIZE)
+            mask_n = offs < N
+            logits_blk = tl.load(LOGITS_ROW + offs, mask=mask_n, other=0.0)
+            avg_logit = tl.mean(logits_blk)
+            std_logit = tl.std(logits_blk)
+
+            outlier_pivot = avg_logit + 3 * std_logit
+            num_outliers = tl.zeros((), dtype=tl.uint32)
             # First pass: compute max and min logits (for numerical stability)
             for i in range(0, NUM_TILES):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -326,8 +336,16 @@ def _topk_kernel(LOGITS, K, B,
 
                 max_logit = tl.maximum(max_logit, tl.max(logits_blk))
                 min_logit = tl.minimum(min_logit, tl.min(logits_blk))
+                outlier_mask = logits_blk > outlier_pivot
+                num_blk_outliers = tl.sum(outlier_mask)
+                num_outliers += num_blk_outliers
+                outlier_idx = tl.where(outlier_mask, offs, -1)
+                gathered_outliers = tl.gather(logits_blk, outlier_idx)
+                tl.store(PROBS_ROW + num_outliers + tl.arange(0, num_blk_outliers), 
+                         gathered_outliers)
+                
 
-            # Second passes: Binary search for pivots
+            # Second passes: Quaternary search for pivots (nlog_4(n))
             k_pivot = -float('inf')
             num_iters = 0
 
@@ -390,9 +408,9 @@ def triton_apply_top_k_top_p(
     NUM_PROGRAMS = 128
     NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
     NUM_PIVOTS = 16 # Multi pivot search for smaller number of scans
-    probs = torch.zeros_like(logits)
+    probs = torch.full_like(logits, -float('inf'))
     if p is None:
-        _topk_kernel[(NUM_PROGRAMS,)](logits, k, batch_size, 
+        _topk_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
                                       vocab_size, BLOCK_SIZE, NUM_TILES)
     else:
         _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
@@ -442,17 +460,13 @@ def apply_top_k_top_p(
     #     print(f"probs: {probs}")
     #     print(f"original_probs: {original_probs}")
 
-    print(f"logits: {logits}")
-    print(f"original_logits: {original_logits}")
     if not torch.allclose(logits, original_logits):
         print(r_str("Error: logits are not close"))
+        print(f"logits: {logits}")
+        print(f"original_logits: {original_logits}")
         diff = (logits - original_logits).abs().flatten()
         diff_nonzero = diff[diff > 1e-6]
         print(f"diff_nonzero: {diff_nonzero}")
-        print(f"diff_nonzero.max(): {diff_nonzero.max()}")
-        print(f"diff_nonzero.min(): {diff_nonzero.min()}")
-        print(f"diff_nonzero.mean(): {diff_nonzero.mean()}")
-        print(f"diff_nonzero.std(): {diff_nonzero.std()}")
 
     start_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(start_time))
     out_dir = "./sampler_input_output"
