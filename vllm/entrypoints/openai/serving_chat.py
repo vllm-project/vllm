@@ -34,6 +34,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
     DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
     PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
+from vllm.entrypoints.openai.streaming_utils import \
+    _is_empty_content_only_delta
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -477,6 +479,7 @@ class OpenAIServingChat(OpenAIServing):
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
+        empty_content_chunk_emitted = False
 
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
@@ -1074,6 +1077,16 @@ class OpenAIServingChat(OpenAIServing):
                             completion_tokens=completion_tokens,
                             total_tokens=num_prompt_tokens + completion_tokens,
                         )
+
+                    delta_is_empty_content_only = _is_empty_content_only_delta(
+                        choice_data)
+                    if delta_is_empty_content_only:
+                        if choice_data.finish_reason is None:
+                            if empty_content_chunk_emitted:
+                                continue
+                            empty_content_chunk_emitted = True
+                        else:
+                            empty_content_chunk_emitted = True
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
