@@ -64,6 +64,20 @@ CopyBlocksOp = Callable[[
 logger = init_logger(__name__)
 
 
+class SupportsHMA:
+    """
+    Inherent this interface if the connector supports HMA.
+    If inherented from this interface, vLLM will:
+    - send `KVCacheConfig` to the connector in `register_kv_caches`.
+    - send `tuple[list[int], ...]` to the connector in `request_finished`.
+    """
+    pass
+
+
+def supports_hma(cls: type) -> bool:
+    return isinstance(cls, SupportsHMA)
+
+
 class KVConnectorRole(enum.Enum):
     # Connector running in the scheduler process
     SCHEDULER = 0
@@ -323,7 +337,7 @@ class KVConnectorBase_V1(ABC):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        block_ids: list[int] | tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.

@@ -7,6 +7,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
+from copy import deepcopy
 from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
@@ -14,7 +15,8 @@ from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole)
+                                                          KVConnectorRole,
+                                                          supports_hma)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorStats)
 from vllm.logger import init_logger
@@ -83,14 +85,25 @@ class Scheduler(SchedulerInterface):
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
         if self.vllm_config.kv_transfer_config is not None:
-            assert len(self.kv_cache_config.kv_cache_groups) == 1, (
-                "Multiple KV cache groups are not currently supported "
-                "with KV connectors")
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported "
                 "with KV connectors")
+            num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
+
+            connector_vllm_config = deepcopy(self.vllm_config)
+            if num_kv_cache_groups > 1:
+                # NOTE(Kuntai): hybrid allocator is enabled.
+                # We inject `kv_cache_config` into vllm_config.
+                connector_vllm_config.kv_cache_config = kv_cache_config
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
+
+            # Make sure that the connector supports HMA if HMA is enabled.
+            if not supports_hma(self.connector) and num_kv_cache_groups > 1:
+                raise NotImplementedError(
+                    f"Connector {self.connector.__class__.__name__} does not"
+                    f" support HMA but HMA is enabled. Please set "
+                    f"`--disable-hybrid-kv-cache-manager`.")
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -1231,8 +1244,13 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             return False, None
 
-        (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
-        return self.connector.request_finished(request, block_ids)
+        if not supports_hma(self.connector):
+            (block_ids, ) = self.kv_cache_manager.get_block_ids(
+                request.request_id)
+            return self.connector.request_finished(request, block_ids)
+        else:
+            block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+            return self.connector.request_finished(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
