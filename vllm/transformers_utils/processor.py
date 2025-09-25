@@ -8,8 +8,8 @@ from transformers import (AutoFeatureExtractor, AutoImageProcessor,
                           AutoProcessor, AutoVideoProcessor)
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
-from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.processing_utils import ProcessorMixin
+from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
 from vllm.utils import get_allowed_kwarg_only_overrides
@@ -267,10 +267,10 @@ def get_video_processor(
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
-        # Unlike AutoTokenizer, AutoImageProcessor does not separate such errors
+        # Unlike AutoTokenizer, AutoVideoProcessor does not separate such errors
         if not trust_remote_code:
             err_msg = (
-                "Failed to load the image processor. If the image processor is "
+                "Failed to load the video processor. If the video processor is "
                 "a custom processor not yet available in the HuggingFace "
                 "transformers library, consider setting "
                 "`trust_remote_code=True` in LLM or using the "
@@ -294,6 +294,6 @@ def cached_video_processor_from_config(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
-        processor_cls_overrides=processor_cls,
+        processor_cls_overrides=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, AutoVideoProcessor, **kwargs),
     )
