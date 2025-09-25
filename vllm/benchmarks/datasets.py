@@ -2738,6 +2738,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
 class MMStarDataset(HuggingFaceDataset):
     """
     Lin-Chen/MMStar: https://huggingface.co/datasets/Lin-Chen/MMStar
+    refer to: https://github.com/sgl-project/SpecForge/pull/106
     """
     DEFAULT_OUTPUT_LEN = 128
     SUPPORTED_DATASET_PATHS = {"Lin-Chen/MMStar"}
