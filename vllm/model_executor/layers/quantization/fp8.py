@@ -1015,8 +1015,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config)
         elif self.use_marlin:
-            assert activation == "silu", (
-                f"{activation} not supported for Marlin MoE.")
             assert self.fused_experts is None
             return torch.ops.vllm.fused_marlin_moe(
                 x,
@@ -1032,6 +1030,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
+                activation=activation,
                 expert_map=expert_map,
                 workspace=layer.workspace)
         elif self.fused_experts:
