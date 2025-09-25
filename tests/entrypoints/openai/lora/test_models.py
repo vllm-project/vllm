@@ -5,7 +5,12 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 
-from ....utils import RemoteOpenAIServer
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../..")))
+
+from tests.utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
