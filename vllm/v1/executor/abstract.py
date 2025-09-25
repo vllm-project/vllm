@@ -13,11 +13,11 @@ from vllm.executor.uniproc_executor import (  # noqa
     ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0,
 )
 from vllm.executor.uniproc_executor import UniProcExecutor as UniProcExecutorV0  # noqa
+from vllm.logger import init_logger
 from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 FailureCallback = Callable[[], None]
