@@ -137,7 +137,7 @@ def triton_reshape_and_cache_flash(
 
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
-    if torch.version.hip:
+    if torch.version.hip or torch.version.xpu:
         num_stages = 4
         num_warps = 8
     else:  # cuda
