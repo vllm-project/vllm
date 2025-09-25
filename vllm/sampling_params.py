@@ -413,7 +413,6 @@ class SamplingParams(
             raise ValueError("min_p must be in [0, 1], got "
                              f"{self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
-            # This is confusing
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
         if self.min_tokens < 0:
