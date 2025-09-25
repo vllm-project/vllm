@@ -70,11 +70,13 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _grouped_impl: Callable[..., Any] | None = None
 _grouped_masked_impl: Callable[..., Any] | None = None
+_get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
-    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl
+    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl,\
+         _get_mn_major_tma_aligned_tensor_impl
 
     # fast path
     if (_fp8_gemm_nt_impl is not None or _grouped_impl is not None
@@ -95,6 +97,16 @@ def _lazy_init() -> None:
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
     _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
+    _get_mn_major_tma_aligned_tensor_impl = getattr(
+        _dg, "get_mn_major_tma_aligned_tensor", None)
+
+
+def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
+    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor"""
+    _lazy_init()
+    if _get_mn_major_tma_aligned_tensor_impl is None:
+        return _missing()
+    return _get_mn_major_tma_aligned_tensor_impl(x)
 
 
 def fp8_gemm_nt(*args, **kwargs):
@@ -191,4 +203,5 @@ __all__ = [
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
     "should_use_deepgemm_for_fp8_linear",
+    "get_col_major_tma_aligned_tensor",
 ]

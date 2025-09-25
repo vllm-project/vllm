@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention.backends.abstract import AttentionMetadataBuilder
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
@@ -25,7 +24,8 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -184,8 +184,9 @@ class EagleProposer:
         builder = (self._get_attention_metadata_builder()
                    if self.attn_metadata_builder is None else
                    self.attn_metadata_builder)
-        attn_metadata = builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata, draft_index=0)
+        attn_metadata = builder.build_for_drafting(  # type: ignore
+            common_attn_metadata=common_attn_metadata,
+            draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -319,7 +320,7 @@ class EagleProposer:
                 exceeds_max_model_len, PADDING_SLOT_ID)
 
             # Rebuild attention metadata
-            attn_metadata = builder.build_for_drafting(
+            attn_metadata = builder.build_for_drafting(  # type: ignore
                 common_attn_metadata=common_attn_metadata,
                 draft_index=token_index + 1)
             for layer_name in self.attn_layer_names:
