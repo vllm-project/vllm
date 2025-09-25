@@ -82,6 +82,7 @@ class SampleRequest:
     ] = None
     lora_request: Optional[LoRARequest] = None
     request_id: Optional[str] = None
+    prediction: Optional[str] = None
 
 
 # -----------------------------------------------------------------------------
@@ -436,6 +437,7 @@ class RandomDataset(BenchmarkDataset):
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
                     request_id=request_id_prefix + str(i),
+                    prediction=prompt,
                 )
             )
         # only used for embeddings benchmark.
@@ -1655,6 +1657,7 @@ class CustomDataset(BenchmarkDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["prompt"]
+            prediction = item.get("prediction", None)
 
             # apply template
             if not skip_chat_template:
@@ -1674,6 +1677,7 @@ class CustomDataset(BenchmarkDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     request_id=request_id_prefix + str(i),
+                    prediction=prediction,
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests,
                                        request_id_prefix, no_oversample)

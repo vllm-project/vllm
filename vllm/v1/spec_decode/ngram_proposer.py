@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from numba import jit
@@ -33,6 +33,7 @@ class NgramProposer:
     def propose(
         self,
         context_token_ids: np.ndarray,
+        vllm_xargs: Optional[dict[str, Any]] = None,
     ) -> Optional[np.ndarray]:
         """Proposes the next sequence of tokens based on n-gram pattern 
         matching in the context. The function finds matches of the last n 
@@ -58,13 +59,29 @@ class NgramProposer:
               followed that pattern. Here we will return [4,2,3] because 
               we only have three tokens after the match.
         """
+        min_ngram = self.min_n
+        max_ngram = self.max_n
+        k = self.k
+        if vllm_xargs is not None:
+            if "min_ngram" in vllm_xargs:
+                min_ngram = vllm_xargs["min_ngram"] \
+                    if isinstance(vllm_xargs.get("min_ngram", None), int) \
+                        else self.min_n
+            if "max_ngram" in vllm_xargs:
+                max_ngram = vllm_xargs["max_ngram"] \
+                    if isinstance(vllm_xargs.get("max_ngram", None), int) \
+                        else self.max_n
+            if "k" in vllm_xargs:
+                k = vllm_xargs["k"] \
+                    if isinstance(vllm_xargs.get("k", None), int) else self.k
+                k = min(k, self.k)
         # TODO(woosuk): Optimize this.
         return _find_longest_matched_ngram_and_propose_tokens(
             origin_tokens=context_token_ids,
-            min_ngram=self.min_n,
-            max_ngram=self.max_n,
+            min_ngram=min_ngram,
+            max_ngram=max_ngram,
             max_model_len=self.max_model_len,
-            k=self.k)
+            k=k)
 
     def load_model(self, *args, **kwargs):
         # No model to load.

@@ -75,6 +75,7 @@ class RequestFuncInput:
     ignore_eos: bool = False
     language: Optional[str] = None
     request_id: Optional[str] = None
+    prediction: Optional[str] = None
 
 
 @dataclass
@@ -91,6 +92,8 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
     start_time: float = 0.0
+    accepted_prediction_tokens: int = 0 
+    rejected_prediction_tokens: int = 0
 
 
 class RequestFunc(Protocol):
@@ -266,6 +269,11 @@ async def async_request_openai_chat_completions(
             "include_usage": True,
         },
     }
+    if request_func_input.prediction is not None:
+        payload["prediction"] = {
+            "content": request_func_input.prediction,
+            "type" : "content"
+        }
     if request_func_input.ignore_eos:
         payload["ignore_eos"] = request_func_input.ignore_eos
     if request_func_input.extra_body:
@@ -323,10 +331,19 @@ async def async_request_openai_chat_completions(
                                     output.itl.append(timestamp -
                                                     most_recent_timestamp)
 
-                                generated_text += content or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get(
-                                    "completion_tokens")
+                            generated_text += content or ""
+                        elif usage := data.get("usage"):
+                            output.output_tokens = usage.get(
+                                "completion_tokens")
+                            if 'completion_tokens_details' in usage:
+                                tokens_details = \
+                                    usage.get('completion_tokens_details')
+                                output.accepted_prediction_tokens = \
+                                    tokens_details.get(
+                                        "accepted_prediction_tokens", 0)
+                                output.rejected_prediction_tokens = \
+                                    tokens_details.get(
+                                        "rejected_prediction_tokens", 0)
 
                             most_recent_timestamp = timestamp
 

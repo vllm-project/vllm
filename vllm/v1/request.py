@@ -43,6 +43,8 @@ class Request:
         trace_headers: Optional[Mapping[str, str]] = None,
         block_hasher: Optional[Callable[["Request"],
                                         list["BlockHash"]]] = None,
+        accepted_prediction_tokens: Optional[int] = None,
+        rejected_prediction_tokens: Optional[int] = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -121,6 +123,8 @@ class Request:
         if block_hasher is not None:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()
+        self.accepted_prediction_tokens = accepted_prediction_tokens
+        self.rejected_prediction_tokens = rejected_prediction_tokens
 
     @classmethod
     def from_engine_core_request(
