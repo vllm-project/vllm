@@ -1731,6 +1731,7 @@ class FusedMoE(CustomOp):
         physical_to_logical_map = \
             EplbState.build_initial_global_physical_to_logical_map(
             num_experts, num_redundant_experts)
+
         return [
             # (param_name, weight_name, expert_id, shard_id)
             ("experts.w13_" if weight_name

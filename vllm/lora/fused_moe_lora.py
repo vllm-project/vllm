@@ -215,6 +215,7 @@ def invoke_fused_moe_lora_kernel(
         len(lora_a_stacked),
         lora_a_stacked[0].shape[0],
     )
+
     fused_moe_lora[grid](qcurr_hidden_states,
                          b_ptr,
                          a_intermediate_cache1,

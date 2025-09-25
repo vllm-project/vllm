@@ -8,7 +8,6 @@ import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
 
-
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -158,7 +157,7 @@ class MLPBlock(torch.nn.Module):
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.experts",
                                 apply_router_weight_on_input=False,
-                                has_bias=False,
+                                has_bias=False, # FIXME: Turn back to True and drop bias terms
                                 activation="swigluoai")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -640,7 +639,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             ".gate_up_proj": ".w13_weight",
             ".down_proj": ".w2_weight",
 
-            # #MoE Bias # FIXME: Lora doesn't finetune bias term
+            # #MoE Bias # FIXME: Lora doesn't finetune bias term and drop bias terms
             # ".gate_up_proj_bias": ".w13_bias",
             # ".down_proj_bias": ".w2_bias",
         },

@@ -1090,7 +1090,6 @@ def inplace_fused_experts(
         block_shape: Optional[List[int]] = None,  #noqa: UP006
         w1_bias: Optional[torch.Tensor] = None,
         w2_bias: Optional[torch.Tensor] = None) -> None:
-    print("inplace", use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16, use_int4_w4a16, use_mxfp4_w4a4)
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
                        activation, is_act_and_mul,
                        apply_router_weight_on_input, use_fp8_w8a8,
