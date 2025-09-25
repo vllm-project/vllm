@@ -228,7 +228,7 @@ else:
 @pytest.mark.parametrize("model_name, model_class", MODELS)
 @pytest.mark.parametrize(
     "backend", [_Backend.FLASHINFER] if current_platform.is_cuda() else [
-        _Backend.ROCM_AITER_UNIFIED_ATTN, _Backend.ROCM_ATTN_VLLM_V1,
+        _Backend.ROCM_AITER_UNIFIED_ATTN, _Backend.ROCM_ATTN,
         _Backend.TRITON_ATTN
     ])
 # TODO(boyuan): test inductor graph partition on rocm
@@ -302,10 +302,10 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
     torch._dynamo.mark_dynamic(k, 0)
     torch._dynamo.mark_dynamic(v, 0)
 
-    use_hnd = backend in (_Backend.ROCM_ATTN_VLLM_V1, )
+    use_hnd = backend in (_Backend.ROCM_ATTN, )
     kv_first = backend in (
         _Backend.ROCM_AITER_UNIFIED_ATTN,
-        _Backend.ROCM_ATTN_VLLM_V1,
+        _Backend.ROCM_ATTN,
     )
 
     # Run model directly without compilation and fusion
