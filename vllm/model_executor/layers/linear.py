@@ -381,9 +381,9 @@ class ReplicatedLinear(LinearBase):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
-        from vllm.model_executor.layers.quantization.quark.schemes.quark_w4a4_mxfp4 import (  # noqa: E501
-            QuarkW4A4MXFP4)
-        if isinstance(self.quant_method, QuarkW4A4MXFP4):
+        from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+            QuarkLinearMethod)
+        if isinstance(self.quant_method, QuarkLinearMethod):
             output = self.quant_method.apply(self,
                                              x,
                                              bias,
@@ -558,9 +558,9 @@ class ColumnParallelLinear(LinearBase):
 
         # Matrix multiply.
         assert self.quant_method is not None
-        from vllm.model_executor.layers.quantization.quark.schemes.quark_w4a4_mxfp4 import (  # noqa: E501
-            QuarkW4A4MXFP4)
-        if isinstance(self.quant_method, QuarkW4A4MXFP4):
+        from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+            QuarkLinearMethod)
+        if isinstance(self.quant_method, QuarkLinearMethod):
             output_parallel = self.quant_method.apply(
                 self, input_, bias, x_quant_scales=x_quant_scales)
         else:
@@ -1369,9 +1369,9 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        from vllm.model_executor.layers.quantization.quark.schemes.quark_w4a4_mxfp4 import (  # noqa: E501
-            QuarkW4A4MXFP4)
-        if isinstance(self.quant_method, QuarkW4A4MXFP4):
+        from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+            QuarkLinearMethod)
+        if isinstance(self.quant_method, QuarkLinearMethod):
             output_parallel = self.quant_method.apply(
                 self, input_parallel, bias_, x_quant_scales=x_quant_scales)
         else:

@@ -386,7 +386,7 @@ class QuarkLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None,
-              x_scales: Optional[torch.Tensor] = None):
+              x_quant_scales: Optional[torch.Tensor] = None):
         """
         Use the output of create_weights and the CompressedTensorsScheme
         associated with the layer to apply the forward pass with the
@@ -397,10 +397,13 @@ class QuarkLinearMethod(LinearMethodBase):
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
 
-        if x_scales is None:
-            return scheme.apply_weights(layer, x, bias=bias)
+        if isinstance(scheme, QuarkW4A4MXFP4):
+            return scheme.apply_weights(layer,
+                                        x,
+                                        bias=bias,
+                                        x_quant_scales=x_quant_scales)
         else:
-            return scheme.apply_weights(layer, x, bias=bias, x_scales=x_scales)
+            return scheme.apply_weights(layer, x, bias=bias)
 
 
 class QuarkKVCacheMethod(BaseKVCacheMethod):
