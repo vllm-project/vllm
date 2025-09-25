@@ -3,16 +3,20 @@
 
 import ast
 import dataclasses
+import inspect
 import os
+import pickle
 import pprint
 import time
 from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
+from unittest.mock import patch
 
 import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
+from torch.utils import _pytree as pytree
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
@@ -408,23 +412,94 @@ assert isinstance(SerializableCallable, type)
 
 class VllmCompiledFunction(SerializableCallable):
 
-    def __init__(self, graph_module, example_inputs, vllm_config,
+    def __init__(self, graph_module, example_inputs, vllm_config, prefix,
                  optimized_call):
+        assert isinstance(graph_module, torch.fx.GraphModule)
         self.graph_module = graph_module
         self.example_inputs = example_inputs
         self.vllm_config = vllm_config
+        self.prefix = prefix
         self.optimized_call = optimized_call
 
     def __call__(self, *args, **kwargs):
         return self.optimized_call(*args, **kwargs)
 
     @classmethod
-    def serialize_compile_artifacts(cls, compiled_fn):
-        raise NotImplementedError("serialization not implemented")
+    def serialize_compile_artifacts(
+            cls, compiled_fn: "VllmCompiledFunction") -> bytes:
+        import sympy
+        from torch._subclasses import FakeTensorMode
+        from torch.fx._graph_pickler import GraphPickler, Options
+        state = compiled_fn.__dict__.copy()
+        state.pop("optimized_call")
+        for node in state["graph_module"].graph.nodes:
+            node.meta.pop("source_fn_stack", None)
+            node.meta.pop("nn_module_stack", None)
+
+        graph_reducer_override = GraphPickler.reducer_override
+
+        def _graph_reducer_override(self, obj):
+            if (inspect.isclass(obj) and issubclass(obj, sympy.Function)
+                    and hasattr(obj, "_torch_unpickler")):
+                return obj._torch_unpickler, (obj._torch_handler_name, )
+            if isinstance(obj, FakeTensorMode):
+                return type(None), ()
+            return graph_reducer_override(self, obj)
+
+        # Mask off tensor inputs since they are large and not needed.
+        state["example_inputs"] = pytree.tree_map_only(torch.Tensor,
+                                                       lambda _: None,
+                                                       state["example_inputs"])
+        with patch.object(GraphPickler, 'reducer_override',
+                          _graph_reducer_override):
+            state["graph_module"] = GraphPickler.dumps(
+                state["graph_module"], Options(ops_filter=None))
+            state["example_inputs"] = GraphPickler.dumps(
+                state["example_inputs"])
+        return pickle.dumps(state)
 
     @classmethod
-    def deserialize_compile_artifacts(cls, data):
-        raise NotImplementedError("deserialization not implemented")
+    def deserialize_compile_artifacts(cls,
+                                      data: bytes) -> "VllmCompiledFunction":
+        from torch._guards import TracingContext, tracing
+        from torch._subclasses import FakeTensorMode
+        from torch.fx._graph_pickler import GraphPickler
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        state = pickle.loads(data)
+        fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+        state["graph_module"] = GraphPickler.loads(state["graph_module"],
+                                                   fake_mode)
+        state["example_inputs"] = GraphPickler.loads(state["example_inputs"],
+                                                     fake_mode)
+        vllm_backend = VllmBackend(state["vllm_config"], state["prefix"])
+
+        def optimized_call(*example_inputs):
+            compile_inputs = [
+                inp or example_inputs[i]
+                for i, inp in enumerate(fn.example_inputs)
+            ]
+            with tracing(TracingContext(fake_mode)):
+                fn.optimized_call = vllm_backend(state["graph_module"],
+                                                 compile_inputs).optimized_call
+            return fn.optimized_call(*example_inputs)
+
+        fn = cls(**state, optimized_call=optimized_call)
+        return fn
+
+
+def compilation_config_hash_factors(vllm_config: VllmConfig) -> list[str]:
+    factors = []
+    # 0. factors come from the env, for example, The values of
+    # VLLM_PP_LAYER_PARTITION will affect the computation graph.
+    env_hash = envs.compute_hash()
+    factors.append(env_hash)
+
+    # 1. factors come from the vllm_config (it mainly summarizes how the
+    #    model is created)
+    config_hash = vllm_config.compute_hash()
+    factors.append(config_hash)
+    return factors
 
 
 class VllmBackend:
@@ -502,7 +577,8 @@ class VllmBackend:
                 self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
-    def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
+    def __call__(self, graph: fx.GraphModule,
+                 example_inputs) -> VllmCompiledFunction:
 
         vllm_config = self.vllm_config
         if not self.compilation_config.cache_dir:
@@ -511,17 +587,7 @@ class VllmBackend:
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
 
-            factors = []
-            # 0. factors come from the env, for example, The values of
-            # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-            env_hash = envs.compute_hash()
-            factors.append(env_hash)
-
-            # 1. factors come from the vllm_config (it mainly summarizes how the
-            #    model is created)
-            config_hash = vllm_config.compute_hash()
-            factors.append(config_hash)
-
+            factors = compilation_config_hash_factors(vllm_config)
             # 2. factors come from the code files that are traced by Dynamo (
             #    it mainly summarizes how the model is used in forward pass)
             forward_code_files = list(
@@ -635,7 +701,7 @@ class VllmBackend:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE or \
             not self.compilation_config.cudagraph_copy_inputs:
             return VllmCompiledFunction(graph, example_inputs, vllm_config,
-                                        self.split_gm)
+                                        self.prefix, self.split_gm)
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode
@@ -678,4 +744,4 @@ class VllmBackend:
             return self.split_gm(*list_args)
 
         return VllmCompiledFunction(graph, example_inputs, vllm_config,
-                                    copy_and_call)
+                                    self.prefix, copy_and_call)

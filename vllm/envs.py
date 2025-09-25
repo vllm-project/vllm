@@ -517,6 +517,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_AOT_COMPILE":
     lambda: os.environ.get("VLLM_USE_AOT_COMPILE", "0") == "1",
 
+    # Force vllm to always load AOT compiled models from disk. Failure
+    # to load will result in a hard error when this is enabled.
+    # Will be ignored when VLLM_USE_AOT_COMPILE is disabled.
+    "VLLM_FORCE_AOT_LOAD":
+    lambda: os.environ.get("VLLM_FORCE_AOT_LOAD", "0") == "1",
+
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":

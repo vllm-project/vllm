@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import hashlib
 import inspect
+import os
 from typing import Callable, Optional, TypeVar, Union, overload
 from unittest.mock import patch
 
@@ -177,6 +179,13 @@ def support_torch_compile(
     return cls_decorator_helper
 
 
+def _model_hash_key(fn) -> str:
+    sha256_hash = hashlib.sha256()
+    sha256_hash.update(fn.__qualname__.encode())
+    sha256_hash.update(str(fn.__code__.co_firstlineno).encode())
+    return sha256_hash.hexdigest()
+
+
 def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, Union[int, list[int]]],
@@ -227,6 +236,39 @@ def _support_torch_compile(
 
         if getattr(self, "aot_compiled_fn", None) is not None:
             return self.aot_compiled_fn(self, *args, **kwargs)
+
+        cache_dir = None
+        aot_compilation_path = None
+        if envs.VLLM_USE_AOT_COMPILE:
+            from .backends import compilation_config_hash_factors
+            factors: list[str] = compilation_config_hash_factors(
+                self.vllm_config)
+
+            factors.append(_model_hash_key(self.forward))
+            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
+
+            cache_dir = os.path.join(
+                envs.VLLM_CACHE_ROOT,
+                "aot_compilation",
+                hash_key,
+            )
+
+            rank = self.vllm_config.parallel_config.rank
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
+            aot_compilation_path = os.path.join(cache_dir, "model")
+            try:
+                with open(aot_compilation_path, "rb") as f:
+                    loaded_fn = torch.compiler.load_compiled_function(f)
+                self.aot_compiled_fn = loaded_fn
+                return self.aot_compiled_fn(self, *args, **kwargs)
+            except Exception as e:
+                if os.path.exists(aot_compilation_path):
+                    logger.warning(
+                        "Cannot load aot compilation from path %s, error: %s",
+                        aot_compilation_path, str(e))
+                if envs.VLLM_FORCE_AOT_LOAD:
+                    raise e
 
         # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
@@ -314,6 +356,11 @@ def _support_torch_compile(
                 if envs.VLLM_USE_AOT_COMPILE:
                     self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
                     output = self.aot_compiled_fn(self, *args, **kwargs)
+                    assert aot_compilation_path is not None
+                    assert cache_dir is not None
+                    os.makedirs(cache_dir, exist_ok=True)
+                    self.aot_compiled_fn.save_compiled_function(
+                        aot_compilation_path)
                 else:
                     output = self.compiled_callable(*args, **kwargs)
             return output
