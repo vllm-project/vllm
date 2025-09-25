@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
+
 import logging
+
+from collections import defaultdict, deque
+
 import numpy as np
-
-
+import torch
 from numba import njit
-from collections import defaultdict, deque, Counter
-from typing import List
+
 from .abstract_policy import EplbPolicy
 
 numba_logger = logging.getLogger("numba")
@@ -190,9 +191,8 @@ def slice_values(X, pieces):
 
 
 @njit
-def group_based_adaptive_searching_kernel(
-    X, P, M, simulated_pieces, simulated_deployment, stage_weights
-):
+def group_based_adaptive_searching_kernel(X, P, M, simulated_pieces,
+                                          simulated_deployment, stage_weights):
     """
     Group-based adaptive searching kernel function for calculating the optimal
     expert partitioning strategy.
@@ -234,9 +234,8 @@ def group_based_adaptive_searching_kernel(
     simulated_load = np.zeros(M, dtype=np.float32)
 
     for i in range(flat_deployment.shape[0]):
-        simulated_load[i // (flat_deployment.shape[0] // M)] += unit_load[
-            flat_deployment[i]
-        ]
+        simulated_load[i // (flat_deployment.shape[0] //
+                             M)] += unit_load[flat_deployment[i]]
 
     slice_vals = slice_values(X_all, simulated_pieces)
     sorted_slices = np.sort(slice_vals)[::-1]
@@ -258,8 +257,8 @@ def group_based_adaptive_searching_kernel(
     slices_used_per_group = np.empty(num_group, dtype=np.int32)
     slices_used_per_group[0] = group_boundary_indices[0]
     for i in range(1, num_group):
-        slices_used_per_group[i] = (group_boundary_indices[i]
-                                    - group_boundary_indices[i - 1])
+        slices_used_per_group[i] = (group_boundary_indices[i] -
+                                    group_boundary_indices[i - 1])
     slices_used_per_group = M - slices_used_per_group
 
     loads = np.zeros(M, dtype=np.float32)
@@ -267,14 +266,15 @@ def group_based_adaptive_searching_kernel(
     num_remain_slice = P - N
     current_idx = 0
     for g in range(num_group):
-        window = X_sorted[:, current_idx: current_idx + 2 * M]
+        window = X_sorted[:, current_idx:current_idx + 2 * M]
         low = max(0, current_idx + M - N)
         high = min(num_remain_slice, M - 1)
         while high - low > 1:
             mid = (high + low) // 2
             keep = M - mid
             current_group = window[:, :keep]
-            current_pieces = compute_piece_counts(current_group, M, stage_weights)
+            current_pieces = compute_piece_counts(current_group, M,
+                                                  stage_weights)
             current_slice = slice_values(current_group.sum(0), current_pieces)
             current_slice_sorted = np.sort(current_slice)
             current_loads = loads + current_slice_sorted
@@ -328,9 +328,9 @@ def auto_fix_new_placement(old_placement, new_placement):
     for rank_id in range(num_ranks):
         old_row = old_placement[rank_id]
         new_row = new_placement[rank_id]
-        index_array = np.full(
-            (max_expert + 1, num_experts), -1, dtype=np.int32
-        )
+        index_array = np.full((max_expert + 1, num_experts),
+                              -1,
+                              dtype=np.int32)
         count_array = np.zeros(max_expert + 1, dtype=np.int32)
         for idx in range(num_experts):
             val = old_row[idx]
@@ -396,12 +396,9 @@ def compute_objective(deployment, X, pieces):
 
 
 @njit
-def compute_logical_to_physical_map(
-    phy2log, num_layers, num_expert, num_replicas, maxlogcnt
-):
-    log2phy = -1 * np.ones(
-        (num_layers, num_expert, maxlogcnt), dtype=np.int64
-    )
+def compute_logical_to_physical_map(phy2log, num_layers, num_expert,
+                                    num_replicas, maxlogcnt):
+    log2phy = -1 * np.ones((num_layers, num_expert, maxlogcnt), dtype=np.int64)
     for layer in range(num_layers):
         filled_counts = np.zeros(num_expert, dtype=np.int64)
         for p in range(num_replicas):
@@ -422,9 +419,8 @@ class FlashLB(EplbPolicy):
         self.buffer_expert_layer_num = 8
         self.threshold_ratio = 1.15
 
-    def compute_expert_hotness(
-        self, num_of_expert: int, deployment: np.ndarray, rank_load: np.ndarray
-    ):
+    def compute_expert_hotness(self, num_of_expert: int,
+                               deployment: np.ndarray, rank_load: np.ndarray):
         hotness = np.zeros(num_of_expert, dtype=rank_load.dtype)
         deployment_flat = deployment.ravel()
         rank_load_flat = rank_load.ravel()
@@ -440,23 +436,26 @@ class FlashLB(EplbPolicy):
             stage_par[i] = stage_load.max() / stage_load.mean()
         return stage_par.mean()
 
-    def group_based_adaptive_searching(
-        self, X, P, M, stage_weights=None, recorsive=False
-    ):
+    def group_based_adaptive_searching(self,
+                                       X,
+                                       P,
+                                       M,
+                                       stage_weights=None,
+                                       recorsive=False):
         n_stage, N = X.shape
         if stage_weights is None:
             stage_weights = np.ones(n_stage, dtype=np.float32)
         if recorsive:
             simulated_deployment, simulated_pieces = (
-                self.group_based_adaptive_searching(
-                    X, P, M, stage_weights, recorsive=False
-                )
-            )
+                self.group_based_adaptive_searching(X,
+                                                    P,
+                                                    M,
+                                                    stage_weights,
+                                                    recorsive=False))
         else:
             simulated_pieces = compute_piece_counts(X, P, stage_weights)
-            simulated_deployment = lpt_placement(
-                X, simulated_pieces, M, stage_weights
-            )
+            simulated_deployment = lpt_placement(X, simulated_pieces, M,
+                                                 stage_weights)
         if M < 2:
             return simulated_deployment, simulated_pieces
         pieces = group_based_adaptive_searching_kernel(
@@ -489,9 +488,12 @@ class FlashLB(EplbPolicy):
         stage_weights = stage_weights / stage_weights.max()
         return stage_weights
 
-    def rebalance_layer(
-        self, num_replicas, num_rank, deployment, hotness, layer_id=0
-    ):
+    def rebalance_layer(self,
+                        num_replicas,
+                        num_rank,
+                        deployment,
+                        hotness,
+                        layer_id=0):
         current_par = self.compute_rank_load(deployment, hotness)
         if not self.need_update(current_par, layer_id):
             pieces = np.bincount(deployment.ravel())
@@ -499,12 +501,10 @@ class FlashLB(EplbPolicy):
 
         stage_weights = self.compute_stage_weight(hotness)
         new_deployment, pieces = self.group_based_adaptive_searching(
-            hotness, num_replicas, num_rank, stage_weights, recorsive=False
-        )
+            hotness, num_replicas, num_rank, stage_weights, recorsive=False)
         assert not np.any(new_deployment < 0), (
             f"Deployment contains {np.sum(new_deployment < 0)} negative "
-            "values (invalid empty places)"
-        )
+            "values (invalid empty places)")
         new_par = self.compute_rank_load(new_deployment, hotness)
         return new_deployment, pieces, new_par, current_par
 
@@ -512,8 +512,7 @@ class FlashLB(EplbPolicy):
         for layer in range(num_layer):
             if layer not in FlashLB.hotness_window:
                 FlashLB.hotness_window[layer] = deque(
-                    maxlen=self.max_stage_window
-                )
+                    maxlen=self.max_stage_window)
             FlashLB.hotness_window[layer].append(hotness[layer])
 
     def compress_by_avg_pooling_fast_nd(self, arr, m):
@@ -526,13 +525,8 @@ class FlashLB(EplbPolicy):
         return result / counts
 
     def rebalance_experts(
-        self,
-        weight: torch.Tensor,
-        num_replicas: int,
-        num_groups: int,
-        num_nodes: int,
-        num_ranks: int,
-        old_global_expert_indices: torch.Tensor
+        self, weight: torch.Tensor, num_replicas: int, num_groups: int,
+        num_nodes: int, num_ranks: int, old_global_expert_indices: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
@@ -556,7 +550,7 @@ class FlashLB(EplbPolicy):
         """
         assert num_ranks % num_nodes == 0
         assert num_replicas % num_ranks == 0
-    
+
         expert_workload = weight.cpu().numpy()
         expert_workload += 1
         num_layer, num_expert = expert_workload.shape
@@ -565,107 +559,91 @@ class FlashLB(EplbPolicy):
             new_deployment = current_deployment.copy()
         else:
             new_deployment = np.zeros(
-                (num_layer, num_ranks, num_replicas // num_ranks)
-            )
+                (num_layer, num_ranks, num_replicas // num_ranks))
+
     
         self.register_hotness(num_layer, expert_workload)
         layers_need_update = np.arange(num_layer)
         new_par = np.zeros(layers_need_update.shape[0])
         current_par = np.ones(layers_need_update.shape[0])
         expert_count = np.zeros((num_layer, num_expert))
-    
+
         for i, layer in enumerate(layers_need_update):
             hotness = np.array(self.hotness_window[layer])
             if hotness.shape[0] > self.max_stage_window:
                 hotness = self.compress_by_avg_pooling_fast_nd(
-                    hotness, self.max_stage_window
-                )
+                    hotness, self.max_stage_window)
             if old_global_expert_indices is None:
                 stage_weights = self.compute_stage_weight(hotness)
                 new_deployment[layer], expert_count[layer] = (
-                    self.group_based_adaptive_searching(
-                        hotness,
-                        num_replicas,
-                        num_ranks,
-                        stage_weights,
-                        recorsive=False
-                    )
-                )
+                    self.group_based_adaptive_searching(hotness,
+                                                        num_replicas,
+                                                        num_ranks,
+                                                        stage_weights,
+                                                        recorsive=False))
             else:
                 (new_deployment[layer], expert_count[layer], new_par[i],
                  current_par[i]) = self.rebalance_layer(
-                    num_replicas,
-                    num_ranks,
-                    current_deployment[layer],
-                    hotness,
-                    layer_id=layer
-                )
-    
+                     num_replicas,
+                     num_ranks,
+                     current_deployment[layer],
+                     hotness,
+                     layer_id=layer)
+
         priority = new_par / current_par
         priority_idx = np.argsort(priority)
-        priority_idx = priority_idx[priority[priority_idx] < 1][
-            :self.buffer_expert_layer_num
-        ]
-    
+        priority_idx = priority_idx[priority[priority_idx] <
+                                    1][:self.buffer_expert_layer_num]
+
         change = len(priority_idx) > 0
         if np.all(expert_workload == 1):
             for _, layer in enumerate(layers_need_update):
                 self.hotness_window[layer].pop()
             change = False
-    
+
         if old_global_expert_indices is None:
-            physical_to_logical_map = np.array(
-                new_deployment, dtype=np.int32
-            ).reshape((num_layer, num_replicas))
+            physical_to_logical_map = np.array(new_deployment,
+                                               dtype=np.int32).reshape(
+                                                   (num_layer, num_replicas))
             maxlogcnt = int(expert_count.max())
             logical_to_physical_map = compute_logical_to_physical_map(
-                physical_to_logical_map, num_layer, num_expert,
-                num_replicas, maxlogcnt
-            )
-            physical_to_logical_map = torch.tensor(
-                physical_to_logical_map, dtype=torch.int32, 
-                device=weight.device
-            )
-            logical_to_physical_map = torch.tensor(
-                logical_to_physical_map, dtype=torch.int32,
-                device=weight.device
-            )
-            expert_count = torch.tensor(
-                expert_count, dtype=torch.int32,
-                device=weight.device
-            )
+                physical_to_logical_map, num_layer, num_expert, num_replicas,
+                maxlogcnt)
+            physical_to_logical_map = torch.tensor(physical_to_logical_map,
+                                                   dtype=torch.int32,
+                                                   device=weight.device)
+            logical_to_physical_map = torch.tensor(logical_to_physical_map,
+                                                   dtype=torch.int32,
+                                                   device=weight.device)
+            expert_count = torch.tensor(expert_count,
+                                        dtype=torch.int32,
+                                        device=weight.device)
             return (physical_to_logical_map, logical_to_physical_map,
                     expert_count)
-    
+
         deployment = current_deployment.copy()
-    
+
         if change:
             for idx in priority_idx:
                 deployment[idx] = auto_fix_new_placement(
-                    current_deployment[idx], new_deployment[idx]
-                )
+                    current_deployment[idx], new_deployment[idx])
                 self.par_history[idx] = new_par[idx]
         physical_to_logical_ndarray = deployment.reshape(
-            (num_layer, num_replicas)
-        ).astype(np.int32)
+            (num_layer, num_replicas)).astype(np.int32)
         maxlogcnt = int(expert_count.max())
         logical_to_physical_ndarray = compute_logical_to_physical_map(
-            physical_to_logical_ndarray, num_layer, num_expert,
-            num_replicas, maxlogcnt
-        )
+            physical_to_logical_ndarray, num_layer, num_expert, num_replicas,
+            maxlogcnt)
 
-        physical_to_logical_map = torch.tensor(
-            physical_to_logical_ndarray, dtype=torch.int32,
-            device=weight.device
-        )
-        logical_to_physical_map = torch.tensor(
-            logical_to_physical_ndarray, dtype=torch.int32,
-            device=weight.device
-        )
-        expert_count_tensor = torch.tensor(
-            expert_count, dtype=torch.int32,
-            device=weight.device
-        )
+        physical_to_logical_map = torch.tensor(physical_to_logical_ndarray,
+                                               dtype=torch.int32,
+                                               device=weight.device)
+        logical_to_physical_map = torch.tensor(logical_to_physical_ndarray,
+                                               dtype=torch.int32,
+                                               device=weight.device)
+        expert_count_tensor = torch.tensor(expert_count,
+                                           dtype=torch.int32,
+                                           device=weight.device)
         return (physical_to_logical_map, logical_to_physical_map,
                 expert_count_tensor)
 
@@ -673,44 +651,41 @@ class FlashLB(EplbPolicy):
 def warmup_flashlb():
     algo = FlashLB()
 
-    def generate_layered_experts(
-        num_layers=58, layer_shape=(32, 9), expert_min=0, expert_max=255
-    ):
+    def generate_layered_experts(num_layers=58,
+                                 layer_shape=(32, 9),
+                                 expert_min=0,
+                                 expert_max=255):
         expert_num = expert_max - expert_min + 1
         layer_total = layer_shape[0] * layer_shape[1]
         extra_slots = layer_total - expert_num
 
         assert layer_total >= expert_num, (
-            f"Layer elements {layer_total} < experts {expert_num}"
-        )
+            f"Layer elements {layer_total} < experts {expert_num}")
 
         layers = []
         for _ in range(num_layers):
-            full_experts = torch.arange(
-                expert_min, expert_max + 1, dtype=torch.int64
-            )
-            extra_experts = torch.randint(
-                expert_min, expert_max + 1,
-                size=(extra_slots,), dtype=torch.int64
-            )
+            full_experts = torch.arange(expert_min,
+                                        expert_max + 1,
+                                        dtype=torch.int64)
+            extra_experts = torch.randint(expert_min,
+                                          expert_max + 1,
+                                          size=(extra_slots, ),
+                                          dtype=torch.int64)
             layer_flat = torch.cat([full_experts, extra_experts], dim=0)
             shuffle_idx = torch.randperm(layer_flat.shape[0])
             layer_shuffled = layer_flat[shuffle_idx]
             layers.append(layer_shuffled.reshape(layer_shape))
         return torch.stack(layers, dim=0)
 
-    expert_tensor = generate_layered_experts(
-        num_layers=58, layer_shape=(32, 9)
-    )
+    expert_tensor = generate_layered_experts(num_layers=58,
+                                             layer_shape=(32, 9))
     hotness = torch.randint(1, 100, (58, 256))
     physical_to_logical_map, _, _ = algo.rebalance_experts(
-        hotness, 288, 4, 2, 32, expert_tensor
-    )
+        hotness, 288, 4, 2, 32, expert_tensor)
     expert_tensor = physical_to_logical_map.reshape((58, 32, 9))
     for _ in range(3):
         physical_to_logical_map, _, _ = algo.rebalance_experts(
-            hotness, 288, 4, 2, 32, expert_tensor
-        )
+            hotness, 288, 4, 2, 32, expert_tensor)
         expert_tensor = physical_to_logical_map.reshape((58, 32, 9))
 
     FlashLB.par_history = defaultdict(float)
