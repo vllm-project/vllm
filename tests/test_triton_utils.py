@@ -69,6 +69,8 @@ def test_triton_placeholder_language():
     assert lang.constexpr is None
     assert lang.dtype is None
     assert lang.int64 is None
+    assert lang.int32 is None
+    assert lang.tensor is None
 
 
 def test_triton_placeholder_language_from_parent():
