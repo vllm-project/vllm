@@ -16,7 +16,8 @@ from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
-from vllm.v1.spec_decode.metrics import compute_acceptance_rate
+from vllm.v1.spec_decode.metrics import (compute_acceptance_len,
+                                         compute_acceptance_rate)
 
 
 def get_test_prompts(mm_enabled: bool, quiet: bool = False):
@@ -243,7 +244,9 @@ class ArgsTest:
     model: str
     draft_model: str
     sampling_config: SamplingParams
+    num_speculative_tokens: int
     expected_acceptance_rate: float
+    expected_acceptance_len: float
     expected_same_output_fraction: float
     # Defaults
     target_tensor_parallel_size: int = 1
@@ -253,17 +256,23 @@ class ArgsTest:
 
 
 cases = [
+    # Same model for draft and target, greedy sampling.
     ArgsTest(
         model="Qwen/Qwen3-0.6B",
         draft_model="Qwen/Qwen3-0.6B",
         sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,  # K 
+        expected_acceptance_len=3 + 1,  # K + 1
         expected_acceptance_rate=1.0,
         expected_same_output_fraction=1.0,
     ),
+    # Smaller draft model, stochastic sampling.
     ArgsTest(
         model="Qwen/Qwen3-1.7B",
         draft_model="Qwen/Qwen3-0.6B",
         sampling_config=stochastic_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=2.85 + 1,
         expected_acceptance_rate=0.9,
         expected_same_output_fraction=0.9,
     ),
@@ -289,7 +298,7 @@ def test_draft_model_correctness(
         speculative_config={
             "model": args.draft_model,
             "method": "draft_model",
-            "num_speculative_tokens": 3,
+            "num_speculative_tokens": args.num_speculative_tokens,
             "max_model_len": args.max_model_len,
             "enforce_eager": enforce_eager,
             "tensor_parallel_size": args.draft_tensor_parallel_size,
@@ -302,12 +311,15 @@ def test_draft_model_correctness(
         disable_log_stats=False,  # enables get_metrics()
     )
     spec_outputs = spec_llm.chat(test_prompts, args.sampling_config)
-    acceptance_rate = compute_acceptance_rate(spec_llm.get_metrics())
+    metrics = spec_llm.get_metrics()
+    acceptance_rate: float = compute_acceptance_rate(metrics)
+    acceptance_len: float = compute_acceptance_len(metrics)
     del spec_llm  # CLEANUP
     torch.cuda.empty_cache()
     cleanup_dist_env_and_memory()
 
     assert acceptance_rate >= args.expected_acceptance_rate
+    assert acceptance_len >= args.expected_acceptance_len
 
     ref_llm = LLM(
         model=args.model,
@@ -330,6 +342,7 @@ def test_draft_model_correctness(
     print(f"spec-decode: target={args.model}, draft={args.draft_model}, "
           f"temperature={args.sampling_config.temperature:.2f}, "
           f"acceptance_rate={acceptance_rate:.2f}, "
+          f"acceptance_len={acceptance_len:.2f}, "
           f"match_fraction={match_fraction:.2f}")
 
 

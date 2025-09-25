@@ -212,6 +212,16 @@ def compute_acceptance_rate(metrics: list[Metric]) -> float:
     return n_accepted_toks / n_draft_toks
 
 
+def compute_acceptance_len(metrics: list[Metric]) -> float:
+    name2metric = {metric.name: metric for metric in metrics}
+    n_drafts = name2metric["vllm:spec_decode_num_drafts"].value  # type: ignore
+    n_accepted_toks = name2metric[
+        "vllm:spec_decode_num_accepted_tokens"].value  # type: ignore
+    if n_drafts == 0:
+        return 1
+    return 1 + (n_accepted_toks / n_drafts)
+
+
 def make_per_engine(counter: prometheus_client.Counter,
                     per_engine_labelvalues: dict[int, list[str]]):
     """Create a counter for each label value."""
