@@ -12,12 +12,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
                                                PoolerHead, PoolerNormalize,
                                                PoolingParamsUpdate,
-                                               build_output, get_prompt_lens,
+                                               get_prompt_lens,
                                                get_prompt_token_ids)
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.sequence import PoolerOutput
 from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces_base import default_pooling_type
@@ -212,7 +212,7 @@ class GritLMPooler(Pooler):
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
-        return build_output(pooled_data)
+        return pooled_data
 
 
 @default_pooling_type("MEAN")
