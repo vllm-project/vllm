@@ -79,23 +79,23 @@ def _create_field_factory(
     return _field_config
 
 
-class LLaVAOneVision1_5_ImagePixelInputs(TypedDict):
+class LlavaOnevision1_5_ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     pixel_values: torch.Tensor
     image_grid_thw: torch.Tensor
 
 
-class LLaVAOneVision1_5_ImageEmbeddingInputs(TypedDict):
+class LlavaOnevision1_5_ImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     image_embeds: torch.Tensor
     image_grid_thw: torch.Tensor
 
 
-LLaVAOneVision1_5_ImageInputs = Union[LLaVAOneVision1_5_ImagePixelInputs,
-                                      LLaVAOneVision1_5_ImageEmbeddingInputs]
+LlavaOnevision1_5_ImageInputs = Union[LlavaOnevision1_5_ImagePixelInputs,
+                                      LlavaOnevision1_5_ImageEmbeddingInputs]
 
 
-class LLaVAOneVision1_5_VisionRotaryEmbedding(nn.Module):
+class LlavaOnevision1_5_VisionRotaryEmbedding(nn.Module):
 
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
@@ -111,7 +111,7 @@ class LLaVAOneVision1_5_VisionRotaryEmbedding(nn.Module):
         return freqs
 
 
-class LLaVAOneVision1_5_VisionPatchEmbed(nn.Module):
+class LlavaOnevision1_5_VisionPatchEmbed(nn.Module):
 
     def __init__(self,
                  patch_size: int = 14,
@@ -133,7 +133,7 @@ class LLaVAOneVision1_5_VisionPatchEmbed(nn.Module):
         return x
 
 
-class LLaVAOneVision1_5_VisionMLP(nn.Module):
+class LlavaOnevision1_5_VisionMLP(nn.Module):
 
     def __init__(self,
                  in_features: int,
@@ -145,7 +145,7 @@ class LLaVAOneVision1_5_VisionMLP(nn.Module):
                  use_data_parallel: bool = False) -> None:
         if quant_config is not None:
             raise ValueError(
-                "LLaVAOneVision1_5 is not support quantization for now")
+                "LlavaOnevision1_5 is not support quantization for now")
         super().__init__()
         self.act_fn = act_fn
         mlp_up_proj = (ReplicatedLinear
@@ -172,7 +172,7 @@ class LLaVAOneVision1_5_VisionMLP(nn.Module):
         return x3
 
 
-class LLaVAOneVision1_5_VisionAttn(nn.Module):
+class LlavaOnevision1_5_VisionAttn(nn.Module):
 
     def __init__(
         self,
@@ -187,7 +187,7 @@ class LLaVAOneVision1_5_VisionAttn(nn.Module):
         super().__init__()
         if quant_config is not None:
             raise ValueError(
-                "LLaVAOneVision1_5 is not support quantization for now")
+                "LlavaOnevision1_5 is not support quantization for now")
         self.tp_size = (1 if use_data_parallel else
                         parallel_state.get_tensor_model_parallel_world_size())
         self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
@@ -222,7 +222,7 @@ class LLaVAOneVision1_5_VisionAttn(nn.Module):
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
         if self.attn_backend not in {_Backend.FLASH_ATTN}:
             raise ValueError(
-                f"LLaVAOneVision1_5 doesn't support {self.attn_backend}.")
+                f"LlavaOnevision1_5 doesn't support {self.attn_backend}.")
         self.is_flash_attn_backend = self.attn_backend == _Backend.FLASH_ATTN
 
     def _all_gather_tensor(self, local_tensor, hidden_size: int,
@@ -303,12 +303,12 @@ class LLaVAOneVision1_5_VisionAttn(nn.Module):
                                             max_seqlen_k=max_seqlen)
         else:
             raise ValueError(
-                f"LLaVAOneVision1_5 doesn't support {self.attn_backend}.")
+                f"LlavaOnevision1_5 doesn't support {self.attn_backend}.")
         output, _ = self.proj(output.reshape(seq_len, -1))
         return output
 
 
-class LLaVAOneVision1_5_VisionTowerBlock(nn.Module):
+class LlavaOnevision1_5_VisionTowerBlock(nn.Module):
 
     def __init__(
         self,
@@ -324,19 +324,19 @@ class LLaVAOneVision1_5_VisionTowerBlock(nn.Module):
         super().__init__()
         if quant_config is not None:
             raise ValueError(
-                "LLaVAOneVision1_5 is not support quantization for now")
+                "LlavaOnevision1_5 is not support quantization for now")
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
-        self.attn = LLaVAOneVision1_5_VisionAttn(
+        self.attn = LlavaOnevision1_5_VisionAttn(
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel)
-        self.mlp = LLaVAOneVision1_5_VisionMLP(
+        self.mlp = LlavaOnevision1_5_VisionMLP(
             dim,
             mlp_hidden_dim,
             act_fn=act_fn,
@@ -359,7 +359,7 @@ class LLaVAOneVision1_5_VisionTowerBlock(nn.Module):
         return x + x_mlp
 
 
-class LLaVAOneVision1_5_PatchMerger(nn.Module):
+class LlavaOnevision1_5_PatchMerger(nn.Module):
 
     def __init__(self,
                  d_model: int,
@@ -372,7 +372,7 @@ class LLaVAOneVision1_5_PatchMerger(nn.Module):
         super().__init__()
         if quant_config is not None:
             raise ValueError(
-                "LLaVAOneVision1_5 is not support quantization for now")
+                "LlavaOnevision1_5 is not support quantization for now")
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-5)
@@ -405,7 +405,7 @@ class LLaVAOneVision1_5_PatchMerger(nn.Module):
         return out
 
 
-class LLaVAOneVision1_5_VisionTower(nn.Module):
+class LlavaOnevision1_5_VisionTower(nn.Module):
 
     def __init__(
         self,
@@ -418,7 +418,7 @@ class LLaVAOneVision1_5_VisionTower(nn.Module):
         super().__init__()
         if quant_config is not None:
             raise ValueError(
-                "LLaVAOneVision1_5 is not support quantization for now")
+                "LlavaOnevision1_5 is not support quantization for now")
         patch_size = vision_config.patch_size
         act_fn = vision_config.hidden_act
         spatial_merge_size = vision_config.spatial_merge_size
@@ -436,18 +436,18 @@ class LLaVAOneVision1_5_VisionTower(nn.Module):
         self.act_fn_map = {"gelu": QuickGELU, "torch_gelu": F.gelu}
         if act_fn.lower() not in self.act_fn_map:
             raise ValueError(
-                f"LLaVAOneVision1_5 Unsupported activation: {act_fn}.")
-        self.patch_embed = LLaVAOneVision1_5_VisionPatchEmbed(
+                f"LlavaOnevision1_5 Unsupported activation: {act_fn}.")
+        self.patch_embed = LlavaOnevision1_5_VisionPatchEmbed(
             patch_size=patch_size,
             in_channels=in_channels,
             embed_dim=embed_dim,
         )
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = embed_dim // num_heads
-        self.rotary_pos_emb = LLaVAOneVision1_5_VisionRotaryEmbedding(
+        self.rotary_pos_emb = LlavaOnevision1_5_VisionRotaryEmbedding(
             head_dim // 2)
         self.blocks = nn.ModuleList([
-            LLaVAOneVision1_5_VisionTowerBlock(
+            LlavaOnevision1_5_VisionTowerBlock(
                 dim=embed_dim,
                 num_heads=num_heads,
                 mlp_hidden_dim=mlp_hidden_dim,
@@ -457,7 +457,7 @@ class LLaVAOneVision1_5_VisionTower(nn.Module):
                 use_data_parallel=use_data_parallel,
                 act_fn=self.act_fn_map[act_fn]) for layer_idx in range(depth)
         ])
-        self.merger = LLaVAOneVision1_5_PatchMerger(
+        self.merger = LlavaOnevision1_5_PatchMerger(
             d_model=text_hidden_size,
             context_dim=embed_dim,
             norm_layer=norm_layer,
@@ -597,7 +597,7 @@ class LLaVAOneVision1_5_VisionTower(nn.Module):
         return loaded_params
 
 
-class LLaVAOneVision1_5_ProcessingInfo(BaseProcessingInfo):
+class LlavaOnevision1_5_ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
         return self.ctx.get_hf_config(LlavaOnevision1_5Config)
@@ -697,8 +697,8 @@ class LLaVAOneVision1_5_ProcessingInfo(BaseProcessingInfo):
         return {"image": None}
 
 
-class LLaVAOneVision1_5_DummyInputsBuilder(
-        BaseDummyInputsBuilder[LLaVAOneVision1_5_ProcessingInfo]):
+class LlavaOnevision1_5_DummyInputsBuilder(
+        BaseDummyInputsBuilder[LlavaOnevision1_5_ProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -722,7 +722,7 @@ class LLaVAOneVision1_5_DummyInputsBuilder(
         }
 
 
-class LLaVAOneVision1_5_MultiModalDataParser(MultiModalDataParser):
+class LlavaOnevision1_5_MultiModalDataParser(MultiModalDataParser):
 
     def __init__(self, spatial_merge_size: int, *args, **kwargs):
         self._spatial_merge_size = spatial_merge_size
@@ -742,11 +742,11 @@ class LLaVAOneVision1_5_MultiModalDataParser(MultiModalDataParser):
         return super()._parse_image_data(data)
 
 
-class LLaVAOneVision1_5_MultiModalProcessor(
-        BaseMultiModalProcessor[LLaVAOneVision1_5_ProcessingInfo]):
+class LlavaOnevision1_5_MultiModalProcessor(
+        BaseMultiModalProcessor[LlavaOnevision1_5_ProcessingInfo]):
 
     def _get_data_parser(self) -> MultiModalDataParser:
-        return LLaVAOneVision1_5_MultiModalDataParser(
+        return LlavaOnevision1_5_MultiModalDataParser(
             self.info.get_hf_config().vision_config.spatial_merge_size)
 
     def _get_prompt_updates(
@@ -792,10 +792,10 @@ class LLaVAOneVision1_5_MultiModalProcessor(
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    LLaVAOneVision1_5_MultiModalProcessor,
-    info=LLaVAOneVision1_5_ProcessingInfo,
-    dummy_inputs=LLaVAOneVision1_5_DummyInputsBuilder)
-class LLaVAOneVision1_5_ForConditionalGeneration(nn.Module, SupportsMultiModal,
+    LlavaOnevision1_5_MultiModalProcessor,
+    info=LlavaOnevision1_5_ProcessingInfo,
+    dummy_inputs=LlavaOnevision1_5_DummyInputsBuilder)
+class LlavaOnevision1_5_ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                  SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -825,7 +825,7 @@ class LLaVAOneVision1_5_ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multimodal_config = multimodal_config
 
         if multimodal_config.get_limit_per_prompt("image"):
-            self.visual = LLaVAOneVision1_5_VisionTower(
+            self.visual = LlavaOnevision1_5_VisionTower(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self._maybe_ignore_quant_config(quant_config),
@@ -861,7 +861,7 @@ class LLaVAOneVision1_5_ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return torch.concat(mm_input)
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[LLaVAOneVision1_5_ImageInputs]:
+            self, **kwargs: object) -> Optional[LlavaOnevision1_5_ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
@@ -875,7 +875,7 @@ class LLaVAOneVision1_5_ForConditionalGeneration(nn.Module, SupportsMultiModal,
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image pixel values. "
                                  f"Got type: {type(pixel_values)}")
-            return LLaVAOneVision1_5_ImagePixelInputs(
+            return LlavaOnevision1_5_ImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw)
@@ -887,13 +887,13 @@ class LLaVAOneVision1_5_ForConditionalGeneration(nn.Module, SupportsMultiModal,
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
-            return LLaVAOneVision1_5_ImageEmbeddingInputs(
+            return LlavaOnevision1_5_ImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
                 image_grid_thw=image_grid_thw)
 
     def _process_image_input(
-        self, image_input: LLaVAOneVision1_5_ImageInputs
+        self, image_input: LlavaOnevision1_5_ImageInputs
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
@@ -950,7 +950,7 @@ class LLaVAOneVision1_5_ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings_v0(
         self,
         input_ids: torch.Tensor,
-        image_input: Optional[LLaVAOneVision1_5_ImagePixelInputs] = None
+        image_input: Optional[LlavaOnevision1_5_ImagePixelInputs] = None
     ) -> torch.Tensor:
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
