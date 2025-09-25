@@ -454,7 +454,6 @@ async def test_web_search(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.flaky(reruns=3)
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -472,7 +471,7 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
                 "type": "auto"
             }
         }],
-        temperature=0,  # More deterministic output in response
+        temperature=0.5,  # More deterministic output in response
     )
     assert response is not None
     assert response.status == "completed"
