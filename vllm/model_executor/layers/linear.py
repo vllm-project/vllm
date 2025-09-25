@@ -22,6 +22,7 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
+                                           ModelWeightParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
@@ -34,6 +35,7 @@ from vllm.utils import GiB_bytes
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
+    "UnquantizedLinearMethod",
     "CompressedTensorsLinearMethod",
     "CompressedTensorsLinearTransformMethod",
     "BitBLASLinearMethod",
@@ -196,10 +198,14 @@ class UnquantizedLinearMethod(LinearMethodBase):
         # The amount of memory allocated for the weights is
         # sum(output_partition_sizes) * input_size_per_partition.
         try:
-            weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                           input_size_per_partition,
-                                           dtype=params_dtype),
-                               requires_grad=False)
+            weight_loader = extra_weight_attrs.pop("weight_loader")
+            weight = ModelWeightParameter(data=torch.empty(
+                sum(output_partition_sizes),
+                input_size_per_partition,
+                dtype=params_dtype),
+                                          input_dim=1,
+                                          output_dim=0,
+                                          weight_loader=weight_loader)
         except torch.cuda.OutOfMemoryError as e:
             logger.error("Failed to create unquantized linear weights: %s", e)
             if torch.cuda.is_available():
@@ -212,7 +218,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 "Failed to create unquantized linear weights. "
                 "This may be caused by insufficient memory to allocate "
                 "the weight.") from e
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 

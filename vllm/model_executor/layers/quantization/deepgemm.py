@@ -4,7 +4,6 @@ import logging
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils import direct_register_custom_op
 from vllm.utils.deep_gemm import fp8_gemm_nt
@@ -43,7 +42,7 @@ def prepare_block_fp8_matmul_inputs(
     return M, N, K, C
 
 
-def w8a8_block_fp8_matmul_deepgemm(
+def w8a8_deepgemm_block_scaled_mm(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -59,7 +58,7 @@ def w8a8_block_fp8_matmul_deepgemm(
     return C
 
 
-def w8a8_block_fp8_matmul_deepgemm_fake(
+def w8a8_deepgemm_block_scaled_mm_fake(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -73,9 +72,7 @@ def w8a8_block_fp8_matmul_deepgemm_fake(
 
 
 direct_register_custom_op(
-    op_name="w8a8_block_fp8_matmul_deepgemm",
-    op_func=w8a8_block_fp8_matmul_deepgemm,
-    mutates_args=[],
-    fake_impl=w8a8_block_fp8_matmul_deepgemm_fake,
-    dispatch_key=current_platform.dispatch_key,
+    op_name="w8a8_deepgemm_block_scaled_mm",
+    op_func=w8a8_deepgemm_block_scaled_mm,
+    fake_impl=w8a8_deepgemm_block_scaled_mm_fake,
 )

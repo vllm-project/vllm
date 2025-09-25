@@ -119,6 +119,12 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_gfx950() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx950"])
+
+
+@cache
 def use_rocm_custom_paged_attention(
         qtype: torch.dtype,
         head_size: int,
@@ -334,7 +340,8 @@ class RocmPlatform(Platform):
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
-        if use_v1 and use_aiter_rms_norm and not is_eager_execution:
+        if (use_v1 and use_aiter_rms_norm and not is_eager_execution
+                and "-rms_norm" not in compilation_config.custom_ops):
             compilation_config.custom_ops.append("+rms_norm")
 
     @classmethod
