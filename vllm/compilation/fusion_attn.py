@@ -152,15 +152,8 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             attn_out_view = RESHAPE_OP(
                 at1[1], [q.shape[0], self.num_heads * self.head_size]
             )
-            output_quant = torch.empty(
-                attn_out_view.size(),
-                device=attn_out_view.device,
-                dtype=self.quant_dtype,
-            )
-            at2 = auto_functionalized(
-                self.QUANT_OP, result=output_quant, input=attn_out_view, scale=scale
-            )
-            return at2[1]
+
+            return self.quant_matcher(attn_out_view, scale)[0]
 
         def replacement(
             q: torch.Tensor,
