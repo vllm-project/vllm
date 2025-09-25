@@ -666,11 +666,11 @@ class ModelConfig:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
         prefix = "Transformers"
+        prefix += "MoE" if self.get_num_experts() > 1 else ""
         # Resolve Transformers backend pooling class
         if getattr(self, "runner_type", self.runner) == "pooling":
             return prefix + "Model"
         # Resolve Transformers backend generate classes
-        prefix += "MoE" if self.get_num_experts() > 1 else ""
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
