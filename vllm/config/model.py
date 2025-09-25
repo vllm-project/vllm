@@ -14,7 +14,6 @@ from pydantic import (ConfigDict, SkipValidation, field_validator,
                       model_validator)
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
