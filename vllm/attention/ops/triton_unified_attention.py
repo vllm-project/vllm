@@ -107,7 +107,7 @@ def select_3d_config(head_size, block_size, element_size, max_seqlen_k, num_2d_p
         return attn_config, reduce_config
 
 
-def select_attn_kernel(
+def use_2d_kernel(
     head_size, sliding_window, all_decode, max_seqlen_q, max_seqlen_k, num_2d_prgms
 ):
     if current_platform.is_rocm():
@@ -841,7 +841,8 @@ def unified_attention(
     BLOCK_M = 16 if num_queries_per_kv <= 16 else triton.next_power_of_2(
         num_queries_per_kv)
     BLOCK_Q = BLOCK_M // num_queries_per_kv
-
+    assert BLOCK_Q >= 1
+    assert BLOCK_M % num_queries_per_kv == 0
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
     # However, it is slow to realize the query_lens on cpu.
@@ -858,7 +859,7 @@ def unified_attention(
     num_2d_prgms = total_num_q_blocks * num_kv_heads
     ALL_DECODE = max_seqlen_q == 1
     # if batch contains a prefill
-    if select_attn_kernel(
+    if use_2d_kernel(
         head_size, SLIDING_WINDOW, ALL_DECODE, max_seqlen_q, max_seqlen_k, num_2d_prgms
     ):
         config = select_2d_config(
@@ -871,6 +872,8 @@ def unified_attention(
             num_queries_per_kv,
             num_2d_prgms,
         )
+        assert config["BLOCK_Q"] >= 1
+        assert config["BLOCK_M"] % num_queries_per_kv == 0
         total_num_q_blocks = q.shape[0] // config["BLOCK_Q"] + num_seqs
 
         kernel_unified_attention_2d[(
