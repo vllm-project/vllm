@@ -9,7 +9,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -334,23 +334,22 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             pass_name="rmsnorm_quant_fusion_pass"
         )
 
-        with set_current_vllm_config(config, check_compile=False):
-            for epsilon in [1e-5, 1e-6]:
-                # Fuse rms_norm + static fp8 quant
-                RMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
+        for epsilon in [1e-5, 1e-6]:
+            # Fuse rms_norm + static fp8 quant
+            RMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
-                # Fuse fused_add_rms_norm + static fp8 quant
-                FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
-                    self.patterns
-                )
+            # Fuse fused_add_rms_norm + static fp8 quant
+            FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
+                self.patterns
+            )
 
-                # Fuse rms_norm + dynamic per-token fp8 quant
-                RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
+            # Fuse rms_norm + dynamic per-token fp8 quant
+            RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
-                # Fuse fused_add_rms_norm + dynamic per-token fp8 quant
-                FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
-                    self.patterns
-                )
+            # Fuse fused_add_rms_norm + dynamic per-token fp8 quant
+            FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
+                self.patterns
+            )
 
         self.dump_patterns(config, self.patterns)
 
