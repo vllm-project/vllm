@@ -432,7 +432,8 @@ class MessageQueue:
     @contextmanager
     def acquire_read(self,
                      timeout: Optional[float] = None,
-                     cancel: Optional[Event] = None):
+                     cancel: Optional[Event] = None,
+                     indefinite: bool = False):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
@@ -453,23 +454,23 @@ class MessageQueue:
                     self._read_spin_timer.spin()
 
                     # if we wait for a long time, log a message
-                    if (time.monotonic() - start_time
-                            > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
+                    elapsed = time.monotonic() - start_time
+                    if not indefinite and (elapsed
+                                           > VLLM_RINGBUFFER_WARNING_INTERVAL *
+                                           n_warning):
                         logger.info(
-                            ("No available shared memory broadcast block found"
-                             " in %s seconds. This typically happens when some"
-                             " processes are hanging, doing some time-consuming"
-                             " work (e.g. compilation), or sitting idle."),
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
-                        )
+                            "No available shared memory broadcast block found"
+                            " in %s seconds. This typically happens when some"
+                            " processes are hanging, doing some time-consuming"
+                            " work (e.g. compilation), or sitting idle.",
+                            VLLM_RINGBUFFER_WARNING_INTERVAL)
                         n_warning += 1
 
                     if cancel is not None and cancel.is_set():
                         raise RuntimeError("cancelled")
 
                     # if we time out, raise an exception
-                    if (timeout is not None
-                            and time.monotonic() - start_time > timeout):
+                    if timeout is not None and elapsed > timeout:
                         raise TimeoutError
 
                     continue
@@ -505,10 +506,11 @@ class MessageQueue:
 
     def dequeue(self,
                 timeout: Optional[float] = None,
-                cancel: Optional[Event] = None):
+                cancel: Optional[Event] = None,
+                indefinite: bool = False):
         """ Read from message queue with optional timeout (in seconds) """
         if self._is_local_reader:
-            with self.acquire_read(timeout, cancel) as buf:
+            with self.acquire_read(timeout, cancel, indefinite) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
                     # no need to know the size of serialized object
