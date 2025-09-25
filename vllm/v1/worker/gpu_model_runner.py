@@ -2807,7 +2807,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
-            seq_len=self.max_num_tokens,
+            seq_len=self.max_model_len,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
         )

@@ -29,7 +29,7 @@ _*Vision-language models currently accept only image inputs. Support for video i
 
 If the Transformers model implementation follows all the steps in [writing a custom model](#writing-custom-models) then, when used with the Transformers backend, it will be compatible with the following features of vLLM:
 
-- All the features listed in the [compatibility matrix](../features/compatibility_matrix.md#feature-x-feature)
+- All the features listed in the [compatibility matrix](../features/README.md#feature-x-feature)
 - Any combination of the following vLLM parallelisation schemes:
     - Pipeline parallel
     - Tensor parallel

@@ -944,11 +944,10 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         hidden_states: torch.Tensor,
     ) -> Optional[torch.Tensor]:
         """Compute logits for next token prediction.
-        
+
         Args:
             hidden_states: Hidden states from model forward pass
-            sampling_metadata: Metadata for sampling process
-            
+
         Returns:
             Logits for next token prediction
         """

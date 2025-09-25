@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Literal, Optional, Union, cast
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -254,7 +254,8 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = tuple(vision_tower(p) for p in pixel_values)
+        image_features: tuple[torch.Tensor, ...] = \
+            tuple(vision_tower(p) for p in pixel_values)
 
         def select_features(leaf: torch.Tensor):
             return self._select_image_features(
@@ -262,10 +263,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 strategy=self.config.vision_feature_select_strategy,
             )
 
-        return cast(
-            Union[torch.Tensor, tuple[torch.Tensor, ...]],
-            json_map_leaves(select_features, image_features),
-        )
+        return json_map_leaves(select_features, image_features)
 
     # adapted from https://huggingface.co/MiniMaxAI/MiniMax-VL-01/blob/main/modeling_minimax_vl_01.py#L616-L631
     def pack_image_features(self, image_features: list[torch.Tensor],
