@@ -34,6 +34,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 import torch.distributed as dist
 
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.config.compilation import CompilationConfig
 import vllm.envs as envs
@@ -66,7 +67,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv, direct_register_custom_op
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend, DeepseekV32IndexerMetadata
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, extract_layer_index,
@@ -74,6 +75,12 @@ from .utils import (PPMissingLayer, extract_layer_index,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.utils.deep_gemm import (
+    fp8_mqa_logits,
+    get_paged_mqa_logits_metadata,
+    fp8_paged_mqa_logits,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
 
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
@@ -348,6 +355,7 @@ class DeepseekV2Attention(nn.Module):
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         config: Union[DeepseekV2Config, DeepseekV3Config],
         hidden_size: int,
         num_heads: int,
@@ -532,94 +540,35 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
     # make sure the hidden_size is expontial of 2
     return hadamard_transform(x, scale=hidden_size**-0.5)
 
-
-def ref_fp8_mqa_logits(
-    q: torch.Tensor,
-    kv: torch.Tensor,
-    weights: torch.Tensor,
-    cu_seqlen_ks: torch.Tensor,
-    cu_seqlen_ke: torch.Tensor,
+@torch.inference_mode()
+def indexer_k_quant_and_cache(
+    k,
+    kv_cache,
+    slot_mapping,
+    quant_block_size,
+    scale_fmt,
 ):
-    # print(f"q_shape: {q.shape}, v_shape: {kv.shape}, weights.shape: {weights.shape}")
-    k = kv
-    q = q.float()
-    k = k.float()
+    from vllm.utils.tile_lang_kernels import act_quant
+    _, block_size, head_dim = kv_cache.shape
+    k_fp8, k_scale = act_quant(k, quant_block_size, scale_fmt)
+    k_bytes = k_fp8.view(torch.uint8)
+    s_bytes = k_scale.view(torch.uint8)
 
-    seq_len_kv = kv.shape[0]
-    mask_lo = (torch.arange(0, seq_len_kv, device="cuda")[None, :]
-               >= cu_seqlen_ks[:, None])
-    mask_hi = (torch.arange(0, seq_len_kv, device="cuda")[None, :]
-               < cu_seqlen_ke[:, None])
-    mask = mask_lo & mask_hi
+    packed = torch.cat([k_bytes, s_bytes], dim=-1)
 
-    score = torch.einsum("mhd,nd->hmn", q, k)
-    logits = (score.relu() * weights.transpose(0, 1)).sum(dim=0)
-    logits = logits.masked_fill(~mask, float("-inf"))
+    block_idx = torch.div(slot_mapping, block_size, rounding_mode='floor')
+    inblock = slot_mapping - block_idx * block_size
+    linear = block_idx * block_size + inblock
 
-    cost = mask.sum()
-    return logits, cost
+    kv_cache_flat = kv_cache.view(-1, head_dim)
 
-
-# TODO (zyongye) optimize this, this is now vibe coded
-def kv_spans_from_batches(start_seq_loc: torch.Tensor,
-                          seq_len_per_batch: torch.Tensor):
-    """
-    Args:
-      start_seq_loc: 1D long tensor [B+1], cumulative counts of selected tokens per batch.
-                     Example: [0, 2, 4, 7] -> batch sizes (selected) [2, 2, 3], N=7 tokens total.
-      seq_len_per_batch: 1D long tensor [B], full sequence length (KV length) of each batch.
-                         Example: [5, 9, 4].
-
-    Returns:
-      start_tensor: 1D long tensor [N], start offset in the concatenated KV cache for each token's batch.
-      end_location: 1D long tensor [N], **exclusive** end = start + token's local position.
-                    (So the attended KV slice is kv[start:end].)
-
-    Assumes each batch contributes its full `seq_len_per_batch[i]` keys to the KV cache, and
-    the selected tokens within a batch are the **last** `counts[i]` positions of that sequence.
-    """
-    q = start_seq_loc.to(dtype=torch.long)
-    L = seq_len_per_batch.to(dtype=torch.long, device=q.device)
-    assert q.dim() == 1 and L.dim() == 1
-    assert q.numel() == L.numel() + 1, "start_seq_loc must have length B+1"
-
-    # Selected tokens per batch and totals
-    counts = q[1:] - q[:-1]  # [B]
-    N = int(q[-1].item())  # total selected tokens
-    B = L.numel()
-    device = L.device
-
-    if N == 0:
-        return (torch.empty(0, dtype=torch.long, device=device),
-                torch.empty(0, dtype=torch.long, device=device))
-
-    # KV start offsets per batch in the concatenated KV cache
-    kv_starts_per_batch = torch.cumsum(L, dim=0) - L  # [B]
-
-    # For each selected token, which batch does it belong to?
-    batch_id = torch.repeat_interleave(torch.arange(B, device=device),
-                                       counts)  # [N]
-
-    # Map batch KV start to each token
-    start_tensor = kv_starts_per_batch[batch_id]  # [N]
-
-    # End-align local positions inside each batch:
-    # local_pos = L[b] - counts[b] + (1..counts[b])  for each batch b
-    L_expand = torch.repeat_interleave(L, counts)  # [N]
-    m_expand = torch.repeat_interleave(counts, counts)  # [N]
-    # position within the selected block: 1..counts[b]
-    pos_within = (torch.arange(N, device=device, dtype=torch.long) -
-                  torch.repeat_interleave(q[:-1], counts) + 1)
-
-    local_pos = L_expand - m_expand + pos_within  # [N], 1-based
-    end_location = start_tensor + local_pos  # exclusive end
-
-    return start_tensor.int(), end_location.int()
+    kv_cache_flat.index_copy_(0, linear, packed)
 
 
 class Indexer(nn.Module):
 
     def __init__(self,
+                 vllm_config: VllmConfig,
                  config: Union[DeepseekV2Config, DeepseekV3Config],
                  hidden_size: int,
                  q_lora_rank: int,
@@ -627,6 +576,7 @@ class Indexer(nn.Module):
                  cache_config: Optional[CacheConfig],
                  prefix: str = ""):
         super().__init__()
+        self.vllm_config = vllm_config
         self.config = config
         self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         self.topk_tokens = config.attn_module_list_cfg[0]["topk_tokens"]
@@ -654,10 +604,12 @@ class Indexer(nn.Module):
         self.quant_block_size = 128  # TODO: get from config
 
         #TODO (zyongye) change dim to fp8 later to (self.head_dim + 4)
-        self.k_cache = DeepseekV32IndexerCache(head_dim=self.head_dim * 2,
-                                               dtype=torch.bfloat16,
+        self.k_cache = DeepseekV32IndexerCache(head_dim=self.head_dim + 4,
+                                               dtype=torch.uint8,
                                                prefix=f"{prefix}.k_cache",
                                                cache_config=cache_config)
+        self.max_model_len = vllm_config.model_config.max_model_len
+        self.prefix = prefix
 
     def forward(self, hidden_states: torch.Tensor, qr: torch.Tensor, positions,
                 rotary_emb) -> torch.Tensor:
@@ -680,80 +632,130 @@ class Indexer(nn.Module):
         q = rotate_activation(q)
         k = rotate_activation(k)
 
+        # we only quant q here since k quant is fused with cache insertion
         from vllm.utils.tile_lang_kernels import act_quant
         q_fp8, q_scale = act_quant(q, self.quant_block_size, self.scale_fmt)
-        k_fp8, k_scale = act_quant(k, self.quant_block_size, self.scale_fmt)
-        # k_cache_entry = torch.cat([k_fp8, k_scale], dim=-1)
+
         weights, _ = self.weights_proj(hidden_states)
         weights = weights.unsqueeze(
-            -1) * self.softmax_scale * self.n_head**-0.5
+            -1) * q_scale * self.softmax_scale * self.n_head**-0.5
+        weights = weights.squeeze(-1)
 
         # careful! this will be None in dummy run
         attn_metadata = get_forward_context().attn_metadata
         if isinstance(attn_metadata, dict):
-            k_cache_attn_metadata = attn_metadata[self.k_cache.prefix]
-            slot_mapping = k_cache_attn_metadata.slot_mapping
+            attn_metadata = attn_metadata[self.k_cache.prefix]
+            assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
+            slot_mapping = attn_metadata.slot_mapping
+            has_decode = attn_metadata.num_decodes > 0
+            has_prefill = attn_metadata.num_prefills > 0
+            num_decode_tokens = attn_metadata.num_decode_tokens
 
-            query_start_loc = k_cache_attn_metadata.query_start_loc
-            seq_lens = k_cache_attn_metadata.seq_lens
-            batch_size = seq_lens.size(0)
-            cu_seq_lens = torch.empty((batch_size + 1),
-                                      dtype=torch.int32,
-                                      device=q.device)
-            cu_seq_lens[0] = 0
-            cu_seq_lens[1:] = seq_lens.cumsum(dim=0).to(dtype=torch.int32)
-            #TODO (zyongye) use quant type
             kv_cache = self.k_cache.kv_cache[0]
-
-            # FIXME (zyongye) right now k_pe cache is a dummy tensor,
-            # we need to change kv cache to only store k cache
-            scale = torch.tensor(1, dtype=torch.float32, device=k.device)
-            ops.concat_and_cache_mla(
+            indexer_k_quant_and_cache(
                 k,
-                k.clone(),
                 kv_cache,
                 slot_mapping,
-                "auto",
-                scale,
+                self.quant_block_size,
+                self.scale_fmt,
             )
 
-            flattened_kv = torch.empty((cu_seq_lens[-1], self.head_dim * 2),
-                                       device=k.device,
-                                       dtype=torch.bfloat16)
-            ops.cp_gather_cache(
-                kv_cache,
-                flattened_kv,
-                k_cache_attn_metadata.block_table,
-                cu_seq_lens,
-                batch_size,
-            )
-            # FIXME (zyongye) put this function before ops.cp_gather_cache would
-            # cause cu_seqlen_ks been changed, this need investigation later
-            cu_seqlen_ks, cu_seqlen_ke = kv_spans_from_batches(
-                query_start_loc, seq_lens)
-            logits, _ = ref_fp8_mqa_logits(
-                q,
-                flattened_kv[..., :self.head_dim],
-                weights,
-                cu_seqlen_ks,
-                cu_seqlen_ke,
-            )
-            topk_indices = logits.topk(min(self.topk_tokens, logits.shape[-1]),
-                                       dim=-1)[1]
-            topk_indices -= cu_seqlen_ks[:, None]
-            mask_lo = topk_indices >= 0
-            mask_hi = topk_indices < cu_seqlen_ke[:, None] - cu_seqlen_ks[:,
-                                                                          None]
-            mask = mask_lo & mask_hi
-            topk_indices = topk_indices.masked_fill(~mask, -1)
             topk_indices_buffer = torch.full(
-                (logits.shape[0], self.topk_tokens),
+                (hidden_states.shape[0], self.topk_tokens),
                 -1,
                 dtype=torch.int32,
-                device=logits.device)
-            topk_indices_buffer[:, :topk_indices.shape[-1]] = topk_indices.to(
-                dtype=torch.int32)
-            return topk_indices_buffer
+                device=hidden_states.device)
+            if has_prefill:
+                prefill_metadata = attn_metadata.prefill
+                num_prefills = attn_metadata.num_prefills
+                flattened_kv = torch.empty(
+                    [prefill_metadata.total_seq_lens, self.head_dim + 4],
+                    device=k.device,
+                    dtype=torch.uint8)
+                ops.cp_gather_cache(
+                    kv_cache,
+                    flattened_kv,
+                    prefill_metadata.block_table,
+                    prefill_metadata.cu_seq_lens,
+                    num_prefills,
+                )
+                # TODO: the memory footprint here can be optimized
+                k_fp8 = flattened_kv[..., :self.head_dim].view(
+                    torch.float8_e4m3fn).contiguous()
+                k_scale = flattened_kv[..., self.head_dim:].view(
+                    torch.float32).contiguous()
+                cu_seqlen_ks = prefill_metadata.cu_seqlen_ks
+                cu_seqlen_ke = prefill_metadata.cu_seqlen_ke
+                logits = fp8_mqa_logits(
+                    q_fp8[num_decode_tokens:],
+                    (k_fp8, k_scale),
+                    weights[num_decode_tokens:],
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
+                )
+                topk_indices = logits.topk(min(self.topk_tokens,
+                                               logits.shape[-1]),
+                                           dim=-1)[1]
+                topk_indices -= cu_seqlen_ks[:, None]
+                mask_lo = topk_indices >= 0
+                mask_hi = topk_indices < cu_seqlen_ke[:,
+                                                      None] - cu_seqlen_ks[:,
+                                                                           None]
+                mask = mask_lo & mask_hi
+                topk_indices = topk_indices.masked_fill(~mask, -1)
+                topk_indices_buffer[num_decode_tokens:, :topk_indices.
+                                    shape[-1]] = topk_indices.to(
+                                        dtype=torch.int32)
+            if has_decode:
+                decode_metadata = attn_metadata.decode
+                # kv_cache size requirement [num_block, block_size, n_head, head_dim],
+                # we only have [num_block, block_size, head_dim],
+                kv_cache = kv_cache.unsqueeze(-2)
+                logits = fp8_paged_mqa_logits(
+                    q_fp8[:num_decode_tokens].unsqueeze(1),
+                    kv_cache,
+                    weights[:num_decode_tokens],
+                    decode_metadata.seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len=self.max_model_len,
+                )
+                positions = torch.arange(self.max_model_len,
+                                         device="cuda").unsqueeze(
+                                             0)  # [1, max_model_len]
+                next_n_offset = torch.arange(num_decode_tokens, device="cuda")
+                # NOTE(Chen): not true for spec decode
+                # [1, max_model_len] < [num_decode_tokens, 1] -> [num_decode_tokens, max_model_len]
+                mask = positions <= (decode_metadata.seq_lens - 1 +
+                                     next_n_offset).unsqueeze(1)
+                logits = logits.masked_fill(~mask, float("-inf"))
+                topk_indices = logits.topk(
+                    min(self.topk_tokens, logits.shape[-1]), dim=-1)[1].to(
+                        torch.int32)  # [num_decode_tokens, topk_tokens]
+                topk_indices[topk_indices >=
+                             decode_metadata.seq_lens[:, None]] = -1
+                topk_indices_buffer[:num_decode_tokens, :topk_indices.
+                                    shape[-1]] = topk_indices.to(
+                                        dtype=torch.int32)
+        else:
+            # profile run
+            from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
+            total_seq_lens = get_max_prefill_buffer_size(self.vllm_config)
+            # NOTE(Chen): create the max possible flattened_kv. So that
+            # profile_run can get correct memory usage.
+            _flattened_kv = torch.empty([total_seq_lens, self.head_dim + 4],
+                                        device=k.device,
+                                        dtype=torch.uint8)
+            _k_fp8 = _flattened_kv[..., :self.head_dim].view(
+                torch.float8_e4m3fn).contiguous()
+            _k_scale = _flattened_kv[..., self.head_dim:].view(
+                torch.float32).contiguous()
+            topk_indices_buffer = torch.full(
+                (hidden_states.shape[0], self.topk_tokens),
+                -1,
+                dtype=torch.int32,
+                device=hidden_states.device)
+        return topk_indices_buffer
 
 
 class DeepseekV2MLAAttention(nn.Module):
@@ -766,6 +768,7 @@ class DeepseekV2MLAAttention(nn.Module):
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         config: Union[DeepseekV2Config, DeepseekV3Config],
         hidden_size: int,
         num_heads: int,
@@ -865,8 +868,8 @@ class DeepseekV2MLAAttention(nn.Module):
         ) and "attn_index" in config.attn_module_list_cfg[0]
 
         if self.is_v32:
-            self.indexer = Indexer(config, hidden_size, q_lora_rank,
-                                   quant_config, cache_config,
+            self.indexer = Indexer(vllm_config, config, hidden_size,
+                                   q_lora_rank, quant_config, cache_config,
                                    f"{prefix}.indexer")
         else:
             self.indexer = None
@@ -937,6 +940,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         else:
             attn_cls = DeepseekV2Attention
         self.self_attn = attn_cls(
+            vllm_config=vllm_config,
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
