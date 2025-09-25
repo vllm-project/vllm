@@ -804,14 +804,16 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
+    proc_manager_poll = zmq.Poller()
     if proc_manager is not None:
         for sentinel in proc_manager.sentinels():
-            poller.register(sentinel, zmq.POLLIN)
+            proc_manager_poll.register(sentinel, zmq.POLLIN)
     if coord_process is not None:
         poller.register(coord_process.sentinel, zmq.POLLIN)
     while any(conn_pending) or any(start_pending):
         events = poller.poll(STARTUP_POLL_PERIOD_MS)
-        if not events:
+        proc_manager_events = proc_manager_poll.poll(STARTUP_POLL_PERIOD_MS)
+        if not events and not proc_manager_events:
             if any(conn_pending):
                 logger.debug(
                     "Waiting for %d local, %d remote core engine proc(s) to connect.",
@@ -824,15 +826,12 @@ def wait_for_engine_startup(
                 )
             continue
         if len(events) > 1 or events[0][0] != handshake_socket:
-            # One of the local core processes exited.
-            finished = proc_manager.finished_procs() if proc_manager else {}
+            # coord_process processes exited.
             if coord_process is not None and coord_process.exitcode is not None:
-                finished[coord_process.name] = coord_process.exitcode
-            raise RuntimeError(
-                "Engine core initialization failed. "
-                "See root cause above. "
-                f"Failed core proc(s): {finished}"
-            )
+                finished = {coord_process.name: coord_process.exitcode}
+            raise RuntimeError("Engine core initialization failed. "
+                               "See root cause above. "
+                               f"Failed core proc(s): {finished}")
 
         # Receive HELLO and READY messages from the input socket.
         eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
@@ -924,6 +923,14 @@ def wait_for_engine_startup(
 
             start_pending[0 if local else 1] -= 1
             engine.state = CoreEngineState.READY
+        elif status == "FAILED" and engine.state == CoreEngineState.CONNECTED:
+            # One of the local core processes exited.
+            finished = proc_manager.finished_procs() if proc_manager else {}
+            raise RuntimeError("Engine core initialization failed. "
+                               "See root cause above. "
+                               f"Failed core proc(s): {finished}. "
+                               "Recived error message from failed "
+                               f"engine {eng_index}: {msg['error_msg']}")
         else:
             raise RuntimeError(
                 f"Unexpected {status} message for "
@@ -931,6 +938,12 @@ def wait_for_engine_startup(
                 f"{eng_index} in {engine.state} state."
             )
 
+        if len(proc_manager_events) > 1:
+            # One or more local core processes exited but we didn't receive any msg.
+            finished = proc_manager.finished_procs() if proc_manager else {}
+            raise RuntimeError("Engine core initialization failed. "
+                               "See root cause above. "
+                               f"Failed core proc(s): {finished}")
         logger.debug(
             "%s from %s core engine process %s.",
             status,

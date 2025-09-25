@@ -634,18 +634,36 @@ class EngineCoreProc(EngineCore):
             vllm_config,
             vllm_config.parallel_config,
         )
+        def handle_err(zmq_socket: zmq.Socket, err: Exception):
+            if zmq_socket is not None:
+                # Send failure message to front-end.
+                logger.exception("EngineCore failed to start.")
+                zmq_socket.send(msgspec.msgpack.encode({
+                    "status": "FAILED",
+                    "local": is_local,
+                    "headless": headless,
+                    "error_msg": str(err),
+                }))
         if client_handshake_address is None:
-            with handshake as addresses:
-                yield addresses
+            with handshake as (addresses, zmq_socket):
+                try:
+                    yield addresses
+                except Exception as e:
+                    handle_err(zmq_socket, e)
+                    raise
         else:
             assert local_client
             local_handshake = self._perform_handshake(
                 input_ctx, client_handshake_address, identity, True, False, vllm_config
             )
-            with handshake as addresses, local_handshake as client_addresses:
+            with handshake as (addresses, _), local_handshake as (client_addresses, zmq_socket):
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
-                yield addresses
+                try:
+                    yield addresses
+                except Exception as e:
+                    handle_err(zmq_socket, e)
+                    raise
 
         # Update config which may have changed from the handshake
         vllm_config.__post_init__()
@@ -660,20 +678,18 @@ class EngineCoreProc(EngineCore):
         headless: bool,
         vllm_config: VllmConfig,
         parallel_config_to_update: Optional[ParallelConfig] = None,
-    ) -> Generator[EngineZmqAddresses, None, None]:
-        with make_zmq_socket(
-            ctx,
-            handshake_address,
-            zmq.DEALER,
-            identity=identity,
-            linger=5000,
-            bind=False,
-        ) as handshake_socket:
+    ) -> Generator[tuple[EngineZmqAddresses, zmq.Socket], None, None]:
+        with make_zmq_socket(ctx,
+                             handshake_address,
+                             zmq.DEALER,
+                             identity=identity,
+                             linger=5000,
+                             bind=False) as handshake_socket:
             # Register engine with front-end.
-            addresses = self.startup_handshake(
-                handshake_socket, local_client, headless, parallel_config_to_update
-            )
-            yield addresses
+            addresses = self.startup_handshake(handshake_socket, local_client,
+                                               headless,
+                                               parallel_config_to_update)
+            yield addresses, handshake_socket
 
             # Send ready message.
             num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
