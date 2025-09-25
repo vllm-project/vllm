@@ -85,9 +85,10 @@ which are treated as audio embeddings;
 these are directly passed to the model without HF processing.
 """
 
-ModalityData: TypeAlias = Union[_T, list[_T]]
+ModalityData: TypeAlias = Union[_T, list[Optional[_T]], None]
 """
-Either a single data item, or a list of data items.
+Either a single data item, or a list of data items. Can only be None if UUID
+is provided.
 
 The number of data items allowed per modality is restricted by
 `--limit-mm-per-prompt`.
@@ -568,8 +569,8 @@ class MultiModalFieldConfig:
         Args:
             modality: The modality of the multi-modal item that uses this
                 keyword argument.
-            slices: For each multi-modal item, the size of the slice that
-                is used to extract the data corresponding to it.
+            size_per_item: For each multi-modal item, the size of the slice
+                that is used to extract the data corresponding to it.
             dim: The dimension to slice, default to 0.
 
         Example:
@@ -589,7 +590,7 @@ class MultiModalFieldConfig:
 
         ```
         Given:
-            slices: [3, 4, 2]
+            size_per_item: [3, 4, 2]
             dim: 1
 
         Input:

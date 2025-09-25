@@ -158,36 +158,36 @@ class OutlinesGrammar(StructuredOutputGrammar):
 
 
 def validate_structured_output_request_outlines(params: SamplingParams):
-    if params.guided_decoding is None:
+    if params.structured_outputs is None:
         return
 
-    gd_params = params.guided_decoding
+    so_params = params.structured_outputs
 
-    if gd_params.regex:
-        validate_regex_is_buildable(gd_params.regex)
-    elif gd_params.json:
-        if isinstance(gd_params.json, str):
+    if so_params.regex:
+        validate_regex_is_buildable(so_params.regex)
+    elif so_params.json:
+        if isinstance(so_params.json, str):
             try:
                 # make sure schema is valid json
-                json.loads(gd_params.json)
-                schema = gd_params.json
+                json.loads(so_params.json)
+                schema = so_params.json
             except json.JSONDecodeError as e:
                 raise ValueError("Invalid JSON grammar specification.") from e
         else:
             try:
-                schema = json.dumps(gd_params.json)
+                schema = json.dumps(so_params.json)
             except Exception as e:
                 raise ValueError(
-                    f"Error serializing guided decoding jsonschema: {e}"
+                    f"Error serializing structured outputs jsonschema: {e}"
                 ) from e
         pattern = json_schema.build_regex_from_schema(schema)
         validate_regex_is_buildable(pattern)
-    elif gd_params.choice:
-        choices = [regex_escape(str(choice)) for choice in gd_params.choice]
+    elif so_params.choice:
+        choices = [regex_escape(str(choice)) for choice in so_params.choice]
         regex = "(" + "|".join(choices) + ")"
         validate_regex_is_buildable(regex)
-    elif gd_params.grammar:
-        raise ValueError("Outlines guided decoding backend "
+    elif so_params.grammar:
+        raise ValueError("Outlines structured outputs backend "
                          "does not support grammar specifications")
 
 
@@ -306,7 +306,7 @@ def validate_regex_is_buildable(pattern: str) -> None:
         _check_unsupported(parsed)
     except ValueError as e:
         raise ValueError(
-            f"Regex uses unsupported feature for guided decoding: {e}. "
+            f"Regex uses unsupported feature for structured outputs: {e}. "
             "Only basic matching constructs are supported—lookarounds, "
             "backreferences, and unicode boundaries are not.") from e
 
@@ -315,6 +315,6 @@ def validate_regex_is_buildable(pattern: str) -> None:
             "Regex does not have a anchored universal start state"
             "This means that the Regex uses anchors (^) or look-arounds "
             "in a way which requires context before any token is matched."
-            "Guided decoding needs regexes that can match without needing "
+            "structured outputs needs regexes that can match without needing "
             "that context. Try rewriting the pattern without using these "
             f"constructs. Pattern:\n{pattern}")

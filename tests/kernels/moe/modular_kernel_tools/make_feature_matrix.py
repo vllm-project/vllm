@@ -10,7 +10,8 @@ import torch
 from tqdm import tqdm
 
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FUSED_MOE_UNQUANTIZED_CONFIG)
 from vllm.platforms import current_platform
 
 from .common import (Config, RankTensors, WeightTensors, reference_moe_impl,
@@ -86,7 +87,7 @@ def make_feature_matrix(csv_file_path: str):
         quant_config_dict = config_dict['quant_config']
         del config_dict['quant_config']
         if quant_config_dict is None:
-            quant_config = FusedMoEQuantConfig(None)
+            quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
             quant_config_dict = asdict(quant_config)
 
         config_dict |= quant_config_dict
