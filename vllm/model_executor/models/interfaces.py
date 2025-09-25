@@ -130,10 +130,10 @@ class SupportsMultiModalPruning(Protocol):
         mrope_positions before we feed it to LLM.
 
         Args:
-            input_ids: (N,) All input tokens of the prompt (Containing
-                entire sequence).
-            multimodal_embeddings: Tuple of multimodal embeddings (
-            That fits into the prefill chunk that is being processed).
+            input_ids: (N,) All input tokens of the prompt containing
+                entire sequence.
+            multimodal_embeddings: Tuple of multimodal embeddings that
+                fits into the prefill chunk that is being processed.
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
             num_computed_tokens: A number of computed tokens so far.
