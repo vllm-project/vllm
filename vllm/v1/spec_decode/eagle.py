@@ -284,7 +284,10 @@ class SpecDecodeBaseProposer:
                 f"{self.allowed_attn_types}")
 
         # Generate the remaining draft tokens.
-        draft_token_ids_list = [draft_token_ids]
+        if self.drop_first_drafted_tokens:
+            draft_token_ids_list = [next_token_ids]
+        else:
+            draft_token_ids_list = [draft_token_ids]
 
         if self.use_cuda_graph and \
                 batch_size <= self.cudagraph_batch_sizes[-1]:
