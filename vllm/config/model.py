@@ -830,6 +830,23 @@ class ModelConfig:
 
         return convert_type
 
+    def _get_default_pooling_task(
+        self,
+        architectures: list[str],
+    ) -> Literal["embed", "classify", "reward"]:
+        if self.registry.is_cross_encoder_model(architectures, self):
+            return "classify"
+
+        for arch in architectures:
+            match = try_match_architecture_defaults(arch,
+                                                    runner_type="pooling")
+            if match:
+                _, (_, convert_type) = match
+                assert convert_type != "none"
+                return convert_type
+
+        return "embed"
+
     def _parse_quant_hf_config(self, hf_config: PretrainedConfig):
         quant_cfg = getattr(hf_config, "quantization_config", None)
         if quant_cfg is None:
