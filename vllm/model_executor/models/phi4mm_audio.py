@@ -551,12 +551,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                                                   self.chunk_size,
                                                   self.left_chunk)
 
-        if xs_pad.is_cuda:
-            enc_streaming_mask = enc_streaming_mask.cuda()
-            xs_pad = xs_pad.cuda()
-        if xs_pad.is_xpu:
-            enc_streaming_mask = enc_streaming_mask.xpu()
-            xs_pad = xs_pad.xpu()
+        if xs_pad.is_cuda or xs_pad.is_xpu:
+            enc_streaming_mask = enc_streaming_mask.to(xs_pad.device)
 
         input_tensor = xs_pad
         input_tensor, masks = self._forward_embeddings_core(
@@ -573,10 +569,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         if chunk_size_nc is not None:
             enc_streaming_mask_nc = self._streaming_mask(
                 seq_len, batch_size, chunk_size_nc, left_chunk_nc)
-            if xs_pad.is_cuda:
-                enc_streaming_mask_nc = enc_streaming_mask_nc.cuda()
-            if xs_pad.is_xpu:
-                enc_streaming_mask_nc = enc_streaming_mask_nc.xpu()
+            if xs_pad.is_cuda or xs_pad.is_xpu:
+                enc_streaming_mask_nc = enc_streaming_mask_nc.to(xs_pad.device)
             if masks is not None:
                 hs_mask_nc = masks & enc_streaming_mask_nc
             else:
