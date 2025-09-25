@@ -30,7 +30,7 @@ eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 def _create_proposer(
     method: str,
     num_speculative_tokens: int,
-    speculative_token_tree: Optional[list[tuple[int]]] = None,
+    speculative_token_tree: Optional[list[tuple[int, ...]]] = None,
 ) -> EagleProposer:
     model_config = ModelConfig(model=model_dir,
                                runner="generate",

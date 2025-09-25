@@ -101,7 +101,7 @@ class VLMTestInfo(NamedTuple):
     # Function for converting ImageAssets to image embeddings;
     # We need to define this explicitly for embedding tests
     convert_assets_to_embeddings: Optional[Callable[[ImageTestAssets],
-                                                    torch.Tensor]] = None
+                                                    list[torch.Tensor]]] = None
 
     # Exposed options for vLLM runner; we change these in a several tests,
     # but the defaults are derived from VllmRunner & the engine defaults
@@ -137,12 +137,12 @@ class VLMTestInfo(NamedTuple):
     # Default expandable params per test; these defaults can be overridden in
     # instances of this object; the complete set of test cases for the model
     # is all combinations of .models + all fields below
-    max_tokens: Union[int, tuple[int]] = 128
-    num_logprobs: Union[int, tuple[int]] = 5
-    dtype: Union[str, Union[list[str], tuple[str, ...]]] = "auto"
-    distributed_executor_backend: Optional[Union[str, Iterable[str]]] = None
+    max_tokens: int = 128
+    num_logprobs: int = 5
+    dtype: str = "auto"
+    distributed_executor_backend: Optional[str] = None
     # Only expanded in video tests
-    num_video_frames: Union[int, tuple[int]] = 16
+    num_video_frames: int = 16
 
     # Fixed image sizes / image size factors; most tests use image_size_factors
     # The values provided for these two fields will be stacked and expanded
