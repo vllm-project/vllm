@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
@@ -864,7 +865,8 @@ class EagleProposer:
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
         target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
+            get_layers_from_vllm_config(self.vllm_config,
+                                        AttentionLayerBase).keys())
         # FIXME: support hybrid kv for draft model
         target_indexer_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config,
@@ -876,7 +878,8 @@ class EagleProposer:
                                    model_config=draft_model_config)
 
         draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
+            get_layers_from_vllm_config(self.vllm_config,
+                                        AttentionLayerBase).keys() -
             target_attn_layer_names)
         indexer_layers = get_layers_from_vllm_config(self.vllm_config,
                                                      DeepseekV32IndexerCache)

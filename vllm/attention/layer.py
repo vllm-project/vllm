@@ -559,9 +559,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
+            calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
             block_size = 16
+            calculate_kv_scales = False
         self.kv_cache_dtype = kv_cache_dtype
 
         dtype = torch.get_default_dtype()
@@ -605,6 +607,35 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             ).parallel_config.pipeline_parallel_size)
         ]
 
+        # Align with Attention's scale attributes so MLA backends can access
+        # scaling fields via the shared AttentionLayer protocol.
+        # These are initialized to 1.0 and can be optionally updated by
+        # calc_kv_scales() if/when MLA adds dynamic scale calculation.
+        self.calculate_kv_scales = calculate_kv_scales
+        self._k_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._v_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._q_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
+
+        # Host-side mirrors used by some attention backends
+        self._q_scale_float = 1.0
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
+        self._o_scale_float: Optional[float] = None
+
+        # Optional ranges for dynamic scale calculation (kept for parity with
+        # Attention; not strictly required unless calculate_kv_scales is used).
+        try:
+            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+        except torch.cuda.OutOfMemoryError:
+            # Keep defaults if allocation fails; not critical for init.
+            pass
+
     def forward(
         self,
         q: torch.Tensor,
@@ -618,6 +649,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+
+            # Mirror Attention.forward scale calculation path
+            if self.calculate_kv_scales and getattr(attn_metadata,
+                                                    "enable_kv_scales_calculation",
+                                                    False):
+                self.calc_kv_scales(q, kv_c_normed, k_pe)
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.zeros(output_shape,
@@ -648,12 +685,47 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 return output
             else:
+                # We can still access forward context to check calculation flag
+                if self.calculate_kv_scales:
+                    forward_context = get_forward_context()
+                    attn_metadata = forward_context.attn_metadata
+                    if isinstance(attn_metadata, dict):
+                        attn_metadata = attn_metadata[self.layer_name]
+                    if getattr(attn_metadata, "enable_kv_scales_calculation",
+                               False):
+                        self.calc_kv_scales(q, kv_c_normed, k_pe)
                 return torch.ops.vllm.unified_mla_attention(
                     q,
                     kv_c_normed,
                     k_pe,
                     self.layer_name,
                 )
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if hasattr(self.impl, "process_weights_after_loading"):
+            self.impl.process_weights_after_loading(act_dtype)
+
+    def calc_kv_scales(self, q: torch.Tensor, kv_c_normed: torch.Tensor,
+                       k_pe: torch.Tensor) -> None:
+        """Optional scale calculation for MLA inputs.
+
+        Mirrors Attention.calc_kv_scales but adapts to MLA inputs. Not all
+        MLA backends require this; kept for protocol completeness.
+        """
+        # Use safe defaults if ranges are not present
+        q_range = getattr(self, "q_range", torch.tensor(1.0))
+        k_range = getattr(self, "k_range", torch.tensor(1.0))
+        v_range = getattr(self, "v_range", torch.tensor(1.0))
+
+        self._q_scale.copy_(torch.abs(q).max() / q_range)
+        # kv_c_normed is the compressed KV representation; use it for k/v
+        kv_abs_max = torch.abs(kv_c_normed).max()
+        self._k_scale.copy_(kv_abs_max / k_range)
+        self._v_scale.copy_(kv_abs_max / v_range)
+        self._q_scale_float = self._q_scale.item()
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
+        self.calculate_kv_scales = False
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend

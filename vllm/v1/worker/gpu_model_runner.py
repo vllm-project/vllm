@@ -19,6 +19,7 @@ from typing_extensions import TypeAlias
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
+from vllm.attention.layer import MLAAttention
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
@@ -4218,6 +4219,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
+
+        # Include MLA attention layers which are not instances of `Attention`.
+        # These layers still need KV cache specs; treat them as full attention
+        # with `use_mla=True` and a single KV head.
+        mla_layers = get_layers_from_vllm_config(self.vllm_config,
+                                                 MLAAttention)
+        for layer_name, mla_module in mla_layers.items():
+            if layer_name in kv_cache_spec:
+                continue
+            kv_cache_spec[layer_name] = FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=mla_module.head_size,
+                dtype=self.kv_cache_dtype,
+                use_mla=True)
 
         mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
         if len(mamba_layers) > 0:
