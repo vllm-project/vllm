@@ -101,15 +101,15 @@ def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
 def parse_limit_mm_per_prompt(val: str):
     """Parse limit-mm-per-prompt with support for configurable options."""
     import json
-    from vllm.config.multimodal import (
-        VideoDummyOptions, ImageDummyOptions, AudioDummyOptions,
-        BaseModalityOptions, LimitPerPromptType
-    )
+
+    from vllm.config.multimodal import (AudioDummyOptions, BaseModalityOptions,
+                                        ImageDummyOptions, VideoDummyOptions)
 
     try:
         parsed = json.loads(val)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON format for --limit-mm-per-prompt: {e}")
+        raise ValueError(
+            f"Invalid JSON format for --limit-mm-per-prompt: {e}") from e
 
     if not isinstance(parsed, dict):
         raise ValueError("--limit-mm-per-prompt must be a JSON object")
@@ -132,10 +132,11 @@ def parse_limit_mm_per_prompt(val: str):
                     # Unknown modality, use base options
                     result[modality] = BaseModalityOptions(**options)
             except TypeError as e:
-                raise ValueError(f"Invalid options for {modality}: {e}")
+                raise ValueError(f"Invalid options for {modality}: {e}") from e
         else:
-            raise ValueError(f"Invalid options type for {modality}: {type(options)}. "
-                           f"Must be int or dict.")
+            raise ValueError(
+                f"Invalid options type for {modality}: {type(options)}. "
+                f"Must be int or dict.")
 
     return result
 
@@ -825,14 +826,18 @@ class EngineArgs:
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
-        # Override the parser for limit_per_prompt to support configurable options
-        multimodal_kwargs["limit_per_prompt"]["type"] = parse_limit_mm_per_prompt
+        # Override the parser for limit_per_prompt to support configurable
+        # options
+        multimodal_kwargs["limit_per_prompt"][
+            "type"] = parse_limit_mm_per_prompt
         multimodal_kwargs["limit_per_prompt"]["help"] += (
-            "\n\nSupports both legacy count-only format and configurable options format:"
+            "\n\nSupports both legacy count-only format and "
+            "configurable options format:"
             "\n  Legacy: '{\"image\": 5, \"video\": 1}'"
-            "\n  Configurable: '{\"video\": {\"count\": 1, \"num_frames\": 32}}'"
-            "\n  Mixed: '{\"image\": 5, \"video\": {\"count\": 1, \"num_frames\": 32}}'"
-        )
+            "\n  Configurable: '{\"video\": {\"count\": 1, "
+            "\"num_frames\": 32}}'"
+            "\n  Mixed: '{\"image\": 5, \"video\": {\"count\": 1, "
+            "\"num_frames\": 32}}'")
         multimodal_group = parser.add_argument_group(
             title="MultiModalConfig",
             description=MultiModalConfig.__doc__,

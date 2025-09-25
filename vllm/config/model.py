@@ -16,8 +16,8 @@ from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
 import vllm.envs as envs
-from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
-                                    MultiModalConfig, LimitPerPromptType)
+from vllm.config.multimodal import (LimitPerPromptType, MMCacheType,
+                                    MMEncoderTPMode, MultiModalConfig)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.utils import assert_hashable, config
 from vllm.logger import init_logger

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -11,8 +10,7 @@ import numpy.typing as npt
 from PIL import Image
 
 import vllm.envs as envs
-from vllm.config.multimodal import (ModalityDummyOptions, VideoDummyOptions,
-                                    ImageDummyOptions, AudioDummyOptions)
+from vllm.config.multimodal import ModalityDummyOptions
 from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -102,7 +100,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
 
         # Use configurable options to guide dummy data generation if provided
         if mm_options:
-            dummy_mm_data = self._get_configurable_dummy_data(seq_len, mm_counts, mm_options)
+            dummy_mm_data = self._get_configurable_dummy_data(
+                seq_len, mm_counts, mm_options)
         else:
             dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
 
@@ -119,7 +118,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         mm_options: Mapping[str, ModalityDummyOptions],
     ) -> MultiModalDataDict:
         """
-        Generate dummy data with configurable options using parameter interception.
+        Generate dummy data with configurable options using parameter
+        interception.
         """
         dummy_data = {}
 
@@ -140,9 +140,12 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                 image_opts = mm_options["image"]
                 if hasattr(image_opts, 'max_size') and image_opts.max_size:
                     target_width, target_height = image_opts.max_size
-                elif hasattr(image_opts, 'width') and hasattr(image_opts, 'height'):
-                    if image_opts.width: target_width = image_opts.width
-                    if image_opts.height: target_height = image_opts.height
+                elif hasattr(image_opts, 'width') and hasattr(
+                        image_opts, 'height'):
+                    if image_opts.width:
+                        target_width = image_opts.width
+                    if image_opts.height:
+                        target_height = image_opts.height
 
             # Simple bounds checking
             target_width = max(target_width, 1)
@@ -152,7 +155,9 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                 target_height = min(target_height, default_height)
 
             dummy_data["image"] = self._get_dummy_images(
-                width=target_width, height=target_height, num_images=mm_counts["image"])
+                width=target_width,
+                height=target_height,
+                num_images=mm_counts["image"])
 
         # Handle videos
         if "video" in mm_counts and mm_counts["video"] > 0:
@@ -164,16 +169,19 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             except (AttributeError, Exception):
                 default_width, default_height = 224, 224
                 vid_dims_known = False
-                
+
             vid_frames_known = True
             try:
-                default_frames = self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+                default_frames = self.info.get_num_frames_with_most_features(
+                    seq_len, mm_counts)
             except (AttributeError, Exception):
                 default_frames = 16
                 vid_frames_known = False
 
             # Override with configurable options if provided
-            target_width, target_height, target_frames = default_width, default_height, default_frames
+            target_width, target_height, target_frames = (default_width,
+                                                          default_height,
+                                                          default_frames)
             if "video" in mm_options:
                 video_opts = mm_options["video"]
                 if hasattr(video_opts, 'num_frames') and video_opts.num_frames:
@@ -194,8 +202,10 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                 target_frames = min(target_frames, default_frames)
 
             dummy_data["video"] = self._get_dummy_videos(
-                width=target_width, height=target_height,
-                num_frames=target_frames, num_videos=mm_counts["video"])
+                width=target_width,
+                height=target_height,
+                num_frames=target_frames,
+                num_videos=mm_counts["video"])
 
         # Handle audio
         if "audio" in mm_counts and mm_counts["audio"] > 0:
@@ -204,8 +214,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                 feature_extractor = self.info.get_feature_extractor()
                 default_sample_rate = int(feature_extractor.sampling_rate)
                 # Most audio processors expose chunk_length in seconds
-                default_duration_s = float(getattr(feature_extractor,
-                                                   "chunk_length", 1))
+                default_duration_s = float(
+                    getattr(feature_extractor, "chunk_length", 1))
             except (AttributeError, Exception):
                 default_sample_rate = 16000
                 default_duration_s = 1.0
@@ -216,7 +226,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             target_channels = 1
             if mm_options and "audio" in mm_options:
                 audio_opts = mm_options["audio"]
-                if hasattr(audio_opts, 'sample_rate') and audio_opts.sample_rate:
+                if hasattr(audio_opts,
+                           'sample_rate') and audio_opts.sample_rate:
                     target_sample_rate = int(audio_opts.sample_rate)
                 if hasattr(audio_opts, 'duration') and audio_opts.duration:
                     target_duration_s = float(audio_opts.duration)
@@ -224,8 +235,10 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                     target_channels = int(audio_opts.channels)
 
             # Compute effective profiling length
-            length_per_channel = max(1, int(target_sample_rate * target_duration_s))
-            effective_length = max(1, length_per_channel * max(1, target_channels))
+            length_per_channel = max(
+                1, int(target_sample_rate * target_duration_s))
+            effective_length = max(
+                1, length_per_channel * max(1, target_channels))
 
             # Return arrays (consistent with legacy builders)
             audios = self._get_dummy_audios(length=effective_length,

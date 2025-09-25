@@ -3,9 +3,9 @@
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import field
 from dataclasses import dataclass as standard_dataclass
-from typing import Any, Dict, Literal, Optional, Union
+from dataclasses import field
+from typing import Any, Literal, Optional, Union
 
 from pydantic.dataclasses import dataclass
 
@@ -75,17 +75,13 @@ class AudioDummyOptions(BaseModalityOptions):
 
 
 # Union type for all supported option types
-ModalityDummyOptions = Union[
-    BaseModalityOptions,
-    VideoDummyOptions,
-    ImageDummyOptions,
-    AudioDummyOptions
-]
+ModalityDummyOptions = Union[BaseModalityOptions, VideoDummyOptions,
+                             ImageDummyOptions, AudioDummyOptions]
 
 # Main configuration type supporting both legacy and configurable formats
 LimitPerPromptType = Union[
-    Dict[str, int],  # Legacy: {"video": 1, "image": 5}
-    Dict[str, Union[int, ModalityDummyOptions]]  # Configurable format
+    dict[str, int],  # Legacy: {"video": 1, "image": 5}
+    dict[str, Union[int, ModalityDummyOptions]]  # Configurable format
 ]
 
 MMEncoderTPMode = Literal["weights", "data"]
@@ -98,14 +94,16 @@ class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
     limit_per_prompt: LimitPerPromptType = field(default_factory=dict)
-    """The maximum number of input items and options allowed per prompt for each modality.
+    """The maximum number of input items and options allowed per 
+        prompt for each modality.
     Defaults to 1 (V0) or 999 (V1) for each modality.
 
     Legacy format (count only):
         {"image": 16, "video": 2}
 
     Configurable format (with options):
-        {"video": {"count": 1, "num_frames": 32}, "image": {"count": 5, "max_size": [512, 512]}}
+        {"video": {"count": 1, "num_frames": 32}, 
+        "image": {"count": 5, "max_size": [512, 512]}}
 
     Mixed format (combining both):
         {"image": 16, "video": {"count": 1, "num_frames": 32}}
@@ -201,9 +199,11 @@ class MultiModalConfig:
         elif isinstance(limit_data, BaseModalityOptions):
             return limit_data.count
         else:
-            raise ValueError(f"Invalid limit data type for {modality}: {type(limit_data)}")
+            raise ValueError(
+                f"Invalid limit data type for {modality}: {type(limit_data)}")
 
-    def get_dummy_options(self, modality: str) -> Optional[ModalityDummyOptions]:
+    def get_dummy_options(self,
+                          modality: str) -> Optional[ModalityDummyOptions]:
         """
         Get the configurable dummy data options for a modality.
         Returns None if no configurable options are configured.
@@ -211,7 +211,7 @@ class MultiModalConfig:
         limit_data = self.limit_per_prompt.get(modality)
 
         if isinstance(limit_data, (BaseModalityOptions, VideoDummyOptions,
-                                  ImageDummyOptions, AudioDummyOptions)):
+                                   ImageDummyOptions, AudioDummyOptions)):
             return limit_data
         elif isinstance(limit_data, int):
             # Convert legacy format to base options
