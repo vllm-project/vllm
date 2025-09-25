@@ -543,7 +543,6 @@ class EngineCoreProc(EngineCore):
                     }))
                 raise
 
-
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         gc.collect()
