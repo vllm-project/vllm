@@ -201,6 +201,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
+    VLLM_USE_FBGEMM: bool = False
 
 
 def get_default_cache_root():
@@ -1452,7 +1453,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH":
     lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
-
+    # Flag to enable FBGemm kernels on model execution
+    "VLLM_USE_FBGEMM": lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1548,6 +1550,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
         "VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE",
         "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
+        "VLLM_USE_FBGEMM",
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,
