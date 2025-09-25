@@ -651,9 +651,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
 
             # Mirror Attention.forward scale calculation path
-            if self.calculate_kv_scales and getattr(attn_metadata,
-                                                    "enable_kv_scales_calculation",
-                                                    False):
+            if self.calculate_kv_scales and getattr(
+                    attn_metadata, "enable_kv_scales_calculation", False):
                 self.calc_kv_scales(q, kv_c_normed, k_pe)
 
             if self.attn_backend.accept_output_buffer:

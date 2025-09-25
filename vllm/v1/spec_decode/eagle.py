@@ -9,13 +9,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention.layer import Attention
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -877,10 +876,9 @@ class EagleProposer:
             self.model = get_model(vllm_config=self.vllm_config,
                                    model_config=draft_model_config)
 
-        draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config,
-                                        AttentionLayerBase).keys() -
-            target_attn_layer_names)
+        draft_attn_layer_names = (get_layers_from_vllm_config(
+            self.vllm_config, AttentionLayerBase).keys() -
+                                  target_attn_layer_names)
         indexer_layers = get_layers_from_vllm_config(self.vllm_config,
                                                      DeepseekV32IndexerCache)
         draft_indexer_layer_names = (indexer_layers.keys() -
