@@ -817,57 +817,55 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         return model_output
 
     def get_multimodal_embeddings(self, **kwargs):
+        pixel_values = kwargs.pop("pixel_values", None)
+        pixel_values = pixel_values if pixel_values is not None else kwargs.pop(
+            "image_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
-        pixel_values = kwargs.pop("pixel_values",
-                                  kwargs.pop("image_patches", None))
 
-        # Early return if image embeddings are already provided
         if image_embeds is not None:
             return image_embeds
-        # Early return if no image inputs
-        if pixel_values is None:
+
+        if pixel_values is None and image_embeds is None:
             return None
 
-        # Flatten and concat all tensor inputs because
-        # that's what Transformers expects
-        kwargs["pixel_values"] = pixel_values
-        for k, v in kwargs.items():
-            if isinstance(v, torch.Tensor):
-                kwargs[k] = flatten_bn(v).to(self.dtype)
-            elif is_list_of(v, torch.Tensor):
-                kwargs[k] = flatten_and_concat(v).to(self.dtype)
-        pixel_values = kwargs.pop("pixel_values")
-
-        # Check that pixel_values is now a single tensor)
-        if not isinstance(pixel_values, torch.Tensor):
-            raise ValueError(
-                f"Unsupported pixel_values type {type(pixel_values)}. "
-                "Expected `torch.Tensor` or list of `torch.Tensor`.")
-
-        # Ensure num_image_patches is int or list of int
         num_image_patches = kwargs.pop("num_image_patches")
-        # TODO: Why is this even a tensor?????
-        num_image_patches = num_image_patches.detach().to("cpu",
-                                                          torch.int).tolist()
+        if pixel_values is not None:
+            if isinstance(pixel_values, torch.Tensor):
+                pixel_values = flatten_bn(pixel_values).to(self.dtype)
+            elif is_list_of(pixel_values, torch.Tensor):
+                pixel_values = flatten_and_concat(pixel_values).to(self.dtype)
+            else:
+                raise ValueError(
+                    f"Unsupported pixel_values type {type(pixel_values)}. "
+                    "Expected `torch.Tensor` or list of `torch.Tensor`.")
 
-        vision_embeddings = self.model.get_image_features(
-            pixel_values, **kwargs)
+            if isinstance(num_image_patches, list):
+                num_image_patches = torch.cat(num_image_patches)
 
-        if isinstance(vision_embeddings, torch.Tensor):
-            if vision_embeddings.ndim == 2:
-                vision_embeddings = vision_embeddings.unsqueeze(0)
+            vision_embeddings = self.model.get_image_features(
+                pixel_values,
+                **{
+                    k: v.flatten(0, 1)
+                    for k, v in kwargs.items()
+                },
+            )
 
-            # Embeddings have to be 2D tensors of length `num_images`
-            # but transformers returns concat tensors if each patch
-            # is of different size. We split it back to make vLLM happy
-            vision_embeddings = torch.split(vision_embeddings,
-                                            num_image_patches)
-            vision_embeddings = [
-                embed.flatten(start_dim=0, end_dim=-2)
-                for embed in vision_embeddings
-            ]
+            if isinstance(vision_embeddings, torch.Tensor):
+                if vision_embeddings.ndim == 2:
+                    vision_embeddings = vision_embeddings.unsqueeze(0)
 
-        return vision_embeddings
+                # Embeddings have to be 2D tensors of length `num_images`
+                # but transformers returns concat tensors if each patch
+                # is of different size. We split it back to make vLLM happy
+                vision_embeddings = torch.split(
+                    vision_embeddings,
+                    num_image_patches.flatten().tolist())
+                vision_embeddings = [
+                    embed.flatten(start_dim=0, end_dim=-2)
+                    for embed in vision_embeddings
+                ]
+
+            return vision_embeddings
 
     def get_input_embeddings(
         self,
