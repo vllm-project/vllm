@@ -201,10 +201,7 @@ def test_mtp_propose(attn_backend, num_speculative_tokens, monkeypatch):
     )
 
     proposer.runner = mock.MagicMock()
-    proposer.runner.attn_groups.append([mock.MagicMock()])
-    proposer.runner.attn_groups[0][0].metadata_builders = [
-        attn_metadata_builder
-    ]
+    proposer.attn_metadata_builder = attn_metadata_builder
 
     # Run propose
     result = proposer.propose(target_token_ids=target_token_ids,

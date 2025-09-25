@@ -228,8 +228,9 @@ def test_eagle_correctness(
 
 @pytest.mark.parametrize(["model_setup", "mm_enabled"], [
     (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False),
+    (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False),
 ],
-                         ids=["mtp"])
+                         ids=["mimo", "deepseek"])
 @pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())
 def test_mtp_correctness(
