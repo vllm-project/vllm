@@ -15,7 +15,6 @@ from logging import DEBUG
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
-import torch.cuda.profiler as profiler
 import zmq
 
 import vllm.envs as envs
@@ -53,6 +52,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.profiler import NsysIterationProfiler
 
 logger = init_logger(__name__)
 
@@ -140,39 +140,10 @@ class EngineCore:
         self.mm_receiver_cache = engine_receiver_cache_from_config(
             vllm_config, mm_registry)
 
-        # cudaProfilerApi Support
-        # To enable profiling, set the environment variable
-        # VLLM_NSYS_PROFILE_START_STOP to the iteration number
-        # to start and stop profiling. For example, to start at
-        # iteration 10 and stop at iteration 20, set the
-        # environment variable to "10-20".
-        self._perf_iter = 0
-        self._profiler_running = False
-        _perf_env_str = envs.VLLM_NSYS_PROFILE_START_STOP
-        if '-' in _perf_env_str:
-            try:
-                parts = _perf_env_str.strip().split('-')
-                if len(parts) != 2:
-                    raise ValueError("Expected format 'start-stop'.")
-                start, stop = map(int, parts)
-                if start < 0 or stop <= start:
-                    raise ValueError("Start must be non-negative and stop"
-                                     " must be greater than start.")
-                self._start_perf_iter = start
-                self._stop_perf_iter = stop
-                logger.info_once(
-                    f"NSYS profiling will start at iteration "
-                    f"{self._start_perf_iter} and stop at iteration "
-                    f"{self._stop_perf_iter}")
-            except ValueError as e:
-                logger.warning_once(
-                    "Invalid VLLM_NSYS_PROFILE_START_STOP value: '%s'. "
-                    "Reason: %s. Disabling profiling.", _perf_env_str, e)
-                self._start_perf_iter = -1
-                self._stop_perf_iter = -1
-        else:
-            self._start_perf_iter = -1
-            self._stop_perf_iter = -1
+        # Nsight Systems CUDA profiler range (iteration-based)
+        # Uses VLLM_NSYS_PROFILE_START_STOP env var parsed in helper class
+        self._nsys_profiler = NsysIterationProfiler.from_env_string(
+            envs.VLLM_NSYS_PROFILE_START_STOP)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -305,19 +276,6 @@ class EngineCore:
                                   self.scheduler.make_stats())
             raise err
 
-    def _nsys_profile(self):
-        # Profiler Start and Stop
-        if self._perf_iter == self._start_perf_iter:
-            logger.info_once("Starting NSYS profiler")
-            profiler.start()
-            self._profiler_running = True
-
-        if self._perf_iter == self._stop_perf_iter:
-            logger.info_once("Stopping NSYS profiler")
-            profiler.stop()
-            self._profiler_running = False
-        self._perf_iter += 1
-
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -325,7 +283,7 @@ class EngineCore:
         was executed.
         """
 
-        self._nsys_profile()
+        self._nsys_profiler.maybe_profile_now()
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
@@ -371,7 +329,7 @@ class EngineCore:
         # Note that this is not blocking.
         assert len(batch_queue) < self.batch_queue_size
 
-        self._nsys_profile()
+        self._nsys_profiler.maybe_profile_now()
 
         model_executed = False
         if self.scheduler.has_requests():
@@ -405,10 +363,8 @@ class EngineCore:
         return engine_core_outputs, model_executed
 
     def shutdown(self):
-        # Check if profiler is running
-        if self._profiler_running:
-            logger.info_once("Stopping NSYS profiler")
-            profiler.stop()
+        # Ensure profiler is stopped
+        self._nsys_profiler.shutdown()
 
         self.structured_output_manager.clear_backend()
         if self.model_executor:

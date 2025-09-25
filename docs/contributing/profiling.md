@@ -145,7 +145,7 @@ nsys profile -o report.nsys-rep \
   --trace-fork-before-exec=true \
   --cuda-graph-trace=node \
   --capture-range=cudaProfilerApi \
-  --stop-on-range-end=true \
+  --capture-range-end stop-shutdown \
   vllm serve meta-llama/Llama-3.1-8B-Instruct
 
 # client
