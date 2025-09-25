@@ -475,9 +475,9 @@ class OutputProcessor:
     def do_tracing(self, engine_core_output: EngineCoreOutput,
                    req_state: RequestState,
                    iteration_stats: Optional[IterationStats]) -> None:
-        assert req_state.stats is not None
-        assert iteration_stats is not None
-        assert self.tracer is not None
+        if (req_state.stats is None or self.tracer is None
+                or iteration_stats is None):
+            return
 
         arrival_time_nano_seconds = int(req_state.stats.arrival_time * 1e9)
         trace_context = extract_trace_context(engine_core_output.trace_headers)
