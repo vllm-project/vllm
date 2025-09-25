@@ -652,6 +652,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self.layer_name,
                 )
 
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return self.attn_backend
+
 
 def wait_for_kv_layer_from_connector(layer_name: str):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
