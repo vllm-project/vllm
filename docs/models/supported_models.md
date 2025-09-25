@@ -17,7 +17,7 @@ These models are what we list in [supported-text-models][supported-text-models] 
 
 ### Transformers
 
-vLLM also supports model implementations that are available in Transformers. You should expect the performance of a Transformers model implementation used in vLLM to be within <1% of the performance of a dedicated vLLM model implementation. We call this feature the "Transformers backend".
+vLLM also supports model implementations that are available in Transformers. You should expect the performance of a Transformers model implementation used in vLLM to be within <5% of the performance of a dedicated vLLM model implementation. We call this feature the "Transformers backend".
 
 Currently, the Transformers backend works for the following:
 
