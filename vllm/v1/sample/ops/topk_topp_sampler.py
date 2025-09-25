@@ -178,133 +178,6 @@ def original_apply_top_k_top_p(
 
 @triton.jit
 def _topk_topp_kernel(LOGITS, PROBS, K, P, B, 
-                      N: tl.constexpr,
-                      BLOCK_SIZE: tl.constexpr,
-                      NUM_TILES: tl.constexpr,
-                      NUM_PIVOTS: tl.constexpr):
-    pid = tl.program_id(0)
-    num_programs = tl.num_programs(0)
-    for row_id in tl.range(pid, B, num_programs):
-        k = tl.load(K + row_id)
-        p = tl.load(P + row_id)
-        if not (k == N and p == 1.0): # All tokens are valid
-            max_logit = -float('inf')
-            min_logit = float('inf')
-
-            max_prob = 0.0
-            min_prob = 1.0
-
-            LOGITS_ROW = LOGITS + row_id * N
-            PROBS_ROW = PROBS + row_id * N
-
-            # First pass: compute max and min logits (for numerical stability)
-            for i in range(0, NUM_TILES):
-                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                mask_n = offs_n < N
-                logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=0.0)
-
-                max_logit = tl.maximum(max_logit, tl.max(logits_blk))
-                min_logit = tl.minimum(min_logit, tl.min(logits_blk))
-            
-            # Second pass: compute probabilities using softmax
-            # (This requires the max for numerical stability)
-            exp_logits_sum = 0.0
-            for i in range(0, NUM_TILES):
-                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                mask_n = offs_n < N
-                logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float('inf'))
-                
-                logits_tile_stable = logits_blk - max_logit  # Numerical stability
-                exp_logits = tl.exp(logits_tile_stable)
-                exp_logits_sum += tl.sum(exp_logits)
-                tl.store(PROBS_ROW + offs_n, exp_logits, mask=mask_n)
-
-            # Third pass: compute probabilities and update max and min probabilities
-            for i in range(0, NUM_TILES):
-                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                mask_n = offs_n < N
-                probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n, other=0.0)
-                probs_blk = probs_blk / exp_logits_sum
-                max_prob = tl.maximum(max_prob, tl.max(probs_blk))
-                min_prob = tl.minimum(min_prob, tl.min(probs_blk))
-                tl.store(PROBS_ROW + offs_n, probs_blk, mask=mask_n)
-
-            # Fourth passes: Search for pivots
-            num_iters = 0
-            k_pivot = -float('inf')
-            k_pivots = tl.full((NUM_PIVOTS,), -float('inf'), dtype=tl.float32)
-            
-            p_pivot = 0.0
-            p_pivots = tl.full((NUM_PIVOTS,), -float('inf'), dtype=tl.float32)
-                
-            while (k_pivot == -float('inf') or p_pivot == 0.0) and num_iters < 32:
-                k_pivots = (max_logit - min_logit) * tl.arange(1, NUM_PIVOTS + 1) / NUM_PIVOTS + min_logit
-                p_pivots = (max_prob - min_prob) * tl.arange(1, NUM_PIVOTS + 1) / NUM_PIVOTS + min_prob
-                
-                k_pivots_num = tl.full((NUM_PIVOTS,), 0, dtype=tl.uint32)
-                p_pivots_sum = tl.full((NUM_PIVOTS,), 0.0, dtype=tl.float32)
-                for i in range(0, NUM_TILES):
-                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                    mask_n = offs_n < N
-                    logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float('inf'))
-                    probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n, other=0.0)
-
-                    logits_expanded = logits_blk[None, :] # shape: 1 x BLOCK_SIZE
-                    k_pivots_expanded = k_pivots[:, None] # shape: NUM_PIVOTS x 1
-                    larger_mask = logits_expanded > k_pivots_expanded # shape: NUM_PIVOTS x BLOCK_SIZE
-                    k_pivots_num += tl.sum(larger_mask, axis=1) # shape: NUM_PIVOTS
-
-                    probs_expanded = probs_blk[None, :] # shape: 1 x BLOCK_SIZE
-                    p_pivots_expanded = p_pivots[:, None] # shape: NUM_PIVOTS x 1
-                    larger_mask = probs_expanded > p_pivots_expanded # shape: NUM_PIVOTS x BLOCK_SIZE
-                    larger_probs = tl.where(larger_mask, probs_expanded, 0.0) # shape: NUM_PIVOTS x BLOCK_SIZE
-                    p_pivots_sum += tl.sum(larger_probs, axis=1) # shape: NUM_PIVOTS
-
-                exact_match_k = k_pivots_num == k
-                if tl.sum(exact_match_k) > 0:
-                    matches = tl.where(exact_match_k, k_pivots, float('inf'))
-                    k_pivot = tl.min(matches)
-                else:
-                    smaller_mask = k_pivots_num < k
-                    if tl.sum(smaller_mask) > 0:
-                        matches = tl.where(smaller_mask, k_pivots, float('inf'))
-                        max_logit = tl.min(matches)
-                    larger_mask = k_pivots_num > k
-                    if tl.sum(larger_mask) > 0:
-                        matches = tl.where(larger_mask, k_pivots, -float('inf'))
-                        min_logit = tl.max(matches)
-
-                exact_match_p = tl.abs(p_pivots_sum - p) < 1e-6
-                if tl.sum(exact_match_p) > 0:
-                    matches = tl.where(exact_match_p, p_pivots, float('inf'))
-                    p_pivot = tl.min(matches)
-                else:
-                    smaller_mask = p_pivots_sum < p
-                    if tl.sum(smaller_mask) > 0:
-                        matches = tl.where(smaller_mask, p_pivots, float('inf'))
-                        max_prob = tl.min(matches)
-                    larger_mask = p_pivots_sum > p
-                    if tl.sum(larger_mask) > 0:
-                        matches = tl.where(larger_mask, p_pivots, -float('inf'))
-                        min_prob = tl.max(matches)
-                # For the case where sum of existing probabilities does not hit p
-                if min_prob == max_prob:
-                    p_pivot = min_prob
-
-                num_iters += 1
-
-            # Fifth pass: Apply top-k and top-p masks
-            for i in range(0, NUM_TILES):
-                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                mask_n = offs_n < N
-                logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n)
-                probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n)
-                logits_blk = tl.where(logits_blk > k_pivot, logits_blk, -float('inf'))
-                logits_blk = tl.where(probs_blk > p_pivot, logits_blk, -float('inf'))
-                tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
-
-@triton.jit
-def _topk_kernel(LOGITS, PROBS, K, P, B, 
                  N: tl.constexpr,
                  BLOCK_SIZE: tl.constexpr,
                  NUM_TILES: tl.constexpr):
@@ -327,7 +200,7 @@ def _topk_kernel(LOGITS, PROBS, K, P, B,
             sq_avg_logit = tl.sum(logits_blk * logits_blk) / N
             std_logit = tl.sqrt(sq_avg_logit - avg_logit * avg_logit)
 
-            outlier_pivot = avg_logit + 3 * std_logit
+            outlier_pivot = avg_logit + 2.7 * std_logit
             num_outliers = tl.zeros((), dtype=tl.uint32)
             # First pass: compute max and min logits and gather outliers
             for i in range(0, NUM_TILES):
@@ -369,6 +242,84 @@ def _topk_kernel(LOGITS, PROBS, K, P, B,
                 for i in range(0, search_iters):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < search_range
+                    logits_blk = tl.load(search_addr + offs_n, mask=mask_n, other=-float('inf'))
+
+                    k_pivots_num_0 += tl.sum(logits_blk > k_pivot_0)
+                    k_pivots_num_1 += tl.sum(logits_blk > k_pivot_1)
+                    k_pivots_num_2 += tl.sum(logits_blk > k_pivot_2)
+
+                # Check if any of the pivots are equal to k
+                if k_pivots_num_0 == k:
+                    k_pivot = k_pivot_0 
+                elif k_pivots_num_1 == k:
+                    k_pivot = k_pivot_1
+                elif k_pivots_num_2 == k:
+                    k_pivot = k_pivot_2
+                # If none of the pivots are equal to k, we updatae the range
+                elif k_pivots_num_2 > k:
+                    min_logit = k_pivot_2
+                elif k_pivots_num_1 > k:
+                    min_logit = k_pivot_1
+                elif k_pivots_num_0 > k:
+                    min_logit = k_pivot_0
+                if k_pivots_num_0 < k:
+                    max_logit = k_pivot_0
+                elif k_pivots_num_1 < k:
+                    max_logit = k_pivot_1
+                elif k_pivots_num_2 < k:
+                    max_logit = k_pivot_2
+                
+                num_iters += 1
+                if num_iters >= 18:
+                    k_pivot = k_pivot_0
+
+            # Third pass: Apply top-k mask
+            for i in range(0, NUM_TILES):
+                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                mask_n = offs_n < N
+                logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n)
+                logits_blk = tl.where(logits_blk > k_pivot, logits_blk, -float('inf'))
+                tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
+@triton.jit
+def _topk_kernel(LOGITS, PROBS, K, P, B, 
+                 N: tl.constexpr,
+                 BLOCK_SIZE: tl.constexpr,
+                 NUM_TILES: tl.constexpr):
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    for row_id in tl.range(pid, B, num_programs):
+        k = tl.load(K + row_id)
+        if not (k == N): # All tokens are valid
+            max_logit = -float('inf')
+            min_logit = float('inf')
+
+            LOGITS_ROW = LOGITS + row_id * N
+            PROBS_ROW = PROBS + row_id * N
+
+            # First pass: compute max and min logits and gather outliers
+            for i in range(0, NUM_TILES):
+                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                mask_n = offs_n < N
+                logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=avg_logit)
+
+                max_logit = tl.maximum(max_logit, tl.max(logits_blk))
+                min_logit = tl.minimum(min_logit, tl.min(logits_blk))
+
+            # Second passes: Quaternary search for pivots (nlog_4(n))
+            k_pivot = -float('inf')
+            num_iters = 0
+
+            while k_pivot == -float('inf') and num_iters < 18:
+                k_pivot_0 = (max_logit - min_logit) * 1.0 / 4.0 + min_logit
+                k_pivot_1 = (max_logit - min_logit) * 2.0 / 4.0 + min_logit
+                k_pivot_2 = (max_logit - min_logit) * 3.0 / 4.0 + min_logit
+                k_pivots_num_0 = tl.zeros((), dtype=tl.uint32)
+                k_pivots_num_1 = tl.zeros((), dtype=tl.uint32)
+                k_pivots_num_2 = tl.zeros((), dtype=tl.uint32)
+
+                for i in range(0, NUM_TILES):
+                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                    mask_n = offs_n < N
                     logits_blk = tl.load(search_addr + offs_n, mask=mask_n, other=-float('inf'))
 
                     k_pivots_num_0 += tl.sum(logits_blk > k_pivot_0)
