@@ -68,7 +68,7 @@ def default_server_args(with_tool_parser: bool):
 def gptoss_server(monkeypatch_module: pytest.MonkeyPatch,
                   default_server_args: list[str]):
     with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
         with RemoteOpenAIServer(GPT_OSS_MODEL_NAME,
                                 default_server_args) as remote_server:
             yield remote_server

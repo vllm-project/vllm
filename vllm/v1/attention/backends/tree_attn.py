@@ -52,7 +52,7 @@ class TreeAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TREE_ATTN_VLLM_V1"
+        return "TREE_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["TreeAttentionImpl"]:

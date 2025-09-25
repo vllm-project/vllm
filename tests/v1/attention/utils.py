@@ -120,30 +120,30 @@ def get_attention_backend(backend_name: _Backend):
         Tuple of (backend_builder_class, backend_impl_class)
     """
     backend_map = {
-        _Backend.FLASH_ATTN_VLLM_V1:
+        _Backend.FLASH_ATTN:
         ("vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
          if current_platform.is_cuda() else
          "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
          ),
-        _Backend.FLASHINFER_VLLM_V1:
+        _Backend.FLASHINFER:
         "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
         _Backend.FLEX_ATTENTION:
         "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
-        _Backend.TRITON_ATTN_VLLM_V1:
+        _Backend.TRITON_ATTN:
         "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
         _Backend.TREE_ATTN:
         "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
-        _Backend.XFORMERS_VLLM_V1:
+        _Backend.XFORMERS:
         "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",
         _Backend.CUTLASS_MLA:
         "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
-        _Backend.FLASHMLA_VLLM_V1:
+        _Backend.FLASHMLA:
         "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
         _Backend.FLASH_ATTN_MLA:
         "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
         _Backend.FLASHINFER_MLA:
         "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",
-        _Backend.TRITON_MLA_VLLM_V1:
+        _Backend.TRITON_MLA:
         "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
     }
 

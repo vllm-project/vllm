@@ -41,12 +41,11 @@ def test_eagle_max_len(monkeypatch: pytest.MonkeyPatch,
         m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
-        if (attn_backend == "TRITON_ATTN_VLLM_V1"
-                and not current_platform.is_rocm()):
-            pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+        if (attn_backend == "TRITON_ATTN" and not current_platform.is_rocm()):
+            pytest.skip("TRITON_ATTN does not support "
                         "multi-token eagle spec decode on current platform")
 
-        if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+        if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
             m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         llm = LLM(

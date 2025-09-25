@@ -89,7 +89,7 @@ backend_configs = {
     # Triton Attention
     "TritonAttn":
     BackendConfig(name="TritonAttn",
-                  env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1"},
+                  env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN"},
                   comp_config={
                       "cudagraph_mode": "FULL_AND_PIECEWISE",
                   }),

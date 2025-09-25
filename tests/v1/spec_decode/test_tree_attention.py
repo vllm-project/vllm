@@ -278,7 +278,7 @@ def test_tree_attn_correctness() -> None:
                             block_table=block_table,
                             slot_mapping=branch_slot_mapping,
                             seqlen_k=sequence_position + q_len,
-                            backend=_Backend.FLASH_ATTN_VLLM_V1,
+                            backend=_Backend.FLASH_ATTN,
                         ).view(batch_size, -1, num_heads, dim_per_head)
 
                         # Compare the outputs.
