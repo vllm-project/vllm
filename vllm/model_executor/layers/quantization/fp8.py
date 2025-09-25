@@ -474,8 +474,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif (current_platform.is_cuda()
               and current_platform.is_device_capability(100)):
             logger.info_once(
-                "Cutlass BlockScaled GroupedGemm kernels available for Fp8MoEMethod."
-            )
+                "CutlassBlockScaledGroupedGemm available for Fp8MoEMethod.")
             self.allow_cutlass_block_scaled_grouped_gemm = True
         else:
             logger.warning_once(
