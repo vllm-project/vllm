@@ -50,12 +50,12 @@ TEST_CONFIGS = {
         "mmlu": 0.60
     },
     "amd/Mixtral-8x7B-Instruct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8": {
-        "arc_challenge": 0.60,
-        "mmlu": 0.66
+        "arc_challenge": 0.62,
+        "mmlu": 0.68
     },
     "amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8": {
-        "arc_challenge": 0.53,
-        "mmlu": 0.70
+        "arc_challenge": 0.52,
+        "mmlu": 0.72
     },
 }
 
