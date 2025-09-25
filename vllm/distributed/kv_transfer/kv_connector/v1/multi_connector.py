@@ -245,7 +245,7 @@ class MultiConnector(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        blocks: list[int],
+        blocks: tuple[list[int], ...] | list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         async_saves = 0
         kv_txfer_params = None

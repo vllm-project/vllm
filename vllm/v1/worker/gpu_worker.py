@@ -318,12 +318,11 @@ class Worker(WorkerBase):
 
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.
-        # This need to be done before `initialize_kv_cache` because
-        # `initialize_kv_cache` will inject kv cache groups not
-        # related to kv cache connector (e.g. kv cache sharing layers)
+        # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
+        # because `initialize_kv_cache` will inject kv cache groups not
+        # related to kv cache connector (e.g. kv cache sharing layers).
         connector_vllm_config = deepcopy(self.vllm_config)
-        if len(kv_cache_config.kv_cache_groups) > 1:
-            connector_vllm_config.kv_cache_config = kv_cache_config
+        connector_vllm_config.kv_cache_config = kv_cache_config
         ensure_kv_transfer_initialized(connector_vllm_config)
 
         if self.vllm_config.model_config.enable_sleep_mode:

@@ -88,17 +88,14 @@ class Scheduler(SchedulerInterface):
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported "
                 "with KV connectors")
-            num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
 
             connector_vllm_config = deepcopy(self.vllm_config)
-            if num_kv_cache_groups > 1:
-                # NOTE(Kuntai): hybrid allocator is enabled.
-                # We inject `kv_cache_config` into vllm_config.
-                connector_vllm_config.kv_cache_config = kv_cache_config
+            connector_vllm_config.kv_cache_config = kv_cache_config
             self.connector = KVConnectorFactory.create_connector(
-                config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
+                config=connector_vllm_config, role=KVConnectorRole.SCHEDULER)
 
             # Make sure that the connector supports HMA if HMA is enabled.
+            num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
             if not supports_hma(self.connector) and num_kv_cache_groups > 1:
                 raise NotImplementedError(
                     f"Connector {self.connector.__class__.__name__} does not"

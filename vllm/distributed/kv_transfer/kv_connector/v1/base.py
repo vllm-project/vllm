@@ -66,10 +66,9 @@ logger = init_logger(__name__)
 
 class SupportsHMA:
     """
-    Inherent this interface if the connector supports HMA.
-    If inherented from this interface, vLLM will:
-    - send `KVCacheConfig` to the connector in `register_kv_caches`.
-    - send `tuple[list[int], ...]` to the connector in `request_finished`.
+    Inherent this interface if the connector supports hybrid memory 
+    allocator (HMA). This is required to use the connector together
+    with hybrid memory allocator.
     """
     pass
 
