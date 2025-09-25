@@ -79,7 +79,7 @@ class Processor:
             if num_logprobs > max_logprobs:
                 raise ValueError(
                     f"Requested sample logprobs of {num_logprobs}, "
-                    f"which is is greater than max allowed: {max_logprobs}")
+                    f"which is greater than max allowed: {max_logprobs}")
 
         # Validate prompt logprobs.
         if params.prompt_logprobs:
@@ -89,7 +89,7 @@ class Processor:
             if num_prompt_logprobs > max_logprobs:
                 raise ValueError(
                     f"Requested prompt logprobs of {num_prompt_logprobs}, "
-                    f"which is is greater than max allowed: {max_logprobs}")
+                    f"which is greater than max allowed: {max_logprobs}")
 
     def _validate_sampling_params(
         self,
