@@ -23,7 +23,7 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig):
         compilation_config.debug_dump_path:
         import depyf
         rank = torch.distributed.get_rank()
-        path = compilation_config.debug_dump_path / f"rank_{rank}"
+        path = compilation_config.compile_debug_dump_path(rank)
         path.mkdir(parents=True, exist_ok=True)
         global context_manager
         context_manager = depyf.prepare_debug(path.as_posix())

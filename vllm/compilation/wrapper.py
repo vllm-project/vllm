@@ -93,11 +93,10 @@ class TorchCompileWrapperWithCustomDispatcher:
 
         self.compiled_codes.append(new_code)
 
-        if self.vllm_config.compilation_config.debug_dump_path:
+        compile_config = self.vllm_config.compilation_config
+        if compile_config.debug_dump_path:
             rank = torch.distributed.get_rank()
-            debug_dump_dir = \
-                self.vllm_config.compilation_config.debug_dump_path
-            decompiled_file = debug_dump_dir / f"rank_{rank}" \
+            decompiled_file = compile_config.compile_debug_dump_path(rank) \
                 / "transformed_code.py"
             if not decompiled_file.exists():
                 try:

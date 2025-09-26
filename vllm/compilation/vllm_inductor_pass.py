@@ -100,7 +100,8 @@ class VllmPatternMatcherPass(VllmInductorPass):
             return
 
         rank = torch.distributed.get_rank()
-        debug_dump_path = debug_dump_path / f"rank_{rank}"
+        debug_dump_path = config.compilation_config.compile_debug_dump_path(
+            rank)
         debug_dump_path.mkdir(parents=True, exist_ok=True)
 
         from vllm.utils import unique_filepath

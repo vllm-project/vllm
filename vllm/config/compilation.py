@@ -672,3 +672,11 @@ class CompilationConfig:
                 enable_str = "enabling" if op[0] == '+' else "disabling"
                 logger.warning_once("Op '%s' %s, %s with '%s' has no effect",
                                     op_name, missing_str, enable_str, op)
+
+    def compile_debug_dump_path(self, rank: int) -> Path:
+        """returns the path to dump the torch.compile 
+            debug information for the given rank.
+        """
+        assert self.debug_dump_path is not None, ("debug_dump_path is not set")
+        path = self.debug_dump_path / f"rank_{rank}"
+        return path

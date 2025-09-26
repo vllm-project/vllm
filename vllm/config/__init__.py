@@ -545,9 +545,12 @@ class VllmConfig:
                     # Hybrid KV cache manager is not yet supported with chunked
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
+
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = \
             Path(self.compilation_config.debug_dump_path).absolute()
+        else:
+            self.compilation_config.debug_dump_path = None
         if envs.VLLM_DEBUG_DUMP_PATH is not None:
             self.compilation_config.debug_dump_path = Path(
                 envs.VLLM_DEBUG_DUMP_PATH).absolute()
