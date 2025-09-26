@@ -876,20 +876,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
-  - vllm/distributed/
-  - vllm/engine/
-  - vllm/executor/
-  - vllm/model_executor/models/
-  - tests/distributed/
-  - vllm/compilation
-  - vllm/worker/worker_base.py
-  - entrypoints/llm/test_collective_rpc.py
-  - tests/v1/test_async_llm_dp.py
-  - tests/v1/test_external_lb_dp.py
-  - tests/v1/entrypoints/openai/test_multi_api_servers.py
-  - vllm/v1/engine/
-  - vllm/v1/worker/
-  - tests/v1/worker/test_worker_memory_snapshot.py
   commands:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_external_lb_dp.py
