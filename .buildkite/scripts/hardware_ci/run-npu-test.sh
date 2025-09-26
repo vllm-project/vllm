@@ -34,7 +34,7 @@ get_config() {
   # Use curl to download the configuration file and check if the download was successful.
   if curl -s -o "${TEST_RUN_CONFIG_FILE}" "${TEST_RUN_CONFIG_URL}"; then
     echo "Configuration file downloaded successfully."
-    source "$TEST_RUN_CONFIG_FILE"
+    source "${TEST_RUN_CONFIG_FILE}"
     echo "Base docker image name that get from configuration: ${BASE_IMAGE_NAME}"
     return 0
   else
@@ -125,8 +125,8 @@ remove_docker_container() {
 trap remove_docker_container EXIT
 
 # Generate corresponding --device args based on BUILDKITE_AGENT_NAME
-# Ascend NPU BUILDKITE_AGENT_NAME format is {hostname}-{agent_idx}-{npu_card_num}cards
-#   e.g. atlas-a2-001-0-2cards means this is the 0-th agent on atlas-a2-001 host, and it has 2 NPU cards.
+# Ascend NPU BUILDKITE_AGENT_NAME format is {hostname}-{agent_idx}-{npu_card_num}cards, and agent_idx starts from 1.
+#   e.g. atlas-a2-001-1-2cards means this is the 1-th agent on atlas-a2-001 host, and it has 2 NPU cards.
 #   returns --device /dev/davinci0 --device /dev/davinci1
 parse_and_gen_devices() {
     local input="$1"
@@ -158,6 +158,9 @@ devices=$(parse_and_gen_devices "${BUILDKITE_AGENT_NAME}") || exit 1
 # Run the image and execute the Out-Of-Tree (OOT) platform interface test case on Ascend NPU hardware.
 # This test checks whether the OOT platform interface is functioning properly in conjunction with
 # the hardware plugin vllm-ascend.
+model_cache_dir_idx=$(echo "${BUILDKITE_AGENT_NAME}" | awk -F'-' '{print $(NF-1)}')
+echo "model_cache_dir_idx: ${model_cache_dir_idx}"
+mkdir -p /mnt/modelscope${model_cache_dir_idx}
 docker run \
     ${devices} \
     --device /dev/davinci_manager \
@@ -168,7 +171,7 @@ docker run \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache/modelscope:/root/.cache/modelscope \
+    -v /mnt/modelscope${model_cache_dir_idx}:/root/.cache/modelscope \
     --entrypoint="" \
     --name "${container_name}" \
     "${image_name}" \
