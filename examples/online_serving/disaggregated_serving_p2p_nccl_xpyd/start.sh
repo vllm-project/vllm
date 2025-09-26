@@ -6,4 +6,5 @@ NCCL_P2P_DISABLE=1 \
 NCCL_SHM_DISABLE=1 \
 NCCL_IB_DISABLE=1 \
 NCCL_NET_GDR_LEVEL=0 \
+VLLM_LOGGING_LEVEL=DEBUG \
 bash /home/ubuntu/vllm/examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/disagg_example_p2p_nccl_xpyd.sh

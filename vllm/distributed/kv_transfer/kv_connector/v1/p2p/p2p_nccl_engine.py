@@ -204,6 +204,9 @@ class P2pNcclEngine:
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
     ) -> bool:
+        logger.debug("send_tensor, tensor_id:%s, tensor_size:%d, remote_address:%s, send_type:%s",
+                     tensor_id, tensor.element_size() * tensor.numel(),
+                     remote_address, self.send_type)
         if remote_address is None:
             with self.recv_store_cv:
                 self.recv_store[tensor_id] = tensor
@@ -221,6 +224,7 @@ class P2pNcclEngine:
             with self.send_queue_cv:
                 self.send_queue.append(item)
                 self.send_queue_cv.notify()
+                logger.debug("send_queue_cv.notify, tensor_id:%s", item.tensor_id)
             return True
 
         # GET
@@ -451,10 +455,12 @@ class P2pNcclEngine:
             self.send_sync(item)
 
     def wait_for_sent(self):
+        logger.debug("wait_for_sent, send_type:%s", self.send_type)
         if self.send_type == "PUT_ASYNC":
             start_time = time.time()
             with self.send_queue_cv:
                 while self.send_queue:
+                    logger.debug("wait_for_sent, send_queue:%s", [item.tensor_id for item in self.send_queue])
                     self.send_queue_cv.wait()
             duration = time.time() - start_time
             logger.debug(
@@ -462,6 +468,7 @@ class P2pNcclEngine:
                 " to be empty, rank:%d", duration * 1000, self.rank)
 
     def send_sync(self, item: SendQueueItem) -> bool:
+        logger.debug("send_sync, tensor_id:%s", item.tensor_id)
         if item.remote_address is None:
             return False
         if item.remote_address not in self.socks:
