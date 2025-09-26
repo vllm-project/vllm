@@ -89,6 +89,51 @@ DOCKER_BUILDKIT=1 docker build . \
 
     For a detailed explanation, refer to the documentation on 'Set up using Python-only build (without compilation)' part in [Build wheel from source](../contributing/ci/nightly_builds.md#precompiled-wheels-usage), these args are similar.
 
+## Building for CPU with a model
+
+<gh-file:docker/Dockerfile.cpu> has a build target allowing you to build a CPU image with a given
+HuggingFace-hosted model that has been pre-downloaded. This can be useful for building CI images or for any
+other scenario where you may want to consistently bring up a specific model for inference on any system.
+
+```bash
+# optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
+DOCKER_BUILDKIT=1 docker build . \
+    --target vllm-openai-model \
+    --build-arg MODEL_NAME="meta-llama/Llama-3.2-1B-Instruct" \
+    --tag vllm/vllm-openai-model \
+    --file docker/Dockerfile.cpu
+```
+
+For models that require authentication (e.g., gated models), you can provide your HuggingFace token securely using Docker build secrets:
+
+```bash
+# Using an environment variable
+export HF_TOKEN="your_huggingface_token_here"
+DOCKER_BUILDKIT=1 docker build . \
+    --target vllm-openai-model \
+    --build-arg MODEL_NAME="meta-llama/Llama-3.2-1B-Instruct" \
+    --secret id=hf_token,env=HF_TOKEN \
+    --tag vllm/vllm-openai-model \
+    --file docker/Dockerfile.cpu
+```
+
+```bash
+# Using a file containing the token
+echo "your_huggingface_token_here" > hf_token.txt
+DOCKER_BUILDKIT=1 docker build . \
+    --target vllm-openai-model \
+    --build-arg MODEL_NAME="meta-llama/Llama-3.2-1B-Instruct" \
+    --secret id=hf_token,src=hf_token.txt \
+    --tag vllm/vllm-openai-model \
+    --file docker/Dockerfile.cpu
+```
+
+!!! note
+    The HuggingFace token secret is optional. If not provided, the model download will proceed without authentication, which works for public models but will fail for gated/private models that require access permissions.
+
+!!! tip
+    Using Docker build secrets is more secure than build arguments because secrets are not persisted in the image layers or visible in the build history. The token is only temporarily available during the build process and is automatically cleaned up afterward.
+
 ## Building for Arm64/aarch64
 
 A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper and Grace-Blackwell. Using the flag `--platform "linux/arm64"` will build for arm64.
