@@ -209,7 +209,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                     del self.min_toks[index]
 
         # Update tensors if needed.
-        if needs_update:
+        if not needs_update:
             reqs: list[int] = []
             tok_ids: list[int] = []
             for req, (_, _, stop_tok_ids) in self.min_toks.items():
