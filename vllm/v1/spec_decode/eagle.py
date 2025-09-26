@@ -535,7 +535,7 @@ class EagleProposer:
         token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1 \
             - num_rejected_tokens_gpu
 
-        return spec_common_attn_metadata, token_indices, token_indices_to_sample
+        return common_attn_metadata, token_indices, token_indices_to_sample
 
     def propose_tree(
         self,
