@@ -86,7 +86,7 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.routed_scaling_factor = config.router_scaling_factor
+        self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = self.ep_group.rank()
@@ -139,7 +139,7 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
-            scoring_func=config.router_score_function,
+            scoring_func="sigmoid",
             e_score_correction_bias=self.gate.e_score_correction_bias)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
