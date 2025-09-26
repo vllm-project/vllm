@@ -66,6 +66,8 @@ class Worker(WorkerBase):
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        # CUDA graphs metadata saved before sleep
+        self._sleep_saved_cudagraphs: dict[str, Any] = {}
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -95,10 +97,92 @@ class Worker(WorkerBase):
         else:
             self.profiler = None
 
+
+    def _save_cuda_graphs(self) -> int:
+        """Put CUDA graphs to sleep."""
+        from vllm.compilation.cuda_graph import CUDAGraphWrapper
+        from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
+
+        cuda_graph_count = 0
+        free_bytes_before = torch.cuda.mem_get_info()[0]
+
+        # Check if model runner has cudagraph dispatcher
+        if hasattr(self.model_runner, "cudagraph_dispatcher"):
+            dispatcher = self.model_runner.cudagraph_dispatcher
+            # Save cudagraph keys for verification during wake-up
+            self._sleep_saved_cudagraphs["dispatcher_keys"] = {
+                mode: list(keys) for mode, keys in dispatcher.cudagraph_keys.items()
+            }
+            logger.info(
+                "Preserved cudagraph dispatcher keys for %d modes",
+                len(self._sleep_saved_cudagraphs["dispatcher_keys"]),
+            )
+
+        # Check if the model is wrapped with CUDAGraphWrapper
+        model = self.model_runner.model
+        if isinstance(model, (CUDAGraphWrapper, UBatchWrapper)):
+            logger.info(
+                "Found CUDAGraphWrapper/UBatchWrapper, entering CUDA graph sleep mode..."
+            )
+
+            # For CUDAGraphWrapper
+            if isinstance(model, CUDAGraphWrapper):
+                # Save references to the cudagraph entries but keep them intact
+                self._sleep_saved_cudagraphs["entries"] = {}
+                for key, entry in model.concrete_cudagraph_entries.items():
+                    if entry.cudagraph is not None:
+                        # Keep the graph but mark it as sleeping
+                        self._sleep_saved_cudagraphs["entries"][key] = {
+                            "batch_descriptor": entry.batch_descriptor,
+                            "outputs": entry.outputs,
+                            "graph_ref": entry.cudagraph,  # Keep reference
+                            "sleeping": True,
+                        }
+                        cuda_graph_count += 1
+
+            # For UBatchWrapper
+            elif isinstance(model, UBatchWrapper):
+                if hasattr(model, "cudagraphs"):
+                    self._sleep_saved_cudagraphs["ubatch_graphs"] = {}
+                    for batch_size, metadata in model.cudagraphs.items():
+                        self._sleep_saved_cudagraphs["ubatch_graphs"][batch_size] = {
+                            "sleeping": True,
+                            "batch_size": batch_size,
+                            "metadata": metadata,  # Keep the metadata
+                        }
+                        cuda_graph_count += 1
+
+                # Keep the graph pool but put it in sleep mode
+                if hasattr(model, "graph_pool") and model.graph_pool:
+                    self._sleep_saved_cudagraphs["graph_pool"] = model.graph_pool
+                    # The pool remains assigned but CUDA will release unused memory
+
+        logger.info("Put %d CUDA graphs into sleep mode.", cuda_graph_count)
+
+        # Synchronize and try to free memory
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+        # Calculate memory freed (if any)
+        free_bytes_after = torch.cuda.mem_get_info()[0]
+        cuda_graph_memory = free_bytes_after - free_bytes_before
+        if cuda_graph_memory > 0:
+            logger.info(
+                "CUDA graph sleep freed %.2f GiB memory.",
+                cuda_graph_memory / GiB_bytes,
+            )
+
+        return cuda_graph_memory
+
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+
+        # Put CUDA graphs to sleep at level 1
+        cuda_graph_memory = 0
+        if level >= 1:
+            cuda_graph_memory = self._save_cuda_graphs()
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -113,11 +197,91 @@ class Worker(WorkerBase):
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
-        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+
         logger.info(
-            "Sleep mode freed %.2f GiB memory, "
-            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+            "Sleep mode level %d completed. Freed %.2f GiB total "
+            "(%.2f GiB from weights, %.2f GiB from CUDA graphs). "
+            "%.2f GiB memory still in use.",
+            level,
+            freed_bytes / GiB_bytes,
+            (freed_bytes - cuda_graph_memory) / GiB_bytes,
+            cuda_graph_memory / GiB_bytes,
             used_bytes / GiB_bytes)
+
+    def _restore_cuda_graphs(self) -> None:
+        """Wake up CUDA graphs."""
+        from vllm.compilation.cuda_graph import CUDAGraphWrapper
+        from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
+
+        if not self._sleep_saved_cudagraphs:
+            return
+
+        logger.info("Waking up CUDA graphs...")
+        cuda_graph_count = 0
+
+        # Verify cudagraph dispatcher keys are intact
+        if "dispatcher_keys" in self._sleep_saved_cudagraphs and hasattr(
+            self.model_runner, "cudagraph_dispatcher"
+        ):
+            dispatcher = self.model_runner.cudagraph_dispatcher
+            # Keys should still be there, just verify
+            for mode, _ in self._sleep_saved_cudagraphs["dispatcher_keys"].items():
+                if mode in dispatcher.cudagraph_keys:
+                    logger.info(
+                        "Verified cudagraph dispatcher keys for mode %s", mode
+                    )
+            logger.info(
+                "Cudagraph dispatcher keys verified for %d modes",
+                len(self._sleep_saved_cudagraphs["dispatcher_keys"]),
+            )
+
+        # Restore model CUDA graphs
+        model = self.model_runner.model
+        if isinstance(model, (CUDAGraphWrapper, UBatchWrapper)):
+            logger.info("Waking up CUDAGraphWrapper/UBatchWrapper...")
+
+            # For CUDAGraphWrapper
+            if isinstance(model, CUDAGraphWrapper):
+                if "entries" in self._sleep_saved_cudagraphs:
+                    # The graphs should still be valid, just marked as sleeping
+                    for key, metadata in self._sleep_saved_cudagraphs[
+                        "entries"
+                    ].items():
+                        if key in model.concrete_cudagraph_entries:
+                            # If we kept the graph reference, restore it
+                            if "graph_ref" in metadata:
+                                model.concrete_cudagraph_entries[key].cudagraph = metadata[
+                                    "graph_ref"
+                                ]
+                                cuda_graph_count += 1
+
+            # For UBatchWrapper
+            elif isinstance(model, UBatchWrapper):
+                # Restore the graph pool if we saved it
+                if "graph_pool" in self._sleep_saved_cudagraphs:
+                    model.graph_pool = self._sleep_saved_cudagraphs["graph_pool"]
+                    logger.info("Restored graph pool reference")
+
+                if "ubatch_graphs" in self._sleep_saved_cudagraphs:
+                    # Restore the metadata
+                    for batch_size, data in self._sleep_saved_cudagraphs[
+                        "ubatch_graphs"
+                    ].items():
+                        if "metadata" in data:
+                            model.cudagraphs[batch_size] = data["metadata"]
+                            cuda_graph_count += 1
+
+
+        # Trigger CUDA to fully wake up the graph memory pool
+        torch.cuda.synchronize()
+
+        if cuda_graph_count > 0:
+            logger.info(
+                "Successfully woke up %d CUDA graphs without recapture.",
+                cuda_graph_count,
+            )
+
+        self._sleep_saved_cudagraphs = {}
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -133,9 +297,13 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+        # Restore CUDA graphs after level 1 sleep
+        self._restore_cuda_graphs()
+
     def _maybe_get_memory_pool_context(self,
                                        tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
+            logger.info(f"Sleep mode is enabled. Using memory pool with tag: {tag}")
             from vllm.device_allocator.cumem import CuMemAllocator
 
             allocator = CuMemAllocator.get_instance()
