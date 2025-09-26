@@ -100,13 +100,6 @@ class Mamba2AttentionMetadataBuilder(
             query_start_loc_p = common_attn_metadata.query_start_loc[
                 -num_prefills - 1:] - num_decode_tokens
 
-            seq_idx_p = torch.repeat_interleave(torch.arange(
-                num_prefills,
-                dtype=torch.int32,
-                device=query_start_loc_p.device),
-                                                query_start_loc_p.diff(),
-                                                output_size=num_prefill_tokens)
-
             num_computed_tokens_p = \
                 common_attn_metadata.num_computed_tokens_cpu[
                     num_reqs - num_prefills:num_reqs]
@@ -115,6 +108,7 @@ class Mamba2AttentionMetadataBuilder(
 
             # TODO (tdoublep): Optimize the code
             cu_chunk_seqlen = []
+            seq_idx = []
             last_chunk = []
             seqlen_pos = 0
             for req_idx in range(num_prefills):
@@ -125,6 +119,7 @@ class Mamba2AttentionMetadataBuilder(
                 # if computed tokens are not chunk-aligned, use the first
                 # chunk to finish it off
                 if this_num_computed % self.chunk_size != 0:
+                    seq_idx.append(req_idx)
                     cu_chunk_seqlen.append(seqlen_pos)
                     # how many tokens to finish the chunk?
                     chunk_len = cdiv(this_num_computed, self.chunk_size
@@ -136,6 +131,7 @@ class Mamba2AttentionMetadataBuilder(
 
                 n_chunks = cdiv(this_new_tokens, self.chunk_size)
                 for chunk in range(n_chunks):
+                    seq_idx.append(req_idx)
                     cu_chunk_seqlen.append(seqlen_pos)
                     chunk_len = min(self.chunk_size, this_new_tokens)
                     seqlen_pos += chunk_len
@@ -146,6 +142,9 @@ class Mamba2AttentionMetadataBuilder(
 
             cu_chunk_seqlen.append(seqlen_pos)
 
+            seq_idx_p = torch.as_tensor(seq_idx,
+                                        device=query_start_loc_p.device,
+                                        dtype=torch.int32)
             cu_chunk_seqlen_p = torch.as_tensor(
                 cu_chunk_seqlen,
                 device=query_start_loc_p.device,

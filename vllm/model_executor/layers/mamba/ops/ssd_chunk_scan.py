@@ -147,7 +147,7 @@ def _chunk_scan_fwd_kernel(
     stride_dA_cs_chunk: tl.int64,
     stride_dA_cs_head: tl.int64,
     stride_dA_cs_csize: tl.constexpr,
-    stride_seq_idx_seqlen: tl.constexpr,
+    stride_seq_idx_chunk: tl.constexpr,
     stride_C_seqlen: tl.int64,
     stride_C_head: tl.int64,
     stride_C_dstate: tl.constexpr,
@@ -191,9 +191,9 @@ def _chunk_scan_fwd_kernel(
     #  - logic in next block may override these if there is an active offset
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
 
-    seq_idx_ptr += chunk_seqlen_start * stride_seq_idx_seqlen
+    seq_idx_ptr += pid_c * stride_seq_idx_chunk
     seq_idx = tl.load(seq_idx_ptr)
-    seq_idx_prev = tl.load(seq_idx_ptr - stride_seq_idx_seqlen,
+    seq_idx_prev = tl.load(seq_idx_ptr - stride_seq_idx_chunk,
                            mask=pid_c >= 1,
                            other=-1)
 
@@ -375,7 +375,7 @@ def _chunk_scan_fwd(
     assert dt.shape == (nheads, nchunks, chunk_size)
     assert dA_cumsum.shape == (nheads, nchunks, chunk_size)
     assert states.shape == (nchunks, nheads, headdim, dstate)
-    assert seq_idx.shape == (seqlen, )
+    assert seq_idx.shape == (nchunks, )
 
     grid = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton
                          .cdiv(headdim, META['BLOCK_SIZE_N']), nchunks, nheads)
@@ -425,7 +425,7 @@ def _chunk_scan_fwd(
         stride_dA_cs_chunk=dA_cumsum.stride(1),
         stride_dA_cs_head=dA_cumsum.stride(0),
         stride_dA_cs_csize=dA_cumsum.stride(2),
-        stride_seq_idx_seqlen=seq_idx.stride(0),
+        stride_seq_idx_chunk=seq_idx.stride(0),
         stride_C_seqlen=C.stride(0),
         stride_C_head=C.stride(1),
         stride_C_dstate=C.stride(2),

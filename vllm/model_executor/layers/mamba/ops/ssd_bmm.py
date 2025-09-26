@@ -94,7 +94,6 @@ def _bmm_chunk_fwd_kernel(
     a_ptr,
     b_ptr,
     out_ptr,
-    seq_idx_ptr,
     cu_chunk_seqlens_ptr,
     # Matrix dimensions
     seqlen,
@@ -111,7 +110,6 @@ def _bmm_chunk_fwd_kernel(
     stride_out_head: tl.int64,
     stride_outm: tl.int64,
     stride_outn: tl.constexpr,
-    stride_seq_idx_seqlen: tl.constexpr,
     # Meta-parameters
     IS_CAUSAL: tl.constexpr,
     dot_dtype: tl.constexpr,
@@ -177,14 +175,12 @@ def _bmm_chunk_fwd(a,
                    b,
                    chunk_size,
                    cu_chunk_seqlens,
-                   seq_idx,
                    causal=False,
                    output_dtype=None):
     """
     Argument:
         a: (seqlen, ngroups, k)
         b: (seqlen, ngroups, k)
-        seq_idx: (seqlen,). out[i, j] for seq_idx[i] != seq_idx[j] will be zeroed out.
         causal: if True, then out[i, j] for i > j will be arbitrary, only out[i, j] for i <= j are
             guaranteed to be correct.
     Return:
@@ -192,8 +188,6 @@ def _bmm_chunk_fwd(a,
     """
     seqlen, ngroups, k = a.shape
     assert b.shape == a.shape
-    assert seq_idx is not None
-    assert seq_idx.shape == (seqlen, )
     if a.stride(-1) != 1 and a.stride(0) != 1:
         a = a.contiguous()
     if b.stride(-1) != 1 and b.stride(0) != 1:
@@ -217,7 +211,6 @@ def _bmm_chunk_fwd(a,
             a_ptr=a,
             b_ptr=b,
             out_ptr=out,
-            seq_idx_ptr=seq_idx,
             cu_chunk_seqlens_ptr=cu_chunk_seqlens,
             seqlen=seqlen,
             chunk_size=chunk_size,
@@ -233,7 +226,6 @@ def _bmm_chunk_fwd(a,
             stride_out_head=out.stride(1),
             stride_outm=out.stride(-2),
             stride_outn=out.stride(-1),
-            stride_seq_idx_seqlen=seq_idx.stride(0),
             IS_CAUSAL=causal,
             dot_dtype=dot_dtype,
         )

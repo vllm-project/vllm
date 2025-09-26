@@ -49,7 +49,7 @@ def _state_passing_fwd_kernel(
     stride_initstates_batch: tl.int64,
     stride_initstates_head: tl.int64,
     stride_initstates_dim: tl.constexpr,
-    stride_seq_idx_seqlen: tl.constexpr,
+    stride_seq_idx_chunk: tl.constexpr,
     # Meta-parameters
     HAS_INITSTATES: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -78,12 +78,10 @@ def _state_passing_fwd_kernel(
 
     prev_seq_idx = 0
     for c in range(nchunks):
-        chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + c)
         new_states = tl.load(states_ptrs, mask=offs_m < dim,
                              other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
-        seq_idx = tl.load(seq_idx_ptr +
-                          chunk_seqlen_start * stride_seq_idx_seqlen)
+        seq_idx = tl.load(seq_idx_ptr + c * stride_seq_idx_chunk)
         # we have started a new sequence
         if prev_seq_idx != seq_idx:
             if HAS_INITSTATES:
@@ -151,7 +149,7 @@ def _state_passing_fwd(
             stride_initstates_batch=initial_states_strides[0],
             stride_initstates_head=initial_states_strides[1],
             stride_initstates_dim=initial_states_strides[2],
-            stride_seq_idx_seqlen=seq_idx.stride(0),
+            stride_seq_idx_chunk=seq_idx.stride(0),
             HAS_INITSTATES=initial_states is not None,
         )
     return out

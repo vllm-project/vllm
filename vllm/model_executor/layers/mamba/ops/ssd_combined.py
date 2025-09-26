@@ -55,7 +55,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     if D is not None:
         assert D.shape == (nheads, headdim) or D.shape == (nheads, )
     if seq_idx is not None:
-        assert seq_idx.shape == (seqlen, )
+        assert seq_idx.shape == (cu_chunk_seqlens.shape[0] - 1, )
     if B.stride(-1) != 1:
         B = B.contiguous()
     if C.stride(-1) != 1:
@@ -100,20 +100,14 @@ def _mamba_chunk_scan_combined_fwd(x,
                               dt,
                               dA_cumsum,
                               cu_chunk_seqlens,
-                              seq_idx=seq_idx,
                               states_in_fp32=True)
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
-    # - for handling chunked prefill, this requires i) initial_states
+    # - for handling chunked prefill, this requires i) initial_states and
     #   ii) seq_idx to be all specified.
     # - When a new seq_idx is detected, we will stop passing the prev_state
     #   and switch accordingly to the init_state corresponding to the new seq_idx.
-    # - We will also make sure that the dA_cumsum is taken only from the start of the
-    #   sequence (hence we need the full dA_cumsum tensor and not just the values at chunk boundaries)
-    # - this will ensure that states will be updated with the rightmost flushed seq_idx
-    #   of the previous chunk. This implies that the first chunk of states is either 0
-    #   or equal to init_states of the first example.
     states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,  # (nheads, nchunks, chunk_size)
@@ -130,7 +124,6 @@ def _mamba_chunk_scan_combined_fwd(x,
                         B,
                         chunk_size,
                         cu_chunk_seqlens,
-                        seq_idx=seq_idx,
                         output_dtype=torch.float32)
 
     # 5. Scan and compute the diagonal blocks, taking into
@@ -189,7 +182,7 @@ def mamba_chunk_scan_combined_varlen(
         B: (seqlen, ngroups, dstate)
         C: (seqlen, ngroups, dstate)
         chunk_size: int
-        seq_idx: (seqlen)
+        seq_idx: (nchunks)
         cu_seqlens: (batch + 1)
         out: (seqlen, nheads, headdim) preallocated output tensor
         D: (nheads, headdim) or (nheads,)

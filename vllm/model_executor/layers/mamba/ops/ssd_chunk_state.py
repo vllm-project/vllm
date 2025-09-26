@@ -192,7 +192,6 @@ def _chunk_state_fwd_kernel(
     dt_ptr,
     dA_cumsum_ptr,
     cu_chunk_seqlens_ptr,
-    seq_idx_ptr,
     # Matrix dimensions
     hdim: tl.constexpr,
     dstate: tl.constexpr,
@@ -216,7 +215,6 @@ def _chunk_state_fwd_kernel(
     stride_dA_cs_head: tl.int64,
     stride_dA_cs_chunk: tl.int64,
     stride_dA_cs_csize: tl.constexpr,
-    stride_seq_idx_seqlen: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -585,7 +583,6 @@ def _chunk_state_fwd(B,
                      dt,
                      dA_cumsum,
                      cu_chunk_seqlens,
-                     seq_idx=None,
                      states=None,
                      states_in_fp32=True):
     seqlen, nheads, headdim = x.shape
@@ -595,9 +592,6 @@ def _chunk_state_fwd(B,
     assert B.shape == (seqlen, ngroups, dstate)
     assert dt.shape == (nheads, nchunks, chunk_size)
     assert dA_cumsum.shape == dt.shape
-
-    assert seq_idx is not None
-    assert seq_idx.shape == (seqlen, )
 
     if states is not None:
         assert states.shape == (nchunks, nheads, headdim, dstate)
@@ -617,7 +611,6 @@ def _chunk_state_fwd(B,
             dt_ptr=dt,
             dA_cumsum_ptr=dA_cumsum,
             cu_chunk_seqlens_ptr=cu_chunk_seqlens,
-            seq_idx_ptr=seq_idx,
             hdim=headdim,
             dstate=dstate,
             chunk_size=chunk_size,
@@ -639,7 +632,6 @@ def _chunk_state_fwd(B,
             stride_dA_cs_head=dA_cumsum.stride(0),
             stride_dA_cs_chunk=dA_cumsum.stride(1),
             stride_dA_cs_csize=dA_cumsum.stride(2),
-            stride_seq_idx_seqlen=seq_idx.stride(0),
         )
     return states
 
