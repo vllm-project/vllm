@@ -209,12 +209,9 @@ class SpeculativeConfig:
 
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
-            # mtp acceleration for more models besides deepseek_v3
-            if self.target_model_config and \
-                (self.target_model_config.hf_text_config.model_type \
-                        == "deepseek_v3" or
-                    self.target_model_config.hf_text_config.model_type in
-                        ("mimo","ernie4_5_moe", "qwen3_next")):
+            if (self.target_model_config
+                    and self.target_model_config.hf_text_config.model_type
+                    in ("deepseek_v3", "mimo", "ernie4_5_moe", "qwen3_next")):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
                 # Align the quantization of draft model for cases such as
@@ -224,8 +221,9 @@ class SpeculativeConfig:
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
             else:
-                raise ValueError("num_speculative_tokens was provided without "
-                                 "speculative model.")
+                raise ValueError(
+                    "num_speculative_tokens was provided but without "
+                    "speculative model.")
 
         # Automatically configure the method for ngram when "model" is used
         # instead of "method"
@@ -542,7 +540,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        eagle3_target_supported = ["llama", "qwen", "gpt_oss"]
+        eagle3_target_supported = ["llama", "qwen", "minicpm", "gpt_oss"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
