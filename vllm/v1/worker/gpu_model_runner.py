@@ -2935,7 +2935,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if num_tokens_across_dp is not None:
                 num_tokens_after_padding = int(num_tokens_across_dp[0])
 
-
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 
         # If force_attention is True, we always capture attention. Otherwise,

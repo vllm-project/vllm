@@ -73,7 +73,6 @@ def ubatch_split(
 
     """
     dp_size = parallel_config.data_parallel_size
-
     dp_rank = parallel_config.data_parallel_rank
 
     # Check preconditions for microbatching
