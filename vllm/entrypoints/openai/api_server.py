@@ -3,6 +3,7 @@
 
 import asyncio
 import gc
+import hashlib
 import importlib
 import inspect
 import json
@@ -1264,7 +1265,9 @@ class AuthenticationMiddleware:
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
         self.app = app
-        self.api_tokens = tokens
+        self.api_tokens = [
+            hashlib.sha256(t.encode("utf-8")).digest() for t in tokens
+        ]
 
     def verify_token(self, headers: Headers) -> bool:
         authorization_header_value = headers.get("Authorization")
@@ -1275,10 +1278,11 @@ class AuthenticationMiddleware:
         if scheme.lower() != "bearer":
             return False
 
+        param_hash = hashlib.sha256(param.encode("utf-8")).digest()
+
         token_match = False
-        for token in self.api_tokens:
-            if secrets.compare_digest(param, token):
-                token_match = True
+        for token_hash in self.api_tokens:
+            token_match |= secrets.compare_digest(param_hash, token_hash)
 
         return token_match
 
