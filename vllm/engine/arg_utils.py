@@ -156,8 +156,8 @@ def is_online_quantization(quantization: Any) -> bool:
 
 
 NEEDS_HELP = (
-    "--help" in (argv := sys.argv)  # vllm SUBCOMMAND --help
-    or (argv0 := argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
+    any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
+    or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
     or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
 )
 
@@ -330,6 +330,8 @@ class EngineArgs:
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = \
         ParallelConfig.dbo_decode_token_threshold
+    dbo_prefill_token_threshold: int = \
+        ParallelConfig.dbo_prefill_token_threshold
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
     expert_placement_strategy: ExpertPlacementStrategy = \
@@ -371,7 +373,6 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
-    max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
@@ -390,6 +391,7 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
+    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -543,8 +545,6 @@ class EngineArgs:
                                  **model_kwargs["quantization"])
         model_group.add_argument("--enforce-eager",
                                  **model_kwargs["enforce_eager"])
-        model_group.add_argument("--max-seq-len-to-capture",
-                                 **model_kwargs["max_seq_len_to_capture"])
         model_group.add_argument("--max-logprobs",
                                  **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode",
@@ -698,6 +698,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
             **parallel_kwargs["dbo_decode_token_threshold"])
+        parallel_group.add_argument(
+            "--dbo-prefill-token-threshold",
+            **parallel_kwargs["dbo_prefill_token_threshold"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config",
@@ -810,6 +813,9 @@ class EngineArgs:
             **multimodal_kwargs["interleave_mm_strings"])
         multimodal_group.add_argument("--skip-mm-profiling",
                                       **multimodal_kwargs["skip_mm_profiling"])
+
+        multimodal_group.add_argument(
+            "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1003,7 +1009,6 @@ class EngineArgs:
             max_model_len=self.max_model_len,
             quantization=self.quantization,
             enforce_eager=self.enforce_eager,
-            max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
@@ -1031,6 +1036,7 @@ class EngineArgs:
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
+            video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
         )
 
@@ -1316,6 +1322,7 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             enable_dbo=self.enable_dbo,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
+            dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
             expert_placement_strategy=self.expert_placement_strategy,
@@ -1463,33 +1470,35 @@ class EngineArgs:
             return False
 
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        if (self.speculative_config is not None
-                and self.speculative_config.get("method") == "draft_model"):
-            raise NotImplementedError(
-                "Speculative decoding with draft model is not supported yet. "
-                "Please consider using other speculative decoding methods "
-                "such as ngram, medusa, eagle, or deepseek_mtp.")
+        if self.speculative_config is not None:
+            # speculative_config could still be a dict at this point
+            if isinstance(self.speculative_config, dict):
+                method = self.speculative_config.get("method", None)
+            else:
+                method = self.speculative_config.method
+
+            if method == "draft_model":
+                raise NotImplementedError(
+                    "Draft model speculative decoding is not supported yet. "
+                    "Please consider using other speculative decoding methods "
+                    "such as ngram, medusa, eagle, or deepseek_mtp.")
 
         V1_BACKENDS = [
-            "FLASH_ATTN_VLLM_V1",
             "FLASH_ATTN",
             "PALLAS",
-            "PALLAS_VLLM_V1",
-            "TRITON_ATTN_VLLM_V1",
+            "TRITON_ATTN",
             "TRITON_MLA",
             "CUTLASS_MLA",
             "FLASHMLA",
-            "FLASHMLA_VLLM_V1",
             "FLASH_ATTN_MLA",
             "FLASHINFER",
-            "FLASHINFER_VLLM_V1",
             "FLASHINFER_MLA",
             "ROCM_AITER_MLA",
-            "TORCH_SDPA_VLLM_V1",
+            "TORCH_SDPA",
             "FLEX_ATTENTION",
             "TREE_ATTN",
-            "XFORMERS_VLLM_V1",
-            "ROCM_ATTN_VLLM_V1",
+            "XFORMERS",
+            "ROCM_ATTN",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
