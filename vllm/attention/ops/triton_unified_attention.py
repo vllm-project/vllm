@@ -67,7 +67,7 @@ def _mxfp4_quant_op(
     amax = amax.to(tl.int32, bitcast=True)
     amax = (amax + 0x200000).to(tl.uint32, bitcast=True) & 0xFF800000
     amax = amax.to(tl.float32, bitcast=True)
-    scale_e8m0_unbiased = tl.log2(amax).floor() - 2
+    scale_e8m0_unbiased = (tl.log2(amax) + 0.5).floor() - 2
     scale_e8m0_unbiased = tl.clamp(scale_e8m0_unbiased, min=-127, max=127)
 
     # blockscale_e8m0
@@ -89,6 +89,7 @@ def _mxfp4_quant_op(
     #           S101 -> +/- 3.0
     #           S110 -> +/- 4.0
     #           S111 -> +/- 6.0
+    #qx = tl.where(qx > 0, qx + 0.25, qx - 0.25)
     qx = qx.to(tl.uint32, bitcast=True)
 
     # Extract sign, exponents and mantissa fields from FP32
@@ -168,7 +169,7 @@ def kernel_unified_attention_2d(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    use_native_fp4: tl.constexpr = True,
+    use_native_fp4: tl.constexpr = 2, #True,
     PACK_ALONG_K: tl.constexpr = True,
 ):
     q_block_global_idx = tl.program_id(0)
@@ -216,11 +217,26 @@ def kernel_unified_attention_2d(
     if Q is not None:
            pid0 = tl.program_id(axis=0)
            pid1 = tl.program_id(axis=1)
-           if pid0 < 1 and pid1 < 1:
+           if pid0 < -1 and pid1 < 1:
               tl.device_print("Q:",Q.shape[0], Q.shape[1])
 
     if use_native_fp4:
-       q_fp4, scale_q = _mxfp4_quant_op(Q.to(tl.float32), HEAD_SIZE_PADDED, BLOCK_M, 32)
+       #q_fp4, scale_q = _mxfp4_quant_op(Q.to(tl.float32), HEAD_SIZE_PADDED, BLOCK_M, 32)
+       if use_native_fp4 == 1:
+          q_fp4, scale_q = _mxfp4_quant_op(Q, HEAD_SIZE_PADDED, BLOCK_M, 32)
+       else:
+          q_avg = tl.sum(Q,1)/HEAD_SIZE_PADDED
+          q_avg = tl.reshape(q_avg,(BLOCK_M,1))
+          ones = tl.full((1,HEAD_SIZE_PADDED), 1.0, dtype=tl.float32)
+          q_avg = tl.dot(q_avg, ones)
+
+          pid0 = tl.program_id(axis=0)
+          pid1 = tl.program_id(axis=1)
+          if pid0 < 1 and pid1 < 1:
+              tl.device_print("q_avg:",q_avg.shape[0], q_avg.shape[1])
+
+          Qr = Q - q_avg
+          q_fp4, scale_q = _mxfp4_quant_op(Qr, HEAD_SIZE_PADDED, BLOCK_M, 32)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -337,24 +353,43 @@ def kernel_unified_attention_2d(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
+        S2 = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
 
         if use_native_fp4:
            kt = tl.trans(K)
+           if use_native_fp4 == 2:
+              k_avg = tl.sum(kt,1) / HEAD_SIZE_PADDED
+              k_avg = tl.reshape(k_avg,(TILE_SIZE,1))
+              ones = tl.full((1,HEAD_SIZE_PADDED), 1.0, dtype=tl.float32)
+              k_avg = tl.dot(k_avg, ones)
+              kt -= k_avg
+              detS = tl.dot(q_avg, tl.trans(kt))
            k_fp4, scale_k = _mxfp4_quant_op(kt, HEAD_SIZE_PADDED, TILE_SIZE, 32)
-
            # debug info
            pid0 = tl.program_id(axis=0)
            pid1 = tl.program_id(axis=1)
-           if pid0 < 1 and pid1 < 1 and j == 0:
+           if pid0 < -1 and pid1 < 1 and j == 0:
               tl.device_print("k_fp4:",k_fp4.shape[0], k_fp4.shape[1])
 
            # copied from triton def dot_scaled()
            # M, K_LHS = lhs.type.shape[-2:]
            # K_RHS, N = rhs.type.shape[-2:]
-           S = scale * tl.dot_scaled(q_fp4, scale_q, "e2m1", tl.trans(k_fp4), tl.trans(scale_k), "e2m1", S, lhs_k_pack=PACK_ALONG_K,
+           #acc_base = None
+           s_fp4 = scale * tl.dot_scaled(q_fp4, scale_q, "e2m1", tl.trans(k_fp4), tl.trans(scale_k), "e2m1", S2, lhs_k_pack=PACK_ALONG_K,
                                    rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32)
-        else:
-           S += scale * tl.dot(Q, K)
+           if use_native_fp4 == 2:
+               S2 += s_fp4 + detS
+           else:
+               S2 += s_fp4
+        #else:
+        S += scale * tl.dot(Q, K)
+        pid0 = tl.program_id(axis=0)
+        pid1 = tl.program_id(axis=1)
+        if pid0 < -1 and pid1 < 1 and j == 0:
+           #tl.device_print("S ", S)
+           #tl.device_print("S2 ",S2)
+           tl.device_print("S-S2 ",S - S2)
+        S = S2
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -418,7 +453,7 @@ def kernel_unified_attention_2d(
            # debug info
            pid0 = tl.program_id(axis=0)
            pid1 = tl.program_id(axis=1)
-           if pid0 < 1 and pid1 < 1 and j == 0:
+           if pid0 < -1 and pid1 < 1 and j == 0:
               tl.device_print("v_fp4:",v_fp4.shape[0], v_fp4.shape[1])
 
            # copied from triton def dot_scaled()
@@ -848,7 +883,8 @@ def unified_attention(
     BLOCK_M = 16 if num_queries_per_kv <= 16 else triton.next_power_of_2(
         num_queries_per_kv)
 
-    print("--------BLOK_M: ", num_queries_per_kv, BLOCK_M)
+    print("--------BLOK_M: ", num_queries_per_kv, BLOCK_M, "qkv dtype: ", q.dtype, k.dtype, v.dtype,
+            "max seqlen q: ", max_seqlen_q, "seqused k, max seqlen k : ", seqused_k.data[0], max_seqlen_k,"num_kv_heads: ", num_kv_heads)
     BLOCK_M = 32
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
