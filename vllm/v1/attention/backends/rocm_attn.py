@@ -159,7 +159,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ROCM_ATTN_VLLM_V1"
+        return "ROCM_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["RocmAttentionImpl"]:
