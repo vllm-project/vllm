@@ -105,8 +105,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
-    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
-    VLLM_ROCM_USE_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -935,18 +933,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in
              ("true", "1")),
 
-    # Whether to use aiter fp4 gemm asm.
-    # By default is disabled.
-    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in
-             ("true", "1")),
-
-    # Whether to use aiter rope.
-    # By default is disabled.
-    "VLLM_ROCM_USE_TRITON_ROPE":
-    lambda: (os.getenv("VLLM_ROCM_USE_TRITON_ROPE", "False").lower() in
-             ("true", "1")),
-
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_FP8BMM":
@@ -1513,8 +1499,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_PATTERN_MATCH_DEBUG", "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP", "VLLM_DP_MASTER_PORT",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "VLLM_CI_USE_S3",
-        "VLLM_MODEL_REDIRECT_PATH", "VLLM_MARLIN_USE_ATOMIC_ADD",
-        "VLLM_MXFP4_USE_MARLIN"
+        "VLLM_MODEL_REDIRECT_PATH"
     }
 
     from vllm.config.utils import normalize_value
@@ -1523,16 +1508,9 @@ def compile_factors() -> dict[str, object]:
     for factor, getter in environment_variables.items():
         if factor in ignored_factors:
             continue
-        try:
-            raw = getter()
-        except Exception:
-            # Do not drop the factor; mark retrieval failure deterministically.
-            factors[factor] = "<error:unavailable>"
-            continue
-        try:
-            factors[factor] = normalize_value(raw)
-        except Exception:
-            # Preserve the factor with a stable placeholder to avoid
-            # under-hashing.
-            factors[factor] = f"<unserializable:{type(raw).__name__}>"
+
+        raw = getter()
+
+        factors[factor] = normalize_value(raw)
+
     return factors

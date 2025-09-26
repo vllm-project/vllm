@@ -478,57 +478,45 @@ class VllmBackend:
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
         vllm_config = self.vllm_config
+        # Minimal hashing here with existing utilities, reused below.
+        from vllm.config.utils import hash_factors as _hash_factors
+        env_factors = envs.compile_factors()
+        env_hash = _hash_factors(env_factors)
+        # Compute config/compiler/code hashes once and reuse
+        config_hash = vllm_config.compute_hash()
+        compiler_hash = self.compiler_manager.compute_hash(vllm_config)
+        forward_code_files = list(sorted(self.compilation_config.traced_files))
+        logger.debug(
+            "Traced files (to be considered for compilation cache):\n%s",
+            "\n".join(forward_code_files))
+        hash_content = []
+        for filepath in forward_code_files:
+            hash_content.append(filepath)
+            if filepath == "<string>":
+                # This means the function was dynamically generated, with
+                # e.g. exec(). We can't actually check these.
+                continue
+            try:
+                with open(filepath) as f:
+                    hash_content.append(f.read())
+            except Exception:
+                continue
+        code_hash = hashlib.sha256(
+            "\n".join(hash_content).encode()).hexdigest()
+        # Clear after consumption
+        self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:
             # no provided cache dir, generate one based on the known factors
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
 
-            factors = []
-            # 0. factors come from the env, for example, The values of
-            # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-            from vllm.config.utils import hash_factors
-            env_hash = hash_factors(envs.compile_factors())
-            factors.append(env_hash)
-
-            # 1. factors come from the vllm_config (it mainly summarizes how the
-            #    model is created)
-            config_hash = vllm_config.compute_hash()
-            factors.append(config_hash)
-
-            # 2. factors come from the code files that are traced by Dynamo (
-            #    it mainly summarizes how the model is used in forward pass)
-            forward_code_files = list(
-                sorted(self.compilation_config.traced_files))
-            logger.debug(
-                "Traced files (to be considered for compilation cache):\n%s",
-                "\n".join(forward_code_files))
-            hash_content = []
-            for filepath in forward_code_files:
-                hash_content.append(filepath)
-                if filepath == "<string>":
-                    # This means the function was dynamically generated, with
-                    # e.g. exec(). We can't actually check these.
-                    continue
-                with open(filepath) as f:
-                    hash_content.append(f.read())
-            code_hash = hashlib.sha256(
-                "\n".join(hash_content).encode()).hexdigest()
-            factors.append(code_hash)
-
-            # 3. compiler hash
-            compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-            factors.append(compiler_hash)
-
-            # combine all factors to generate the cache dir
+            factors = [env_hash, config_hash, code_hash, compiler_hash]
             hash_key = hashlib.md5(str(factors).encode(),
                                    usedforsecurity=False).hexdigest()[:10]
 
-            cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT,
-                "torch_compile_cache",
-                hash_key,
-            )
+            cache_dir = os.path.join(envs.VLLM_CACHE_ROOT,
+                                     "torch_compile_cache", hash_key)
             self.compilation_config.cache_dir = cache_dir
 
         cache_dir = self.compilation_config.cache_dir
@@ -552,35 +540,7 @@ class VllmBackend:
         self.compiler_manager.initialize_cache(local_cache_dir, disable_cache,
                                                self.prefix)
 
-        try:
-            vllm_config_hash = vllm_config.compute_hash()
-        except Exception:
-            vllm_config_hash = "<unavailable>"
-
-        # Derive hashes for logging and cache key.
-        from vllm.config.utils import hash_factors as _hash_factors
-        env_hash = _hash_factors(envs.compile_factors())
-        config_hash = vllm_config_hash if vllm_config_hash != "<unavailable>" \
-            else vllm_config.compute_hash()
-        compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-
-        forward_code_files = list(sorted(self.compilation_config.traced_files))
-        self.compilation_config.traced_files.clear()
-        hash_content = []
-        for filepath in forward_code_files:
-            hash_content.append(filepath)
-            if filepath == "<string>":
-                continue
-            try:
-                with open(filepath) as f:
-                    hash_content.append(f.read())
-            except Exception:
-                continue
-        code_hash = hashlib.sha256(
-            "\n".join(hash_content).encode()).hexdigest()
-        summary_hash_key = hashlib.sha256(
-            str([env_hash, config_hash, code_hash,
-                 compiler_hash]).encode()).hexdigest()[:10]
+        # Reuses existing cache key
 
         logger.info(
             "torch.compile cache factors: env=%s cfg=%s comp=%s dir=%s",
@@ -589,12 +549,10 @@ class VllmBackend:
             compiler_hash,
             local_cache_dir,
         )
-        logger.debug("code hash=%s summary_key=%s", code_hash,
-                     summary_hash_key)
+        logger.debug("code hash=%s", code_hash)
 
         # Persist and log only hash-relevant factors together.
         try:
-            env_factors = envs.compile_factors()
             logger.debug(
                 "Compile env factors (raw):\n%s\nVllm config hash: %s",
                 pprint.pformat(env_factors, width=120),
@@ -608,7 +566,6 @@ class VllmBackend:
                         "config_hash": config_hash,
                         "code_hash": code_hash,
                         "compiler_hash": compiler_hash,
-                        "summary_key": summary_hash_key,
                     },
                     f,
                     indent=2,
