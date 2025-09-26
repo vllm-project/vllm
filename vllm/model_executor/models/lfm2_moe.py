@@ -611,7 +611,6 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-        use_v1: bool = True,
     ) -> tuple[tuple[int, int]]:
         """ Calculate shapes for LFM2's convolutional cache.
 
@@ -630,7 +629,6 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             tp_world_size=parallel_config.tensor_parallel_size,
             intermediate_size=hf_config.hidden_size,
             conv_kernel=hf_config.conv_L_cache,
-            use_v1=use_v1,
         )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -646,10 +644,6 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         super().__init__()
         self.config = config
-        self.vllm_config = vllm_config
-        self.scheduler_config = scheduler_config
-        self.model_config = vllm_config.model_config
-
         self.model = Lfm2MoeModel(vllm_config=vllm_config,
                                   prefix=maybe_prefix(prefix, "model"))
 
