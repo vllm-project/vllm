@@ -218,8 +218,7 @@ class RocmPlatform(Platform):
                 raise ValueError(
                     f" The selected backend, {selected_backend.name},"
                     f"does not support block size {block_size}.")
-            if selected_backend in (_Backend.ROCM_AITER_MLA,
-                                    _Backend.ROCM_AITER_MLA_VLLM_V1):
+            if selected_backend == _Backend.ROCM_AITER_MLA:
                 if block_size == 1:
                     logger.info("Using AITER MLA backend on V1 engine.")
                     return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
@@ -240,7 +239,7 @@ class RocmPlatform(Platform):
             elif (envs.VLLM_ROCM_USE_AITER and
                 envs.VLLM_USE_AITER_UNIFIED_ATTENTION) or \
                     envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION or \
-                        selected_backend == _Backend.ROCM_ATTN_VLLM_V1:
+                        selected_backend == _Backend.ROCM_ATTN:
                 # rocm specific backend, with aiter and/or
                 #   triton prefix-prefill
                 logger.info("Using Rocm/Aiter Attention backend on V1 engine.")
@@ -340,7 +339,8 @@ class RocmPlatform(Platform):
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
-        if use_v1 and use_aiter_rms_norm and not is_eager_execution:
+        if (use_v1 and use_aiter_rms_norm and not is_eager_execution
+                and "-rms_norm" not in compilation_config.custom_ops):
             compilation_config.custom_ops.append("+rms_norm")
 
     @classmethod

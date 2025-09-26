@@ -27,7 +27,7 @@ def try_get_class_from_dynamic_module(
     **kwargs,
 ) -> Optional[type]:
     """
-    As [transformers.dynamic_module_utils.get_class_from_dynamic_module][],
+    As `transformers.dynamic_module_utils.get_class_from_dynamic_module`,
     but ignoring any errors.
     """
     try:
