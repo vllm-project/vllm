@@ -246,8 +246,7 @@ class ForwardContext:
     ubatch_slices: Optional[UBatchSlices] = None
 
     def __post_init__(self):
-        assert self.cudagraph_runtime_mode in [
-            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], \
+        assert self.cudagraph_runtime_mode.valid_runtime_modes(), \
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
 
 

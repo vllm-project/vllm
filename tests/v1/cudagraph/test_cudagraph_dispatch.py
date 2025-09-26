@@ -45,39 +45,22 @@ def _create_vllm_config(compilation_config: CompilationConfig,
 class TestCudagraphDispatcher:
 
     @pytest.mark.parametrize(
-        "params",
+        "case_id,cudagraph_mode_str,compilation_level",
         [
             # Test case 0: Full CG for mixed batches, no separate routine
-            {
-                "case_id": 0,
-                "cudagraph_mode": "FULL",
-                "compilation_level": CompilationLevel.NO_COMPILATION,
-            },
+            (0, "FULL", CompilationLevel.NO_COMPILATION),
             # Test case 1: Full CG for uniform batches, piecewise for mixed
-            {
-                "case_id": 1,
-                "cudagraph_mode": "FULL_AND_PIECEWISE",
-                "compilation_level": CompilationLevel.PIECEWISE,
-            },
+            (1, "FULL_AND_PIECEWISE", CompilationLevel.NO_COMPILATION),
             # Test case 2: Full CG for uniform batches, no CG for mixed
-            {
-                "case_id": 2,
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-                "compilation_level": CompilationLevel.NO_COMPILATION,
-            },
+            (2, "FULL_DECODE_ONLY", CompilationLevel.NO_COMPILATION),
             # Test case 3: Piecewise for all
-            {
-                "case_id": 3,
-                "cudagraph_mode": "PIECEWISE",
-                "compilation_level": CompilationLevel.PIECEWISE,
-            },
+            (3, "PIECEWISE", CompilationLevel.PIECEWISE),
         ])
-    def test_dispatcher(self, params):
+    def test_dispatcher(self, cudagraph_mode_str, compilation_level):
         # Setup dispatcher
-        comp_config = CompilationConfig(
-            cudagraph_mode=params["cudagraph_mode"],
-            level=params["compilation_level"],
-            cudagraph_capture_sizes=[1, 8])
+        comp_config = CompilationConfig(cudagraph_mode=cudagraph_mode_str,
+                                        level=compilation_level,
+                                        cudagraph_capture_sizes=[1, 8])
 
         config = _create_vllm_config(comp_config, max_num_seqs=8)
         dispatcher = CudagraphDispatcher(config)
@@ -86,11 +69,11 @@ class TestCudagraphDispatcher:
             uniform_decode_query_len=1)
 
         # Verify the key is initialized correctly
-        if params["cudagraph_mode"] in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
+        if cudagraph_mode_str in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]) == 2
         else:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]) == 0
-        if params["cudagraph_mode"] not in ["NONE", "PIECEWISE"]:
+        if cudagraph_mode_str not in ["NONE", "PIECEWISE"]:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) == 2
         else:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) == 0
@@ -99,10 +82,10 @@ class TestCudagraphDispatcher:
         # 1. non-uniform batch, size in cudagraph size list
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform_decode=False)
         rt_mode, key = dispatcher.dispatch(desc_full_exact)
-        if params["cudagraph_mode"] == "FULL":
+        if cudagraph_mode_str == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_full_exact
-        elif params["cudagraph_mode"] in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
+        elif cudagraph_mode_str in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
             assert rt_mode == CUDAGraphMode.PIECEWISE
             assert key == desc_full_exact
         else:
@@ -111,15 +94,13 @@ class TestCudagraphDispatcher:
         # 2. uniform decode batch, size in cudagraph size list
         desc_uniform_exact = BatchDescriptor(num_tokens=8, uniform_decode=True)
         rt_mode, key = dispatcher.dispatch(desc_uniform_exact)
-        if params["cudagraph_mode"] == "FULL":
+        if cudagraph_mode_str == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_uniform_exact.non_uniform
-        elif params["cudagraph_mode"] in [
-                "FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"
-        ]:
+        elif cudagraph_mode_str in ["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"]:
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_uniform_exact
-        elif params["cudagraph_mode"] == "PIECEWISE":
+        elif cudagraph_mode_str == "PIECEWISE":
             assert rt_mode == CUDAGraphMode.PIECEWISE
             assert key == desc_uniform_exact.non_uniform
         else:
@@ -130,6 +111,16 @@ class TestCudagraphDispatcher:
         rt_mode, key = dispatcher.dispatch(desc_no_match)
         assert rt_mode == CUDAGraphMode.NONE
         assert key is None
+
+        # 4. Cascade attention should have a fall back mode
+        desc_full_exact = BatchDescriptor(num_tokens=8, uniform_decode=False)
+        rt_mode, key = dispatcher.dispatch(desc_full_exact,
+                                           use_cascade_attn=True)
+        if "PIECEWISE" in cudagraph_mode_str:  # string contains check
+            assert rt_mode == CUDAGraphMode.PIECEWISE
+            assert key == desc_full_exact.non_uniform
+        else:
+            assert rt_mode == CUDAGraphMode.NONE
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")

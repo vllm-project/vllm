@@ -336,7 +336,7 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
     from vllm.config import CUDAGraphMode
 
     compilation_config = vllm_config.compilation_config
-    if (compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+    if (compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
             and compilation_config.use_inductor_graph_partition):
         from torch._inductor.utils import CUDAGraphWrapperMetadata
 
@@ -365,7 +365,7 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
 
     yield
 
-    if (compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+    if (compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
             and compilation_config.use_inductor_graph_partition):
         torch._inductor.utils.set_customized_partition_wrappers(None)
 
