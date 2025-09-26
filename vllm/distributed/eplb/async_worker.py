@@ -24,7 +24,6 @@ logger = init_logger(__name__)
 
 def start_async_worker(
     state: "EplbState",
-    rank_mapping: dict[int, int] | None = None,
     is_profile: bool = False,
 ) -> threading.Thread:
     ep_group = get_ep_group().device_group
@@ -43,7 +42,6 @@ def start_async_worker(
                     state=state,
                     ep_group=ep_group,
                     is_profile=is_profile,
-                    rank_mapping=rank_mapping,
                     cuda_stream=cuda_stream,
                 )
             )
@@ -61,7 +59,6 @@ async def transfer_run_periodically(
     state: "EplbState",
     ep_group: ProcessGroup,
     is_profile: bool = False,
-    rank_mapping: dict[int, int] | None = None,
     cuda_stream: torch.cuda.Stream = None,
 ) -> None:
     while True:
@@ -99,7 +96,6 @@ async def transfer_run_periodically(
                             is_profile=is_profile,
                             layer=model_state.layer_to_transfer,
                             cuda_stream=cuda_stream,
-                            rank_mapping=rank_mapping,
                         )
                         event = torch.cuda.Event(blocking=False)
                         cuda_stream.record_event(event)

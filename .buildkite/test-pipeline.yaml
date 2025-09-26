@@ -1348,6 +1348,21 @@ steps:
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
+- label: Elastic EP Scaling Test
+  timeout_in_minutes: 20
+  gpu: b200
+  optional: true
+  working_dir: "/vllm-workspace/"
+  num_gpus: 4
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/compilation/
+  - tests/distributed/
+  commands:
+  - pytest -v -s distributed/test_elastic_ep.py
+
 ##### RL Integration Tests #####
 - label: Prime-RL Integration Test # 15min
   timeout_in_minutes: 30
