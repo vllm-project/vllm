@@ -267,8 +267,8 @@ __device__ __forceinline__ void token_bounds(int32_t n_tokens,
 }
 
 static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;
-template <typename fp8_type, int THREADS, typename Idx_t, bool USE_UE8M0,
-          int GROUP_SIZE = 128, int NUM_STAGES = 3>
+template <int SMEM_SIZE_BYTES_Y, typename fp8_type, int THREADS, typename Idx_t,
+          bool USE_UE8M0, int GROUP_SIZE = 128, int NUM_STAGES = 3>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const __nv_bfloat16* __restrict__ _input, fp8_type* __restrict__ _y_q,
     float* __restrict__ _y_s, const int32_t* __restrict__ tokens_per_expert,
@@ -286,10 +286,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   static constexpr int COMPUTE_STAGE_SIZE = 2 * GROUP_SIZE / 4;
   static constexpr int COMPUTE_STAGE_MOD = COMPUTE_STAGE_SIZE * NUM_STAGES;
 
-  extern __shared__ __int128_t smem_128[];
+  extern __shared__ __align__(16) __int128_t smem_128[];
 
-  static constexpr int MAX_EXPERTS = 256;
-  __shared__ int s_expert_offsets[MAX_EXPERTS + 1];
+  int* s_expert_offsets =
+      reinterpret_cast<int*>(smem_128 + (SMEM_SIZE_BYTES_Y / 16));
 
   static constexpr __nv_bfloat16 fp8_min = get_fp8_min<fp8_type>();
   static constexpr __nv_bfloat16 fp8_max = get_fp8_max<fp8_type>();
@@ -920,8 +920,9 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
   VLLM_DISPATCH_FP8_TYPES(                                                   \
       y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {        \
         vllm::silu_mul_fp8_quant_deep_gemm_kernel<                           \
-            fp8_t, THREAD_COUNT, Idx_t, USE_UE8M0, GROUP_SIZE, STAGES>       \
-            <<<grid, block, max_shared_mem_bytes, stream>>>(                 \
+            max_shared_mem_bytes, fp8_t, THREAD_COUNT, Idx_t, USE_UE8M0,     \
+            GROUP_SIZE, STAGES>                                              \
+            <<<grid, block, max_shared_mem_bytes + (E + 1) * 16, stream>>>(  \
                 reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),          \
                 (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),               \
                 reinterpret_cast<int32_t*>(tokens_per_expert.data_ptr()), E, \
