@@ -31,7 +31,8 @@ from vllm.utils import direct_register_custom_op
 
 from .transformers import (TransformersBase, TransformersForCausalLM,
                            TransformersForMultimodalLM, TransformersModel,
-                           can_enable_torch_compile, log_replacement)
+                           can_enable_torch_compile, log_replacement,
+                           replace_linear_class)
 from .utils import AutoWeightsLoader, maybe_prefix
 
 
@@ -187,10 +188,12 @@ class TransformersMoEBase(TransformersBase):
         elif "grok1" in wrapped_arch:
             activation = "gelu"
 
-        # Expert parallel load balancing kwargs
+        # Configs
+        quant_config = self.quant_config
         parallel_config = self.parallel_config
         eplb_config = parallel_config.eplb_config
 
+        # Expert parallel load balancing kwargs
         enable_eplb = parallel_config.enable_eplb
         num_redundant_experts = eplb_config.num_redundant_experts
 
@@ -203,6 +206,13 @@ class TransformersMoEBase(TransformersBase):
                     # Alias for readability
                     mlp = module
                     experts = child_module
+                    # GPTQ configs ddo not have lists of ignored modules
+                    # and AutoGPTQ seems to avoid gate quantization.
+                    if (quant_config and "gptq" in quant_config.get_name()
+                            and (gate := getattr(mlp, "gate", None))):
+                        new_gate = replace_linear_class(
+                            gate, prefix=f"{prefix}.gate")
+                        mlp.gate = new_gate
                     # Do the experts have biases
                     has_bias = False
                     for experts_param_name, _ in experts.named_parameters():
@@ -235,7 +245,7 @@ class TransformersMoEBase(TransformersBase):
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
                     )
-                    setattr(mlp, child_name, fused_experts)
+                    mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
                     # If results are not all-reduced in FusedMoE, ensure they
                     # are all-reduced at the end of mlp.forward()
