@@ -58,6 +58,12 @@ except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
 
+try:
+    from nixl._api import nixl_agent_config
+except ImportError:
+    nixl_agent_config = None
+    logger.warning("NIXL agent config is not available")
+
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
 _NIXL_SUPPORTED_DEVICE = {
@@ -65,6 +71,8 @@ _NIXL_SUPPORTED_DEVICE = {
     "tpu": ("cpu", ),
     "xpu": ("cpu", ),
 }
+# support for oot platform by providing mapping in current_platform
+_NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 
 class NixlAgentMetadata(
@@ -241,6 +249,10 @@ class NixlConnector(KVConnectorBase_V1):
         if self.connector_worker.use_host_buffer and \
            self.connector_worker.copy_blocks:
             self.connector_worker.save_kv_to_host(self._connector_metadata)
+
+    def shutdown(self):
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
 
 
 class NixlConnectorScheduler:
@@ -448,8 +460,15 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
+        self.nixl_backends = \
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "backends", ["UCX"])
         # Agent.
-        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
+        non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
+        config = nixl_agent_config(backends=self.nixl_backends) if len(
+            non_ucx_backends) > 0 and nixl_agent_config is not None else None
+
+        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
@@ -486,11 +505,15 @@ class NixlConnectorWorker:
         # used when device memory can not be registered under nixl
         self.host_xfer_buffers: dict[str, torch.Tensor] = {}
         self.use_host_buffer = self.kv_buffer_device == "cpu"
-        if self.kv_buffer_device == "cuda":
-            self.nixl_memory_type = "VRAM"
-        elif self.kv_buffer_device == "cpu":
-            self.nixl_memory_type = "DRAM"
-        else:
+        # support for oot platform which can't register nixl memory
+        # type based on kv_buffer_device
+        self.nixl_memory_type = current_platform.get_nixl_memory_type()
+        if self.nixl_memory_type is None:
+            if self.kv_buffer_device == "cuda":
+                self.nixl_memory_type = "VRAM"
+            elif self.kv_buffer_device == "cpu":
+                self.nixl_memory_type = "DRAM"
+        if self.nixl_memory_type is None:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported.")
@@ -551,12 +574,11 @@ class NixlConnectorWorker:
                                    self.model_config.dtype,
                                    self.cache_config.cache_dtype,
                                    self.block_size,
-                                   self.model_config.is_attention_free,
                                    use_mla=self.use_mla)
         self.backend_name = backend.get_name()
         attn_backend = backend_name_to_enum(self.backend_name)
-        self._use_flashinfer = attn_backend == _Backend.FLASHINFER_VLLM_V1
-        self._use_pallas_v1 = attn_backend == _Backend.PALLAS_VLLM_V1
+        self._use_flashinfer = attn_backend == _Backend.FLASHINFER
+        self._use_pallas = attn_backend == _Backend.PALLAS
         self.kv_cache_layout = get_kv_cache_layout()
         logger.debug("Detected attention backend %s", self.backend_name)
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
@@ -566,13 +588,6 @@ class NixlConnectorWorker:
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
-
-    def __del__(self):
-        """Cleanup background threads on destruction."""
-        if executor := getattr(self, "_handshake_initiation_executor", None):
-            executor.shutdown(wait=False)
-        if listener_t := getattr(self, "_nixl_handshake_listener_t", None):
-            listener_t.join(timeout=0)
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
@@ -734,7 +749,7 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         # Conversely for FlashInfer, K and V are registered in the same region
         # to better exploit the memory layout (ie num_blocks is the first dim).
-        split_k_and_v = not (self.use_mla or self._use_pallas_v1
+        split_k_and_v = not (self.use_mla or self._use_pallas
                              or self._use_flashinfer)
         tensor_size_bytes = None
         for layer_name, cache_or_caches in xfer_buffers.items():
@@ -766,7 +781,7 @@ class NixlConnectorWorker:
         descs = self.nixl_wrapper.get_reg_descs(caches_data,
                                                 self.nixl_memory_type)
         logger.debug("Registering descs: %s", caches_data)
-        self.nixl_wrapper.register_memory(descs)
+        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
 
@@ -923,7 +938,7 @@ class NixlConnectorWorker:
         tp_ratio = divide(self._tp_size[self.engine_id],
                           self._tp_size[engine_id])
         assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
-        assert not self._use_pallas_v1 or tp_ratio == 1, \
+        assert not self._use_pallas or tp_ratio == 1, \
                "TPU (pallas_v1) DOES NOT support heterogeneous TP yet."
 
         # Handle tp_size>num_kv_heads: replicate KV cache.
@@ -1326,6 +1341,30 @@ class NixlConnectorWorker:
         if not self.xfer_stats.is_empty():
             return self.xfer_stats.clone_and_reset()
         return None
+
+    def shutdown(self):
+        """Shutdown the connector worker."""
+        self._handshake_initiation_executor.shutdown(wait=False)
+        if self._nixl_handshake_listener_t is not None:
+            self._nixl_handshake_listener_t.join(timeout=0)
+            self._nixl_handshake_listener_t = None
+        for handles in self._recving_transfers.values():
+            for handle, _ in handles:
+                self.nixl_wrapper.release_xfer_handle(handle)
+        self._recving_transfers.clear()
+        if self.src_xfer_side_handle:
+            self.nixl_wrapper.release_dlist_handle(self.src_xfer_side_handle)
+            self.src_xfer_side_handle = 0
+        for dst_xfer_side_handle in self.dst_xfer_side_handles.values():
+            self.nixl_wrapper.release_dlist_handle(dst_xfer_side_handle)
+        self.dst_xfer_side_handles.clear()
+        for remote_agents in self._remote_agents.values():
+            for agent_name in remote_agents.values():
+                self.nixl_wrapper.remove_remote_agent(agent_name)
+        self._remote_agents.clear()
+        for desc in self._registered_descs:
+            self.nixl_wrapper.deregister_memory(desc)
+        self._registered_descs.clear()
 
 
 @contextlib.contextmanager
