@@ -20,7 +20,7 @@ vLLM also maintains a continuous performance benchmark under [perf.vllm.ai](http
 The benchmark needs to be triggered manually:
 
 ```bash
-bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
+bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 Runtime environment variables:
