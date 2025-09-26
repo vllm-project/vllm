@@ -100,8 +100,8 @@ if current_platform.is_rocm():
                             k_dtype = k_reg.dtype
                             v_dtype = v_reg.dtype
 
-                            k_reg = (k_reg.to(tl.float32) * v_scale).to(k_dtype)
-                            v_reg = (v_reg.to(tl.float32) * k_scale).to(v_dtype)
+                            k_reg = (k_reg.to(tl.float32) * k_scale).to(k_dtype)
+                            v_reg = (v_reg.to(tl.float32) * v_scale).to(v_dtype)
 
                         tl.store(key_ptr_offset + dst_head_offset + col_offsets, k_reg, mask=mask)
                         tl.store(value_ptr_offset + dst_head_offset + col_offsets, v_reg, mask=mask)

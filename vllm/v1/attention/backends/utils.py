@@ -946,15 +946,13 @@ def reorder_batch_to_split_decodes_prefills_and_chunks(
 
     modified_batch = False
     # do directly swap for 
-    modified_batch &= direct_zone_swap(0, 1)  # decode <--> chunk prefill
-    modified_batch &= direct_zone_swap(0, 2)  # decode <--> pure prefill
-    modified_batch &= direct_zone_swap(1, 2)  # chunk prefill <--> pure prefill
+    modified_batch |= direct_zone_swap(0, 1)  # decode <--> chunk prefill
+    modified_batch |= direct_zone_swap(0, 2)  # decode <--> pure prefill
+    modified_batch |= direct_zone_swap(1, 2)  # chunk prefill <--> pure prefill
 
-    modified_batch &= indirect_zone_swap(((0, 1), (1, 2), (2, 0)))
-    modified_batch &= indirect_zone_swap(((2, 1), (0, 2), (1, 0)))
+    modified_batch |= indirect_zone_swap(((0, 1), (1, 2), (2, 0)))
+    modified_batch |= indirect_zone_swap(((2, 1), (0, 2), (1, 0)))
 
-    # print("after reorder")
-    # print_order_of_batch()
 
     return modified_batch
 
