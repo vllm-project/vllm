@@ -1465,33 +1465,35 @@ class EngineArgs:
             return False
 
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        if (self.speculative_config is not None
-                and self.speculative_config.get("method") == "draft_model"):
-            raise NotImplementedError(
-                "Speculative decoding with draft model is not supported yet. "
-                "Please consider using other speculative decoding methods "
-                "such as ngram, medusa, eagle, or deepseek_mtp.")
+        if self.speculative_config is not None:
+            # speculative_config could still be a dict at this point
+            if isinstance(self.speculative_config, dict):
+                method = self.speculative_config.get("method", None)
+            else:
+                method = self.speculative_config.method
+
+            if method == "draft_model":
+                raise NotImplementedError(
+                    "Draft model speculative decoding is not supported yet. "
+                    "Please consider using other speculative decoding methods "
+                    "such as ngram, medusa, eagle, or deepseek_mtp.")
 
         V1_BACKENDS = [
-            "FLASH_ATTN_VLLM_V1",
             "FLASH_ATTN",
             "PALLAS",
-            "PALLAS_VLLM_V1",
-            "TRITON_ATTN_VLLM_V1",
+            "TRITON_ATTN",
             "TRITON_MLA",
             "CUTLASS_MLA",
             "FLASHMLA",
-            "FLASHMLA_VLLM_V1",
             "FLASH_ATTN_MLA",
             "FLASHINFER",
-            "FLASHINFER_VLLM_V1",
             "FLASHINFER_MLA",
             "ROCM_AITER_MLA",
-            "TORCH_SDPA_VLLM_V1",
+            "TORCH_SDPA",
             "FLEX_ATTENTION",
             "TREE_ATTN",
-            "XFORMERS_VLLM_V1",
-            "ROCM_ATTN_VLLM_V1",
+            "XFORMERS",
+            "ROCM_ATTN",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
