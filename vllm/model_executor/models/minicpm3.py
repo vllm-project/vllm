@@ -120,6 +120,7 @@ class MiniCPM3Attention(nn.Module):
         self.kv_lora_rank = kv_lora_rank
         self.num_heads = num_heads
         tp_size = get_tensor_model_parallel_world_size()
+        assert num_heads % tp_size == 0
         self.num_local_heads = num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
 
@@ -254,6 +255,7 @@ class MiniCPM3MLAAttention(nn.Module):
         self.kv_lora_rank = kv_lora_rank
         self.num_heads = num_heads
         tp_size = get_tensor_model_parallel_world_size()
+        assert num_heads % tp_size == 0
         self.num_local_heads = num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
 
