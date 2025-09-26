@@ -4,12 +4,11 @@ import contextlib
 import os
 import weakref
 from contextlib import ExitStack
-from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
+from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
@@ -34,74 +33,6 @@ def temporary_environ(env_vars):
                 os.environ[k] = v
 
 
-@dataclass
-class BackendConfig:
-    name: str
-    env_vars: dict
-    comp_config: dict
-    specific_gpu_arch: Optional[tuple] = None
-
-
-# Define all backend configurations of full cudagraph to be tested
-backend_configs = {
-    # FA3 on Hopper
-    "FA3":
-    BackendConfig(name="FA3",
-                  env_vars={
-                      "VLLM_FLASH_ATTN_VERSION": "3",
-                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
-                  },
-                  comp_config={
-                      "cudagraph_mode": "FULL",
-                  },
-                  specific_gpu_arch=(9, 0)),
-    # FlashMLA on Hopper
-    "FlashMLA":
-    BackendConfig(name="FlashMLA",
-                  env_vars={
-                      "VLLM_ATTENTION_BACKEND": "FLASHMLA",
-                  },
-                  comp_config={
-                      "cudagraph_mode": "FULL_AND_PIECEWISE",
-                  },
-                  specific_gpu_arch=(9, 0)),
-    # FlashAttention MLA on Hopper
-    "FlashAttentionMLA":
-    BackendConfig(name="FlashAttentionMLA",
-                  env_vars={
-                      "VLLM_ATTENTION_BACKEND": "FLASH_ATTN_MLA",
-                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
-                  },
-                  comp_config={
-                      "cudagraph_mode": "FULL_DECODE_ONLY",
-                  },
-                  specific_gpu_arch=(9, 0)),
-    # FA2
-    "FA2":
-    BackendConfig(name="FA2",
-                  env_vars={
-                      "VLLM_FLASH_ATTN_VERSION": "2",
-                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
-                  },
-                  comp_config={
-                      "cudagraph_mode": "FULL_AND_PIECEWISE",
-                  }),
-    # Triton Attention
-    "TritonAttn":
-    BackendConfig(name="TritonAttn",
-                  env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN"},
-                  comp_config={
-                      "cudagraph_mode": "FULL_AND_PIECEWISE",
-                  }),
-    # FlashInfer
-    "FlashInfer":
-    BackendConfig(name="FlashInfer",
-                  env_vars={"VLLM_ATTENTION_BACKEND": "FLASHINFER"},
-                  comp_config={
-                      "cudagraph_mode": "FULL_AND_PIECEWISE",
-                  }),
-}
-
 # test attention backend and cudagraph_mode combo
 # (backend_name, cudagraph_mode, supported)
 combo_cases_1 = [
@@ -114,9 +45,10 @@ combo_cases_1 = [
 ]
 
 
-@pytest.mark.parametrize("combo_case", combo_cases_1)
-def test_backend_and_cudagraph_mode_combo(combo_case):
-    backend_name, cudagraph_mode, supported = combo_case
+@pytest.mark.parametrize("backend_name, cudagraph_mode, supported",
+                         combo_cases_1)
+def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode,
+                                          supported):
     if backend_name == "FlashInfer":
         try:
             import flashinfer  # noqa: F401
@@ -142,7 +74,7 @@ def test_backend_and_cudagraph_mode_combo(combo_case):
                   compilation_config=CompilationConfig(
                       level=3, cudagraph_mode=cudagraph_mode))
         llm.generate(["Hello, my name is"] * 10)
-
+    # when above code raises, `llm` may be undefined, so we need to catch that
     try:
         llm = weakref.proxy(llm)
         del llm
@@ -173,7 +105,8 @@ combo_cases_2 = [
 ]
 
 
-@pytest.mark.parametrize("combo_case", combo_cases_2)
+@pytest.mark.parametrize("backend_name,cudagraph_mode,compilation_level,"\
+                         "supported", combo_cases_2)
 def test_cudagraph_compilation_combo(combo_case):
     backend_name, cudagraph_mode, compilation_level, supported\
         = combo_case
@@ -192,6 +125,7 @@ def test_cudagraph_compilation_combo(combo_case):
                   compilation_config=CompilationConfig(
                       level=compilation_level, cudagraph_mode=cudagraph_mode))
         llm.generate(["Hello, my name is"] * 10)
+    # when above code raises, `llm` may be undefined, so we need to catch that
     try:
         llm = weakref.proxy(llm)
         del llm
