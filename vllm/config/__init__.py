@@ -124,8 +124,6 @@ class DeviceConfig:
             # Automated device type detection
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
-            if "CPU_ONLY_HEAD" in os.environ:
-                self.device_type = "cpu"
             if not self.device_type:
                 raise RuntimeError(
                     "Failed to infer device type, please set "
