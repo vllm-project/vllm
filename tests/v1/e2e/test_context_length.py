@@ -27,7 +27,7 @@ from vllm.inputs import TokensPrompt
 @pytest.mark.parametrize("model", ["JackFram/llama-160m"])
 @pytest.mark.parametrize("max_model_len", [2048])
 @pytest.mark.parametrize("max_tokens", [1])
-def test_models(
+def test_prefill_max_context_length(
     model: str,
     max_model_len: int,
     max_tokens: int,
