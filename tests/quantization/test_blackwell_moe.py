@@ -104,7 +104,7 @@ def test_deepseek_nvfp4_moe_flashinfer_cutlass(
     can_initialize("nvidia/DeepSeek-R1-0528-FP4-v2", [])
 
 
-@pytest.mark.skip(reason="RuntimeError: routing_bias must be bfloat16.")
+@pytest.mark.skip(reason="RuntimeError: No kernel found for the given options")
 def test_deepseek_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
