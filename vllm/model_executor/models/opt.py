@@ -406,7 +406,8 @@ class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         if config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(
                 self.model.decoder.embed_tokens)
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size)
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size, org_vocab_size=config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
