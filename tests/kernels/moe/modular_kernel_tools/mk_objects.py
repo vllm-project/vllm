@@ -223,7 +223,7 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
 
     register_prepare_and_finalize(
         DeepEPHybridPrepareAndFinalize,
-        batched_format,
+        standard_format,
         common_float_types,
         blocked_quantization_support=True,
         backend="deepep_hybrid",
