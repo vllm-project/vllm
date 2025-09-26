@@ -836,8 +836,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
-            self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
-            self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+            if self.enable_prompt_embeds:
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
 
         # Async scheduling case, where some decode requests from the previous
@@ -863,8 +864,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # If not all requests are decodes from the last iteration,
             # We need to copy the input_ids_cpu to the GPU first.
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
-            self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
-            self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+            if self.enable_prompt_embeds:
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_commmon_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids_cpu will have all the input ids.
@@ -878,7 +880,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.prev_sampled_token_ids[:num_commmon_tokens,
                                                         0],
                 non_blocking=True)
-            self.is_token_ids.gpu[:num_commmon_tokens] = True
+            if self.enable_prompt_embeds:
+                self.is_token_ids.gpu[:num_commmon_tokens] = True
             return
         # Upload the index tensors asynchronously
         # so the scatter can be non-blocking.
@@ -978,12 +981,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                            0,
                            token_indices_tensor,
                            out=self.input_ids.cpu[:total_num_scheduled_tokens])
-        is_token_ids = self.input_batch.is_token_ids.flatten()
-        torch.index_select(
-            is_token_ids,
-            0,
-            token_indices_tensor,
-            out=self.is_token_ids.cpu[:total_num_scheduled_tokens])
+        if self.enable_prompt_embeds:
+            is_token_ids = self.input_batch.is_token_ids.flatten()
+            torch.index_select(
+                is_token_ids,
+                0,
+                token_indices_tensor,
+                out=self.is_token_ids.cpu[:total_num_scheduled_tokens])
 
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
         # the InputBatch, we need to fill in the prompt embeds into the expected
