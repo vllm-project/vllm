@@ -85,10 +85,12 @@ def ubatch_split(
 
     if not allow_microbatching:
         should_attempt_ubatching = False
-    # Don't microbatch unless every other DP worker is also microbatching
+
     (should_ubatch, num_tokens_after_padding) = coordinate_batch_across_dp(
         num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching,
         dp_size, dp_rank)
+
+    # Don't microbatch unless every other DP worker is also microbatching
     if not should_ubatch:
         return (None, num_tokens_after_padding)
 
