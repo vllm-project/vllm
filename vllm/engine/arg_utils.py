@@ -391,6 +391,7 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
+    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -813,6 +814,9 @@ class EngineArgs:
         multimodal_group.add_argument("--skip-mm-profiling",
                                       **multimodal_kwargs["skip_mm_profiling"])
 
+        multimodal_group.add_argument(
+            "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"])
+
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
         lora_group = parser.add_argument_group(
@@ -1032,6 +1036,7 @@ class EngineArgs:
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
+            video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
         )
 
