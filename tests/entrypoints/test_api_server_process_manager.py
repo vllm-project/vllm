@@ -60,7 +60,7 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
     global WORKER_RUNTIME_SECONDS
     WORKER_RUNTIME_SECONDS = 0.5
 
-    # Copy the args to avoid mutating the
+    # Copy the args to avoid mutating them
     args = api_server_args.copy()
 
     if not with_stats_update:
