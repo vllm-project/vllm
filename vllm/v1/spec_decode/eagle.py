@@ -238,11 +238,9 @@ class EagleProposer:
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
-            # M-RoPE
-            forward_positions = self._get_positions(num_input_tokens)
             ret_hidden_states = self.model(
                 input_ids=input_ids,
-                positions=forward_positions,
+                positions=self._get_positions(num_input_tokens), # M-RoPE
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
@@ -397,10 +395,9 @@ class EagleProposer:
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
                 # M-RoPE
-                forward_positions = self._get_positions(input_batch_size)
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
-                    positions=forward_positions,
+                    positions=self._get_positions(input_batch_size), # M-RoPE
                     hidden_states=self.hidden_states[:input_batch_size],
                     inputs_embeds=inputs_embeds,
                 )
@@ -933,9 +930,6 @@ class EagleProposer:
     ) -> None:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
-            # M-RoPE
-            forward_positions = self._get_positions(num_tokens)
-
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -945,7 +939,7 @@ class EagleProposer:
 
             self.model(
                 input_ids=input_ids,
-                positions=forward_positions,
+                positions=self._get_positions(num_tokens), # M-RoPE
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
