@@ -426,15 +426,15 @@ class WorkerProc:
         self.mm_receiver_cache = worker_receiver_cache_from_config(
             vllm_config, MULTIMODAL_REGISTRY, shared_worker_lock)
 
-        # Initialize device
-        self.worker.init_device()
+        import os
+        is_new_worker = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
 
-        # Set process title and log prefix
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel)
 
-        # Load model
-        self.worker.load_model()
+        if not is_new_worker:
+            self.worker.init_device()
+            self.worker.load_model()
 
     @staticmethod
     def make_worker_process(

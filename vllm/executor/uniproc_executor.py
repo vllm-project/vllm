@@ -50,9 +50,13 @@ class UniProcExecutor(ExecutorBase):
             self.async_output_thread = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput")
 
+        is_new_worker = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
+
         self.collective_rpc("init_worker", args=([kwargs], ))
-        self.collective_rpc("init_device")
-        self.collective_rpc("load_model")
+
+        if not is_new_worker:
+            self.collective_rpc("init_device")
+            self.collective_rpc("load_model")
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""

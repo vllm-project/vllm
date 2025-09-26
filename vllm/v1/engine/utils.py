@@ -424,6 +424,8 @@ class CoreEngineActorManager:
 
             node_ip = node.node_ip
             node_id = node.node_id
+            if device_str not in available_resources[node_id]:
+                continue
             available_gpus = int(available_resources[node_id][device_str])
 
             # Get total GPUs on this node from the node's resources
@@ -623,6 +625,9 @@ def launch_core_engines(
     # sends requests only to colocated engines.
     client_local_only = (offline_mode or local_engines_only
                          or (local_engine_count == dp_size))
+    # NOTE(yongji): handling scaling from intra-node to inter-node
+    if parallel_config.enable_elastic_ep:
+        client_local_only = False
 
     # Set up input and output addresses.
     addresses = EngineZmqAddresses(
@@ -693,6 +698,10 @@ def launch_core_engines(
     # their co-located frontend and also the rank 0 front-end, and hence this
     # will be False.
     handshake_local_only = offline_mode or local_engine_count == dp_size
+
+    # NOTE(yongji): handling scaling from intra-node to inter-node
+    if parallel_config.enable_elastic_ep:
+        handshake_local_only = False
 
     handshake_address = get_engine_client_zmq_addr(
         handshake_local_only, host, parallel_config.data_parallel_rpc_port)

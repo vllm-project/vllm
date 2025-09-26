@@ -6,7 +6,7 @@ from typing import Optional, Union
 # ===================== import region =====================
 import torch
 import torch.distributed as dist
-from torch.distributed import ProcessGroup, ReduceOp
+from torch.distributed import ProcessGroup, ReduceOp, P2POp
 
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
@@ -248,8 +248,12 @@ class PyNcclCommunicator:
             f"but the input tensor is on {tensor.device}")
         if stream is None:
             stream = current_stream()
+        if tensor.dtype in [torch.float8_e5m2, torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2fnuz]:
+            nccl_dtype = ncclDataTypeEnum.from_torch(torch.uint8)
+        else:
+            nccl_dtype = ncclDataTypeEnum.from_torch(tensor.dtype)
         self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
-                           ncclDataTypeEnum.from_torch(tensor.dtype), dst,
+                           nccl_dtype, dst,
                            self.comm, cudaStream_t(stream.cuda_stream))
 
     def recv(self, tensor: torch.Tensor, src: int, stream=None):
@@ -260,8 +264,12 @@ class PyNcclCommunicator:
             f"but the input tensor is on {tensor.device}")
         if stream is None:
             stream = current_stream()
+        if tensor.dtype in [torch.float8_e5m2, torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2fnuz]:
+            nccl_dtype = ncclDataTypeEnum.from_torch(torch.uint8)
+        else:
+            nccl_dtype = ncclDataTypeEnum.from_torch(tensor.dtype)
         self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
-                           ncclDataTypeEnum.from_torch(tensor.dtype), src,
+                           nccl_dtype, src,
                            self.comm, cudaStream_t(stream.cuda_stream))
 
     def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
@@ -288,3 +296,16 @@ class PyNcclCommunicator:
 
     def group_end(self):
         self.nccl.ncclGroupEnd()
+
+    def batch_isend_irecv(self, p2p_ops: list, stream=None):
+        if self.disabled:
+            return
+        if stream is None:
+            stream = current_stream()
+        self.group_start()
+        for op in p2p_ops:
+            if op.op.__name__ == "isend":
+                self.send(op.tensor, op.group_peer, stream)
+            elif op.op.__name__ == "irecv":
+                self.recv(op.tensor, op.group_peer, stream)
+        self.group_end()

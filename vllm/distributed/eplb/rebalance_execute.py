@@ -13,6 +13,9 @@ from typing import Optional
 import torch
 from torch.distributed import (P2POp, ProcessGroup, all_gather,
                                batch_isend_irecv, get_global_rank)
+from torch.distributed.distributed_c10d import _world
+
+from vllm.distributed.parallel_state import get_ep_group
 
 
 def idx_local_to_global(
@@ -137,6 +140,11 @@ def shuffle_layer(
                     buffer[dst].copy_(weight[src])
 
     p2p_ops: list[P2POp] = []
+    if ep_group not in _world.pg_map:
+        ep_group = get_ep_group()
+        is_stateless = True
+    else:
+        is_stateless = False
 
     # 2. Initiate sending of weights.
     experts_send_loc: dict[int, int] = {}
@@ -171,14 +179,22 @@ def shuffle_layer(
             recv_ranks.append(ranks_to_recv[recver_pos])
 
         for dst in recv_ranks:
-            dst_global = get_global_rank(ep_group, dst)
-            p2p_ops += [
-                P2POp(
-                    torch.distributed.isend,
-                    weight[src],
-                    dst_global,
-                ) for weight in expert_weights
-            ]
+            if is_stateless:
+                for weight in expert_weights:
+                    op = object.__new__(P2POp)
+                    op.op = torch.distributed.isend
+                    op.tensor = weight[src]
+                    op.group_peer = dst
+                    p2p_ops.append(op)
+            else:
+                dst_global = get_global_rank(ep_group, dst)
+                p2p_ops += [
+                    P2POp(
+                        torch.distributed.isend,
+                        weight[src],
+                        dst_global,
+                    ) for weight in expert_weights
+                ]
 
     # 3. Initiate receiving of weights.
     experts_recv_loc: dict[int, int] = {}
@@ -210,20 +226,31 @@ def shuffle_layer(
         else:
             src = ranks_to_send[recver_pos - remainder_start]
 
-        src_global = get_global_rank(ep_group, src)
-        p2p_ops += [
-            P2POp(
-                torch.distributed.irecv,
-                weight[dst],
-                src_global,
-            ) for weight in expert_weights_buffer
-        ]
+        if is_stateless:
+            for weight in expert_weights_buffer:
+                op = object.__new__(P2POp)
+                op.op = torch.distributed.irecv
+                op.tensor = weight[dst]
+                op.group_peer = src
+                p2p_ops.append(op)
+        else:
+            src_global = get_global_rank(ep_group, src)
+            p2p_ops += [
+                P2POp(
+                    torch.distributed.irecv,
+                    weight[dst],
+                    src_global,
+                ) for weight in expert_weights_buffer
+            ]
 
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops:
-        reqs = batch_isend_irecv(p2p_ops)
-        for req in reqs:
-            req.wait()
+        if is_stateless:
+            ep_group.device_communicator.batch_isend_irecv(p2p_ops)
+        else:
+            reqs = batch_isend_irecv(p2p_ops)
+            for req in reqs:
+                req.wait()
 
     # 5. Copy the weights from the buffer back to the original weights.
     for dst in range(num_local_experts):

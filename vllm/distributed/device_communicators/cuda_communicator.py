@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from .base_device_communicator import DeviceCommunicatorBase
+from ..utils import StatelessProcessGroup
 
 logger = init_logger(__name__)
 
@@ -21,8 +22,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                  cpu_group: ProcessGroup,
                  device: Optional[torch.device] = None,
                  device_group: Optional[ProcessGroup] = None,
-                 unique_name: str = ""):
-        super().__init__(cpu_group, device, device_group, unique_name)
+                 unique_name: str = "",
+                 global_ranks: Optional[list[int]] = None,
+                 global_world_size: Optional[int] = None,
+                 tcp_store_group: Optional[StatelessProcessGroup] = None):
+        super().__init__(cpu_group, device, device_group, unique_name,
+                        global_ranks, global_world_size)
         if "tp" not in unique_name:
             # only tp uses custom allreduce
             use_custom_allreduce = False
@@ -32,7 +37,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
 
         # ep does not use pynccl
-        use_pynccl = "ep" not in unique_name
+        use_pynccl = ("ep" not in unique_name) or (tcp_store_group is not None)
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
@@ -50,7 +55,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
-                group=self.cpu_group,
+                group=self.cpu_group if tcp_store_group is None else tcp_store_group,
                 device=self.device,
             )
 
@@ -85,23 +90,23 @@ class CudaCommunicator(DeviceCommunicatorBase):
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
             if all2all_backend == "naive":
                 from .all2all import NaiveAll2AllManager
-                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
+                self.all2all_manager = NaiveAll2AllManager(self.cpu_group, tcp_store_group=tcp_store_group)
                 logger.info("Using naive all2all manager.")
             elif all2all_backend == "allgather_reducescatter":
                 from .all2all import AgRsAll2AllManager
-                self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
+                self.all2all_manager = AgRsAll2AllManager(self.cpu_group, tcp_store_group=tcp_store_group)
                 logger.info("Using AllGather-ReduceScatter all2all manager.")
             elif all2all_backend == "pplx":
                 from .all2all import PPLXAll2AllManager
-                self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
+                self.all2all_manager = PPLXAll2AllManager(self.cpu_group, tcp_store_group=tcp_store_group)
                 logger.info("Using PPLX all2all manager.")
             elif all2all_backend == "deepep_high_throughput":
                 from .all2all import DeepEPHTAll2AllManager
-                self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
+                self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group, tcp_store_group=tcp_store_group)
                 logger.info("Using DeepEP High-Throughput all2all manager.")
             elif all2all_backend == "deepep_low_latency":
                 from .all2all import DeepEPLLAll2AllManager
-                self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
+                self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group, tcp_store_group=tcp_store_group)
                 logger.info("Using DeepEP Low-Latency all2all manager.")
             else:
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
@@ -229,6 +234,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
 
+    def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
+        """Broadcast a tensor from source rank to all ranks."""
+        if self.world_size == 1:
+            return tensor
+
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            pynccl_comm.broadcast(tensor, src)
+            return tensor
+        else:
+            raise ValueError("No PyNCCL communicator found")
+
     def destroy(self):
         if self.pynccl_comm is not None:
             self.pynccl_comm = None
@@ -296,3 +313,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         assert self.all2all_manager is not None
         hidden_states = self.all2all_manager.combine(hidden_states)
         return hidden_states
+
+    def batch_isend_irecv(self, p2p_ops: list):
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            pynccl_comm.batch_isend_irecv(p2p_ops)
+        else:
+            raise ValueError("No PyNCCL communicator found")

@@ -327,6 +327,7 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = \
         ParallelConfig.dbo_decode_token_threshold
@@ -693,6 +694,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
+        parallel_group.add_argument(
+            "--enable-elastic-ep",
+            **parallel_kwargs["enable_elastic_ep"])
         parallel_group.add_argument("--enable-dbo",
                                     **parallel_kwargs["enable_dbo"])
         parallel_group.add_argument(
@@ -1319,6 +1323,7 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
+            enable_elastic_ep=self.enable_elastic_ep,
             enable_dbo=self.enable_dbo,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             enable_eplb=self.enable_eplb,

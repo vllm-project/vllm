@@ -430,7 +430,6 @@ class AsyncLLM(EngineClient):
         engine_core = self.engine_core
         output_processor = self.output_processor
         log_stats = self.log_stats
-        logger_manager = self.logger_manager
 
         async def output_handler():
             try:
@@ -470,8 +469,10 @@ class AsyncLLM(EngineClient):
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
-                    if logger_manager:
-                        logger_manager.record(
+                    if self.logger_manager:
+                        # NOTE(yongji): we need to use self.logger_manager here 
+                        # since it can be reinstantiated during scaling up
+                        self.logger_manager.record(
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
@@ -701,16 +702,6 @@ class AsyncLLM(EngineClient):
             logger.info("Data parallel size is already %s, skipping scale",
                         new_data_parallel_size)
             return
-        logger.info(
-            "Waiting for requests to drain before "
-            "scaling up to %s engines...", new_data_parallel_size)
-        await self.wait_for_requests_to_drain(drain_timeout)
-        logger.info(
-            "Requests have been drained, proceeding with scale "
-            "to %s engines", new_data_parallel_size)
-        await self.engine_core.scale_elastic_ep(new_data_parallel_size)
-        self.vllm_config.parallel_config.data_parallel_size = \
-            new_data_parallel_size
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -723,6 +714,11 @@ class AsyncLLM(EngineClient):
                 engine_idxs=list(range(new_data_parallel_size)),
                 custom_stat_loggers=None,
             )
+            self.logger_manager.log_engine_initialized()
+
+        await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+        self.vllm_config.parallel_config.data_parallel_size = \
+            new_data_parallel_size
 
     @property
     def is_running(self) -> bool:

@@ -245,6 +245,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
         self.eplb_state: Optional[EplbState] = None
+        self.eplb_disabled = False
         """
         State of the expert parallelism load balancer.
 
@@ -1719,7 +1720,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
-        if not self.parallel_config.enable_eplb:
+        if not self.parallel_config.enable_eplb or self.eplb_disabled:
             return
 
         assert self.eplb_state is not None
@@ -1730,6 +1731,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             is_dummy,
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
+        )
+
+    def setup_eplb_from_mapping(
+        self,
+        expanded_physical_to_logical: torch.Tensor,
+        old_num_physical_experts: int,
+    ) -> None:
+        model = self.get_model()
+        assert is_mixture_of_experts(model)
+
+        self.eplb_state = EplbState.from_mapping(
+            model=model,
+            device=self.device,
+            parallel_config=self.parallel_config,
+            expanded_physical_to_logical=expanded_physical_to_logical,
+            num_valid_physical_experts=old_num_physical_experts,
         )
 
     def get_dp_padding(self,
@@ -2521,42 +2538,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
-    def load_model(self, eep_scale_up: bool = False) -> None:
+    def load_model(self, dummy_weights: bool = False) -> None:
         """
         Args:
-            eep_scale_up: the model loading is for elastic EP scale up.
+            dummy_weights: load dummy weights instead of real weights.
         """
         logger.info("Starting to load model %s...", self.model_config.model)
-        if eep_scale_up:
-            from vllm.distributed.parallel_state import get_ep_group
-            num_local_physical_experts = torch.empty(1,
-                                                     dtype=torch.int32,
-                                                     device="cpu")
-            torch.distributed.broadcast(num_local_physical_experts,
-                                        group=get_ep_group().cpu_group,
-                                        group_src=0)
-            num_local_physical_experts = int(num_local_physical_experts.item())
-            new_ep_size = get_ep_group().world_size
-            global_expert_load, old_global_expert_indices = (
-                EplbState.recv_state())
-            num_logical_experts = global_expert_load.shape[1]
-            self.parallel_config.eplb_config.num_redundant_experts = (
-                num_local_physical_experts * new_ep_size - num_logical_experts)
-            assert old_global_expert_indices.shape[
-                1] % num_local_physical_experts == 0
-            old_ep_size = old_global_expert_indices.shape[
-                1] // num_local_physical_experts
-            rank_mapping = {
-                old_ep_rank: old_ep_rank
-                for old_ep_rank in range(old_ep_size)
-            }
-        else:
-            global_expert_load = None
-            old_global_expert_indices = None
-            rank_mapping = None
 
         with DeviceMemoryProfiler() as m:
             time_before_load = time.perf_counter()
+            if dummy_weights:
+                self.load_config.load_format = "dummy"
             model_loader = get_model_loader(self.load_config)
             logger.info("Loading model from scratch...")
             self.model = model_loader.load_model(
@@ -2580,22 +2572,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logger.info("Model loading took %.4f GiB and %.6f seconds",
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
-        prepare_communication_buffer_for_model(self.model)
+
+        if not dummy_weights:
+            prepare_communication_buffer_for_model(self.model)
 
         if is_mixture_of_experts(
-                self.model) and self.parallel_config.enable_eplb:
+                self.model) and self.parallel_config.enable_eplb and not dummy_weights:
             logger.info("EPLB is enabled for model %s.",
                         self.model_config.model)
             self.eplb_state = EplbState.build(
                 self.model,
                 self.device,
                 self.parallel_config,
-                global_expert_load,
-                old_global_expert_indices,
-                rank_mapping,
             )
 
         if (
+            not dummy_weights and
             self.vllm_config.compilation_config.level == \
                 CompilationLevel.DYNAMO_AS_IS and supports_dynamo()
         ):
@@ -2896,6 +2888,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
+        if not (num_tokens <= self.scheduler_config.max_num_batched_tokens):
+            logger.info(f"num_tokens: {num_tokens}, max_num_batched_tokens: {self.scheduler_config.max_num_batched_tokens}")
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:

@@ -23,8 +23,8 @@ class NaiveAll2AllManager(All2AllManagerBase):
     debugging.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def naive_multicast(self, x: torch.Tensor,
                         cu_tokens_across_dp_cpu: torch.Tensor):
@@ -76,8 +76,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
     all-gather (dispatch) and reduce-scatter (combine).
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
@@ -113,14 +113,16 @@ class PPLXAll2AllManager(All2AllManagerBase):
     All2All communication based on PPLX kernels.
     """
 
-    def __init__(self, cpu_group):
+    def __init__(self, cpu_group, tcp_store_group=None):
         assert has_pplx(
         ), "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install pplx_kernels."  # noqa
-        super().__init__(cpu_group)
+        super().__init__(cpu_group, tcp_store_group)
 
-        if self.internode:
-            # inter-node communication needs nvshmem,
-            # intra-node communication uses p2p mapping directly
+        self.nvshmem_initialized = False
+        self.handle_cache = Cache()
+
+    def get_handle(self, kwargs):
+        if self.internode and not self.nvshmem_initialized:
             from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
                                               nvshmem_get_unique_id,
                                               nvshmem_init)
@@ -129,15 +131,18 @@ class PPLXAll2AllManager(All2AllManagerBase):
                 "rank=%d, world size=%d", self.rank, self.world_size)
             uid = nvshmem_get_unique_id(
             ) if self.rank == 0 else nvshmem_alloc_empty_unique_id()
-            dist.broadcast(uid,
-                           src=dist.get_process_group_ranks(self.cpu_group)[0],
-                           group=self.cpu_group)
+
+            if self.tcp_store_group is not None:
+                uid = self.tcp_store_group.broadcast_obj(uid, src=0)
+            else:
+                dist.broadcast(uid,
+                               src=dist.get_process_group_ranks(self.cpu_group)[0],
+                               group=self.cpu_group)
+
             logger.debug("PPLX NVSHMEM UID = %s", uid)
             nvshmem_init(uid, self.rank, self.world_size)
+            self.nvshmem_initialized = True
 
-        self.handle_cache = Cache()
-
-    def get_handle(self, kwargs):
         import pplx_kernels as pplx
         return self.handle_cache.get_or_create(
             kwargs, pplx.AllToAll.internode
@@ -166,10 +171,10 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
     All2All communication based on DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, cpu_group):
+    def __init__(self, cpu_group, tcp_store_group=None):
         assert has_deep_ep(
         ), "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install DeepEP kernels."  # noqa
-        super().__init__(cpu_group)
+        super().__init__(cpu_group, tcp_store_group)
         self.handle_cache = Cache()
 
         # This is the DeepEP default. Stick to it till we can establish
@@ -195,8 +200,8 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
     All2All communication based on DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def _make_all2all_kwargs(self) -> dict[Any, Any]:
         # Defaults for internode and intranode are taken from DeepEP tests.
@@ -243,8 +248,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     All2All communication based on DeepEP Low-Latency kernels.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def _make_all2all_kwargs(
         self,
@@ -265,7 +270,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         import deep_ep
 
         # Defaults for internode and intranode are taken from DeepEP tests.
-        num_nvl_bytes = 1024 * 1024 * 1024
+        # num_nvl_bytes = 1024 * 1024 * 1024
+        num_nvl_bytes = 0
         num_qps_per_rank = num_local_experts
         num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
             num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
@@ -278,7 +284,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
                     num_nvl_bytes=num_nvl_bytes,
                     num_rdma_bytes=num_rdma_bytes,
                     low_latency_mode=True,
-                    num_qps_per_rank=num_qps_per_rank)
+                    num_qps_per_rank=num_qps_per_rank,
+                    allow_mnnvl=True)
 
     def get_handle(self, kwargs):
         """
