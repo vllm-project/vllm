@@ -128,8 +128,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             return []
         if mm_options and isinstance(
                 mm_options["audio"],
-                AudioDummyOptions) and mm_options["audio"].duration:
-            length = min(length, mm_options["audio"].duration)
+                AudioDummyOptions) and mm_options["audio"].length:
+            length = min(length, mm_options["audio"].length)
         audio = np.zeros((length, ))
         return [audio] * num_audios
 

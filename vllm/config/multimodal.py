@@ -57,13 +57,13 @@ class ImageDummyOptions(BaseModalityOptions):
 class AudioDummyOptions(BaseModalityOptions):
     """Options for generating dummy audio data during profiling."""
     count: int = 999
-    duration: Optional[float] = None
+    length: Optional[int] = None
 
     def __post_init__(self):
         if self.count < 0:
             raise ValueError("count must be non-negative")
-        if self.duration is not None and self.duration <= 0:
-            raise ValueError("duration must be positive")
+        if self.length is not None and self.length <= 0:
+            raise ValueError("length must be positive")
 
 
 # Union type for all supported option types
