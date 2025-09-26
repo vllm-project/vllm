@@ -69,13 +69,13 @@ class NgramProposer:
         """Batch version of ngram proposer using numba for acceleration.
         
         Args:
-            valid_ngram_requests: 
+            valid_ngram_requests:
                 Set of indices of requests that need ngram proposals.
-                num_tokens_no_spec: 
-            Numpy array of shape (batch_size,) representing the number 
+            num_tokens_no_spec:
+                Numpy array of shape (batch_size,) representing the number
                 of tokens without speculative tokens for each request.
-            token_ids_cpu: 
-                Numpy array of shape (batch_size, max_model_len) 
+            token_ids_cpu:
+                Numpy array of shape (batch_size, max_model_len)
                 representing the token IDs for each request.
 
         Returns:
