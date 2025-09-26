@@ -13,7 +13,7 @@ from vllm.config import CompilationConfig, config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
                                    get_type, get_type_hints, is_not_builtin,
                                    is_type, literal_to_kwargs, optional_type,
-                                   parse_type)
+                                   parse_type, _split_gguf_model_spec)
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -202,6 +202,33 @@ def test_media_io_kwargs_parser(arg, expected):
 
     assert args.media_io_kwargs == expected
 
+@pytest.mark.parametrize(
+    ("model_spec", "expected"),
+    [
+        ("org/repo:Q4_K_M", ("org/repo", "Q4_K_M")),
+        ("foo/bar/baz:Q5_0", ("foo/bar/baz", "Q5_0")),
+        ("repo:subdir/model-Q4_K_S", ("repo", "subdir/model-Q4_K_S")),
+        ("nested/repo:folder/Q8_0.gguf", ("nested/repo", "folder/Q8_0.gguf")),
+    ],
+)
+def test_split_gguf_model_spec_valid(model_spec: str,
+                                     expected: tuple[str, str]) -> None:
+    assert _split_gguf_model_spec(model_spec) == expected
+
+
+@pytest.mark.parametrize(
+    "model_spec",
+    [
+        "model",  # No quantization component
+        "repo:",  # Missing quantization component
+        ":quant",  # Missing repository component
+        "https://huggingface.co/repo:Q4_K_M",  # Explicit scheme should disable parsing
+        "C:/models/foo.gguf",  # Windows drive letter path
+        "C\\\\models\\foo.gguf",  # Windows path with escaped backslashes
+    ],
+)
+def test_split_gguf_model_spec_invalid(model_spec: str) -> None:
+    assert _split_gguf_model_spec(model_spec) is None
 
 def test_compilation_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
