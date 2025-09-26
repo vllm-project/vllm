@@ -502,8 +502,6 @@ class MambaMixer2(MambaBase, CustomOp):
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
             seq_idx_p = attn_metadata.seq_idx_p
-            chunk_indices_p = attn_metadata.chunk_indices_p
-            chunk_offsets_p = attn_metadata.chunk_offsets_p
             query_start_loc_p = attn_metadata.query_start_loc_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_p = attn_metadata.last_chunk_p
@@ -636,8 +634,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 z=None,
                 dt_bias=self.dt_bias,
                 seq_idx=seq_idx_p,
-                chunk_indices=chunk_indices_p,
-                chunk_offsets=chunk_offsets_p,
                 cu_seqlens=query_start_loc_p,
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
                 last_chunk=last_chunk_p,

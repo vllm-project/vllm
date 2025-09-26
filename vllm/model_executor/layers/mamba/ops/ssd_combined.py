@@ -36,8 +36,6 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    dt_bias=None,
                                    initial_states=None,
                                    seq_idx=None,
-                                   chunk_indices=None,
-                                   chunk_offsets=None,
                                    cu_seqlens=None,
                                    cu_chunk_seqlens=None,
                                    last_chunk=None,
@@ -108,7 +106,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
     # - for handling chunked prefill, this requires i) initial_states
-    #   ii) seq_idx iii) is_cont_batched and (iv) chunk_offsets to be all specified.
+    #   ii) seq_idx to be all specified.
     # - When a new seq_idx is detected, we will stop passing the prev_state
     #   and switch accordingly to the init_state corresponding to the new seq_idx.
     # - We will also make sure that the dA_cumsum is taken only from the start of the
@@ -124,8 +122,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         if initial_states is not None else
         None,  # (batch, nheads, headdim*dstate)
         seq_idx=seq_idx,
-        out_dtype=state_dtype if state_dtype is not None else C.dtype,
-        chunk_offsets=chunk_offsets)
+        out_dtype=state_dtype if state_dtype is not None else C.dtype)
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
@@ -158,8 +155,6 @@ def _mamba_chunk_scan_combined_fwd(x,
         seq_idx,
         D=D,
         z=z,
-        chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
         initial_states=initial_states,
     )
 
@@ -182,8 +177,6 @@ def mamba_chunk_scan_combined_varlen(
         z=None,
         dt_bias=None,
         initial_states=None,
-        chunk_indices=None,
-        chunk_offsets=None,
         dt_softplus=False,
         dt_limit=(0.0, float("inf")),
         state_dtype=None,
@@ -226,8 +219,6 @@ def mamba_chunk_scan_combined_varlen(
         dt_bias=dt_bias,
         initial_states=initial_states,
         seq_idx=seq_idx,
-        chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
         cu_seqlens=cu_seqlens,
         cu_chunk_seqlens=cu_chunk_seqlens,
         last_chunk=last_chunk,

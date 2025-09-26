@@ -120,9 +120,6 @@ def _chunk_scan_fwd_kernel(
     states_ptr,
     D_ptr,
     initstates_ptr,
-    chunk_indices_ptr,
-    chunk_offsets_ptr,
-    chunk_meta_num,
     cu_chunk_seqlens_ptr,
     # Matrix dimensions
     chunk_size: tl.constexpr,
@@ -361,8 +358,6 @@ def _chunk_scan_fwd(
     seq_idx,
     D=None,
     z=None,
-    chunk_indices=None,
-    chunk_offsets=None,
     initial_states=None,
 ):
     assert seq_idx is not None, "this implementation requires seq_idx"
@@ -381,14 +376,6 @@ def _chunk_scan_fwd(
     assert dA_cumsum.shape == (nheads, nchunks, chunk_size)
     assert states.shape == (nchunks, nheads, headdim, dstate)
     assert seq_idx.shape == (seqlen, )
-
-    if initial_states is not None:
-        # with initial states, we need to take care of how
-        # seq_idx crosses the boundaries
-        assert chunk_indices is not None and chunk_offsets is not None, \
-            "chunk_indices and chunk_offsets should have been set"
-    else:
-        chunk_indices, chunk_offsets = None, None
 
     grid = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton
                          .cdiv(headdim, META['BLOCK_SIZE_N']), nchunks, nheads)
@@ -413,9 +400,6 @@ def _chunk_scan_fwd(
         states_ptr=states,
         D_ptr=D,
         initstates_ptr=initial_states,
-        chunk_indices_ptr=chunk_indices,
-        chunk_offsets_ptr=chunk_offsets,
-        chunk_meta_num=len(chunk_indices) if chunk_indices is not None else 0,
         cu_chunk_seqlens_ptr=cu_chunk_seqlens,
         chunk_size=chunk_size,
         hdim=headdim,

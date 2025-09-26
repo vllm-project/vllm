@@ -30,8 +30,6 @@ def _state_passing_fwd_kernel(
     dA_cs_ptr,
     initstates_ptr,
     seq_idx_ptr,
-    chunk_offsets_ptr,
-    chunk_meta_num,
     cu_chunk_seqlens_ptr,
     # Matrix dimensions
     dim: tl.constexpr,
@@ -111,7 +109,6 @@ def _state_passing_fwd(
     dA_cumsum,
     cu_chunk_seqlens,
     seq_idx,
-    chunk_offsets,
     initial_states=None,
     out_dtype=None,
 ):
@@ -137,9 +134,6 @@ def _state_passing_fwd(
             dA_cs_ptr=dA_cumsum,
             initstates_ptr=initial_states,
             seq_idx_ptr=seq_idx,
-            chunk_offsets_ptr=chunk_offsets,
-            chunk_meta_num=len(chunk_offsets)
-            if chunk_offsets is not None else 0,
             cu_chunk_seqlens_ptr=cu_chunk_seqlens,
             dim=dim,
             nchunks=nchunks,
