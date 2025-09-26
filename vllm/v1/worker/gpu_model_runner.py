@@ -3695,7 +3695,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_groups: List of attention groups
 
         Returns:
-            Largest block size supported by all backends
+            Block size supported by all backends, 
+            prioritizing cache_config.block_size
 
         Raises:
             ValueError: If no common block size found
@@ -3716,6 +3717,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 error_msg += (f"Backend {attn_group.backend} supports: "
                               f"{sorted(supported)}. ")
             raise ValueError(error_msg)
+
+        if self.cache_config.block_size in common_supported_sizes:
+            return self.cache_config.block_size
 
         return max(common_supported_sizes)
 
