@@ -27,14 +27,11 @@ class QuantFP8(CustomOp):
     This CustomOp supports both static and dynamic quantization.
     """
 
-    def __init__(
-            self,
-            static: bool,
-            group_shape: GroupShape,
-            num_token_padding: Optional[int] = None,
-            column_major_scales: bool = False,
-            use_ue8m0: Optional[bool] = None,  # for Torch compile
-    ):
+    def __init__(self,
+                 static: bool,
+                 group_shape: GroupShape,
+                 num_token_padding: Optional[int] = None,
+                 column_major_scales: bool = False):
         """
         :param static: static or dynamic quantization
         :param group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
@@ -49,7 +46,6 @@ class QuantFP8(CustomOp):
         self.group_shape = group_shape
         self.num_token_padding = num_token_padding
         self.column_major_scales = column_major_scales
-        self.use_ue8m0 = use_ue8m0
 
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
@@ -74,8 +70,7 @@ class QuantFP8(CustomOp):
                 x,
                 group_size=self.group_size,
                 column_major_scales=self.column_major_scales,
-                dtype=_FP8_DTYPE,
-                use_ue8m0=self.use_ue8m0)
+                dtype=_FP8_DTYPE)
 
         assert (scale is not None) == self.static
         assert scale_ub is None or (not self.static and self.group_shape
@@ -142,10 +137,7 @@ class QuantFP8(CustomOp):
 
         x_grouped = x.view(-1, num_groups, self.group_size)
         absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
-        scales_raw = absmax / _FP8_MAX
-        if self.use_ue8m0:
-            scales_raw = torch.exp2(torch.ceil(torch.log2(scales_raw)))
-        scales = (scales_raw).clamp(min=_FP8_MIN_SCALING_FACTOR)
+        scales = (absmax / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
 
         x_scaled = x_grouped / scales
         x_quant = x_scaled.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
@@ -159,6 +151,6 @@ class QuantFP8(CustomOp):
         scales = scales.reshape(orig_shape[:-1] + (num_groups, ))
 
         if self.column_major_scales:
-            scales = scales.transpose(-2, -1).contiguous().transpose(-1, -2)
+            scales = scales.transpose(-2, -1).contiguous()
 
         return x_quant, scales
