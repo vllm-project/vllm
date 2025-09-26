@@ -12,6 +12,29 @@
 
 namespace vllm {
 
+template <typename T>
+__device__ __forceinline__ T warp_sum(T v) {
+#ifdef __HIP_PLATFORM_AMD__
+  const unsigned long long m = 0xffffffffffffffffull;
+#else
+  const unsigned m = 0xffffffffu;
+#endif
+  constexpr int kWidth = 32;
+  v += __shfl_down_sync(m, v, 16, kWidth);
+  v += __shfl_down_sync(m, v, 8, kWidth);
+  v += __shfl_down_sync(m, v, 4, kWidth);
+  v += __shfl_down_sync(m, v, 2, kWidth);
+  v += __shfl_down_sync(m, v, 1, kWidth);
+  return v;
+}
+
+__host__ __device__ __forceinline__ int ln_block_threads_unified(int H) {
+  int threads = (H >= 1024)  ? 256
+                : (H >= 512) ? 512
+                             : std::min(1024, ((H + 31) / 32) * 32);
+  return std::min(1024, std::max(128, ((threads + 31) / 32) * 32));
+}
+
 // has_residual must be true, if residual is not a nullptr
 template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
