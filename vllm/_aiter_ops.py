@@ -410,6 +410,7 @@ class rocm_aiter_ops:
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_USE_AITER_UNIFIED_ATTENTION
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+    _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
 
     @classmethod
     @is_aiter_supported
@@ -474,6 +475,11 @@ class rocm_aiter_ops:
     @is_aiter_supported
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM
+
+    @classmethod
+    @is_aiter_supported
+    def is_triton_rotary_embed_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._TRITON_ROTARY_EMBED
 
     @staticmethod
     @is_aiter_supported
@@ -754,6 +760,37 @@ class rocm_aiter_ops:
 
         gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
         return y
+
+    @staticmethod
+    def triton_rotary_embed(positions: torch.Tensor, query: torch.Tensor,
+                            key: torch.Tensor, cos_sin_cache: torch.Tensor,
+                            head_size: int, rotary_dim: int,
+                            is_neox_style: bool):
+        from aiter.ops.triton.rope import (
+            rope_cached_thd_positions_2c_fwd_inplace)
+        num_tokens = positions.numel()
+        cos, sin = cos_sin_cache.chunk(2, dim=-1)
+        query_shape = query.shape
+        key_shape = key.shape
+        rotate_style = 0 if is_neox_style else 1
+
+        query = query.view(num_tokens, -1, head_size)
+        key = key.view(num_tokens, -1, head_size)
+        query_ = query[..., :rotary_dim]
+        key_ = key[..., :rotary_dim]
+        positions = positions.view(*query.shape[:1])
+        rope_cached_thd_positions_2c_fwd_inplace(
+            positions,
+            sin,
+            cos,
+            query_,
+            key_,
+            rotate_style,
+            reuse_freqs_front_part=True,
+            is_nope_first=False,
+        )
+        query = query.view(query_shape)
+        key = key.view(key_shape)
 
     @staticmethod
     def triton_fp8_bmm(
