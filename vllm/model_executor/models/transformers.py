@@ -125,8 +125,8 @@ def can_enable_torch_compile(vllm_config: VllmConfig) -> bool:
 
 def replace_linear_class(
     linear: nn.Linear,
-    style: Literal["colwise", "rowwise"],
-    quant_config: Optional[QuantizationConfig],
+    style: Literal["colwise", "rowwise"] = "replicate",
+    quant_config: Optional[QuantizationConfig] = None,
     *,
     prefix: str = "",
 ) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
