@@ -126,19 +126,6 @@ class PrefixCacheStats(BaseCacheStats):
     preempted_hits: int = 0
     """The `hits` number for preempted requests."""
 
-    def record(self, num_tokens: int, num_hits: int, preempted: bool) -> None:
-        """Aggregate request information into the stats."""
-        if preempted:
-            # Previously preempted request
-            self.preempted_requests += 1
-            self.preempted_queries += num_tokens
-            self.preempted_hits += num_hits
-        else:
-            # New request
-            self.requests += 1
-            self.queries += num_tokens
-            self.hits += num_hits
-
 
 @dataclass
 class MultiModalCacheStats(BaseCacheStats):
@@ -148,6 +135,32 @@ class MultiModalCacheStats(BaseCacheStats):
     - `queries`: Refers to the number of multi-modal data items
       that were queried.
     """
+
+
+@dataclass
+class KVCacheLifetimeStats:
+    """Stores KV cache block lifetime statistics."""
+
+    # Total number of blocks that have been freed
+    total_blocks_freed: int = 0
+    # Sum of all block lifetimes (in seconds)
+    total_lifetime_seconds: float = 0.0
+    # Average lifetime of freed blocks (in seconds)
+    average_lifetime_seconds: float = 0.0
+
+    def add_block_lifetime(self, lifetime_seconds: float) -> None:
+        """Add a new block lifetime to the statistics."""
+        self.total_blocks_freed += 1
+        self.total_lifetime_seconds += lifetime_seconds
+        self.average_lifetime_seconds = (
+            self.total_lifetime_seconds / self.total_blocks_freed
+        )
+
+    def reset(self) -> None:
+        """Reset all lifetime statistics."""
+        self.total_blocks_freed = 0
+        self.total_lifetime_seconds = 0.0
+        self.average_lifetime_seconds = 0.0
 
 
 @dataclass
@@ -164,7 +177,10 @@ class SchedulerStats:
     kv_cache_usage: float = 0.0
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
-    connector_prefix_cache_stats: PrefixCacheStats | None = None
+    kv_cache_lifetime_stats: KVCacheLifetimeStats = field(
+        default_factory=KVCacheLifetimeStats
+    )
+    kv_cache_block_lifetimes: list[float] = field(default_factory=list)
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None

@@ -93,7 +93,6 @@ class LoggingStatLogger(StatLoggerBase):
         # Caching metrics. This cannot be reset.
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = CachingMetrics()
-        self.connector_prefix_caching_metrics = CachingMetrics()
         self.mm_caching_metrics = CachingMetrics()
 
         self.spec_decoding_logging = SpecDecodingLogging()
@@ -140,11 +139,6 @@ class LoggingStatLogger(StatLoggerBase):
 
         if scheduler_stats is not None:
             self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
-
-            if scheduler_stats.connector_prefix_cache_stats is not None:
-                self.connector_prefix_caching_metrics.observe(
-                    scheduler_stats.connector_prefix_cache_stats
-                )
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_logging.observe(scheduler_stats.spec_decoding_stats)
@@ -198,9 +192,6 @@ class LoggingStatLogger(StatLoggerBase):
             self.last_scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         ]
-        if not self.connector_prefix_caching_metrics.empty:
-            log_parts.append("External prefix cache hit rate: %.1f%%")
-            log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
         if not self.mm_caching_metrics.empty:
             log_parts.append("MM cache hit rate: %.1f%%")
             log_args.append(self.mm_caching_metrics.hit_rate * 100)
@@ -446,6 +437,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, engine_indexes, model_name
         )
 
+        gauge_kv_cache_avg_lifetime = self._gauge_cls(
+            name="vllm:kv_cache_avg_lifetime_seconds",
+            documentation="Average lifetime of KV cache blocks in seconds.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_cache_avg_lifetime = make_per_engine(
+            gauge_kv_cache_avg_lifetime, engine_indexes, model_name
+        )
+
         counter_prefix_cache_queries = self._counter_cls(
             name="vllm:prefix_cache_queries",
             documentation=(
@@ -464,34 +465,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_prefix_cache_hits = make_per_engine(
             counter_prefix_cache_hits, engine_indexes, model_name
-        )
-
-        #
-        # External - KV connector prefix cache
-        #
-
-        counter_connector_prefix_cache_queries = self._counter_cls(
-            name="vllm:external_prefix_cache_queries",
-            documentation=(
-                "External prefix cache queries from KV connector "
-                "cross-instance cache sharing, in terms of number of queried tokens."
-            ),
-            labelnames=labelnames,
-        )
-        self.counter_connector_prefix_cache_queries = make_per_engine(
-            counter_connector_prefix_cache_queries, engine_indexes, model_name
-        )
-
-        counter_connector_prefix_cache_hits = self._counter_cls(
-            name="vllm:external_prefix_cache_hits",
-            documentation=(
-                "External prefix cache hits from KV connector "
-                "cross-instance cache sharing, in terms of number of cached tokens."
-            ),
-            labelnames=labelnames,
-        )
-        self.counter_connector_prefix_cache_hits = make_per_engine(
-            counter_connector_prefix_cache_hits, engine_indexes, model_name
         )
 
         #
@@ -920,13 +893,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.prefix_cache_stats.hits
             )
 
-            if scheduler_stats.connector_prefix_cache_stats is not None:
-                self.counter_connector_prefix_cache_queries[engine_idx].inc(
-                    scheduler_stats.connector_prefix_cache_stats.queries
-                )
-                self.counter_connector_prefix_cache_hits[engine_idx].inc(
-                    scheduler_stats.connector_prefix_cache_stats.hits
-                )
+            # Update KV cache lifetime metric
+            if hasattr(scheduler_stats, "kv_cache_lifetime_stats"):
+                lifetime_stats = scheduler_stats.kv_cache_lifetime_stats
+                if lifetime_stats.total_blocks_freed > 0:
+                    self.gauge_kv_cache_avg_lifetime[engine_idx].set(
+                        lifetime_stats.average_lifetime_seconds
+                    )
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(

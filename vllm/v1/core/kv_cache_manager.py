@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.metrics.stats import KVCacheLifetimeStats, PrefixCacheStats
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -173,6 +173,22 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
+    def get_kv_cache_lifetime_stats(self) -> KVCacheLifetimeStats:
+        """Get the current KV cache lifetime statistics.
+
+        Returns:
+            The current lifetime statistics from the block pool.
+        """
+        return self.block_pool.get_lifetime_stats()
+
+    def collect_recent_kv_cache_lifetimes(self) -> list[float]:
+        """Collect lifetimes recorded since the previous collection."""
+        return self.block_pool.collect_recent_lifetimes()
+
+    def reset_kv_cache_lifetime_stats(self) -> None:
+        """Reset the KV cache lifetime statistics."""
+        self.block_pool.reset_lifetime_stats()
+
     def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
@@ -208,11 +224,14 @@ class KVCacheManager:
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.record(
-                num_tokens=request.num_tokens,
-                num_hits=num_new_computed_tokens,
-                preempted=request.num_preemptions > 0,
-            )
+            if request.num_preemptions > 0:
+                self.prefix_cache_stats.preempted_requests += 1
+                self.prefix_cache_stats.preempted_queries += request.num_tokens
+                self.prefix_cache_stats.preempted_hits += num_new_computed_tokens
+            else:
+                self.prefix_cache_stats.requests += 1
+                self.prefix_cache_stats.queries += request.num_tokens
+                self.prefix_cache_stats.hits += num_new_computed_tokens
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
@@ -353,6 +372,7 @@ class KVCacheManager:
         """
         if not self.block_pool.reset_prefix_cache():
             return False
+        self.block_pool.reset_lifetime_stats()
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
