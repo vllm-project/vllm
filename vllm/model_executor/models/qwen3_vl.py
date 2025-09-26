@@ -332,6 +332,9 @@ class Qwen3_VisionTransformer(nn.Module):
             check_upstream_fa_availability(
                 torch.get_default_dtype()):
             self.attn_backend = _Backend.FLASH_ATTN
+        assert self.attn_backend == _Backend.TORCH_SDPA, \
+            f"Qwen3-VL does not support {self.attn_backend} backend now. " \
+            f"Consider `export VLLM_ATTENTION_BACKEND=TORCH_SDPA` to enable it."
 
     @property
     def dtype(self) -> torch.dtype:
