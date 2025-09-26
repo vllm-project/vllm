@@ -283,10 +283,6 @@ WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
 
-# cuda arch list used by torch in the runtime image
-ARG torch_cuda_arch_list='7.5 8.0 8.9 9.0a 10.0a 12.0'
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
-
 ARG GDRCOPY_CUDA_VERSION=12.8
 # Keep in line with FINAL_BASE_IMAGE
 ARG GDRCOPY_OS_VERSION=Ubuntu22_04
