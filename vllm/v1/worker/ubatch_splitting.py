@@ -59,6 +59,7 @@ def ubatch_split(
     num_tokens_padded: int,
     parallel_config: ParallelConfig,
     allow_microbatching: bool,
+    uniform_decode: bool,
 ) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
@@ -80,7 +81,7 @@ def ubatch_split(
     should_attempt_ubatching = check_ubatch_thresholds(
         parallel_config,
         num_tokens_unpadded,
-        True,  #TODO Fix
+        uniform_decode=uniform_decode,
     )
 
     if not allow_microbatching:
