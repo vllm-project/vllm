@@ -405,8 +405,9 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
             fi
             echo "🏗️  Installing FlashInfer with AOT compilation for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
             export FLASHINFER_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}"
+            # HACK: We need these to run flashinfer.aot before installing flashinfer, get from the package in the future
+            uv pip install --system cuda-python==$(echo $CUDA_VERSION | cut -d. -f1,2) pynvml==$(echo $CUDA_VERSION | cut -d. -f1)
             # Build AOT kernels
-            uv pip install --system cuda-python==$(echo $CUDA_VERSION | cut -d. -f1,2)
             TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
                 python3 -m flashinfer.aot
             # Install with no-build-isolation since we already built AOT kernels
