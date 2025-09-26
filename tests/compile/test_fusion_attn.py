@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import itertools
+from collections.abc import Iterable
+from typing import Any
 
 import pytest
 import torch._dynamo
@@ -226,19 +228,24 @@ else:
     USE_INDUCTOR_GRAPH_PARTITION = [False]
 
 
+def flat_product(*iterables: Iterable[Any]):
+    """ Flatten lists of tuples into cartesian product."""
+    for element in itertools.product(*iterables):
+        normalized = (e if isinstance(e, tuple) else [e] for e in element)
+        yield list(itertools.chain(*normalized))
+
+
 @pytest.mark.parametrize("num_qo_heads, num_kv_heads", HEADS)
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("batch_size",
                          [7, 256, 533] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
-    "backend, model, custom_ops",
-    # Test attention+quant_fp8 fusion with custom and torch impls
-    list(
-        itertools.product(BACKENDS_FP8, MODELS_FP8,
-                          ["+quant_fp8", "-quant_fp8"]))
+    "backend, model_name, model_class, custom_ops",
+    # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
+    list(flat_product(BACKENDS_FP8, MODELS_FP8, ["+quant_fp8", "-quant_fp8"]))
     # quant_fp4 only has the custom impl
-    + list(itertools.product(BACKENDS_FP4, MODELS_FP4, [""])))
+    + list(flat_product(BACKENDS_FP4, MODELS_FP4, [""])))
 @pytest.mark.parametrize("split_attention", SPLIT_ATTENTION)
 @pytest.mark.parametrize("use_inductor_graph_partition",
                          USE_INDUCTOR_GRAPH_PARTITION)
@@ -247,14 +254,13 @@ else:
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 def test_attention_quant_pattern(
         num_qo_heads: int, num_kv_heads: int, head_size: int, batch_size: int,
-        dtype: torch.dtype, custom_ops: str,
-        model: tuple[str, type[AttentionQuantPatternModel]], backend: _Backend,
+        dtype: torch.dtype, custom_ops: str, model_name: str,
+        model_class: type[AttentionQuantPatternModel], backend: _Backend,
         split_attention: bool, use_inductor_graph_partition: bool, monkeypatch,
         dist_init, caplog_vllm):
     """Test AttentionStaticQuantPattern fusion pass"""
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
-    model_name, model_class = model
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
     if split_attention:
