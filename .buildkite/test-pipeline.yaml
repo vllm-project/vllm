@@ -164,11 +164,20 @@ steps:
   - tests/v1/test_internal_lb_dp.py
   - tests/v1/test_hybrid_lb_dp.py
   - tests/v1/engine/test_engine_core_client.py
+  - tests/distributed/test_symm_mem_allreduce.py
   commands:
-  # test with tp=2 and external_dp=2
+  # test with torchrun tp=2 and external_dp=2
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
-  # test with tp=2 and pp=2
+  # test with torchrun tp=2 and pp=2
   - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+  # test with torchrun tp=4 and dp=1
+  - TP_SIZE=4 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+  # test with torchrun tp=2, pp=2 and dp=1
+  - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+  # test with torchrun tp=1 and dp=4 with ep
+  - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
+  # test with torchrun tp=2 and dp=2 with ep
+  - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
   # test with internal dp
   - python3 ../examples/offline_inference/data_parallel.py --enforce-eager
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
@@ -180,6 +189,7 @@ steps:
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
+  - pytest -v -s distributed/test_symm_mem_allreduce.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
@@ -290,10 +300,12 @@ steps:
     - pytest -v -s v1/spec_decode
     - pytest -v -s v1/kv_connector/unit
     - pytest -v -s v1/metrics
+    - pytest -v -s v1/test_kv_sharing.py
+    - pytest -v -s v1/test_metrics_reader.py
+    - pytest -v -s v1/test_oracle.py
+    - pytest -v -s v1/test_request.py
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s v1/test_utils.py
-    - pytest -v -s v1/test_oracle.py
-    - pytest -v -s v1/test_metrics_reader.py
     # Integration test for streaming correctness (requires special branch).
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
@@ -321,6 +333,8 @@ steps:
     - python3 offline_inference/basic/classify.py
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
+    - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
+    - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
 
 - label: Platform Tests (CUDA) # 4min
   timeout_in_minutes: 15
@@ -758,8 +772,9 @@ steps:
     - pytest -v -s tests/models/multimodal/processing/
     - pytest -v -s tests/models/multimodal/test_mapping.py
     - python3 examples/offline_inference/basic/chat.py
-    - python3 examples/offline_inference/audio_language.py --model-type whisper
     - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
+    # Whisper needs spawn method to avoid deadlock
+    - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
 - label: Blackwell Test # 38 min
   timeout_in_minutes: 60
@@ -857,24 +872,28 @@ steps:
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
     - python3 ../examples/offline_inference/data_parallel.py --dp-size=2 --tp-size=1 --node-size=2 --node-rank=1 --master-addr=192.168.10.10 --master-port=12345 --enforce-eager --trust-remote-code
 
-- label: Distributed Tests (2 GPUs) # 110min
-  timeout_in_minutes: 150
+- label: Distributed Tests (2 GPUs) # 68min
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
+  - vllm/compilation/
   - vllm/distributed/
   - vllm/engine/
   - vllm/executor/
-  - vllm/model_executor/models/
-  - tests/distributed/
-  - vllm/compilation
   - vllm/worker/worker_base.py
-  - entrypoints/llm/test_collective_rpc.py
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/compile/test_basic_correctness.py
+  - tests/compile/test_wrapper.py
+  - tests/distributed/
+  - tests/entrypoints/llm/test_collective_rpc.py
   - tests/v1/test_async_llm_dp.py
   - tests/v1/test_external_lb_dp.py
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
-  - vllm/v1/engine/
+  - tests/v1/shutdown
+  - tests/v1/worker/test_worker_memory_snapshot.py
   commands:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_external_lb_dp.py
@@ -883,19 +902,29 @@ steps:
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+  - pytest -v -s distributed/test_sequence_parallel.py
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
+  - pytest -v -s v1/worker/test_worker_memory_snapshot.py
+
+- label: Distributed Model Tests (2 GPUs) # 37min
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental]
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/sharded_state_loader.py
+  - vllm/model_executor/models/
+  - tests/basic_correctness/
+  - tests/model_executor/model_loader/test_sharded_state_loader.py
+  - tests/models/
+  commands:
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
-  # test sequence parallel
-  - pytest -v -s distributed/test_sequence_parallel.py
-  # this test fails consistently.
-  # TODO: investigate and fix
-  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
-  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
-  - pytest -v -s models/multimodal/generation/test_maverick.py
 
 - label: Plugin Tests (2 GPUs) # 40min
   timeout_in_minutes: 60
@@ -1029,3 +1058,16 @@ steps:
   num_gpus: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
+    - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
+
+##### RL Integration Tests #####
+- label: Prime-RL Integration Test # 15min
+  timeout_in_minutes: 30
+  optional: true
+  num_gpus: 2
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/
+  - .buildkite/scripts/run-prime-rl-test.sh
+  commands:
+    - bash .buildkite/scripts/run-prime-rl-test.sh

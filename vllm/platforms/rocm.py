@@ -119,6 +119,12 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_gfx950() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx950"])
+
+
+@cache
 def use_rocm_custom_paged_attention(
         qtype: torch.dtype,
         head_size: int,
@@ -212,8 +218,7 @@ class RocmPlatform(Platform):
                 raise ValueError(
                     f" The selected backend, {selected_backend.name},"
                     f"does not support block size {block_size}.")
-            if selected_backend in (_Backend.ROCM_AITER_MLA,
-                                    _Backend.ROCM_AITER_MLA_VLLM_V1):
+            if selected_backend == _Backend.ROCM_AITER_MLA:
                 if block_size == 1:
                     logger.info("Using AITER MLA backend on V1 engine.")
                     return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
@@ -231,7 +236,17 @@ class RocmPlatform(Platform):
                 logger.info("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "rocm_aiter_fa.AiterFlashAttentionBackend")
+            elif (envs.VLLM_ROCM_USE_AITER and
+                envs.VLLM_USE_AITER_UNIFIED_ATTENTION) or \
+                    envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION or \
+                        selected_backend == _Backend.ROCM_ATTN:
+                # rocm specific backend, with aiter and/or
+                #   triton prefix-prefill
+                logger.info("Using Rocm/Aiter Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "rocm_attn.RocmAttentionBackend")
             else:
+                # default case, using triton unified attention
                 logger.info("Using Triton Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "triton_attn.TritonAttentionBackend")
@@ -324,7 +339,8 @@ class RocmPlatform(Platform):
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
-        if use_v1 and use_aiter_rms_norm and not is_eager_execution:
+        if (use_v1 and use_aiter_rms_norm and not is_eager_execution
+                and "-rms_norm" not in compilation_config.custom_ops):
             compilation_config.custom_ops.append("+rms_norm")
 
     @classmethod
@@ -385,11 +401,6 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fnuz
         else:
             return torch.float8_e4m3fn
-
-    @classmethod
-    def supports_v1(cls, model_config: "ModelConfig") -> bool:
-        # V1 support on AMD gpus is experimental
-        return True
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:

@@ -64,6 +64,7 @@ _TEXT_GENERATION_MODELS = {
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
+    "CwmForCausalLM": ("llama", "LlamaForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
@@ -109,6 +110,7 @@ _TEXT_GENERATION_MODELS = {
     "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),  # noqa: E501
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
+    "LongcatFlashForCausalLM": ("longcat_flash", "LongcatFlashForCausalLM"),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM":("falcon_h1", "FalconH1ForCausalLM"),
@@ -134,7 +136,6 @@ _TEXT_GENERATION_MODELS = {
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
-    "Phi4FlashForCausalLM": ("phi4flash", "Phi4FlashForCausalLM"),
     "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
@@ -230,7 +231,7 @@ _MULTIMODAL_MODELS = {
     "GraniteSpeechForConditionalGeneration": ("granite_speech", "GraniteSpeechForConditionalGeneration"),  # noqa: E501
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
-    "NemotronH_Nano_VL": ("nano_nemotron_vl", "NemotronH_Nano_VL"),
+    "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "InternS1ForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "InternVLForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
@@ -288,6 +289,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
+    "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
@@ -487,23 +489,23 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     def inspect_model_cls(self) -> _ModelInfo:
         model_path = Path(
             __file__).parent / f"{self.module_name.split('.')[-1]}.py"
+        module_hash = None
 
-        assert model_path.exists(), \
-            f"Model {self.module_name} expected to be on path {model_path}"
-        with open(model_path, "rb") as f:
-            module_hash = hashlib.md5(f.read()).hexdigest()
+        if model_path.exists():
+            with open(model_path, "rb") as f:
+                module_hash = hashlib.md5(f.read()).hexdigest()
 
-        mi = self._load_modelinfo_from_cache(module_hash)
-        if mi is not None:
-            logger.debug(("Loaded model info "
-                          "for class %s.%s from cache"), self.module_name,
-                         self.class_name)
-            return mi
-        else:
-            logger.debug(("Cache model info "
-                          "for class %s.%s miss. "
-                          "Loading model instead."), self.module_name,
-                         self.class_name)
+            mi = self._load_modelinfo_from_cache(module_hash)
+            if mi is not None:
+                logger.debug(("Loaded model info "
+                              "for class %s.%s from cache"), self.module_name,
+                             self.class_name)
+                return mi
+            else:
+                logger.debug(("Cache model info "
+                              "for class %s.%s miss. "
+                              "Loading model instead."), self.module_name,
+                             self.class_name)
 
         # Performed in another process to avoid initializing CUDA
         mi = _run_in_subprocess(
@@ -512,7 +514,8 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
                      self.class_name)
 
         # save cache file
-        self._save_modelinfo_to_cache(mi, module_hash)
+        if module_hash is not None:
+            self._save_modelinfo_to_cache(mi, module_hash)
 
         return mi
 
