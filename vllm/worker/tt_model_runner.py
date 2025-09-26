@@ -3,7 +3,7 @@
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Type, Union
 
 import torch
 import torch.nn as nn
@@ -164,6 +164,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 "a model cannot be encoder-decoder and request-specific rope")
             # seq_id -> cached_req_data
             self.cached_req_data: Dict[int, Dict[str, Any]] = {}
+            self.previous_seq_ids: Set[int] = set()
 
         # Detect if the model has "mrope" rope_scaling type.
         # mrope requires keep "rope_deltas" between prompt and decoding phases.
@@ -824,12 +825,17 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     decode_full_text_row_masked_out_mask
                 }
             elif self.request_specific_rope:
-                enc_dec_kwargs = {
-                    "rot_mats_all_users": [
-                        self.cached_req_data[seq_id]["rot_mats"]
-                        for seq_id in model_input.seq_groups
-                    ]
-                }
+                if any(seq_id not in self.previous_seq_ids
+                       for seq_id in model_input.seq_groups):
+                    enc_dec_kwargs = {
+                        "rot_mats_all_users": [
+                            self.cached_req_data[seq_id]["rot_mats"]
+                            for seq_id in model_input.seq_groups
+                        ]
+                    }
+                else:
+                    enc_dec_kwargs = {"rot_mats_all_users": None}
+                self.previous_seq_ids = set(model_input.seq_groups)
             else:
                 enc_dec_kwargs = {}
 
