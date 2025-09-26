@@ -59,6 +59,11 @@ class EngineClient(ABC):
         """Generate outputs for a request."""
         ...
 
+    @abstractmethod
+    async def minimal_generation(self) -> str:
+        """Generate outputs for a minimal spec prompt"""
+        ...
+
     async def beam_search(
         self,
         prompt: PromptType,
