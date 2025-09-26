@@ -120,6 +120,7 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # Timestamp when the block was allocated (for lifetime tracking)
     allocation_time: float | None = None
 
     @property
