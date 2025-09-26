@@ -15,6 +15,7 @@ from vllm.compilation.activation_quant_fusion import (
 # yapf: enable
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
+from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import CompilationConfig, PassConfig, VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -69,6 +70,10 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 
     def __init__(self, hidden_size: int, x: torch.Tensor, **kwargs):
         super().__init__()
+        from vllm.compilation.activation_quant_fusion import (
+            silu_and_mul_nvfp4_quant_supported)
+        assert silu_and_mul_nvfp4_quant_supported
+
         self.silu_and_mul = SiluAndMul()
 
         # create nvfp4 weight
@@ -127,7 +132,11 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, dtype, model_class,
         pass_config=PassConfig(enable_fusion=True, enable_noop=True))
     fusion_pass = ActivationQuantFusionPass(config)
 
-    backend = TestBackend(NoOpEliminationPass(config), fusion_pass)
+    passes = [
+        NoOpEliminationPass(config), fusion_pass,
+        PostCleanupPass(config)
+    ]
+    backend = TestBackend(*passes)
     model = model_class(hidden_size=hidden_size,
                         cuda_force_torch=cuda_force_torch,
                         x=x)
@@ -150,6 +159,8 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, dtype, model_class,
                                result2[0].to(dtype=dtype),
                                atol=atol,
                                rtol=rtol)
+
+    assert fusion_pass.matched_count == 1
 
     # In pre-nodes, quant op should be present and fused kernels should not
     backend.check_before_ops(model.ops_in_model_before())
