@@ -58,6 +58,7 @@ def ubatch_split(
     num_tokens_unpadded: int,
     num_tokens_padded: int,
     parallel_config: ParallelConfig,
+    allow_microbatching: bool,
 ) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
@@ -82,6 +83,8 @@ def ubatch_split(
         True,  #TODO Fix
     )
 
+    if not allow_microbatching:
+        should_attempt_ubatching = False
     # Don't microbatch unless every other DP worker is also microbatching
     (should_ubatch, num_tokens_after_padding) = coordinate_batch_across_dp(
         num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching,

@@ -96,7 +96,6 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
-from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
@@ -1048,7 +1047,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ubatch_split(num_scheduled_tokens,
                         num_tokens_unpadded,
                         num_tokens_padded,
-                        self.parallel_config)
+                        self.parallel_config,
+                        True)
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -2915,25 +2915,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
-        if self.parallel_config.enable_dbo and allow_microbatching:
-            ubatch_slices, num_tokens_across_dp = ubatch_split(
-                num_scheduled_tokens,
-                total_num_scheduled_tokens,
-                total_num_scheduled_tokens,
-                self.vllm_config.parallel_config,
-            )
-            assert num_tokens_across_dp is not None
-            num_tokens_after_padding = int(num_tokens_across_dp[0].item())
-        else:
-            should_ubatch = False
-            dp_size = self.parallel_config.data_parallel_size
-            dp_rank = self.parallel_config.data_parallel_rank
-            (should_ubatch, num_tokens_across_dp) = coordinate_batch_across_dp(
-                num_tokens, num_tokens, should_ubatch, dp_size, dp_rank)
-
-            num_tokens_after_padding = num_tokens
-            if num_tokens_across_dp is not None:
-                num_tokens_after_padding = int(num_tokens_across_dp[0])
+        ubatch_slices, num_tokens_across_dp = ubatch_split(
+            num_scheduled_tokens,
+            total_num_scheduled_tokens,
+            total_num_scheduled_tokens,
+            self.vllm_config.parallel_config,
+            allow_microbatching,
+        )
+        num_tokens_after_padding = num_tokens
+        if num_tokens_across_dp is not None:
+            num_tokens_after_padding = int(num_tokens_across_dp[0])
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 
