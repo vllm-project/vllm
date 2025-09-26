@@ -22,7 +22,10 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import GiB_bytes, direct_register_custom_op
@@ -247,6 +250,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 "This may be caused by insufficient memory to allocate "
                 "kv cache.") from e
 
+        # for attn backends supporting query quantization
+        self.query_quant = None
+        if self.kv_cache_dtype.startswith(
+                "fp8") and self.attn_backend.supports_quant_query_input:
+            self.query_quant = QuantFP8(static=True,
+                                        group_shape=GroupShape.PER_TENSOR)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -270,11 +280,22 @@ class Attention(nn.Module, AttentionLayerBase):
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
+
+        output_dtype = query.dtype
+        if self.query_quant is not None:
+            # quantizing with a simple torch operation enables
+            # torch.compile to fuse this into previous ops
+            # which reduces overheads during decoding.
+            # Otherwise queries are quantized using custom ops
+            # which causes decoding overheads
+            assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
+            query, _ = self.query_quant(query, self._q_scale)
+
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
             output = torch.zeros(output_shape,
-                                 dtype=query.dtype,
+                                 dtype=output_dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
             # We skip reshaping query, key and value tensors for the MLA
@@ -343,7 +364,7 @@ class Attention(nn.Module, AttentionLayerBase):
             self.impl.process_weights_after_loading(act_dtype)
 
         # FlashInfer requires attention sinks to be float32
-        if (self.backend == _Backend.FLASHINFER_VLLM_V1
+        if (self.backend == _Backend.FLASHINFER
                 and hasattr(self.impl, 'sinks')):
             from vllm.v1.attention.backends.flashinfer import FlashInferImpl
             assert isinstance(self.impl, FlashInferImpl)
@@ -399,21 +420,17 @@ class MultiHeadAttention(nn.Module):
 
             self.attn_backend = backend if backend in {
                 _Backend.TORCH_SDPA,
-                _Backend.TORCH_SDPA_VLLM_V1,
                 _Backend.XFORMERS,
-                _Backend.PALLAS_VLLM_V1,
+                _Backend.PALLAS,
                 _Backend.ROCM_AITER_FA,
                 _Backend.FLASH_ATTN,
-                _Backend.FLASH_ATTN_VLLM_V1,
             } else _Backend.TORCH_SDPA
 
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
             self.attn_backend = _Backend.TORCH_SDPA
 
-        if self.attn_backend in {
-                _Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1
-        }:
+        if self.attn_backend == _Backend.FLASH_ATTN:
             if use_upstream_fa:
                 from flash_attn import flash_attn_varlen_func
                 self._flash_attn_varlen_func = flash_attn_varlen_func
@@ -447,11 +464,7 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend in {
-                _Backend.FLASH_ATTN,
-                _Backend.FLASH_ATTN_VLLM_V1,
-        }:
-
+        if self.attn_backend == _Backend.FLASH_ATTN:
             cu_seqlens_q = torch.arange(0, (bsz + 1) * q_len,
                                         step=q_len,
                                         dtype=torch.int32,
@@ -478,8 +491,7 @@ class MultiHeadAttention(nn.Module):
                                                           key,
                                                           value,
                                                           scale=self.scale)
-        elif (self.attn_backend == _Backend.TORCH_SDPA
-              or self.attn_backend == _Backend.TORCH_SDPA_VLLM_V1):
+        elif self.attn_backend == _Backend.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
             out = F.scaled_dot_product_attention(query,
@@ -487,7 +499,7 @@ class MultiHeadAttention(nn.Module):
                                                  value,
                                                  scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend == _Backend.PALLAS_VLLM_V1:
+        elif self.attn_backend == _Backend.PALLAS:
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
             from torch_xla.experimental.custom_kernel import flash_attention
