@@ -13,7 +13,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                     MultiModalInputs, MultiModalKwargsOptionalItems,
+                     MultiModalInputs, MultiModalKwargsItems,
                      MultiModalPlaceholderDict)
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          EncDecMultiModalProcessor)
@@ -43,7 +43,7 @@ class DummyDecoderData(NamedTuple):
     """Dummy data used for profiling."""
 
     prompt_token_ids: list[int]
-    multi_modal_data: MultiModalKwargsOptionalItems
+    multi_modal_data: MultiModalKwargsItems
     multi_modal_placeholders: MultiModalPlaceholderDict
 
 
@@ -239,7 +239,7 @@ class MultiModalProfiler(Generic[_I]):
 
         return DummyDecoderData(
             prompt_token_ids=prompt_token_ids,
-            multi_modal_data=mm_inputs["mm_kwargs"],
+            multi_modal_data=mm_inputs["mm_kwargs"].require_data(),
             multi_modal_placeholders=mm_inputs["mm_placeholders"],
         )
 

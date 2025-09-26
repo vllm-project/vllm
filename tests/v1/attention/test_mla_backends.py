@@ -15,8 +15,8 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
-    _Backend.CUTLASS_MLA, _Backend.FLASHMLA_VLLM_V1, _Backend.FLASH_ATTN_MLA,
-    _Backend.TRITON_MLA_VLLM_V1
+    _Backend.CUTLASS_MLA, _Backend.FLASHMLA, _Backend.FLASH_ATTN_MLA,
+    _Backend.TRITON_MLA
 ]
 
 # Remove CUTLASS_MLA from the list if not using sm100

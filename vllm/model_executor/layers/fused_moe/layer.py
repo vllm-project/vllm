@@ -1925,7 +1925,9 @@ class FusedMoE(CustomOp):
             assert self.shared_experts is None or isinstance(
                 final_hidden_states, tuple)
 
-            if isinstance(final_hidden_states, tuple):
+            if self.zero_expert_num is not None and self.zero_expert_num > 0:
+                assert isinstance(final_hidden_states, tuple)
+                assert self.shared_experts is None
                 final_hidden_states, zero_expert_result = final_hidden_states
                 if zero_expert_result is not None:
                     final_hidden_states += zero_expert_result

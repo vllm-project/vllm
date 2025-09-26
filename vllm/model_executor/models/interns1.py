@@ -16,6 +16,8 @@ from transformers import BatchFeature, InternVLProcessor, PretrainedConfig
 from transformers.activations import ACT2FN
 from transformers.models.got_ocr2.image_processing_got_ocr2_fast import (
     GotOcr2ImageProcessorFast)
+from transformers.models.internvl.video_processing_internvl import (
+    InternVLVideoProcessor)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -31,6 +33,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import (
+    cached_video_processor_from_config)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -152,7 +156,12 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
     """ProcessingInfo for InternS1-style models."""
 
     def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
-        return self.ctx.get_hf_processor(InternVLProcessor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(InternVLProcessor, **kwargs)
+        hf_processor.video_processor = cached_video_processor_from_config(
+            self.ctx.model_config,
+            processor_cls=InternVLVideoProcessor,
+            **kwargs)
+        return hf_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
