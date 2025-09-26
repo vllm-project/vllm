@@ -3546,6 +3546,10 @@ def unique_filepath(fn: Callable[[int], Path]) -> Path:
 
     fn should be a callable that returns a path that
     includes the passed int at a fixed location.
+
+    Note: This function has a TOCTOU race condition.
+    Caller should use atomic operations (e.g., open with 'x' mode)
+    when creating the file to ensure thread safety.
     """
     i = 0
     while True:
