@@ -328,12 +328,12 @@ class DeepEPHybridAll2AllManager(DeepEPAll2AllManagerBase):
     def __init__(self, cpu_group):
         super().__init__(cpu_group)
 
-    def _make_all2all_kwargs(self, kwargs) -> dict[Any, Any]:
+    def _make_all2all_kwargs(self, **kwargs) -> dict[Any, Any]:
         extra_kwargs = dict(group=self.cpu_group,
-                            num_of_ranks_per_node = 32,
-                            num_sms_preprocessing_api = 32,
                             num_sms_dispatch_api = 32,
-                            num_sms_combine_api = 32
+                            num_sms_combine_api = 32,
+                            num_sms_preprocessing_api = 128,
+                            nvlink_domain_size = None,
                             )
         return {**kwargs, **extra_kwargs}
 
