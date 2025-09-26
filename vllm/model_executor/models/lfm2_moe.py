@@ -29,9 +29,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-# from transformers import Lfm2MoeConfig
 from vllm.transformers_utils.configs import Lfm2MoeConfig
 
 from .interfaces import (HasInnerState, IsHybrid, MixtureOfExperts,
@@ -391,7 +389,6 @@ class Lfm2MoeShortConvDecoderLayer(nn.Module):
         self.conv(
             hidden_states,
             output,
-            conv_metadata=None,
         )
         hidden_states, residual = self.ffn_norm(output, residual)
         hidden_states = self.feed_forward(hidden_states)
@@ -749,10 +746,8 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                                    inputs_embeds)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
