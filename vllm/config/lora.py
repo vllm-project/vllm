@@ -135,5 +135,7 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
-        if self.max_num_labels is None:
-            self.max_num_labels = model_config.hf_config.num_labels
+        if (self.max_num_labels is None
+                and model_config.pooler_config is not None):
+            self.max_num_labels = (8 if model_config.hf_config.num_labels < 8
+                                   else model_config.hf_config.num_labels)

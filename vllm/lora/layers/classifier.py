@@ -56,7 +56,8 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
         lora_bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
-
+        # It's possible to use fp32 computation,
+        # so type conversion is performed here
         if lora_a.dtype != self.lora_type:
             lora_a = lora_a.to(self.lora_type)
         self.lora_a_stacked[index,
@@ -80,7 +81,7 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
         org_output = self.base_layer.quant_method.apply(
             self.base_layer, input_, bias)
 
-        y = torch.zeros(self.input_size,
+        y = torch.zeros(input_.size(0),
                         self.max_class_label,
                         device=input_.device)
         lora_weight = tuple(self.lora_a_stacked, )

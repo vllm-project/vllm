@@ -136,15 +136,20 @@ class LoRAModel:
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             # Case for classify head
+            module_name = "score"
             if classifier_lora_name and tensor_name.endswith(
                     classifier_lora_name):
-                loras[tensor_name] = ClassifierLoRALayerWeights.from_config(
-                    tensor_name, peft_helper, None)
-                loras[tensor_name].lora_a = tensor.to(device=device,
-                                                      dtype=dtype).t()
+                loras[module_name] = ClassifierLoRALayerWeights.from_config(
+                    tensor_name,
+                    tensor.shape[0],
+                    peft_helper.lora_alpha,
+                    peft_helper.vllm_lora_scaling_factor,
+                )
+                loras[module_name].lora_a = tensor.to(device=device,
+                                                      dtype=dtype)
                 if pin_memory:
-                    loras[tensor_name].lora_a = loras[
-                        tensor_name].lora_a.pin_memory()
+                    loras[module_name].lora_a = loras[
+                        module_name].lora_a.pin_memory()
                 continue
 
             module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
@@ -442,7 +447,8 @@ class LoRAModelManager:
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
-
+            if "score" in module_name:
+                pass
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
                 module_lora.optimize()
@@ -613,8 +619,6 @@ class LoRAModelManager:
                         module.lora_a_stacked[0].shape[-2],
                         module.lora_a_stacked[0].dtype,
                         "cpu",
-                        embeddings_tensor_dim=None,
-                        bias_enabled=bias_enabled,
                     )
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(

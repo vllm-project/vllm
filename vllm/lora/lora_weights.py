@@ -201,6 +201,26 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
 class ClassifierLoRALayerWeights(LoRALayerWeights):
 
+    def __init__(
+        self,
+        module_name,
+        rank,
+        lora_alpha,
+        lora_a: Optional[torch.Tensor] = None,
+        scaling=None,
+    ):
+        super().__init__(
+            module_name,
+            rank,
+            lora_alpha,
+            lora_a,
+            None,
+            None,
+            None,
+            scaling,
+        )
+        self.class_num = self.rank
+
     @classmethod
     def create_dummy_lora_weights(
         cls,
@@ -222,10 +242,17 @@ class ClassifierLoRALayerWeights(LoRALayerWeights):
             rank=rank,
             lora_alpha=1,
             lora_a=lora_a,
-            lora_b=None,
-            bias=None,
-            embeddings_tensor=None,
         )
+
+    @classmethod
+    def from_config(
+        cls,
+        module_name: str,
+        rank: int,
+        lora_alpha: int,
+        scaling: float,
+    ) -> "LoRALayerWeights":
+        return cls(module_name, rank, lora_alpha, None, scaling)
 
     def optimize(self) -> "LoRALayerWeights":
         return self
@@ -233,3 +260,7 @@ class ClassifierLoRALayerWeights(LoRALayerWeights):
     @property
     def output_dim(self) -> int:
         return self.rank
+
+    @property
+    def input_dim(self) -> int:
+        raise NotImplementedError()
