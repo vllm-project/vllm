@@ -119,8 +119,8 @@ def demonstrate_lifetime_stats():
             f"Note: Could not access detailed lifetime stats in this environment: {e}"
         )
         print(
-            "This is expected in some configurations - the feature is still "
-            "working internally."
+            "This is expected in some configurations - the feature is "
+            "still working internally."
         )
 
     print("\n3. Demonstrating Prometheus metric integration...")
@@ -138,8 +138,8 @@ def demonstrate_lifetime_stats():
     )
     print("# TYPE vllm:kv_cache_avg_lifetime_seconds gauge")
     print(
-        'vllm:kv_cache_avg_lifetime_seconds{model_name="facebook/opt-125m",'
-        'engine="0"} 0.0234'
+        "vllm:kv_cache_avg_lifetime_seconds{"
+        'model_name="facebook/opt-125m",engine="0"} 0.0234'
     )
 
     print("\n" + "=" * 60)
