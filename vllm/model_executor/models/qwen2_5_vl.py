@@ -317,14 +317,13 @@ class Qwen2_5_VisionAttention(nn.Module):
 
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
-                _Backend.ROCM_AITER_FA, _Backend.FLASH_ATTN_VLLM_V1
+                _Backend.ROCM_AITER_FA
         }:
             raise RuntimeError(
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
             )
         self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA,
-            _Backend.FLASH_ATTN_VLLM_V1
+            _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
         }
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -739,8 +738,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
     ) -> tuple[Optional[int], Optional[list[int]]]:
         max_seqlen, seqlens = None, None
         if (self.attn_backend == _Backend.FLASH_ATTN
-                or self.attn_backend == _Backend.ROCM_AITER_FA
-                or self.attn_backend == _Backend.FLASH_ATTN_VLLM_V1):
+                or self.attn_backend == _Backend.ROCM_AITER_FA):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()

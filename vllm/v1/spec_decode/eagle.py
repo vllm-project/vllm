@@ -84,9 +84,9 @@ class EagleProposer:
         self.uses_mrope = self.vllm_config.model_config.uses_mrope
         if self.uses_mrope:
             # M-RoPE need (3, max_num_tokens)
-            self.positions = torch.zeros((3, self.max_num_tokens),
-                                         dtype=torch.int64,
-                                         device=device)
+            self.mrope_positions = torch.zeros((3, self.max_num_tokens),
+                                                dtype=torch.int64,
+                                                device=device)
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens,
@@ -152,6 +152,18 @@ class EagleProposer:
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
 
+    # M-RoPE
+    def _get_positions(self, num_tokens: int):
+        if self.uses_mrope:
+            return self.mrope_positions[:, :num_tokens]
+        return self.positions[:num_tokens]
+
+    def _set_positions(self, num_tokens: int, positions: torch.Tensor):
+        if self.uses_mrope:
+            self.mrope_positions[:, :num_tokens] = positions
+        else:
+            self.positions[:num_tokens] = positions
+
     def propose(
         self,
         # [num_tokens]
@@ -208,10 +220,7 @@ class EagleProposer:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
         # M-RoPE
-        if self.uses_mrope:
-            self.positions[:, :num_tokens] = target_positions
-        else:
-            self.positions[:num_tokens] = target_positions
+        self._set_positions(num_tokens, target_positions)
         self.hidden_states[:num_tokens] = target_hidden_states
         if self.is_multimodal_model:
             input_ids = self.input_ids[:num_tokens]
@@ -230,10 +239,7 @@ class EagleProposer:
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
             # M-RoPE
-            if self.uses_mrope:
-                forward_positions = self.positions[:, :num_input_tokens]
-            else:
-                forward_positions = self.positions[:num_input_tokens]
+            forward_positions = self._get_positions(num_input_tokens)
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=forward_positions,
@@ -375,10 +381,7 @@ class EagleProposer:
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             # M-RoPE
-            if self.uses_mrope:
-                self.positions[:, :batch_size] = clamped_positions
-            else:
-                self.positions[:batch_size] = clamped_positions
+            self._set_positions(batch_size, clamped_positions)
             self.hidden_states[:batch_size] = hidden_states
             if self.is_multimodal_model:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
@@ -394,10 +397,7 @@ class EagleProposer:
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
                 # M-RoPE
-                if self.uses_mrope:
-                    forward_positions = self.positions[:, :input_batch_size]
-                else:
-                    forward_positions = self.positions[:input_batch_size]
+                forward_positions = self._get_positions(input_batch_size)
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=forward_positions,
@@ -934,10 +934,7 @@ class EagleProposer:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
             # M-RoPE
-            if self.uses_mrope:
-                forward_positions = self.positions[:, :num_tokens]
-            else:
-                forward_positions = self.positions[:num_tokens]
+            forward_positions = self._get_positions(num_tokens)
 
             if self.is_multimodal_model:
                 input_ids = None
