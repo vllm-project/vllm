@@ -270,6 +270,7 @@ class VllmConfig:
                     f"{model_config.dtype} is not supported for quantization "
                     f"method {model_config.quantization}. Supported dtypes: "
                     f"{supported_dtypes}")
+            quant_config.maybe_update_config(model_config.model)
             return quant_config
         return None
 

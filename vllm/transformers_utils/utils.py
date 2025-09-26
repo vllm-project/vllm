@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import struct
 from functools import cache
 from os import PathLike
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from vllm.envs import VLLM_MODEL_REDIRECT_PATH
 from vllm.logger import init_logger
@@ -97,3 +98,11 @@ def maybe_model_redirect(model: str) -> str:
         return redirect_model
 
     return model
+
+
+def parse_safetensors_file_metadata(
+        path: Union[str, PathLike]) -> dict[str, Any]:
+    with open(path, "rb") as f:
+        length_of_metadata = struct.unpack('<Q', f.read(8))[0]
+        metadata = json.loads(f.read(length_of_metadata).decode('utf-8'))
+        return metadata

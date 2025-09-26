@@ -50,9 +50,6 @@ from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -1270,7 +1267,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.visual = Qwen2VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=self._maybe_ignore_quant_config(quant_config),
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
             )
@@ -1285,14 +1282,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid vision encoder sections for some models.
-        # See: https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct-GPTQ-Int4
-        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
-            return None
-        return quant_config
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
