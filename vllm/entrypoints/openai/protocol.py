@@ -2089,8 +2089,8 @@ class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
     """The type of the event. Always `response.reasoning_part.added`."""
 
 
-# TODO: move this to a separate file
-# Streaming Events
+# vLLM Streaming Events
+# Note: we override the response type with the vLLM ResponsesResponse type
 class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
     response: ResponsesResponse  # type: ignore[override]
 
