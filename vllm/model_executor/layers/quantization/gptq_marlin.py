@@ -37,6 +37,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
+from vllm.utils import is_list_of
 
 logger = init_logger(__name__)
 
@@ -247,6 +248,13 @@ class GPTQMarlinConfig(QuantizationConfig):
                             model_name: str,
                             revision: Optional[str] = None):
         if self.modules_in_block_to_quantize:
+            if is_list_of(self.modules_in_block_to_quantize, list):
+                # original modules_in_block_to_quantize: list[list[str]]
+                # flatten original modules_in_block_to_quantize
+                self.modules_in_block_to_quantize = [
+                    item for sublist in self.modules_in_block_to_quantize
+                    for item in sublist
+                ]
             return
 
         unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
