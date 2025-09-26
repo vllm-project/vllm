@@ -2750,7 +2750,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
             tokens = np.random.randint(
                 0, vocab_size, size=target_length).tolist()
 
-            _, adjusted_tokens, token_mismatch = gen_prompt_decode_to_target_len(
+            _, adjusted_tokens, token_mismatch = gen_prompt_decode_to_target_len( # noqa: E501
                 tokenizer=tokenizer,
                 token_sequence=tokens,
                 target_token_len=target_length,
