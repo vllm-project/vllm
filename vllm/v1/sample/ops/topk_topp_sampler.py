@@ -454,9 +454,15 @@ def _topk_topp_kernel(LOGITS, PROBS, NUM_SEARCH, K, P, B,
 
                     masked_larger_0 = tl.where(probs_blk > p_pivot_0, probs_blk, 1.0)
                     min_larger_0 = tl.minimum(min_larger_0, tl.min(masked_larger_0))
-                    num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-6)
 
                     p_pivots_sum_0 += tl.sum(probs_blk * (probs_blk > p_pivot_0))
+                
+                for i in range(0, search_iters):
+                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                    mask_n = offs_n < search_range
+                    probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n, other=0.0)
+
+                    num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-6)
 
                 # Check if any of the pivots are equal to k
                 if p_pivots_sum_0 >= p:
@@ -471,7 +477,7 @@ def _topk_topp_kernel(LOGITS, PROBS, NUM_SEARCH, K, P, B,
                 if num_iters >= 32 or tl.abs(min_range - max_range) < 1e-9:
                     p_pivot = p_pivot_0
                 
-                if row_id == 1:
+                if row_id == 195:
                     tl.store(DEBUG_PTR + num_iters * 21 + 0, p_pivots_sum_0)
                     tl.store(DEBUG_PTR + num_iters * 21 + 1, p_pivot_0)
                     tl.store(DEBUG_PTR + num_iters * 21 + 2, min_probs)
@@ -480,8 +486,8 @@ def _topk_topp_kernel(LOGITS, PROBS, NUM_SEARCH, K, P, B,
                     tl.store(DEBUG_PTR + num_iters * 21 + 5, max_range)
                     tl.store(DEBUG_PTR + num_iters * 21 + 6, num_iters)
                     tl.store(DEBUG_PTR + num_iters * 21 + 7, sum_exp_logits)
-                    tl.store(DEBUG_PTR + num_iters * 21 + 8, p_pivot)
-                    tl.store(DEBUG_PTR + num_iters * 21 + 9, tl.log(p_pivot * sum_exp_logits))
+                    tl.store(DEBUG_PTR + num_iters * 21 + 8, p_pivot_0)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 9, tl.log(p_pivot_0 * sum_exp_logits) + max_logit)
                     tl.store(DEBUG_PTR + num_iters * 21 + 10, min_larger_0)
                     tl.store(DEBUG_PTR + num_iters * 21 + 11, num_min_larger_0)
             # Subtract a small value to include the nearest smaller value
@@ -496,12 +502,12 @@ def _topk_topp_kernel(LOGITS, PROBS, NUM_SEARCH, K, P, B,
                 num_force_remove = tl.cast((p_pivots_sum_0 - p) / min_larger_0, tl.uint32)
                 force_remove_logit = tl.log(min_larger_0 * sum_exp_logits) + max_logit
 
-            if row_id == 1:
+            if row_id == 195:
                 tl.store(DEBUG_PTR + num_iters * 21 + 12, p_pivots_sum_0)
                 tl.store(DEBUG_PTR + num_iters * 21 + 13, p_pivot)
                 tl.store(DEBUG_PTR + num_iters * 21 + 14, num_iters)
             p_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
-            if row_id == 1:
+            if row_id == 195:
                 tl.store(DEBUG_PTR + num_iters * 21 + 15, p_pivot)
                 tl.store(DEBUG_PTR + num_iters * 21 + 16, p)
                 tl.store(DEBUG_PTR + num_iters * 21 + 17, force_remove_logit)
@@ -584,7 +590,9 @@ def apply_top_k_top_p(
     """
 
     input_logits = logits.clone()
-    print(f"input_logits: {torch.sort(input_logits, descending=True).values[:12, :12]}")
+    if input_logits.shape[0] > 195:
+        print(f"input_logits: {torch.sort(input_logits[195], descending=True).values[:12]}")
+ 
     original_logits = original_apply_top_k_top_p(input_logits, k, p)
     # original_probs = torch.softmax(input_logits, dim=-1)
 
@@ -604,8 +612,15 @@ def apply_top_k_top_p(
 
     if not torch.allclose(logits, original_logits):
         print(r_str("Error: logits are not close"))
-    print(f"logits: {torch.sort(logits, descending=True).values[:12, :12]}")
-    print(f"original_logits: {torch.sort(original_logits, descending=True).values[:12, :12]}")
+        error_rows = torch.where(logits != original_logits)[0]
+        error_rows = torch.unique(error_rows)
+        num_error_rows = error_rows.shape[0]
+        print(f"num_error_rows: {num_error_rows} - {error_rows}")
+        row_to_show = 12 if num_error_rows > 12 else num_error_rows
+        print(f"logits: {torch.sort(logits[error_rows], descending=True).values[:row_to_show, :12]}")
+        print(f"original_logits: {torch.sort(original_logits[error_rows], descending=True).values[:row_to_show, :12]}")
+
+    print("////////////////////////////////////////////////////////////")
 
     start_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(start_time))
     out_dir = "./sampler_input_output"
