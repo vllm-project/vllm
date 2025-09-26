@@ -28,7 +28,7 @@ from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import torch
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.whisper.modeling_whisper import (ACT2FN,
                                                           WhisperAttention,
@@ -36,10 +36,6 @@ from transformers.models.whisper.modeling_whisper import (ACT2FN,
                                                           WhisperEncoder)
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
@@ -547,36 +543,6 @@ class MiniCPMO(MiniCPMV2_6):
                                           prefix=maybe_prefix(prefix, "apm"))
 
         self.audio_token_id = None
-
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid vision encoder sections for some models.
-        # See: https://huggingface.co/openbmb/MiniCPM-o-2_6-int4
-        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
-            return None
-        return quant_config
-
-    def init_vision_module(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> nn.Module:
-        # MiniCPMO GPTQ model leave vpm unquantized.
-        quant_config = self._maybe_ignore_quant_config(quant_config)
-        return super().init_vision_module(config, quant_config, prefix)
-
-    def init_resampler(
-        self,
-        embed_dim: int,
-        vision_dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> nn.Module:
-        # MiniCPMO GPTQ model leave resampler unquantized.
-        quant_config = self._maybe_ignore_quant_config(quant_config)
-        return super().init_resampler(embed_dim, vision_dim, quant_config,
-                                      prefix)
 
     def init_audio_module(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # Do not use parameters temporarily
