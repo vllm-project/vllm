@@ -41,7 +41,8 @@ class SharedFusedMoE(FusedMoE):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
         self._shared_fused_combine = lambda a, b: self.post_process(a, b)
-        self.use_overlapped = use_overlapped
+        self.use_overlapped = use_overlapped and not (
+            self.use_ep or self.use_flashinfer_cutlass_kernels)
         self.fused_output_scaling_factor = fused_output_scaling_factor
         self.shared_output_scaling_factor = shared_output_scaling_factor
 
