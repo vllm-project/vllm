@@ -24,7 +24,8 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseCodeInterpreterToolCallParam, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
-    ResponseCreatedEvent, ResponseFunctionToolCall, ResponseFunctionWebSearch,
+    ResponseCreatedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionToolCall, ResponseFunctionWebSearch,
     ResponseInProgressEvent, ResponseOutputItem, ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent, ResponseOutputMessage, ResponseOutputText,
     ResponseReasoningItem, ResponseReasoningTextDeltaEvent,
@@ -1280,7 +1281,6 @@ class OpenAIServingResponses(OpenAIServing):
             assert isinstance(ctx, StreamingHarmonyContext)
 
             if ctx.is_expecting_start():
-                current_output_index += 1
                 sent_output_item_added = False
 
                 if len(ctx.parser.messages) > 0:
@@ -1363,6 +1363,9 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="completed",
                                 ),
                             ))
+                # Prepare for the next output item turn
+                current_output_index += 1
+                current_content_index = -1
 
             # stream the output of a harmony message
             if ctx.parser.last_content_delta:
@@ -1409,6 +1412,38 @@ class OpenAIServingResponses(OpenAIServing):
                             delta=ctx.parser.last_content_delta,
                             # TODO, use logprobs from ctx.last_request_output
                             logprobs=[],
+                        ))
+                elif (ctx.parser.current_channel == "commentary"
+                      and ctx.parser.current_recipient is not None and
+                      ctx.parser.current_recipient.startswith("functions.")):
+                    # Start or continue streaming function-call arguments
+                    if not sent_output_item_added:
+                        sent_output_item_added = True
+                        current_item_id = f"fc_{random_uuid()}"
+                        _func_name = ctx.parser.current_recipient.split(
+                            ".", 1)[1]
+                        yield _increment_sequence_number_and_return(
+                            ResponseOutputItemAddedEvent(
+                                type="response.output_item.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item=ResponseFunctionToolCall(
+                                    type="function_call",
+                                    id=current_item_id,
+                                    name=_func_name,
+                                    call_id=f"call_{current_item_id}",
+                                    arguments="",
+                                ),
+                            ))
+                        current_content_index = 0
+                    yield _increment_sequence_number_and_return(
+                        ResponseFunctionCallArgumentsDeltaEvent(
+                            type="response.function_call_arguments.delta",
+                            sequence_number=-1,
+                            content_index=current_content_index,
+                            output_index=current_output_index,
+                            item_id=current_item_id,
+                            delta=ctx.parser.last_content_delta,
                         ))
                 elif (ctx.parser.current_channel == "analysis"
                       and ctx.parser.current_recipient is None):
@@ -1492,6 +1527,23 @@ class OpenAIServingResponses(OpenAIServing):
             # stream tool call outputs
             if ctx.is_assistant_action_turn() and len(ctx.parser.messages) > 0:
                 previous_item = ctx.parser.messages[-1]
+                # Complete a function tool call turn, if any
+                if (previous_item.recipient is not None
+                        and previous_item.recipient.startswith("functions.")):
+                    yield _increment_sequence_number_and_return(
+                        ResponseOutputItemDoneEvent(
+                            type="response.output_item.done",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item=ResponseFunctionToolCall(
+                                type="function_call",
+                                id=current_item_id or f"fc_{random_uuid()}",
+                                name=previous_item.recipient.split(".", 1)[1],
+                                call_id=f"call_{current_item_id}" if
+                                current_item_id else f"call_{random_uuid()}",
+                                arguments=previous_item.content[0].text,
+                            ),
+                        ))
                 if (self.tool_server is not None
                         and self.tool_server.has_tool("browser")
                         and previous_item.recipient is not None
