@@ -124,14 +124,11 @@ class SpeculativeConfig:
     suffix_decoding_max_tree_depth: int = 64
     """The maximum depth of the suffix decoding tree."""
 
-    suffix_decoding_max_cached_requests: int = 1000
+    suffix_decoding_max_cached_requests: int = 10000
     """The maximum number of requests to cache in the global suffix tree."""
 
     suffix_decoding_max_spec_factor: float = 1.0
     """The maximum speculative factor for suffix decoding."""
-
-    suffix_decoding_max_spec_offset: float = 0.0
-    """The maximum speculative offset for suffix decoding."""
 
     suffix_decoding_min_token_prob: float = 0.1
     """The minimum token probability for suffix decoding."""
@@ -278,7 +275,7 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             if self.num_speculative_tokens is None:
-                self.num_speculative_tokens = 16
+                self.num_speculative_tokens = 32
             # Validate values
             if self.suffix_decoding_max_tree_depth < 4:
                 raise ValueError(
