@@ -520,10 +520,12 @@ class P2pNcclEngine:
             all_layers_send_done = True
             for layer_name in no_compile_layers:
                 tensor_id = request_id + "#" + layer_name
-                if tensor_id not in self.recv_request_id_to_done_tensor_ids[
+                if request_id not in self.recv_request_id_to_done_tensor_ids \
+                    or tensor_id not in self.recv_request_id_to_done_tensor_ids[
                         request_id]:
                     all_layers_recv_done = False
-                if tensor_id not in self.send_request_id_to_tensor_ids[
+                if request_id not in self.send_request_id_to_tensor_ids \
+                    or tensor_id not in self.send_request_id_to_tensor_ids[
                         request_id]:
                     all_layers_send_done = False
                 if not all_layers_recv_done and not all_layers_send_done:
