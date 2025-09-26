@@ -38,6 +38,8 @@ def get_token_bin_counts_and_mask(
     vocab_size: int,
     num_seqs: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if tokens is None:
+        return None, None
     # Compute the bin counts for the tokens.
     # vocab_size + 1 for padding.
     bin_counts = torch.zeros(
@@ -79,15 +81,28 @@ def apply_penalties(
         output_tokens_tensor, vocab_size, num_seqs
     )
 
-    # Apply repetition penalties as a custom op
-    from vllm._custom_ops import apply_repetition_penalties
+    if prompt_mask is not None or output_mask is not None:
+        from vllm._custom_ops import apply_repetition_penalties
 
-    apply_repetition_penalties(logits, prompt_mask, output_mask, repetition_penalties)
+        if prompt_mask is None:
+            prompt_mask = torch.zeros(
+                (num_seqs, vocab_size), dtype=torch.bool, device=logits.device
+            )
+        if output_mask is None:
+            output_mask = torch.zeros(
+                (num_seqs, vocab_size), dtype=torch.bool, device=logits.device
+            )
 
-    # We follow the definition in OpenAI API.
-    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits -= frequency_penalties.unsqueeze(dim=1) * output_bin_counts
-    logits -= presence_penalties.unsqueeze(dim=1) * output_mask
+        apply_repetition_penalties(
+            logits, prompt_mask, output_mask, repetition_penalties
+        )
+
+    if output_bin_counts is not None:
+        logits -= frequency_penalties.unsqueeze(dim=1) * output_bin_counts
+
+    if output_mask is not None:
+        logits -= presence_penalties.unsqueeze(dim=1) * output_mask
+
     return logits
 
 
