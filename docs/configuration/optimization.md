@@ -139,9 +139,9 @@ there is relatively little gain from TP. On the other hand, TP incurs significan
 overhead because of all-reduce being performed after every layer.
 
 Given this, it may be advantageous to instead shard the batched input data using TP, essentially
-performing batch-level DP. This has been shown to improve the throughput by around 10% for
+performing batch-level DP. This has been shown to improve the throughput and TTFT by around 10% for
 `tensor_parallel_size=8`. For vision encoders that use hardware-unoptimized Conv3D operations,
-batch-level DP can provide another 40% increase to throughput compared to regular TP.
+batch-level DP can provide another 40% improvement compared to regular TP.
 
 Nevertheless, since the weights of the multi-modal encoder are replicated across each TP rank,
 there will be a minor increase in memory consumption and may cause OOM if you can barely fit the model already.
@@ -172,14 +172,15 @@ Batch-level DP needs to be implemented on a per-model basis,
 and enabled by setting `supports_encoder_tp_data = True` in the model class.
 Regardless, you need to set `mm_encoder_tp_mode="data"` in engine arguments to use this feature.
 
-Known supported models:
+Known supported models (with corresponding benchmarks):
 
-- GLM-4.5V GLM-4.1V (<gh-pr:23168>)
+- dots_ocr (<gh-pr:25466>)
+- GLM-4.1V or above (<gh-pr:23168>)
 - InternVL (<gh-pr:23909>)
 - Kimi-VL (<gh-pr:23817>)
 - Llama4 (<gh-pr:18368>)
 - MiniCPM-V-2.5 or above (<gh-pr:23327>, <gh-pr:23948>)
-- Qwen2.5-VL (<gh-pr:22742>)
+- Qwen2-VL or above (<gh-pr:22742>, <gh-pr:24955>, <gh-pr:25445>)
 - Step3 (<gh-pr:22697>)
 
 ## Input Processing
