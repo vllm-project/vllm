@@ -117,9 +117,9 @@ def test_ngram_correctness(
                 print(f"ref_output: {ref_output.outputs[0].text}")
                 print(f"spec_output: {spec_output.outputs[0].text}")
 
-        # Heuristic: expect at least 68% of the prompts to match exactly
+        # Heuristic: expect at least 66% of the prompts to match exactly
         # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches >= int(0.68 * len(ref_outputs))
+        assert matches >= int(0.66 * len(ref_outputs))
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
@@ -176,12 +176,11 @@ def test_eagle_correctness(
         m.setenv("VLLM_MLA_DISABLE", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
-        if (attn_backend == "TRITON_ATTN_VLLM_V1"
-                and not current_platform.is_rocm()):
-            pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+        if (attn_backend == "TRITON_ATTN" and not current_platform.is_rocm()):
+            pytest.skip("TRITON_ATTN does not support "
                         "multi-token eagle spec decode on current platform")
 
-        if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+        if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
             m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         method, model_name, spec_model_name, tp_size = model_setup

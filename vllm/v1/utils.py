@@ -355,7 +355,8 @@ def report_usage_stats(
             vllm_config.cache_config.block_size,
             "gpu_memory_utilization":
             vllm_config.cache_config.gpu_memory_utilization,
-
+            "kv_cache_memory_bytes":
+            vllm_config.cache_config.kv_cache_memory_bytes,
             # Quantization
             "quantization":
             vllm_config.model_config.quantization,
@@ -374,8 +375,22 @@ def report_usage_stats(
         })
 
 
+_PROFILER_FUNC = None
+
+
 def record_function_or_nullcontext(name: str) -> AbstractContextManager:
+    global _PROFILER_FUNC
+
+    # fast path assume it is set
+    if _PROFILER_FUNC is not None:
+        return _PROFILER_FUNC(name)
+
+    func = contextlib.nullcontext
     if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
-        return record_function(name)
-    else:
-        return contextlib.nullcontext()
+        func = record_function
+    elif envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
+        import nvtx
+        func = nvtx.annotate
+
+    _PROFILER_FUNC = func
+    return func(name)

@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 # TPU XLA related
+import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
@@ -29,7 +30,8 @@ from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
-from vllm.model_executor.models.interfaces import supports_transcription
+from vllm.model_executor.models.interfaces import (SupportsMultiModal,
+                                                   supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -387,9 +389,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_kwargs=new_req_data.mm_kwargs,
-                mm_positions=new_req_data.mm_positions,
-                mm_hashes=new_req_data.mm_hashes,
+                prompt_embeds=new_req_data.prompt_embeds,
+                mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=None,
                 generator=None,
@@ -822,10 +823,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
-                mm_hash = req_state.mm_hashes[mm_input_id]
-                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
-                mm_hashes_pos.append(
-                    (mm_hash, req_state.mm_positions[mm_input_id]))
+                mm_feature = req_state.mm_features[mm_input_id]
+                mm_hash = mm_feature.identifier
+                mm_kwargs.append(mm_feature.data)
+                mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -834,11 +835,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # in the same batch while still being able to benefit from batching
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
+        model = cast(SupportsMultiModal, self.model)
         encoder_outputs = []
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
                 pin_memory=self.pin_memory,
+                merge_by_field_config=model.merge_by_field_config,
         ):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -847,10 +850,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            xm.mark_step()
-            curr_group_outputs = self.model.get_multimodal_embeddings(
+            torch_xla.sync(wait=False)
+            curr_group_outputs = model.get_multimodal_embeddings(
                 **mm_kwargs_group)
-            xm.mark_step()
+            torch_xla.sync(wait=False)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -883,13 +886,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens
-            mm_positions = req_state.mm_positions
-            mm_hashes = req_state.mm_hashes
             # TODO unroll loop and assume/enforce --disable_chunked_mm_input
             # NOTE (NickLucche) here we diverge from logic in other runners, as
             # we assume to only have whole mm items to process. Hence we avoid
             # the intrinsic dynamism that `gather_mm_placeholders` introduces.
-            for i, pos_info in enumerate(mm_positions):
+            for mm_feature in req_state.mm_features:
+                pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
 
@@ -904,8 +906,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # The encoder output is already processed and stored
                     # in the decoder's KV cache.
                     continue
-
-                mm_hash = mm_hashes[i]
+                mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
@@ -955,7 +956,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
-        xm.mark_step()
+        torch_xla.sync(wait=False)
         # Prepare inputs, the requests might be split into multiple
         # executions, combine the result of each execution.
         start_index = 0
@@ -972,7 +973,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 end_index = self._prepare_inputs(scheduler_output, start_index)
             input_ids, inputs_embeds = self._get_model_inputs(
                 self.input_ids, mm_embeds)
-            xm.mark_step()
+            torch_xla.sync(wait=False)
             # Run the decoder
             with set_forward_context(
                     attn_metadata,
@@ -1181,14 +1182,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "or sharding the weights on more chips. "
                     f"See the detailed error: {e}") from e
         if self.lora_config is not None:
-            model = self.load_lora_model(model, self.model_config,
-                                         self.scheduler_config,
-                                         self.lora_config, self.device)
+            model = self.load_lora_model(model, self.vllm_config, self.device)
             replace_set_lora(model)
 
         # Sync all pending XLA execution during model initialization and weight
         # loading.
-        xm.mark_step()
+        torch_xla.sync(wait=False)
         xm.wait_device_ops()
         if not hasattr(self, "model"):
             self.model = model
@@ -1272,10 +1271,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping,
                           lora_requests) -> None:
-        xm.mark_step()  # Captures input updates
+        torch_xla.sync(wait=False)  # Captures input updates
         super()._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                   lora_requests)
-        xm.mark_step()  # Captures metadata updates
+        torch_xla.sync(wait=False)  # Captures metadata updates
 
     def _precompile_mm_encoder(self) -> None:
         if not self.supports_mm_inputs:
@@ -1302,10 +1301,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_items,
                 )
                 # Run multimodal encoder.
-                xm.mark_step()
+                torch_xla.sync(wait=False)
                 mm_embeds = self.model.get_multimodal_embeddings(
                     **batched_dummy_mm_inputs)
-                xm.mark_step()
+                torch_xla.sync(wait=False)
                 num_patches = mm_embeds[0].shape[0]
                 items_size = num_patches * num_items
 
@@ -1330,7 +1329,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         a, b = self._get_model_inputs(placeholders_ids,
                                                       [mm_embeds])
                         assert a is None
-                        xm.mark_step()
+                        torch_xla.sync(wait=False)
 
             # Pre-compile `get_input_embeddings` when mm_embeddings are not
             # present. Chunk is only made of text, no mm_placeholders.
@@ -1341,7 +1340,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 placeholders_ids = placeholders_ids.to(self.device)
                 a, b = self._get_model_inputs(placeholders_ids, [])
                 assert a is None
-                xm.mark_step()
+                torch_xla.sync(wait=False)
 
             xm.wait_device_ops()
             end = time.perf_counter()
@@ -1537,11 +1536,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # Isolate encoder graph from post-processing to minimize
                     # impact of recompilation until it's fixed.
                     start = time.perf_counter()
-                    xm.mark_step()
+                    torch_xla.sync(wait=False)
                     dummy_encoder_outputs = \
                         self.model.get_multimodal_embeddings(
                         **batched_dummy_mm_inputs)
-                    xm.mark_step()
+                    torch_xla.sync(wait=False)
                     xm.wait_device_ops()
                     end = time.perf_counter()
                     logger.info(
@@ -1564,7 +1563,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self._dummy_run(num_tokens, self.num_reqs_most_model_len,
                             self.num_blocks_per_most_len_req)
 
-        xm.mark_step()
+        torch_xla.sync(wait=False)
         xm.wait_device_ops()
         self.encoder_cache.clear()
         gc.collect()
@@ -1697,7 +1696,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def compute_logits(self,
                        sample_hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.model.compute_logits(sample_hidden_states, None)
+        return self.model.compute_logits(sample_hidden_states)
 
     # TODO: Under SPMD mode, sample_from_logits has correctness issue.
     #       Re-enable the torch.compile once the issue is fixed in torchxla.
@@ -1799,7 +1798,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
-            seq_len=self.max_num_tokens,
+            seq_len=self.max_model_len,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
         )
@@ -1809,11 +1808,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_mm_item = dummy_mm_data[modality][0]
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
+        model = cast(SupportsMultiModal, self.model)
         return next(grouped_mm_kwargs
                     for _, _, grouped_mm_kwargs in group_mm_kwargs_by_modality(
                         dummy_mm_items,
                         device=self.device,
                         pin_memory=self.pin_memory,
+                        merge_by_field_config=model.merge_by_field_config,
                     ))
 
 
@@ -1932,11 +1933,11 @@ def replace_set_lora(model):
         # to a tensor doesn't seem to work anymore. This might be fixed with a
         # later release of torch_xla.
         self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
-        xm.mark_step()
+        torch_xla.sync(wait=False)
 
     def _tpu_reset_lora(self, index: int):
         self._original_reset_lora(index)
-        xm.mark_step()
+        torch_xla.sync(wait=False)
 
     for _, module in model.named_modules():
         if isinstance(module, BaseLayerWithLoRA):

@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Optional, Union
 
+from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm.entrypoints.harmony_utils import (
@@ -20,6 +21,24 @@ if TYPE_CHECKING:
     from mcp.client import ClientSession
 
 logger = logging.getLogger(__name__)
+
+# This is currently needed as the tool type doesn't 1:1 match the
+# tool namespace, which is what is used to look up the
+# connection to the tool server
+_TOOL_NAME_TO_TYPE_MAP = {
+    "browser": "web_search_preview",
+    "python": "code_interpreter",
+    "container": "container",
+}
+
+
+def _map_tool_name_to_tool_type(tool_name: str) -> str:
+    if tool_name not in _TOOL_NAME_TO_TYPE_MAP:
+        available_tools = ', '.join(_TOOL_NAME_TO_TYPE_MAP.keys())
+        raise ValueError(
+            f"Built-in tool name '{tool_name}' not defined in mapping. "
+            f"Available tools: {available_tools}")
+    return _TOOL_NAME_TO_TYPE_MAP[tool_name]
 
 
 class TurnTokens:
@@ -59,8 +78,8 @@ class ConversationContext(ABC):
 
     @abstractmethod
     async def init_tool_sessions(self, tool_server: Optional[ToolServer],
-                                 exit_stack: AsyncExitStack,
-                                 request_id: str) -> None:
+                                 exit_stack: AsyncExitStack, request_id: str,
+                                 mcp_tools: dict[str, Mcp]) -> None:
         pass
 
     @abstractmethod
@@ -96,8 +115,8 @@ class SimpleContext(ConversationContext):
         raise NotImplementedError("Should not be called.")
 
     async def init_tool_sessions(self, tool_server: Optional[ToolServer],
-                                 exit_stack: AsyncExitStack,
-                                 request_id: str) -> None:
+                                 exit_stack: AsyncExitStack, request_id: str,
+                                 mcp_tools: dict[str, Mcp]) -> None:
         pass
 
     async def cleanup_session(self) -> None:
@@ -112,6 +131,7 @@ class HarmonyContext(ConversationContext):
         available_tools: list[str],
     ):
         self._messages = messages
+        self.finish_reason: Optional[str] = None
         self.available_tools = available_tools
         self._tool_sessions: dict[str, Union[ClientSession, Tool]] = {}
         self.called_tools: set[str] = set()
@@ -135,7 +155,8 @@ class HarmonyContext(ConversationContext):
         if self.parser.current_channel in {"analysis", "commentary"}:
             self.num_reasoning_tokens += 1
 
-    def append_output(self, output) -> None:
+    def append_output(self, output: Union[RequestOutput,
+                                          list[Message]]) -> None:
         if isinstance(output, RequestOutput):
             output_token_ids = output.outputs[0].token_ids
             self.parser = get_streamable_parser_for_assistant()
@@ -149,7 +170,12 @@ class HarmonyContext(ConversationContext):
             self._update_decode_token_usage(output)
             # Move current turn to previous turn for next turn's calculations
             self.previous_turn = self.current_turn.copy()
+            # append_output is called only once before tool calling
+            # in non-streaming case
+            # so we can append all the parser messages to _messages
             output_msgs = self.parser.messages
+            # The responses finish reason is set in the last message
+            self.finish_reason = output.outputs[0].finish_reason
         else:
             # Tool output.
             output_msgs = output
@@ -157,18 +183,18 @@ class HarmonyContext(ConversationContext):
 
     def _update_prefill_token_usage(self, output: RequestOutput) -> None:
         """Update token usage statistics for the prefill phase of generation.
-        
+
         The prefill phase processes the input prompt tokens. This method:
         1. Counts the prompt tokens for this turn
         2. Calculates tool output tokens for multi-turn conversations
         3. Updates cached token counts
         4. Tracks state for next turn calculations
-        
+
         Tool output tokens are calculated as:
-        current_prompt_tokens - last_turn_prompt_tokens - 
+        current_prompt_tokens - last_turn_prompt_tokens -
         last_turn_output_tokens
         This represents tokens added between turns (typically tool responses).
-        
+
         Args:
             output: The RequestOutput containing prompt token information
         """
@@ -214,18 +240,18 @@ class HarmonyContext(ConversationContext):
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.
-        
+
         The decode phase processes the generated output tokens. This method:
         1. Counts output tokens from all completion outputs
         2. Updates the total output token count
         3. Tracks tokens generated in the current turn
-        
+
         In streaming mode, this is called for each token generated.
         In non-streaming mode, this is called once with all output tokens.
-        
+
         Args:
             output: The RequestOutput containing generated token information
-            
+
         Returns:
             int: Number of output tokens processed in this call
         """
@@ -311,13 +337,17 @@ class HarmonyContext(ConversationContext):
         ]
 
     async def init_tool_sessions(self, tool_server: Optional[ToolServer],
-                                 exit_stack: AsyncExitStack,
-                                 request_id: str) -> None:
+                                 exit_stack: AsyncExitStack, request_id: str,
+                                 mcp_tools: dict[str, Mcp]):
         if tool_server:
             for tool_name in self.available_tools:
                 if tool_name not in self._tool_sessions:
+                    tool_type = _map_tool_name_to_tool_type(tool_name)
+                    headers = mcp_tools[
+                        tool_type].headers if tool_type in mcp_tools else None
                     tool_session = await exit_stack.enter_async_context(
-                        tool_server.new_session(tool_name, request_id))
+                        tool_server.new_session(tool_name, request_id,
+                                                headers))
                     self._tool_sessions[tool_name] = tool_session
                     exit_stack.push_async_exit(self.cleanup_session)
 
@@ -383,9 +413,10 @@ class StreamingHarmonyContext(HarmonyContext):
 
     @property
     def messages(self) -> list:
-        return self.parser.messages
+        return self._messages
 
-    def append_output(self, output) -> None:
+    def append_output(self, output: Union[RequestOutput,
+                                          list[Message]]) -> None:
         if isinstance(output, RequestOutput):
             # append_output is called for each output token in streaming case,
             # so we only want to add the prompt tokens once for each message.
@@ -407,6 +438,11 @@ class StreamingHarmonyContext(HarmonyContext):
             # Check if the current token is part of reasoning content
             self._update_num_reasoning_tokens()
             self.last_tok = tok
+            if len(self._messages) - self.num_init_messages < len(
+                    self.parser.messages):
+                self._messages.extend(
+                    self.parser.messages[len(self._messages) -
+                                         self.num_init_messages:])
         else:
             # Handle the case of tool output in direct message format
             assert len(output) == 1, "Tool output should be a single message"
@@ -419,6 +455,7 @@ class StreamingHarmonyContext(HarmonyContext):
             for tok in toks:
                 self.parser.process(tok)
             self.last_tok = toks[-1]
+            # TODO: add tool_output messages to self._messages
 
     def is_expecting_start(self) -> bool:
         return self.parser.state == StreamState.EXPECT_START

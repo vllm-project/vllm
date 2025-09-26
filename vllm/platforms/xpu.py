@@ -40,14 +40,14 @@ class XPUPlatform(Platform):
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
-        TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
-        FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
-        if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+        TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+        FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+        if selected_backend == _Backend.TRITON_ATTN:
             logger.info_once("Using Triton backend on V1 engine.")
-            return TRITON_ATTN_VLLM_V1
+            return TRITON_ATTN
         elif selected_backend == _Backend.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend on V1 engine.")
-            return FLASH_ATTN_V1
+            return FLASH_ATTN
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
@@ -64,7 +64,7 @@ class XPUPlatform(Platform):
         XPU only support fp8 kv cache with triton backend.
         """
         if envs.is_set("VLLM_ATTENTION_BACKEND") and \
-            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN_VLLM_V1":
+            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN":
             return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
 
         return False
@@ -99,10 +99,6 @@ class XPUPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return True
-
-    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
@@ -117,12 +113,11 @@ class XPUPlatform(Platform):
         # lazy import to avoid circular import
         from vllm.config import CompilationLevel, CUDAGraphMode
         compilation_config = vllm_config.compilation_config
-        if compilation_config.cudagraph_mode is None or \
-                compilation_config.cudagraph_mode.max_cudagraph_mode() \
-                    != CUDAGraphMode.NONE:
-            logger.info("[XPU] CUDA graph is not supported on XPU, disabling "
-                        "cudagraphs. Fallback to cudagraph_mode=NONE")
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        if compilation_config.compile_sizes is None:
+            compilation_config.compile_sizes = []
+
+        assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE, \
+            "CUDA graph mode should be NONE on XPU"
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -163,13 +158,19 @@ class XPUPlatform(Platform):
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
+        from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
-        if (envs.VLLM_KV_CACHE_LAYOUT is None
-                or envs.VLLM_KV_CACHE_LAYOUT != "NHD"):
-            os.environ["VLLM_KV_CACHE_LAYOUT"] = "NHD"
-            logger.info(
-                "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
-                "only NHD layout is supported by XPU attention kernels.")
+        set_kv_cache_layout("NHD")
+        logger.info("Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
+                    "only NHD layout is supported by XPU attention kernels.")
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        return False
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -194,10 +195,6 @@ class XPUPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        return True
 
     @classmethod
     def device_count(cls) -> int:

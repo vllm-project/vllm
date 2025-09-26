@@ -9,6 +9,8 @@ from typing import Callable, Optional, Union
 import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorLogging)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
@@ -59,6 +61,8 @@ class LoggingStatLogger(StatLoggerBase):
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
         self.spec_decoding_logging = SpecDecodingLogging()
+        kv_tranfer_config = self.vllm_config.kv_transfer_config
+        self.kv_transfer_logging = KVConnectorLogging(kv_tranfer_config)
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
 
@@ -86,7 +90,6 @@ class LoggingStatLogger(StatLoggerBase):
                iteration_stats: Optional[IterationStats],
                engine_idx: int = 0):
         """Log Stats to standard output."""
-
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
 
@@ -97,7 +100,8 @@ class LoggingStatLogger(StatLoggerBase):
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_logging.observe(
                     scheduler_stats.spec_decoding_stats)
-
+            if kv_connector_stats := scheduler_stats.kv_connector_stats:
+                self.kv_transfer_logging.observe(kv_connector_stats)
             self.last_scheduler_stats = scheduler_stats
 
     def log(self):
@@ -136,6 +140,7 @@ class LoggingStatLogger(StatLoggerBase):
             self.prefix_caching_metrics.hit_rate * 100,
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
+        self.kv_transfer_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
@@ -169,15 +174,11 @@ class PrometheusStatLogger(StatLoggerBase):
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
-        if (len(self.engine_indexes) > 1
-                and vllm_config.speculative_config is not None):
-            raise NotImplementedError("Prometheus metrics with Spec Decoding "
-                                      "with >1 EngineCore per AsyncLLM is not "
-                                      "supported yet.")
-        spec_decode_labelvalues = [
-            vllm_config.model_config.served_model_name,
-            str(self.engine_indexes[0])
-        ]
+        spec_decode_labelvalues: dict[int, list[str]] = {
+            idx: [model_name, str(idx)]
+            for idx in engine_indexes
+        }
+
         self.spec_decoding_prom = self._spec_decoding_cls(
             vllm_config.speculative_config, labelnames,
             spec_decode_labelvalues)
@@ -206,40 +207,46 @@ class PrometheusStatLogger(StatLoggerBase):
         #
         # GPU cache
         #
-        # Deprecated in 0.9 - Renamed as vllm:kv_cache_usage_perc
-        # TODO: in 0.10, only enable if show_hidden_metrics=True
-        gauge_gpu_cache_usage = self._gauge_cls(
-            name="vllm:gpu_cache_usage_perc",
-            documentation=(
-                "GPU KV-cache usage. 1 means 100 percent usage."
-                "DEPRECATED: Use vllm:kv_cache_usage_perc instead."),
-            multiprocess_mode="mostrecent",
-            labelnames=labelnames)
-        self.gauge_gpu_cache_usage = make_per_engine(gauge_gpu_cache_usage,
-                                                     engine_indexes,
-                                                     model_name)
+        # Deprecated in 0.9.2 - Renamed as vllm:kv_cache_usage_perc
+        # With 0.11.x you can enable with --show-hidden-metrics-for-version=0.10
+        # TODO: remove in 0.12.0
+        if self.show_hidden_metrics:
+            gauge_gpu_cache_usage = self._gauge_cls(
+                name="vllm:gpu_cache_usage_perc",
+                documentation=(
+                    "GPU KV-cache usage. 1 means 100 percent usage."
+                    "DEPRECATED: Use vllm:kv_cache_usage_perc instead."),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames)
+            self.gauge_gpu_cache_usage = make_per_engine(
+                gauge_gpu_cache_usage, engine_indexes, model_name)
 
-        # Deprecated in 0.9 - Renamed as vllm:prefix_cache_queries
-        # TODO: in 0.10, only enable if show_hidden_metrics=True
-        counter_gpu_prefix_cache_queries = self._counter_cls(
-            name="vllm:gpu_prefix_cache_queries",
-            documentation=(
-                "GPU prefix cache queries, in terms of number of queried"
-                "tokens. DEPRECATED: Use vllm:prefix_cache_queries instead."),
-            labelnames=labelnames)
-        self.counter_gpu_prefix_cache_queries = make_per_engine(
-            counter_gpu_prefix_cache_queries, engine_indexes, model_name)
+        # Deprecated in 0.9.2 - Renamed as vllm:prefix_cache_queries
+        # With 0.11.x you can enable with --show-hidden-metrics-for-version=0.10
+        # TODO: remove in 0.12.0
+        if self.show_hidden_metrics:
+            counter_gpu_prefix_cache_queries = self._counter_cls(
+                name="vllm:gpu_prefix_cache_queries",
+                documentation=(
+                    "GPU prefix cache queries, in terms of number of queried"
+                    "tokens. DEPRECATED: Use vllm:prefix_cache_queries instead."
+                ),
+                labelnames=labelnames)
+            self.counter_gpu_prefix_cache_queries = make_per_engine(
+                counter_gpu_prefix_cache_queries, engine_indexes, model_name)
 
-        # Deprecated in 0.9 - Renamed as vllm:prefix_cache_hits
-        # TODO: in 0.10, only enable if show_hidden_metrics=True
-        counter_gpu_prefix_cache_hits = self._counter_cls(
-            name="vllm:gpu_prefix_cache_hits",
-            documentation=(
-                "GPU prefix cache hits, in terms of number of cached "
-                "tokens. DEPRECATED: Use vllm:prefix_cache_hits instead."),
-            labelnames=labelnames)
-        self.counter_gpu_prefix_cache_hits = make_per_engine(
-            counter_gpu_prefix_cache_hits, engine_indexes, model_name)
+        # Deprecated in 0.9.2 - Renamed as vllm:prefix_cache_hits
+        # With 0.11.x you can enable with --show-hidden-metrics-for-version=0.10
+        # TODO: remove in 0.12.0
+        if self.show_hidden_metrics:
+            counter_gpu_prefix_cache_hits = self._counter_cls(
+                name="vllm:gpu_prefix_cache_hits",
+                documentation=(
+                    "GPU prefix cache hits, in terms of number of cached "
+                    "tokens. DEPRECATED: Use vllm:prefix_cache_hits instead."),
+                labelnames=labelnames)
+            self.counter_gpu_prefix_cache_hits = make_per_engine(
+                counter_gpu_prefix_cache_hits, engine_indexes, model_name)
 
         gauge_kv_cache_usage = self._gauge_cls(
             name="vllm:kv_cache_usage_perc",
@@ -403,6 +410,19 @@ class PrometheusStatLogger(StatLoggerBase):
         self.histogram_inter_token_latency = make_per_engine(
             histogram_inter_token_latency, engine_indexes, model_name)
 
+        histogram_request_time_per_output_token = self._histogram_cls(
+            name="vllm:request_time_per_output_token_seconds",
+            documentation=
+            "Histogram of time_per_output_token_seconds per request.",
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
+            ],
+            labelnames=labelnames)
+        self.histogram_request_time_per_output_token = make_per_engine(
+            histogram_request_time_per_output_token, engine_indexes,
+            model_name)
+
         request_latency_buckets = [
             0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
             40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
@@ -513,15 +533,17 @@ class PrometheusStatLogger(StatLoggerBase):
             self.gauge_scheduler_waiting[engine_idx].set(
                 scheduler_stats.num_waiting_reqs)
 
-            self.gauge_gpu_cache_usage[engine_idx].set(
-                scheduler_stats.kv_cache_usage)
+            if self.show_hidden_metrics:
+                self.gauge_gpu_cache_usage[engine_idx].set(
+                    scheduler_stats.kv_cache_usage)
             self.gauge_kv_cache_usage[engine_idx].set(
                 scheduler_stats.kv_cache_usage)
 
-            self.counter_gpu_prefix_cache_queries[engine_idx].inc(
-                scheduler_stats.prefix_cache_stats.queries)
-            self.counter_gpu_prefix_cache_hits[engine_idx].inc(
-                scheduler_stats.prefix_cache_stats.hits)
+            if self.show_hidden_metrics:
+                self.counter_gpu_prefix_cache_queries[engine_idx].inc(
+                    scheduler_stats.prefix_cache_stats.queries)
+                self.counter_gpu_prefix_cache_hits[engine_idx].inc(
+                    scheduler_stats.prefix_cache_stats.hits)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries)
@@ -530,7 +552,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
-                    scheduler_stats.spec_decoding_stats)
+                    scheduler_stats.spec_decoding_stats, engine_idx)
 
         if iteration_stats is None:
             return
@@ -573,6 +595,8 @@ class PrometheusStatLogger(StatLoggerBase):
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request[engine_idx].observe(
                 finished_request.num_generation_tokens)
+            self.histogram_request_time_per_output_token[engine_idx].observe(
+                finished_request.mean_time_per_output_token)
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param)

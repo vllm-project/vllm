@@ -11,7 +11,7 @@ from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block

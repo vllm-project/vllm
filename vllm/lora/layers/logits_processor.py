@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import LoRAConfig
+from vllm.config.lora import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -140,11 +140,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     ):
         self.reset_lora(index)
         self.lora_a_stacked[index,
-                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-                                lora_a.T, non_blocking=True)
+                            0, :lora_a.shape[0], :lora_a.shape[1]].copy_(
+                                lora_a, non_blocking=True)
         self.lora_b_stacked[index,
-                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-                                lora_b.T, non_blocking=True)
+                            0, :lora_b.shape[0], :lora_b.shape[1]].copy_(
+                                lora_b, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
                 index,
