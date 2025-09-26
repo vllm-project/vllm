@@ -40,19 +40,19 @@ class AsyncScheduler(Scheduler):
         scheduler_output: SchedulerOutput,
     ) -> None:
         super()._update_after_schedule(scheduler_output)
-        next_spec_tokens = self.speculative_config.num_speculative_tokens \
-            if self.speculative_config else 0
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
-            if (request.num_computed_tokens == request.num_tokens_with_spec +
+            num_scheduled_propose_token = \
+                len(scheduler_output.scheduled_spec_decode_tokens[req_id])
+            if (request.num_computed_tokens == request.num_tokens +
+                    num_scheduled_propose_token + 
                     request.num_output_placeholders):
-                num_proposed_tokens = 0
-                if next_spec_tokens > 0:
-                    num_proposed_tokens = \
-                        len(scheduler_output.scheduled_spec_decode_tokens[req_id])
+                if num_scheduled_propose_token > 0:
                     request.spec_token_ids = \
-                        [DRAFT_TOKEN_PLACEHOLDER] * next_spec_tokens
-                request.num_output_placeholders += 1 + num_proposed_tokens
+                        [DRAFT_TOKEN_PLACEHOLDER] * \
+                            self.speculative_config.num_speculative_tokens
+                request.num_output_placeholders += \
+                    1 + num_scheduled_propose_token
 
     def _update_request_with_output(
         self,
