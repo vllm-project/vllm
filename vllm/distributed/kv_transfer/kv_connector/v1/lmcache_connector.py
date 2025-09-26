@@ -29,7 +29,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         use_native = vllm_config.kv_transfer_config.get_from_extra_config(
-            "use_native", True)
+            "use_native", False)
         if use_native:
             logger.info("Initializing native LMCache connector")
             cls = LMCacheConnectorUpstreamImpl
