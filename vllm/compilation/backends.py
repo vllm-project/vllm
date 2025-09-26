@@ -3,19 +3,25 @@
 
 import ast
 import dataclasses
+import hashlib
+import inspect
 import os
+import pickle
 import pprint
 import time
 from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
+from unittest.mock import patch
 
 import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
+from torch.utils import _pytree as pytree
 
 import vllm.envs as envs
-from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config import (CompilationConfig, CUDAGraphMode, VllmConfig,
+                         get_current_vllm_config)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -31,13 +37,14 @@ logger = init_logger(__name__)
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     if compilation_config.use_inductor:
-        # Use standalone compile only if requested, version is new enough,
-        # and the symbol actually exists in this PyTorch build.
-        if (envs.VLLM_USE_STANDALONE_COMPILE
-                and is_torch_equal_or_newer("2.8.0.dev")
-                and hasattr(torch._inductor, "standalone_compile")):
+        if (envs.VLLM_USE_STANDALONE_COMPILE or envs.VLLM_USE_AOT_COMPILE
+            ) and is_torch_equal_or_newer("2.8.0.dev"):
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor()
+        elif envs.VLLM_USE_AOT_COMPILE:
+            raise RuntimeError(
+                "AOT compile requires InductorStandaloneAdaptor which requires torch >= 2.8.0.dev"
+            )
         else:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
@@ -151,25 +158,33 @@ class CompilerManager:
 
         compiled_graph = None
 
-        # try to load from the cache
-        compiled_graph = self.load(graph, example_inputs, graph_index,
-                                   runtime_shape)
-        if compiled_graph is not None:
-            if graph_index == num_graphs - 1:
-                # after loading the last graph for this shape, record the time.
-                # there can be multiple graphs due to piecewise compilation.
-                now = time.time()
-                elapsed = now - compilation_start_time
-                if runtime_shape is None:
-                    logger.info(
-                        "Directly load the compiled graph(s) for dynamic shape "
-                        "from the cache, took %.3f s", elapsed)
-                else:
-                    logger.info(
-                        "Directly load the compiled graph(s) for shape %s "
-                        "from the cache, took %.3f s", str(runtime_shape),
-                        elapsed)
-            return compiled_graph
+        # with aot compile, we shouldn't ever
+        # load using .load() -- if we get to
+        # this point, we need to call compiler.compile
+        if not envs.VLLM_USE_AOT_COMPILE:
+            # try to load from the cache
+            compiled_graph = self.load(graph, example_inputs, graph_index,
+                                       runtime_shape)
+            if compiled_graph is not None:
+                if graph_index == num_graphs - 1:
+                    # after loading the last graph for this shape, record the time.
+                    # there can be multiple graphs due to piecewise compilation.
+                    now = time.time()
+                    elapsed = now - compilation_start_time
+                    if runtime_shape is None:
+                        logger.info(
+                            "Directly load the compiled graph(s) for dynamic shape "
+                            "from the cache, took %.3f s",
+                            elapsed,
+                        )
+                    else:
+                        logger.info(
+                            "Directly load the compiled graph(s) for shape %s "
+                            "from the cache, took %.3f s",
+                            str(runtime_shape),
+                            elapsed,
+                        )
+                return compiled_graph
 
         # no compiler cached the graph, or the cache is disabled,
         # we need to compile it
@@ -329,23 +344,63 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
             global compilation_start_time
-
-            compiled_graph_for_dynamic_shape = self.vllm_backend.\
-                compiler_manager.compile(
-                submod,
-                args,
-                self.compilation_config.inductor_compile_config,
-                self.compilation_config,
-                graph_index=index,
-                num_graphs=len(self.compile_submod_names),
-                runtime_shape=None)
             # Lazy import here to avoid circular import
             from .cuda_piecewise_backend import PiecewiseBackend
 
-            piecewise_backend = PiecewiseBackend(
-                submod, self.vllm_config, index,
-                len(self.compile_submod_names), sym_shape_indices,
-                compiled_graph_for_dynamic_shape, self.vllm_backend)
+            if (envs.VLLM_USE_AOT_COMPILE
+                    and self.vllm_backend.inductor_cache is not None):
+
+                def get_compiled_artifact(shape_id: str):
+                    inductor_compiled_graph = (
+                        self.vllm_backend.inductor_cache.
+                        get_loaded(  # type: ignore[union-attr]
+                            target, shape_id))
+
+                    logger.debug(
+                        "Loaded inductor artifacts for submod %s directly from VllmCompiledFunction",
+                        f"{target}_{shape_id}",
+                    )
+
+                    return inductor_compiled_graph
+
+                compiled_graph_for_dynamic_shape = get_compiled_artifact(
+                    "None")
+
+                piecewise_backend = PiecewiseBackend(
+                    submod,
+                    self.vllm_config,
+                    index,
+                    len(self.compile_submod_names),
+                    sym_shape_indices,
+                    compiled_graph_for_dynamic_shape,
+                    self.vllm_backend,
+                    get_compiled_artifact,
+                )
+
+            else:
+                compiled_graph_for_dynamic_shape = (
+                    self.vllm_backend.compiler_manager.compile(
+                        submod,
+                        args,
+                        self.compilation_config.inductor_compile_config,
+                        self.compilation_config,
+                        graph_index=index,
+                        num_graphs=len(self.compile_submod_names),
+                        runtime_shape=None,
+                    ))
+
+                piecewise_backend = PiecewiseBackend(
+                    submod,
+                    self.vllm_config,
+                    index,
+                    len(self.compile_submod_names),
+                    sym_shape_indices,
+                    compiled_graph_for_dynamic_shape,
+                    self.vllm_backend,
+                )
+
+            # Lazy import here to avoid circular import
+            from .cuda_graph import CUDAGraphOptions
 
             if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                     and
@@ -398,6 +453,244 @@ def set_model_tag(tag: str):
         model_tag = old_tag
 
 
+try:
+    from torch._dynamo.aot_compile import SerializableCallable
+except ImportError:
+    SerializableCallable = object
+
+assert isinstance(SerializableCallable, type)
+
+
+class VllmCompiledFunction(SerializableCallable):
+
+    class InductorCache:
+
+        def __init__(self):
+            # dict from submodule name to byte hash
+            self.submodule_bytes = {}
+            # dict from byte hash to bytes
+            self.submodule_bytes_store = {}
+            # dict from byte hash to loaded module
+            self.loaded_submodule_store = {}
+
+        def insert(self, submod_name: str, shape: str, entry: bytes):
+            hasher = hashlib.sha256()
+            hasher.update(entry)
+            hex_digest = hasher.hexdigest()
+            self.submodule_bytes[f"{submod_name}_{shape}"] = hex_digest
+            if hex_digest not in self.submodule_bytes_store:
+                self.submodule_bytes_store[hex_digest] = entry
+                logger.debug(
+                    "Using stored inductor cache artifact for submod %s with shape %s (%s bytes) at hash %s",
+                    submod_name,
+                    shape,
+                    len(entry),
+                    hex_digest,
+                )
+            else:
+                logger.debug(
+                    "Inserting inductor artifact for submod %s with shape %s (%s bytes) at hash %s",
+                    submod_name,
+                    shape,
+                    len(entry),
+                    hex_digest,
+                )
+
+        def get(self, submod_name: str, shape: str) -> bytes:
+            logger.debug(
+                "Getting inductor artifact for submod %s with shape %s",
+                submod_name,
+                shape,
+            )
+            return self.submodule_bytes_store[
+                self.submodule_bytes[f"{submod_name}_{shape}"]]
+
+        def get_loaded(self, submod_name: str,
+                       shape: str) -> torch._inductor.CompiledArtifact:
+            logger.debug(
+                "Getting inductor artifact for submod %s with shape %s",
+                submod_name,
+                shape,
+            )
+            return self.loaded_submodule_store[
+                self.submodule_bytes[f"{submod_name}_{shape}"]]
+
+        def size_bytes(self) -> int:
+            return sum(
+                len(entry) for entry in self.submodule_bytes_store.values())
+
+        def num_artifacts(self) -> int:
+            return len(self.submodule_bytes_store)
+
+        def num_entries(self) -> int:
+            return len(self.submodule_bytes)
+
+        def load_all(self) -> None:
+            import concurrent.futures
+
+            # check if already loaded
+            if len(self.loaded_submodule_store) == len(
+                    self.submodule_bytes_store):
+                return
+
+            from torch._dynamo.aot_compile import (
+                BundledAOTAutogradSerializableCallable)
+            from torch._functorch._aot_autograd.autograd_cache import (
+                BundledAOTAutogradCacheEntry, deserialize_bundled_cache_entry)
+
+            def _load_entry(entry) -> BundledAOTAutogradSerializableCallable:
+                entry_loaded = pickle.loads(entry)
+                assert isinstance(entry_loaded, BundledAOTAutogradCacheEntry)
+                return deserialize_bundled_cache_entry(entry_loaded)
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                entries = list(self.submodule_bytes_store.values())
+                loaded_entries = list(executor.map(_load_entry, entries))
+
+            for i, k in enumerate(self.submodule_bytes_store.keys()):
+                self.loaded_submodule_store[k] = loaded_entries[i]
+
+            logger.debug("loaded all %s submodules", self.num_artifacts())
+
+        def __getstate__(self):
+            return {
+                "submodule_bytes": self.submodule_bytes,
+                "submodule_bytes_store": self.submodule_bytes_store,
+            }
+
+        def __setstate__(self, state):
+            self.submodule_bytes = state["submodule_bytes"]
+            self.submodule_bytes_store = state["submodule_bytes_store"]
+            self.loaded_submodule_store = {}
+
+    def __init__(self, graph_module, example_inputs, prefix, optimized_call,
+                 inductor_cache):
+        assert isinstance(graph_module, torch.fx.GraphModule)
+        self.graph_module = graph_module
+        self.example_inputs = example_inputs
+        self.prefix = prefix
+        self.optimized_call = optimized_call
+        self.inductor_cache = inductor_cache
+
+    def __call__(self, *args, **kwargs):
+        return self.optimized_call(*args, **kwargs)
+
+    @classmethod
+    def serialize_compile_artifacts(
+            cls, compiled_fn: "VllmCompiledFunction") -> bytes:
+        import sympy
+        from torch._subclasses import FakeTensorMode
+        from torch.fx._graph_pickler import GraphPickler, Options
+        state = compiled_fn.__dict__.copy()
+
+        inductor_cache = VllmCompiledFunction.InductorCache()
+
+        # Get all submodules of state["optimized_call"] and call to_bytes() on them
+        # to serialize them directly...
+        # optimized_call should be some variant of self.split_gm
+        for name, submod in state["optimized_call"].__dict__.items():
+            if hasattr(submod, "to_bytes"):
+                as_bytes = submod.to_bytes()
+                # ensure this is a piecewise backend, and not the compiledartifact
+                # since we want all shapes here.
+                if not isinstance(as_bytes, dict):
+                    continue
+                for shape, entry in submod.to_bytes().items():
+                    inductor_cache.insert(name, shape, entry)
+
+        logger.debug(
+            "Populated inductor cache with %s artifacts across %s entries and a total size of %s GiB",
+            inductor_cache.num_artifacts(),
+            inductor_cache.num_entries(),
+            f"{(inductor_cache.size_bytes() / (1024**3)):.2f}",
+        )
+
+        state.pop("optimized_call")
+        for node in state["graph_module"].graph.nodes:
+            node.meta.pop("source_fn_stack", None)
+            node.meta.pop("nn_module_stack", None)
+
+        # Mask off tensor inputs since they are large and not needed.
+        state["example_inputs"] = pytree.tree_map_only(torch.Tensor,
+                                                       lambda _: None,
+                                                       state["example_inputs"])
+
+        original_graph_reducer_override = GraphPickler.reducer_override
+
+        def _graph_reducer_override(self, obj):
+            if (inspect.isclass(obj) and issubclass(obj, sympy.Function)
+                    and hasattr(obj, "_torch_unpickler")):
+                return obj._torch_unpickler, (obj._torch_handler_name, )
+            if isinstance(obj, FakeTensorMode):
+                return type(None), ()
+            return original_graph_reducer_override(self, obj)
+
+        with patch.object(GraphPickler, 'reducer_override',
+                          _graph_reducer_override):
+            state["graph_module"] = GraphPickler.dumps(
+                state["graph_module"], Options(ops_filter=None))
+            state["example_inputs"] = GraphPickler.dumps(
+                state["example_inputs"])
+
+        state["inductor_cache"] = pickle.dumps(inductor_cache, -1)
+
+        return pickle.dumps(state, -1)
+
+    @classmethod
+    def deserialize_compile_artifacts(cls,
+                                      data: bytes) -> "VllmCompiledFunction":
+        from torch._guards import TracingContext, tracing
+        from torch._subclasses import FakeTensorMode
+        from torch.fx._graph_pickler import GraphPickler
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        state = pickle.loads(data)
+        fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+        state["graph_module"] = GraphPickler.loads(state["graph_module"],
+                                                   fake_mode)
+        state["example_inputs"] = GraphPickler.loads(state["example_inputs"],
+                                                     fake_mode)
+
+        state["inductor_cache"] = pickle.loads(state["inductor_cache"])
+        state["inductor_cache"].load_all()
+
+        logger.debug(
+            "Found %s submodule inductor artifacts across %s entries",
+            state["inductor_cache"].num_artifacts(),
+            state["inductor_cache"].num_entries(),
+        )
+
+        vllm_backend = VllmBackend(get_current_vllm_config(), state["prefix"],
+                                   state["inductor_cache"])
+
+        def optimized_call(*example_inputs):
+            compile_inputs = [
+                inp or example_inputs[i]
+                for i, inp in enumerate(fn.example_inputs)
+            ]
+            with tracing(TracingContext(fake_mode)):
+                fn.optimized_call = vllm_backend(state["graph_module"],
+                                                 compile_inputs).optimized_call
+            return fn.optimized_call(*example_inputs)
+
+        fn = cls(**state, optimized_call=optimized_call)
+        return fn
+
+
+def compilation_config_hash_factors(vllm_config: VllmConfig) -> list[str]:
+    factors = []
+    # 0. factors come from the env, for example, The values of
+    # VLLM_PP_LAYER_PARTITION will affect the computation graph.
+    env_hash = envs.compute_hash()
+    factors.append(env_hash)
+
+    # 1. factors come from the vllm_config (it mainly summarizes how the
+    #    model is created)
+    config_hash = vllm_config.compute_hash()
+    factors.append(config_hash)
+    return factors
+
+
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
     It is used for compilation level of `CompilationLevel.PIECEWISE`,
@@ -429,6 +722,7 @@ class VllmBackend:
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
+        inductor_cache: Optional[VllmCompiledFunction.InductorCache] = None,
     ):
 
         # if the model is initialized with a non-empty prefix,
@@ -445,9 +739,10 @@ class VllmBackend:
         self.sym_tensor_indices = []
         self.input_buffers = []
 
+        self.inductor_cache = inductor_cache
+
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-
         self.compiler_manager: CompilerManager = CompilerManager(
             self.compilation_config)
 
@@ -473,7 +768,8 @@ class VllmBackend:
                 self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
-    def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
+    def __call__(self, graph: fx.GraphModule,
+                 example_inputs) -> VllmCompiledFunction:
 
         vllm_config = self.vllm_config
         if not self.compilation_config.cache_dir:
@@ -482,17 +778,7 @@ class VllmBackend:
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
 
-            factors = []
-            # 0. factors come from the env, for example, The values of
-            # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-            env_hash = envs.compute_hash()
-            factors.append(env_hash)
-
-            # 1. factors come from the vllm_config (it mainly summarizes how the
-            #    model is created)
-            config_hash = vllm_config.compute_hash()
-            factors.append(config_hash)
-
+            factors = compilation_config_hash_factors(vllm_config)
             # 2. factors come from the code files that are traced by Dynamo (
             #    it mainly summarizes how the model is used in forward pass)
             forward_code_files = list(
@@ -511,6 +797,7 @@ class VllmBackend:
                 with open(filepath) as f:
                     hash_content.append(f.read())
             import hashlib
+
             code_hash = hashlib.md5("\n".join(hash_content).encode(),
                                     usedforsecurity=False).hexdigest()
             factors.append(code_hash)
@@ -605,7 +892,8 @@ class VllmBackend:
 
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE or \
             not self.compilation_config.cudagraph_copy_inputs:
-            return self.split_gm
+            return VllmCompiledFunction(graph, example_inputs, self.prefix,
+                                        self.split_gm, None)
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode
@@ -647,4 +935,5 @@ class VllmBackend:
                 list_args[index] = static_tensor
             return self.split_gm(*list_args)
 
-        return copy_and_call
+        return VllmCompiledFunction(graph, example_inputs, self.prefix,
+                                    copy_and_call, None)
