@@ -43,27 +43,23 @@ def can_initialize(model: str, extra_args: list[str]):
                             override_hf_configs=dummy_hf_overrides) as server:
         client = server.get_client()
         # Make a simple request to verify the server works
-        completion = client.chat.completions.create(
+        completion = client.completions.create(
             model=model,
-            messages=[{
-                "role": "system",
-                "content": "You are a helpful assistant."
-            }, {
-                "role": "user",
-                "content": "Hello!"
-            }],
+            prompt=["Hello!"],
             temperature=0,
-            max_completion_tokens=2,
+            max_tokens=2,
         )
-        generated_text = completion.choices[0].message.content
-        assert generated_text is not None
+        print(completion)
+        assert completion.choices[0].text is not None
 
 
 ## Llama4 ##
 
 
-@pytest.mark.skip(
-    reason="This gets stuck during/after graph capture for some reason")
+@pytest.mark.skip(reason=(
+    "RuntimeError: run_moe() Expected a value of type "
+    "'Optional[List[Tensor]]' for argument '_9' but instead found type "
+    "'list'."))
 def test_llama4_fp8_tensor_moe_flashinfer_cutlass(
         monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
@@ -71,7 +67,7 @@ def test_llama4_fp8_tensor_moe_flashinfer_cutlass(
     can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", [])
 
 
-@pytest.mark.skip(reason="Takes too long to run")
+@pytest.mark.skip(reason="Works, but takes too long to run")
 def test_llama4_fp8_tensor_moe_flashinfer_trtllm(
         monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
@@ -79,8 +75,7 @@ def test_llama4_fp8_tensor_moe_flashinfer_trtllm(
     can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", [])
 
 
-@pytest.mark.skip(
-    reason="This gets stuck during/after graph capture for some reason")
+@pytest.mark.skip(reason="Works, but takes too long to run")
 def test_llama4_nvfp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
