@@ -393,7 +393,7 @@ __device__ void paged_attention_kernel(
 
     // Avoid type conversion and use original F32 data for higher precision dot
     // product
-    Float_L_vec logits_vec = 
+    Float_L_vec logits_vec =
         *reinterpret_cast<Float_L_vec*>(logits + token_idx - start_token_idx);
 
     const cache_t* v_ptr = v_cache + physical_block_number * kv_block_stride +
