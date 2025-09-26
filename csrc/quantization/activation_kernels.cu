@@ -373,10 +373,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   int t_load_bound = H / (GROUP_SIZE * NUM_WARPS);
 
-  Idx_t base_i =
-      (expert_id * (T * (H / 4)) + (token_id - expert_offset) * (H / 4));
+  Idx_t base_i = ((expert_id * stride_i_e) / 8) +
+                 (token_id - expert_offset) * stride_i_t / 8;
   const Idx_t gate_warp_offset =
-      warp_id * (H / (8 * NUM_WARPS)) + (lane_id & 0b1111);
+      warp_id * ((stride_i_h * H) / (8 * NUM_WARPS)) + (lane_id & 0b1111);
 
   const __int128_t* input_128_ptr =
       reinterpret_cast<const __int128_t*>(_input) + gate_warp_offset +
@@ -880,7 +880,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
     const at::Tensor& tokens_per_expert,  // (E)
     at::Tensor& y_q,                      // (E, T, H) [OUT]
     at::Tensor& y_s,                      // (E, T, H//group_size) [OUT]
-    int64_t group_size, bool use_ue8m0, int64_t num_parallel_tokens) {
+    bool use_ue8m0) {
   // This kernel currently only supports H % 128 == 0 and assumes a
   // fixed GROUP_SIZE of 128.
   TORCH_CHECK(input.dtype() == torch::kBFloat16);

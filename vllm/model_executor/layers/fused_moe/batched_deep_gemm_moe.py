@@ -98,7 +98,7 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     H = H2 // 2
     G = (H + group_size - 1) // group_size
     assert H % 8 == 0, "H must be divisible by 8"
-    assert group_size == 128, "H must be divisible by 8"
+    assert group_size == 128, "Group size assumed 128"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
 
     tokens_per_expert = tokens_per_expert.to(device=y.device,
@@ -118,8 +118,7 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     use_ue8m0 = is_deep_gemm_e8m0_used()
 
     torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert, y_q,
-                                                   y_s, group_size, use_ue8m0,
-                                                   num_parallel_tokens)
+                                                   y_s, use_ue8m0)
 
     return y_q, y_s
 
