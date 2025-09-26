@@ -19,7 +19,7 @@ class Ernie45ReasoningParser(ReasoningParser):
     """
     Reasoning parser for Ernie45 thinking model.
     The Ernie45 thinking model ouput format is
-        abc\n</think>\n\n\n<response>\ndef\n</response>\n
+        abc\n</think>\n\n<response>\ndef\n</response>\n
     or  abc\n</think>\ndef
     """
 
@@ -50,8 +50,7 @@ class Ernie45ReasoningParser(ReasoningParser):
         self.newline_token_id = self.vocab.get(self.newline_token)
 
         self.parser_token_ids = [
-            self.think_start_token_id, self.think_end_token_id,
-            self.response_start_token_id, self.response_end_token_id
+            self.think_end_token_id, self.response_end_token_id
         ]
 
         if self.think_start_token_id is None or self.think_end_token_id is None:
@@ -85,9 +84,8 @@ class Ernie45ReasoningParser(ReasoningParser):
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
         The Ernie45 thinking model ouput format is
-            abc\n</think>\n\n\n<response>\ndef\n</response>\n
+            abc\n</think>\n\n<response>\ndef\n</response>\n
         or  abc\n</think>\ndef
-        or  abc\n</think>\n\n\n<tool_call>\nxyz\n</tool_call>\n
         - 'abc' goes to reasoning_content
         - 'def' goes to content
         """
@@ -133,7 +131,7 @@ class Ernie45ReasoningParser(ReasoningParser):
             elif self.response_end_token_id in delta_token_ids:
                 response_end_idx = content.rfind(self.response_end_token)
                 content = content[:response_end_idx]
-            # remove \n after </think> or <response> or </response>
+            # remove \n after </think>  or </response>
             if previous_token_ids[-1] in self.parser_token_ids and \
                 (len(delta_token_ids) > 0 and \
                     delta_token_ids[0] == self.newline_token_id):
@@ -184,8 +182,6 @@ class Ernie45ReasoningParser(ReasoningParser):
                 if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
                     content = content[start_idx +
                                       len(self.response_start_token):end_idx]
-                    if content.startswith("\n"):
-                        content = content[1:]
 
             # If the end token is not found, return the model output as is.
             # It should not happen since we already checked for the presence
