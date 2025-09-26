@@ -136,8 +136,8 @@ class ShmRingBuffer:
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.total_bytes_of_buffer)
             # initialize the metadata section to 0
-            with memoryview(self.shared_memory.buf[self.metadata_offset:]
-                            ) as metadata_buffer:
+            with self.shared_memory.buf[self.
+                                        metadata_offset:] as metadata_buffer:
                 torch.frombuffer(metadata_buffer, dtype=torch.uint8).fill_(0)
         else:
             # we are opening an existing buffer
@@ -182,14 +182,14 @@ class ShmRingBuffer:
     def get_data(self, current_idx: int):
         start = self.data_offset + current_idx * self.max_chunk_bytes
         end = start + self.max_chunk_bytes
-        with memoryview(self.shared_memory.buf[start:end]) as buf:
+        with self.shared_memory.buf[start:end] as buf:
             yield buf
 
     @contextmanager
     def get_metadata(self, current_idx: int):
         start = self.metadata_offset + current_idx * self.metadata_size
         end = start + self.metadata_size
-        with memoryview(self.shared_memory.buf[start:end]) as buf:
+        with self.shared_memory.buf[start:end] as buf:
             yield buf
 
 
