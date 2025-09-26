@@ -94,6 +94,7 @@ direct_register_custom_op(
 class TransformersMoEBase(TransformersBase):
 
     def __init__(self, *, vllm_config, prefix=""):
+        self.check_version("4.57.0.dev0", "MoE models support")
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         if self.parallel_config.enable_expert_parallel:

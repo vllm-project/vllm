@@ -22,6 +22,8 @@ from typing import Literal, Optional, Union
 
 import regex as re
 import torch
+import transformers
+from packaging.version import Version
 from torch import nn
 from transformers import (AutoModel, BatchFeature, PretrainedConfig,
                           PreTrainedModel)
@@ -725,6 +727,14 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
+    def check_version(self, min_version: str, feature: str):
+        installed = Version(transformers.__version__)
+        required = Version(min_version)
+        if installed < required:
+            raise ImportError(
+                f"Transformers backend requires transformers>={required} "
+                f"for {feature}, but got {installed}")
+
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersModel(TransformersBase):
@@ -781,14 +791,7 @@ class TransformersModel(TransformersBase):
 
         # Check minimum transformers version for encoder models support
         if attn_type == AttentionType.ENCODER_ONLY:
-            import transformers
-            from packaging.version import Version
-            installed = Version(transformers.__version__)
-            required = Version("4.57.0.dev0")
-            if installed < required:
-                raise ValueError(
-                    "Encoder models with the Transformers backend require "
-                    f"transformers>={required}, but got {installed}")
+            self.check_version("4.57.0.dev0", "encoder models support")
 
         return super().create_attention_instances(attn_type)
 
