@@ -24,7 +24,7 @@ class TritonMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TRITON_MLA_VLLM_V1"
+        return "TRITON_MLA"
 
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
