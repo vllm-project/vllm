@@ -94,11 +94,12 @@ class MultiModalConfig:
         {"image": 16, "video": 2}
 
     Configurable format (with options):
-        {"video": {"count": 1, "num_frames": 32}, 
-        "image": {"count": 5, "max_size": [512, 512]}}
+        {"video": {"count": 1, "num_frames": 32, "width": 512, "height": 512}, 
+        "image": {"count": 5, "width": 512, "height": 512}}
 
     Mixed format (combining both):
-        {"image": 16, "video": {"count": 1, "num_frames": 32}}
+        {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512, 
+        "height": 512}}
     """
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
