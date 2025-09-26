@@ -31,7 +31,8 @@ logger = init_logger(__name__)
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "ernie_mtp", "qwen3_next_mtp", "mimo_mtp"]
+                            "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
+                            "longcat_flash_mtp"]
 
 
 @config
@@ -186,6 +187,13 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["Qwen3NextMTP"]
             })
+        if hf_config.model_type == "longcat_flash":
+            hf_config.model_type = "longcat_flash_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["LongCatFlashMTPModel"]
+            })
 
         return hf_config
 
@@ -201,12 +209,9 @@ class SpeculativeConfig:
 
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
-            # mtp acceleration for more models besides deepseek_v3
-            if self.target_model_config and \
-                (self.target_model_config.hf_text_config.model_type \
-                        == "deepseek_v3" or
-                    self.target_model_config.hf_text_config.model_type in
-                        ("mimo","ernie4_5_moe", "qwen3_next")):
+            if (self.target_model_config
+                    and self.target_model_config.hf_text_config.model_type
+                    in ("deepseek_v3", "mimo", "ernie4_5_moe", "qwen3_next")):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
                 # Align the quantization of draft model for cases such as
@@ -216,8 +221,9 @@ class SpeculativeConfig:
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
             else:
-                raise ValueError("num_speculative_tokens was provided without "
-                                 "speculative model.")
+                raise ValueError(
+                    "num_speculative_tokens was provided but without "
+                    "speculative model.")
 
         # Automatically configure the method for ngram when "model" is used
         # instead of "method"
@@ -329,6 +335,15 @@ class SpeculativeConfig:
                     if self.num_speculative_tokens > 1:
                         logger.warning(
                                 "All Qwen3Next MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
+                elif (self.draft_model_config.hf_config.model_type
+                      in ("longcat_flash_mtp")):
+                    self.method = "longcat_flash_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "LongCat MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
                             )
@@ -525,7 +540,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        eagle3_target_supported = ["llama", "qwen", "gpt_oss"]
+        eagle3_target_supported = ["llama", "qwen", "minicpm", "gpt_oss"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
@@ -548,7 +563,7 @@ class SpeculativeConfig:
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp",
-                               "qwen3_next_mtp")
+                               "qwen3_next_mtp", "longcat_flash_mtp")
 
     def __repr__(self) -> str:
         method = self.method
