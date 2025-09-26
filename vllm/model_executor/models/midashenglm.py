@@ -318,7 +318,7 @@ class DashengAudioTransformer(nn.Module):
                 qkv_bias=config.qkv_bias,
                 init_values=config.init_values,
                 quant_config=quant_config,
-                prefix=f"{prefix}.block{i}",
+                prefix=f"{prefix}.blocks.{i}",
             ) for i in range(config.depth))
         self.norm = nn.LayerNorm(config.embed_dim, eps=1e-6)
 
