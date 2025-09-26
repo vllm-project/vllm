@@ -1111,6 +1111,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_cutlass_block_scaled_grouped_gemm=(
                     self.allow_cutlass_block_scaled_grouped_gemm))
 
+
 class PureFp8LinearMethod(LinearMethodBase):
     """Pure FP8 linear method for weights already quantized to FP8E4M3FN without scales.
     
@@ -1164,7 +1165,7 @@ class PureFp8LinearMethod(LinearMethodBase):
         
         # Use the custom TMA kernel from utils.py
         from vllm.model_executor.utils import fp8_tma_linear
-        return fp8_tma_linear(x, layer.weight, bias, layer=layer)
+        return fp8_tma_linear(x, layer.weight, layer.weight_scale, layer.input_scale, layer.bias, layer=layer)
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
     """

@@ -191,6 +191,8 @@ def cpu_unquantized_gemm(layer: torch.nn.Module,
 
 def fp8_tma_linear(x: torch.Tensor,
                    weight: torch.Tensor,
+                   weight_scale: torch.Tensor,
+                   input_scale: Optional[torch.Tensor] = None,
                    bias: Optional[torch.Tensor] = None,
                    layer=None):
     """Optimized FP8 TMA linear function with CUDA graph capture support.
@@ -205,16 +207,11 @@ def fp8_tma_linear(x: torch.Tensor,
         Output tensor in BF16 format
     """
     try:
-        ## Do not convert the input to FP8 here, convert it inside of the kernel
-        # if x.dtype != torch.float8_e4m3fn:
-        #     x = x.to(torch.float8_e4m3fn)
-
         # Weight should already be FP8 from PureFp8LinearMethod
         assert weight.dtype == torch.float8_e4m3fn, f"Expected FP8 weight, got {weight.dtype}"
 
         # Handle arbitrary input shapes like torch.nn.functional.linear
-        input_shape = x.shape
-        x_2d = x.view(-1, x.size(-1))  # Flatten to 2D for matmul
+        x_2d = x
         num_tokens = x_2d.shape[0]
 
         # Initialize persistent buffers if not available
@@ -248,6 +245,7 @@ def fp8_tma_linear(x: torch.Tensor,
                     layer._tma_outputs[graph_key] = torch.zeros(
                         output_shape, dtype=torch.bfloat16, device=x.device)
                     layer._tma_weights[graph_key] = weight_for_tma
+                    layer._tma_weight_scales[graph_key] = weight_scale
 
                     # Create memory pool and stream for stable capture
                     # Check if memory_pool is available and functional
@@ -268,6 +266,8 @@ def fp8_tma_linear(x: torch.Tensor,
                             layer._tma_outputs[graph_key] = matmul_tma_persistent(
                                 layer._tma_inputs[graph_key],
                                 layer._tma_weights[graph_key],
+                                layer._tma_weight_scales[graph_key],
+                                None,
                                 bias=bias
                             )
                     else:
@@ -276,6 +276,8 @@ def fp8_tma_linear(x: torch.Tensor,
                             layer._tma_outputs[graph_key] = matmul_tma_persistent(
                                 layer._tma_inputs[graph_key],
                                 layer._tma_weights[graph_key],
+                                layer._tma_weight_scales[graph_key],
+                                None,
                                 bias=bias
                             )
 
@@ -302,7 +304,8 @@ def fp8_tma_linear(x: torch.Tensor,
                     weight_for_tma = weight
 
                 output_2d = matmul_tma_persistent(
-                    x_2d, weight_for_tma,
+                    x_2d, weight_for_tma, weight_scale,
+                    None,
                     bias=bias
                 )
 
@@ -316,17 +319,12 @@ def fp8_tma_linear(x: torch.Tensor,
 
             # Use customized TMA persistent kernel for all cases
             output_2d = matmul_tma_persistent(
-                x_2d, weight_for_tma,
+                x_2d, weight_for_tma, weight_scale,
+                None,
                 bias=bias
             )
 
-        # Reshape back to match expected output shape
-        # For TMA kernel: weight_for_tma is (N, K), so N is at dimension 0
-        output_features = weight_for_tma.shape[0] if 'weight_for_tma' in locals() else weight.shape[0]
-        output_shape = input_shape[:-1] + (output_features,)
-        output = output_2d.view(output_shape)
-
-        return output
+        return output_2d
     except ImportError as e:
         # Fallback to regular linear if TMA kernel not available
         print(f"Warning: TMA kernel not available ({e}), falling back to regular linear")
@@ -342,12 +340,9 @@ def unquantized_gemm_with_fp8_support(layer: torch.nn.Module,
                                       weight: torch.Tensor,
                                       bias: Optional[torch.Tensor] = None):
     """Unquantized GEMM with FP8 TMA kernel support."""
-    # Check if weight is FP8 - if so, use TMA kernel
-    # print(weight.dtype)
-    # print(x.dtype)
     if weight.dtype == torch.float8_e4m3fn:
         # x = x.to(torch.float8_e4m3fn)
-        return fp8_tma_linear(x, weight, bias, layer=layer)
+        return fp8_tma_linear(x, weight, layer.weight_scale, None, bias, layer=layer)
     else:
         # Use regular linear for non-FP8 weights
         # return default_unquantized_gemm
