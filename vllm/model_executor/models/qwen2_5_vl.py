@@ -277,6 +277,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        forced_attn_backend: Optional[_Backend] = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -304,16 +305,20 @@ class Qwen2_5_VisionAttention(nn.Module):
                                       prefix=f"{prefix}.proj",
                                       disable_tp=use_data_parallel)
 
-        # Detect attention implementation.
-        self.attn_backend = get_vit_attn_backend(
-            head_size=self.hidden_size_per_attention_head,
-            dtype=torch.get_default_dtype())
+        # detect attention implementation unless forced by caller
         self.use_upstream_fa = False
-        if self.attn_backend != _Backend.FLASH_ATTN and \
-            check_upstream_fa_availability(
-                torch.get_default_dtype()):
-            self.attn_backend = _Backend.FLASH_ATTN
-            self.use_upstream_fa = True
+        if forced_attn_backend is not None:
+            self.attn_backend = forced_attn_backend
+            self.use_upstream_fa = (forced_attn_backend == _Backend.FLASH_ATTN)
+        else:
+            self.attn_backend = get_vit_attn_backend(
+                head_size=self.hidden_size_per_attention_head,
+                dtype=torch.get_default_dtype())
+            if self.attn_backend != _Backend.FLASH_ATTN and \
+                check_upstream_fa_availability(
+                    torch.get_default_dtype()):
+                self.attn_backend = _Backend.FLASH_ATTN
+                self.use_upstream_fa = True
 
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
@@ -446,6 +451,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        forced_attn_backend: Optional[_Backend] = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -458,7 +464,8 @@ class Qwen2_5_VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            use_data_parallel=use_data_parallel)
+            use_data_parallel=use_data_parallel,
+            forced_attn_backend=forced_attn_backend)
         self.mlp = Qwen2_5_VisionMLP(dim,
                                      mlp_hidden_dim,
                                      act_fn=act_fn,
