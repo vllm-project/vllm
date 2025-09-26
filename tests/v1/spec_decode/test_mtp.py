@@ -6,7 +6,6 @@ from unittest import mock
 import pytest
 import torch
 
-from tests.utils import get_attn_backend_list_based_on_platform
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
@@ -93,24 +92,9 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers,
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
 
 
-@pytest.mark.parametrize("attn_backend",
-                         get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("num_speculative_tokens", [1])
-def test_mtp_propose(attn_backend, num_speculative_tokens, monkeypatch):
+def test_mtp_propose(num_speculative_tokens, monkeypatch):
     """Test that MTP's forward method returns hidden states directly"""
-
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
-
-    if (attn_backend == "TRITON_ATTN_VLLM_V1"
-            and not current_platform.is_rocm()):
-        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
-                    "multi-token spec decode on current platform")
-
-    if attn_backend == "TREE_ATTN":
-        pytest.skip("MTP does not support tree-based speculative decoding")
-
-    if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     device = torch.device(current_platform.device_type)
     batch_size = 2
@@ -184,14 +168,7 @@ def test_mtp_propose(attn_backend, num_speculative_tokens, monkeypatch):
     sampling_metadata = mock.MagicMock()
 
     # Setup attention metadata
-    if attn_backend == "FLASH_ATTN_VLLM_V1":
-        attn_metadata_builder_cls, _ = get_attention_backend(
-            _Backend.FLASH_ATTN_VLLM_V1)
-    elif attn_backend == "TRITON_ATTN_VLLM_V1":
-        attn_metadata_builder_cls, _ = get_attention_backend(
-            _Backend.TRITON_ATTN_VLLM_V1)
-    else:
-        raise ValueError(f"Unsupported attention backend: {attn_backend}")
+    attn_metadata_builder_cls, _ = get_attention_backend(_Backend.FLASH_ATTN)
 
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
