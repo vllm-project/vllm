@@ -163,6 +163,9 @@ def original_apply_top_k_top_p(
             top_k_mask = logits_sort < top_k_mask
             logits_sort.masked_fill_(top_k_mask, -float("inf"))
 
+        probs = logits_sort.softmax(dim=-1)
+        probs = probs.scatter(dim=-1, index=logits_idx, src=probs)
+
         if p is not None:
             # Apply top-p.
             probs_sort = logits_sort.softmax(dim=-1)
@@ -174,7 +177,7 @@ def original_apply_top_k_top_p(
 
         # Re-sort the probabilities.
         logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
-    return logits
+    return logits, probs
 
 @triton.jit
 def _topk_kernel(LOGITS, PROBS, K, B, 
@@ -294,7 +297,8 @@ def _topk_kernel(LOGITS, PROBS, K, B,
 def _topk_topp_kernel(LOGITS, PROBS, K, P, B, 
                       N: tl.constexpr,
                       BLOCK_SIZE: tl.constexpr,
-                      NUM_TILES: tl.constexpr):
+                      NUM_TILES: tl.constexpr,
+                      DEBUG_PTR):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
     for row_id in tl.range(pid, B, num_programs):
@@ -405,16 +409,18 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < search_range
                 probs_blk = tl.load(search_addr + offs_n, mask=mask_n, other=-float('inf'))
-                probs_blk = probs_blk - max_probs
+                probs_blk = tl.where(probs_blk > k_pivot, probs_blk, -float('inf'))
+                probs_blk = probs_blk - max_logit
                 probs_blk = tl.exp(probs_blk)
                 sum_exp_logits += tl.sum(probs_blk)
                 tl.store(PROBS_ROW + offs_n, probs_blk, mask=mask_n)
 
             # Fourth pass: Compute probs (softmax)
+            exp_avg = tl.exp(avg_logit)
             for i in range(0, search_iters):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < search_range
-                probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n, other=avg_logit)
+                probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n, other=exp_avg)
                 probs_blk = probs_blk / sum_exp_logits
                 min_probs = tl.minimum(min_probs, tl.min(probs_blk))
                 max_probs = tl.maximum(max_probs, tl.max(probs_blk))
@@ -424,60 +430,103 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
             min_range = min_probs
 
             num_iters = 0
-            while p_pivot == -float('inf') and num_iters < 18:
-                p_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
-                p_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
-                p_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
+            while p_pivot == -float('inf') and num_iters < 32:
+                p_pivot_0 = (max_range - min_range) * 1.0 / 2.0 + min_range
                 p_pivots_sum_0 = 0.0
-                p_pivots_sum_1 = 0.0
-                p_pivots_sum_2 = 0.0
+
+                min_larger_0 = float('inf')
+                max_smaller_0 = -float('inf')
+
+                # p_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                # p_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
+                
+                # p_pivots_sum_1 = 0.0
+                # p_pivots_sum_2 = 0.0
 
                 for i in range(0, search_iters):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < search_range
-                    probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n, other=-float('inf'))
+                    probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n, other=0.0)
 
-                    larger_mask_0 = probs_blk > p_pivot_0
-                    larger_mask_1 = probs_blk > p_pivot_1
-                    larger_mask_2 = probs_blk > p_pivot_2
+                    masked_larger_0 = tl.where(probs_blk > p_pivot_0, probs_blk, float('inf'))
+                    min_larger_0 = tl.minimum(min_larger_0, tl.min(masked_larger_0))
+                    masked_smaller_0 = probs_blk * (probs_blk < p_pivot_0)
+                    max_smaller_0 = tl.maximum(max_smaller_0, tl.max(masked_smaller_0))
+                    p_pivots_sum_0 += tl.sum(probs_blk * (probs_blk > p_pivot_0))
 
-                    p_pivots_sum_0 += tl.sum(probs_blk * larger_mask_0)
-                    p_pivots_sum_1 += tl.sum(probs_blk * larger_mask_1)
-                    p_pivots_sum_2 += tl.sum(probs_blk * larger_mask_2)
+                    # larger_mask_1 = probs_blk > p_pivot_1
+                    # larger_mask_2 = probs_blk > p_pivot_2
+
+                    # p_pivots_sum_1 += tl.sum(probs_blk * larger_mask_1)
+                    # p_pivots_sum_2 += tl.sum(probs_blk * larger_mask_2)
 
                 # Check if any of the pivots are equal to k
                 if tl.abs(p_pivots_sum_0 - p) < 1e-6:
                     p_pivot = p_pivot_0 
-                elif tl.abs(p_pivots_sum_1 - p) < 1e-6:
-                    p_pivot = p_pivot_1
-                elif tl.abs(p_pivots_sum_2 - p) < 1e-6:
-                    p_pivot = p_pivot_2
-                # If none of the pivots are equal to k, we updatae the range
-                elif p_pivots_sum_2 > p:
-                    min_range = p_pivot_2
-                elif p_pivots_sum_1 > p:
-                    min_range = p_pivot_1
                 elif p_pivots_sum_0 > p:
+                    if p_pivots_sum_0 - min_larger_0 < p:
+                        p_pivot = p_pivot_0
                     min_range = p_pivot_0
-                if p_pivots_sum_0 < p:
+                elif p_pivots_sum_0 < p:
+                    if p_pivots_sum_0 + max_smaller_0 > p:
+                        
+                        p_pivot = max_smaller_0 
                     max_range = p_pivot_0
-                elif p_pivots_sum_1 < p:
-                    max_range = p_pivot_1
-                elif p_pivots_sum_2 < p:
-                    max_range = p_pivot_2
+                
+                # elif tl.abs(p_pivots_sum_1 - p) < 1e-6:
+                #     p_pivot = p_pivot_1
+                # elif tl.abs(p_pivots_sum_2 - p) < 1e-6:
+                #     p_pivot = p_pivot_2
+                # If none of the pivots are equal to k, we updatae the range
+                # elif p_pivots_sum_2 > p:
+                #     min_range = p_pivot_2
+                # elif p_pivots_sum_1 > p:
+                #     min_range = p_pivot_1
+                # elif p_pivots_sum_0 > p:
+                #     min_range = p_pivot_0
+                # if p_pivots_sum_0 < p:
+                #     max_range = p_pivot_0
+                # elif p_pivots_sum_1 < p:
+                #     max_range = p_pivot_1
+                # elif p_pivots_sum_2 < p:
+                #     max_range = p_pivot_2
                 
                 num_iters += 1
-                if num_iters >= 18:
+                if num_iters >= 32 or tl.abs(min_range - max_range) < 1e-6:
                     p_pivot = p_pivot_0
 
-        # Sixth pass: Apply top-k mask
+                
+                if row_id == 0 and num_iters == 2:
+                    tl.store(DEBUG_PTR + 0 * N + 0, p_pivots_sum_0)
+                    tl.store(DEBUG_PTR + 0 * N + 1, p_pivot_0)
+                    tl.store(DEBUG_PTR + 0 * N + 2, min_probs)
+                    tl.store(DEBUG_PTR + 0 * N + 3, max_probs)
+                    tl.store(DEBUG_PTR + 0 * N + 4, min_range)
+                    tl.store(DEBUG_PTR + 0 * N + 5, max_range)
+                    tl.store(DEBUG_PTR + 0 * N + 6, num_iters)
+                    tl.store(DEBUG_PTR + 0 * N + 7, sum_exp_logits)
+                    tl.store(DEBUG_PTR + 0 * N + 8, p_pivot)
+                    tl.store(DEBUG_PTR + 0 * N + 9, tl.log(p_pivot * sum_exp_logits))
+                    tl.store(DEBUG_PTR + 0 * N + 10, min_larger_0)
+                    tl.store(DEBUG_PTR + 0 * N + 11, max_smaller_0)
+            # Subtract a small value to include the nearest smaller value
+            # If the nearest smaller value very small, it may cause numerical instability
+            p_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit - 1e-6
+            if row_id == 0:
+                tl.store(DEBUG_PTR + 12, p_pivot)
+                tl.store(DEBUG_PTR + 13, p)
+
+            # Transform p_pivot into equivalent logit
+            # p_pivot = tl.log(p_pivot * sum_exp_logits)
+
+        # Sixth pass: Apply mask
         if k_pivot != -float('inf') or p_pivot != -float('inf'):
+            pivot = tl.maximum(k_pivot, p_pivot)
             for i in range(0, NUM_TILES):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < N
                 logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n)
-                mask = (logits_blk > k_pivot) & (logits_blk > p_pivot)
-                logits_blk = tl.where(mask, logits_blk, -float('inf'))
+                logits_blk = tl.where(logits_blk > pivot, logits_blk, -float('inf'))
                 tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
 
 def triton_apply_top_k_top_p(
@@ -490,6 +539,7 @@ def triton_apply_top_k_top_p(
     NUM_PROGRAMS = 128
     NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
     probs = torch.full_like(logits, -float('inf'))
+    debug = torch.full_like(logits, -float('inf'))
     print(b_str("Launch params:") + f"logits.shape: {logits.shape}, probs.shape: {probs.shape}, "
           f"k.shape: {k.shape if k is not None else None}, p.shape: {p.shape if p is not None else None}, "
           f"batch_size: {batch_size}, vocab_size: {vocab_size}, BLOCK_SIZE: {BLOCK_SIZE}, NUM_TILES: {NUM_TILES}")
@@ -499,7 +549,8 @@ def triton_apply_top_k_top_p(
                                       vocab_size, BLOCK_SIZE, NUM_TILES)
     else:
         _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
-                                           vocab_size, BLOCK_SIZE, NUM_TILES)
+                                           vocab_size, BLOCK_SIZE, NUM_TILES, debug)
+    print(f"debug: {debug[:14, :14]}")
     # print(f"Output logits: {logits}")
     # print(f"Output probs: {probs}")
     return logits, probs
@@ -524,9 +575,12 @@ def apply_top_k_top_p(
 
     The logits tensor may be updated in-place.
     """
+    logits = torch.full_like(logits, -10.0)
+    logits[:, :11] = torch.arange(1, 12, dtype=torch.float32, device=logits.device)
     input_logits = logits.clone()
-    original_logits = original_apply_top_k_top_p(input_logits, k, p)
-    original_probs = torch.softmax(input_logits, dim=-1)
+    print(f"input_logits: {input_logits[:12, :12]}")
+    original_logits, original_probs = original_apply_top_k_top_p(input_logits, k, p)
+    # original_probs = torch.softmax(input_logits, dim=-1)
 
     batch_size, vocab_size = logits.shape
     print(g_str("apply_top_k_top_p") + f" logits.shape: {batch_size} x {vocab_size}, p is None: {p is None}, k is None: {k is None}")
@@ -544,13 +598,13 @@ def apply_top_k_top_p(
 
     if not torch.allclose(probs, original_probs):
         print(r_str("Error: probs are not close"))
-        print(f"probs: {probs}")
-        print(f"original_probs: {original_probs}")
+    print(f"probs: {probs[:12, :12]}")
+    print(f"original_probs: {original_probs[:12, :12]}")
 
     if not torch.allclose(logits, original_logits):
         print(r_str("Error: logits are not close"))
-        print(f"logits: {logits}")
-        print(f"original_logits: {original_logits}")
+    print(f"logits: {logits[:12, :12]}")
+    print(f"original_logits: {original_logits[:12, :12]}")
 
     start_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(start_time))
     out_dir = "./sampler_input_output"

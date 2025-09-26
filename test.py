@@ -7,7 +7,7 @@ prompts = [
     "The future of AI is",
 ]
 prompts = prompts * 64
-sampling_params = SamplingParams(temperature=0.8, top_k=10, top_p=0.95)
+sampling_params = SamplingParams(temperature=0.8, top_k=8, top_p=0.95)
 
 llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct")
 # llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite")
