@@ -325,6 +325,8 @@ class Qwen3_VisionTransformer(nn.Module):
                               "set attn_backend to FLASH_ATTN.")
         if current_platform.is_device_capability(
                 100) and self.attn_backend != _Backend.TORCH_SDPA:
+            # TODO(Roger/Wentao): remove this after FA
+            # or XFORMERS's issue fixed on Blackwell
             logger.warning_once(
                 f"Qwen3-VL does not support {self.attn_backend} backend "
                 "on Blackwell now. Set attn_backend to TORCH_SDPA.")
