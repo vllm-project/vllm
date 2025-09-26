@@ -484,20 +484,13 @@ class Lfm2ForCausalLM(
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
-        scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, (
-            "Lfm2 currently does not support prefix caching"
-        )
+        assert (not cache_config.enable_prefix_caching
+                ), "Lfm2 currently does not support prefix caching"
 
         super().__init__()
         self.config = config
-        self.vllm_config = vllm_config
-        self.scheduler_config = scheduler_config
-        self.model_config = vllm_config.model_config
-
-        self.model = Lfm2Model(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+        self.model = Lfm2Model(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = self.config.vocab_size

@@ -633,7 +633,6 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
-        scheduler_config = vllm_config.scheduler_config
         assert (not cache_config.enable_prefix_caching
                 ), "Lfm2Moe currently does not support prefix caching"
         assert envs.VLLM_USE_V1, (
