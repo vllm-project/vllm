@@ -135,6 +135,9 @@ class Hermes2ProToolParser(ToolParser):
                     json.loads(match[0] if match[0] else match[1])
                     for match in function_call_tuples
                 ]
+                for fc in raw_function_calls:
+                    if isinstance(fc["arguments"], str):
+                        fc["arguments"] = json.loads(fc["arguments"])
                 tool_calls = [
                     ToolCall(
                         type="function",
@@ -297,6 +300,13 @@ class Hermes2ProToolParser(ToolParser):
                 current_tool_call = partial_json_parser.loads(
                     tool_call_portion or "{}",
                     flags) if tool_call_portion else None
+                if current_tool_call and \
+                   (args := current_tool_call.get("arguments")) and \
+                   isinstance(args,str):
+                    try:
+                        json.loads(args)
+                    except:
+                        del current_tool_call["arguments"]
                 logger.debug("Parsed tool call %s", current_tool_call)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
@@ -368,24 +378,27 @@ class Hermes2ProToolParser(ToolParser):
             # case -- we now have the first info about arguments available from
             #   autocompleting the JSON
             elif cur_arguments and not prev_arguments:
-                # extract the content after {"name": ..., "arguments":
-                #   directly from tool_call_portion as cur_arguments_json,
-                #   since cur_arguments may differ from the original text
-                #   due to partial JSON parsing
-                #   for example, tool_call_portion =
-                #     {"name": "search", "arguments": {"search_request": {"
-                #   but cur_arguments =
-                #     {"search_request": {}}
-                function_name = current_tool_call.get("name")
-                match = re.search(
-                    r'\{"name":\s*"' +
-                    re.escape(function_name) + r'"\s*,\s*"arguments":\s*(.*)',
-                    tool_call_portion.strip(), re.DOTALL)
-                if match:
-                    cur_arguments_json = match.group(1)
+                if isinstance(cur_arguments, str):
+                    cur_arguments_json = cur_arguments
                 else:
-                    cur_arguments_json = json.dumps(cur_arguments,
-                                                    ensure_ascii=False)
+                    # extract the content after {"name": ..., "arguments":
+                    #   directly from tool_call_portion as cur_arguments_json,
+                    #   since cur_arguments may differ from the original text
+                    #   due to partial JSON parsing
+                    #   for example, tool_call_portion =
+                    #     {"name": "search", "arguments": {"search_request": {"
+                    #   but cur_arguments =
+                    #     {"search_request": {}}
+                    function_name = current_tool_call.get("name")
+                    match = re.search(
+                        r'\{"name":\s*"' + re.escape(function_name) +
+                        r'"\s*,\s*"arguments":\s*(.*)',
+                        tool_call_portion.strip(), re.DOTALL)
+                    if match:
+                        cur_arguments_json = match.group(1)
+                    else:
+                        cur_arguments_json = json.dumps(cur_arguments,
+                                                        ensure_ascii=False)
 
                 logger.debug("finding %s in %s", delta_text,
                              cur_arguments_json)
