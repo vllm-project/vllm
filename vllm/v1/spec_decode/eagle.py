@@ -80,7 +80,6 @@ class EagleProposer:
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device=device)
-        # M-RoPE
         self.uses_mrope = self.vllm_config.model_config.uses_mrope
         if self.uses_mrope:
             # M-RoPE need (3, max_num_tokens)
@@ -152,7 +151,6 @@ class EagleProposer:
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
 
-    # M-RoPE
     def _get_positions(self, num_tokens: int):
         if self.uses_mrope:
             return self.mrope_positions[:, :num_tokens]
@@ -219,7 +217,6 @@ class EagleProposer:
         else:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
-        # M-RoPE
         self._set_positions(num_tokens, target_positions)
         self.hidden_states[:num_tokens] = target_hidden_states
         if self.is_multimodal_model:
@@ -240,7 +237,7 @@ class EagleProposer:
                                  num_tokens=num_input_tokens):
             ret_hidden_states = self.model(
                 input_ids=input_ids,
-                positions=self._get_positions(num_input_tokens), # M-RoPE
+                positions=self._get_positions(num_input_tokens),
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
@@ -258,7 +255,6 @@ class EagleProposer:
             draft_token_ids = logits.argmax(dim=-1)
             return draft_token_ids.view(-1, 1)
 
-        # M-RoPE
         if self.uses_mrope:
             positions = target_positions[:, last_token_indices]
         else:
@@ -309,7 +305,6 @@ class EagleProposer:
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_list[-1].int()
-            # M-RoPE
             if self.uses_mrope:
                 positions += 1
                 # NOTE(woosuk): We should handle the case where the draft model
@@ -345,7 +340,6 @@ class EagleProposer:
                 common_attn_metadata.seq_lens_cpu - 1
 
             # Compute the slot mapping.
-            # M-RoPE
             if self.uses_mrope:
                 # all dimensions of positions are the same
                 block_numbers = clamped_positions[0] // self.block_size
@@ -354,7 +348,6 @@ class EagleProposer:
             block_ids = common_attn_metadata.block_table_tensor.gather(
                 dim=1, index=block_numbers.view(-1, 1))
             block_ids = block_ids.view(-1)
-            # M-RoPE
             if self.uses_mrope:
                 common_attn_metadata.slot_mapping = (
                     block_ids * self.block_size +
@@ -378,7 +371,6 @@ class EagleProposer:
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
-            # M-RoPE
             self._set_positions(batch_size, clamped_positions)
             self.hidden_states[:batch_size] = hidden_states
             if self.is_multimodal_model:
@@ -394,10 +386,9 @@ class EagleProposer:
             with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
-                # M-RoPE
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
-                    positions=self._get_positions(input_batch_size), # M-RoPE
+                    positions=self._get_positions(input_batch_size),
                     hidden_states=self.hidden_states[:input_batch_size],
                     inputs_embeds=inputs_embeds,
                 )
@@ -939,7 +930,7 @@ class EagleProposer:
 
             self.model(
                 input_ids=input_ids,
-                positions=self._get_positions(num_tokens), # M-RoPE
+                positions=self._get_positions(num_tokens),
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
