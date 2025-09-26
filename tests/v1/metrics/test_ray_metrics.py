@@ -71,8 +71,8 @@ def test_engine_log_metrics_ray(
 def test_sanitized_opentelemetry_name():
     """Test the metric name sanitization logic for Ray."""
 
-    # Only a-z, A-Z, 0-9, _, /, test valid characters are preserved
-    valid_name = "valid_metric_123/abcDEF"
+    # Only a-z, A-Z, 0-9, _, test valid characters are preserved
+    valid_name = "valid_metric_123_abcDEF"
     assert RayPrometheusMetric._get_sanitized_opentelemetry_name(
         valid_name) == valid_name
 
