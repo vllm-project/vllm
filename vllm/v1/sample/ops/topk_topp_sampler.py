@@ -291,7 +291,7 @@ def _topk_kernel(LOGITS, PROBS, K, B,
 
 
 @triton.jit
-def _topk_topp_kernel(LOGITS, PROBS, K, P, B, 
+def _topk_topp_kernel(LOGITS, PROBS, NUM_SEARCH, K, P, B, 
                       N: tl.constexpr,
                       BLOCK_SIZE: tl.constexpr,
                       NUM_TILES: tl.constexpr,
@@ -303,7 +303,7 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
         p_pivot = -float('inf')
 
         LOGITS_ROW = LOGITS + row_id * N
-        PROBS_ROW = PROBS + pid * N
+        PROBS_ROW = PROBS + row_id * N
 
         search_addr = LOGITS_ROW
         search_range = N
@@ -311,6 +311,10 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
 
         max_logit = -float('inf')
         avg_logit = -float('inf')
+
+        # The Pytorch version removes the earlier duplicates if there are more than one duplicates
+        force_remove_logit = -float('inf')
+        num_force_remove = tl.zeros((), dtype=tl.uint32)
 
         k = tl.load(K + row_id)
         if not (k == N): # All tokens are valid
@@ -434,11 +438,14 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
 
             num_iters = 0
             p_pivots_sum_0 = 0.0
+            min_larger_0 = 1.0
+            num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
             while p_pivot == -float('inf') and num_iters < 32:
                 p_pivot_0 = (max_range - min_range) * 1.0 / 2.0 + min_range
                 p_pivots_sum_0 = 0.0
 
                 min_larger_0 = 1.0
+                num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
 
                 for i in range(0, search_iters):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -447,14 +454,14 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
 
                     masked_larger_0 = tl.where(probs_blk > p_pivot_0, probs_blk, 1.0)
                     min_larger_0 = tl.minimum(min_larger_0, tl.min(masked_larger_0))
+                    num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-6)
+
                     p_pivots_sum_0 += tl.sum(probs_blk * (probs_blk > p_pivot_0))
 
                 # Check if any of the pivots are equal to k
                 if p_pivots_sum_0 >= p:
-                    if p_pivots_sum_0 - min_larger_0 < p:
+                    if p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p:
                         p_pivot = p_pivot_0
-                        if tl.abs(p_pivots_sum_0 - min_larger_0) < 1e-6:
-                            p_pivot = (p_pivot_0 + min_larger_0) / 2.0
                     else:
                         min_range = p_pivot_0
                 else:
@@ -465,44 +472,67 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
                     p_pivot = p_pivot_0
                 
                 if row_id == 1:
-                    tl.store(DEBUG_PTR + num_iters * 18 + 0, p_pivots_sum_0)
-                    tl.store(DEBUG_PTR + num_iters * 18 + 1, p_pivot_0)
-                    tl.store(DEBUG_PTR + num_iters * 18 + 2, min_probs)
-                    tl.store(DEBUG_PTR + num_iters * 18 + 3, max_probs)
-                    tl.store(DEBUG_PTR + num_iters * 18 + 4, min_range)
-                    tl.store(DEBUG_PTR + num_iters * 18 + 5, max_range)
-                    tl.store(DEBUG_PTR + num_iters * 18 + 6, num_iters)
-                    tl.store(DEBUG_PTR + num_iters * 18 + 7, sum_exp_logits)
-                    tl.store(DEBUG_PTR + num_iters * 18 + 8, p_pivot)
-                    tl.store(DEBUG_PTR + num_iters * 18 + 9, tl.log(p_pivot * sum_exp_logits))
-                    tl.store(DEBUG_PTR + num_iters * 18 + 10, min_larger_0)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 0, p_pivots_sum_0)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 1, p_pivot_0)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 2, min_probs)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 3, max_probs)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 4, min_range)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 5, max_range)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 6, num_iters)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 7, sum_exp_logits)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 8, p_pivot)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 9, tl.log(p_pivot * sum_exp_logits))
+                    tl.store(DEBUG_PTR + num_iters * 21 + 10, min_larger_0)
+                    tl.store(DEBUG_PTR + num_iters * 21 + 11, num_min_larger_0)
             # Subtract a small value to include the nearest smaller value
             # If the nearest smaller value very small, it may cause numerical instability
-            if row_id == 1:
-                tl.store(DEBUG_PTR + num_iters * 18 + 13, p_pivots_sum_0)
-                tl.store(DEBUG_PTR + num_iters * 18 + 14, p_pivot)
-                tl.store(DEBUG_PTR + num_iters * 18 + 15, num_iters)
-            p_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
-            if row_id == 1:
-                tl.store(DEBUG_PTR + num_iters * 18 + 16, p_pivot)
-                tl.store(DEBUG_PTR + num_iters * 18 + 17, p)
+            
 
             # At least one value should be greater than p_pivot
             if p_pivot >= max_logit:
                 p_pivot = second_max_logit
+            elif num_min_larger_0 > 1:
+                # Force remove duplicates (p_pivot is made to include all duplicates if it falls on the duplicates)
+                num_force_remove = tl.cast((p_pivots_sum_0 - p) / min_larger_0, tl.uint32)
+                force_remove_logit = tl.log(min_larger_0 * sum_exp_logits) + max_logit
+
+            if row_id == 1:
+                tl.store(DEBUG_PTR + num_iters * 21 + 12, p_pivots_sum_0)
+                tl.store(DEBUG_PTR + num_iters * 21 + 13, p_pivot)
+                tl.store(DEBUG_PTR + num_iters * 21 + 14, num_iters)
+            p_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
+            if row_id == 1:
+                tl.store(DEBUG_PTR + num_iters * 21 + 15, p_pivot)
+                tl.store(DEBUG_PTR + num_iters * 21 + 16, p)
+                tl.store(DEBUG_PTR + num_iters * 21 + 17, force_remove_logit)
+                tl.store(DEBUG_PTR + num_iters * 21 + 18, num_force_remove)
+                tl.store(DEBUG_PTR + num_iters * 21 + 19, num_min_larger_0)
+                tl.store(DEBUG_PTR + num_iters * 21 + 20, min_larger_0)
+
 
             # Transform p_pivot into equivalent logit
             # p_pivot = tl.log(p_pivot * sum_exp_logits)
 
         # Sixth pass: Apply mask
         pivot = tl.maximum(k_pivot, p_pivot)
+        current_num_force_remove = tl.zeros((), dtype=tl.uint32)
         if pivot != -float('inf'):
             for i in range(0, NUM_TILES):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < N
-                logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n)
+                logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float('inf'))
+
+                if force_remove_logit != -float('inf'):
+                    force_remove_mask = tl.abs(logits_blk - force_remove_logit) < 1e-6
+                    force_remove_count = tl.cumsum(force_remove_mask) + current_num_force_remove
+                    force_remove_count_mask = force_remove_count <= num_force_remove
+                    force_remove_mask = force_remove_count_mask & force_remove_mask
+                    logits_blk = tl.where(force_remove_mask, -float('inf'), logits_blk)
+                    current_num_force_remove = tl.max(force_remove_count)
+
                 logits_blk = tl.where(logits_blk > pivot, logits_blk, -float('inf'))
                 tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
+                
 
 def triton_apply_top_k_top_p(
     logits: torch.Tensor,
@@ -513,19 +543,21 @@ def triton_apply_top_k_top_p(
     BLOCK_SIZE = 4096
     NUM_PROGRAMS = 128
     NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
-    probs = torch.full((NUM_PROGRAMS, vocab_size), -float('inf'), device=logits.device)
-    debug = torch.full((20, 18), -float('inf'), device=logits.device)
+    debug = torch.full((20, 21), -float('inf'), device=logits.device)
     # print(b_str("Launch params:") + f"logits.shape: {logits.shape}, probs.shape: {probs.shape}, "
     #       f"k.shape: {k.shape if k is not None else None}, p.shape: {p.shape if p is not None else None}, "
     #       f"batch_size: {batch_size}, vocab_size: {vocab_size}, BLOCK_SIZE: {BLOCK_SIZE}, NUM_TILES: {NUM_TILES}")
     # print(f"Input logits: {logits}")
     if p is None and k is not None:
+        probs = torch.full((NUM_PROGRAMS, vocab_size), -float('inf'), device=logits.device)
         _topk_kernel[(NUM_PROGRAMS,)](logits, probs, k, batch_size, 
                                       vocab_size, BLOCK_SIZE, NUM_TILES)
     else:
-        _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
+        probs = torch.full_like(logits, -float('inf'), device=logits.device)
+        num_search = torch.full((logits.shape[0],), vocab_size, device=logits.device)
+        _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, num_search, k, p, batch_size, 
                                            vocab_size, BLOCK_SIZE, NUM_TILES, debug)
-    print(f"debug: {debug[:, :18]}")
+    print(f"debug: {debug}")
     # print(f"Output logits: {logits}")
     # print(f"Output probs: {probs}")
     return logits
