@@ -114,28 +114,20 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = quant_config.a1_scale
 
+        self.handle = None
         (
-            expert_x, expert_probs, expert_x_scale,
-            num_tokens_per_expert, local_expert_routing_map,
-            self.handle
+            expert_x, expert_probs, expert_x_scale, _, _, self.handle
         ) = self.buffer.dispatch(
-            tokens=a1,
+            tensor=a1,
             scaling_factor=a1q_scale,
             topk_idx=topk_ids,
             topk_weights=topk_weights,
             routing_map=None, # None = generated dynamically
             handle=None,
             num_of_tokens_for_experts=-1, #??
-            async_mode=False,
         )
 
-        # Makes a GPU-CPU copy.
-        # TODO (varun): Maybe it is better to re-compute the expert_num_tokens
-        # on GPU.
-        expert_tokens_meta = mk.ExpertTokensMetadata(
-            num_tokens_per_expert,
-            None, #? num_tokens_per_expert.cpu(),
-        )
+        expert_tokens_meta = None
 
         # Dispatch and Quant
         # DeepEP kernels only support dispatching block-quantized
@@ -154,9 +146,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         self.expert_probs = expert_probs
 
-        return (expert_x, expert_x_scale, expert_tokens_meta,
-                topk_ids[local_expert_routing_map],
-                expert_probs)
+        return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
 
     def finalize(
         self,
@@ -182,7 +172,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         combined_x, _ = self.buffer.combine(
             tensor=fused_expert_output,
-            probs=self.expert_probs,
+            probs=self.expert_probs,  # None?
             handle=self.handle,
         )
 
