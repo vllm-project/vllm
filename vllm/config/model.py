@@ -337,6 +337,22 @@ class ModelConfig:
         assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
+    def _apply_nested_overrides(
+            self, hf_config: "PretrainedConfig",
+            nested_overrides: dict[str, dict[str, Any]]) -> None:
+        for key, override in nested_overrides.items():
+            sub_config = getattr(hf_config, key, None)
+
+            if sub_config is None:
+                continue
+
+            if isinstance(sub_config, dict):
+                sub_config.update(override)
+                continue
+
+            for attr, value in override.items():
+                setattr(sub_config, attr, value)
+
     def __post_init__(
             self,
             # Multimodal config init vars
@@ -385,8 +401,14 @@ class ModelConfig:
             hf_overrides_kw = {}
             hf_overrides_fn = self.hf_overrides
         else:
-            hf_overrides_kw = self.hf_overrides
+            hf_overrides_kw = dict(self.hf_overrides)
             hf_overrides_fn = None
+
+        nested_overrides: dict[str, dict[str, Any]] = {}
+        for key, value in list(hf_overrides_kw.items()):
+            if isinstance(value, dict):
+                nested_overrides[key] = value
+                del hf_overrides_kw[key]
 
         if self.rope_scaling:
             hf_override: dict[str, Any] = {"rope_scaling": self.rope_scaling}
@@ -437,6 +459,8 @@ class ModelConfig:
                                hf_overrides_fn=hf_overrides_fn)
 
         self.hf_config = hf_config
+        if nested_overrides:
+            self._apply_nested_overrides(hf_config, nested_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(self.hf_text_config,
                                             "attention_chunk_size", None)
