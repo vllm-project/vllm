@@ -388,6 +388,7 @@ def gen_prompt_decode_to_target_len(
     Returns a tuple of the final prompt string and the adjusted token sequence.
     """
     remain_num_try = max_retry
+    token_mismatch = 0
     while True:
         prompt = tokenizer.decode(token_sequence)
         token_sequence = tokenizer.encode(
@@ -395,12 +396,7 @@ def gen_prompt_decode_to_target_len(
         )
         if remain_num_try <= 0:
             if len(token_sequence) != target_token_len:
-                logger.warning(
-                    "Failed to sample a prompt that matches the "
-                    "expected decoded token length, expected %d, got %d",
-                    target_token_len,
-                    len(token_sequence),
-                )
+                token_mismatch = len(token_sequence) - target_token_len
             break
         
         if len(token_sequence) == target_token_len:
@@ -417,7 +413,7 @@ def gen_prompt_decode_to_target_len(
 
         remain_num_try -= 1
 
-    return prompt, token_sequence
+    return prompt, token_sequence, token_mismatch
 
 # -----------------------------------------------------------------------------
 # Random Dataset Implementation (Synthetic Data)
@@ -472,8 +468,9 @@ class RandomDataset(BenchmarkDataset):
         vocab_size = tokenizer.vocab_size
 
         requests = []
+        token_mismatch_total = 0
         for i in range(num_requests):
-            prompt, total_input_len = self.generate_token_sequence(
+            prompt, total_input_len, token_mismatch = self.generate_token_sequence( # noqa: E501
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
                 prefix_len=prefix_len,
@@ -482,6 +479,7 @@ class RandomDataset(BenchmarkDataset):
                 offset=int(offsets[i]),
                 index=i,
             )
+            token_mismatch_total += token_mismatch
             requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -505,6 +503,18 @@ class RandomDataset(BenchmarkDataset):
                     )
                 )
             requests = batch_requests
+        
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
+
         return requests
 
     def get_prefix(
@@ -2740,21 +2750,22 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
             tokens = np.random.randint(
                 0, vocab_size, size=target_length).tolist()
 
-            _, adjusted_tokens = gen_prompt_decode_to_target_len(
+            _, adjusted_tokens, token_mismatch = gen_prompt_decode_to_target_len(
                 tokenizer=tokenizer,
                 token_sequence=tokens,
                 target_token_len=target_length,
                 add_special_tokens=False,
             )
-            return adjusted_tokens
+            return adjusted_tokens, token_mismatch
 
         requests = []
+        token_mismatch_total = 0
         for _ in range(num_prefixes):
             prefix_tokens = _generate_exact_length_tokens(prefix_len)
 
             for _ in range(prompts_per_prefix):
-                suffix_tokens = _generate_exact_length_tokens(suffix_len)
-
+                suffix_tokens, token_mistmatch = _generate_exact_length_tokens(suffix_len) # noqa: E501
+                token_mismatch_total += token_mistmatch
                 combined_tokens = prefix_tokens + suffix_tokens
                 prompt = tokenizer.decode(combined_tokens)
                 prompt_len = len(combined_tokens)
@@ -2766,5 +2777,15 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
                     )
                 )
 
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
         random.shuffle(requests)
         return requests
