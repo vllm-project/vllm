@@ -31,6 +31,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    B,
                                    C,
                                    chunk_size,
+                                   out,
                                    D=None,
                                    z=None,
                                    dt_bias=None,
@@ -41,14 +42,13 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    cu_seqlens=None,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
-                                   state_dtype=None,
-                                   out=None):
+                                   state_dtype=None):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
-    batch, seqlen, nheads, headdim = x.shape
-    _, _, ngroups, dstate = B.shape
+    seqlen, nheads, headdim = x.shape
+    _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
-    assert B.shape == (batch, seqlen, ngroups, dstate)
-    assert dt.shape == (batch, seqlen, nheads)
+    assert B.shape == (seqlen, ngroups, dstate)
+    assert dt.shape == (seqlen, nheads)
     assert A.shape == (nheads, )
     assert C.shape == B.shape
     if z is not None:
@@ -56,25 +56,24 @@ def _mamba_chunk_scan_combined_fwd(x,
     if D is not None:
         assert D.shape == (nheads, headdim) or D.shape == (nheads, )
     if seq_idx is not None:
-        assert seq_idx.shape == (batch, seqlen)
+        assert seq_idx.shape == (seqlen, )
     if B.stride(-1) != 1:
         B = B.contiguous()
     if C.stride(-1) != 1:
         C = C.contiguous()
     if x.stride(-1) != 1 and x.stride(
-            1) != 1:  # Either M or K dimension should be contiguous
+            0) != 1:  # Either M or K dimension should be contiguous
         x = x.contiguous()
     if z is not None and z.stride(-1) != 1 and z.stride(
-            1) != 1:  # Either M or K dimension should be contiguous
+            0) != 1:  # Either M or K dimension should be contiguous
         z = z.contiguous()
     if D is not None and D.stride(-1) != 1:
         D = D.contiguous()
+    assert cu_seqlens is not None, "Assuming varlen input - must supply cu_seqlens"
+
     if initial_states is not None:
-        if cu_seqlens is None:
-            assert initial_states.shape == (batch, nheads, headdim, dstate)
-        else:
-            assert initial_states.shape == (len(cu_seqlens) - 1, nheads,
-                                            headdim, dstate)
+        assert initial_states.shape == (len(cu_seqlens) - 1, nheads, headdim,
+                                        dstate)
 
     # This function executes 5 sub-functions for computing mamba
     # - a good resource is the blog https://goombalab.github.io/blog/2024/mamba2-part3-algorithm/
@@ -114,18 +113,16 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - this will ensure that states will be updated with the rightmost flushed seq_idx
     #   of the previous chunk. This implies that the first chunk of states is either 0
     #   or equal to init_states of the first example.
-    states, final_states = _state_passing_fwd(
+    states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
-        dA_cumsum,
+        dA_cumsum,  # (nheads, nchunks, chunk_size)
         initial_states=rearrange(initial_states, "... p n -> ... (p n)")
-        if initial_states is not None else None,
+        if initial_states is not None else
+        None,  # (batch, nheads, headdim*dstate)
         seq_idx=seq_idx,
-        chunk_size=chunk_size,
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
-        is_cont_batched=cu_seqlens is not None,
         chunk_offsets=chunk_offsets)
-    states, final_states = (rearrange(t, "... (p n) -> ... p n", n=dstate)
-                            for t in [states, final_states])
+    states = rearrange(states, "... (p n) -> ... p n", n=dstate)
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C,
@@ -144,87 +141,88 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - in each (pseudo) chunk, we detect if the previous (pseudo) chunk had
     #   a seq_idx change, in which case we take states information from
     #   init_states.
-    out_x = _chunk_scan_fwd(
+    _chunk_scan_fwd(
         CB,
         x,
         dt,
         dA_cumsum,
         C,
         states,
+        out,  # in-place update
+        seq_idx,
         D=D,
         z=z,
-        seq_idx=seq_idx,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         initial_states=initial_states,
-        out=out,
     )
-    if cu_seqlens is None:
-        return out_x, dt, dA_cumsum, states, final_states
-    else:
-        assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
-        varlen_states = chunk_state_varlen(
-            B.squeeze(0),
-            x.squeeze(0),
-            dt.squeeze(0),
-            dA_cumsum.squeeze(0),
-            cu_seqlens,
-            states.squeeze(0),
-            initial_states=initial_states,
-        )
-        return out_x, dt, dA_cumsum, states, final_states, varlen_states
+
+    varlen_states = chunk_state_varlen(
+        B,
+        x,
+        dt,
+        dA_cumsum,
+        cu_seqlens,
+        states,
+        initial_states=initial_states,
+    )
+
+    return varlen_states
 
 
-def mamba_chunk_scan_combined(x,
-                              dt,
-                              A,
-                              B,
-                              C,
-                              chunk_size,
-                              D=None,
-                              z=None,
-                              dt_bias=None,
-                              initial_states=None,
-                              seq_idx=None,
-                              chunk_indices=None,
-                              chunk_offsets=None,
-                              cu_seqlens=None,
-                              dt_softplus=False,
-                              dt_limit=(0.0, float("inf")),
-                              out=None,
-                              return_final_states=False,
-                              return_varlen_states=False,
-                              state_dtype=None):
-    """
-    Argument:
-        x: (batch, seqlen, nheads, headdim)
-        dt: (batch, seqlen, nheads)
-        A: (nheads)
-        B: (batch, seqlen, ngroups, dstate)
-        C: (batch, seqlen, ngroups, dstate)
-        chunk_size: int
-        D: (nheads, headdim) or (nheads,)
-        z: (batch, seqlen, nheads, headdim)
-        dt_bias: (nheads,)
-        initial_states: (batch, nheads, headdim, dstate)
-        seq_idx: (batch, seqlen)
-        cu_seqlens: (num_sequences + 1) or None, only used if return_varlen_states is True
-        dt_softplus: Whether to apply softplus to dt
-        out: Preallocated output tensor
-        state_dtype: The data type of the ssm state
-    """
-
-    if not return_varlen_states:
-        cu_seqlens = None
-    else:
-        assert cu_seqlens is not None, "cu_seqlens must be provided if return_varlen_states is True"
-    out_x, dt_out, dA_cumsum, states, final_states, *rest = _mamba_chunk_scan_combined_fwd(
+def mamba_chunk_scan_combined_varlen(
         x,
         dt,
         A,
         B,
         C,
         chunk_size,
+        cu_seqlens,
+        seq_idx,
+        out,
+        D=None,
+        z=None,
+        dt_bias=None,
+        initial_states=None,
+        chunk_indices=None,
+        chunk_offsets=None,
+        dt_softplus=False,
+        dt_limit=(0.0, float("inf")),
+        state_dtype=None,
+):
+    """
+    Argument:
+        x: (seqlen, nheads, headdim)
+        dt: (seqlen, nheads)
+        A: (nheads)
+        B: (seqlen, ngroups, dstate)
+        C: (seqlen, ngroups, dstate)
+        chunk_size: int
+        seq_idx: (seqlen)
+        cu_seqlens: (batch + 1)
+        out: (seqlen, nheads, headdim) preallocated output tensor
+        D: (nheads, headdim) or (nheads,)
+        z: (seqlen, nheads, headdim)
+        dt_bias: (nheads,)
+        initial_states: (batch, nheads, headdim, dstate)
+        dt_softplus: Whether to apply softplus to dt
+        out: (seqlen, nheads, headdim) preallocated output tensor
+        state_dtype: The data type of the ssm state
+    Return:
+        varlen_states: (batch, nheads, headdim, dstate)
+    """
+
+    assert cu_seqlens is not None, "cu_seqlens must be provided assuming varlen input"
+    assert seq_idx is not None
+
+    varlen_states = _mamba_chunk_scan_combined_fwd(
+        x,
+        dt,
+        A,
+        B,
+        C,
+        chunk_size,
+        out,
         D=D,
         z=z,
         dt_bias=dt_bias,
@@ -235,14 +233,6 @@ def mamba_chunk_scan_combined(x,
         cu_seqlens=cu_seqlens,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
-        out=out,
         state_dtype=state_dtype)
-    if not return_varlen_states:
-        if not return_final_states:
-            return
-        else:
-            return final_states
-    else:
-        varlen_states = rest[0]
-        return (varlen_states) if not return_final_states else (final_states,
-                                                                varlen_states)
+
+    return varlen_states
