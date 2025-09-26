@@ -21,6 +21,7 @@ To enable vLLM in TRL, set the `use_vllm` flag in the trainer configuration to `
 
 Some trainers also support **vLLM sleep mode**, which offloads parameters and caches to GPU RAM during training, helping reduce memory usage. Learn more in the [memory optimization docs](https://huggingface.co/docs/trl/main/en/reducing_memory_usage#vllm-sleep-mode).
 
+
 !!! info
     For more information on the `use_vllm` flag you can provide to the configs of these online methods, see:
 
