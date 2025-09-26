@@ -213,8 +213,14 @@ def kernel_unified_attention_2d(
         other=0.0,
     )
 
+    if Q is not None:
+           pid0 = tl.program_id(axis=0)
+           pid1 = tl.program_id(axis=1)
+           if pid0 < 1 and pid1 < 1:
+              tl.device_print("Q:",Q.shape[0], Q.shape[1])
+
     if use_native_fp4:
-       q_fp4, scale_q = _mxfp4_quant_op(Q, HEAD_SIZE_PADDED, BLOCK_M, 32)
+       q_fp4, scale_q = _mxfp4_quant_op(Q.to(tl.float32), HEAD_SIZE_PADDED, BLOCK_M, 32)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -339,13 +345,13 @@ def kernel_unified_attention_2d(
            # debug info
            pid0 = tl.program_id(axis=0)
            pid1 = tl.program_id(axis=1)
-           if pid0 < -1 and pid1 < 1 and j == 0:
+           if pid0 < 1 and pid1 < 1 and j == 0:
               tl.device_print("k_fp4:",k_fp4.shape[0], k_fp4.shape[1])
 
            # copied from triton def dot_scaled()
            # M, K_LHS = lhs.type.shape[-2:]
            # K_RHS, N = rhs.type.shape[-2:]
-           S = scale * tl.dot_scaled(q_fp4, scale_p, "e2m1", k_fp4, scale_v, "e2m1", S, lhs_k_pack=PACK_ALONG_K,
+           S = scale * tl.dot_scaled(q_fp4, scale_q, "e2m1", tl.trans(k_fp4), tl.trans(scale_k), "e2m1", S, lhs_k_pack=PACK_ALONG_K,
                                    rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32)
         else:
            S += scale * tl.dot(Q, K)
@@ -401,10 +407,10 @@ def kernel_unified_attention_2d(
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
         if use_native_fp4:
-           p_fp4, scale_p = _mxfp4_quant_op(P, BLOCK_SIZE, BLOCK_M, 32)
+           p_fp4, scale_p = _mxfp4_quant_op(P, TILE_SIZE, BLOCK_M, 32)
 
            vt = tl.trans(V)
-           v_fp4, scale_v = _mxfp4_quant_op(vt, BLOCK_SIZE, HEAD_SIZE_PADDED, 32)
+           v_fp4, scale_v = _mxfp4_quant_op(vt, TILE_SIZE, HEAD_SIZE_PADDED, 32)
 
            v_fp4_t   =  tl.trans(v_fp4)
            scale_v_t =  tl.trans(scale_v)
@@ -412,7 +418,7 @@ def kernel_unified_attention_2d(
            # debug info
            pid0 = tl.program_id(axis=0)
            pid1 = tl.program_id(axis=1)
-           if pid0 < -1 and pid1 < 1 and j == 0:
+           if pid0 < 1 and pid1 < 1 and j == 0:
               tl.device_print("v_fp4:",v_fp4.shape[0], v_fp4.shape[1])
 
            # copied from triton def dot_scaled()
@@ -841,8 +847,11 @@ def unified_attention(
 
     BLOCK_M = 16 if num_queries_per_kv <= 16 else triton.next_power_of_2(
         num_queries_per_kv)
+
+    print("--------BLOK_M: ", num_queries_per_kv, BLOCK_M)
+    BLOCK_M = 32
     BLOCK_Q = BLOCK_M // num_queries_per_kv
-    print("BLOK_M: ", num_queries_per_kv, BLOCK_M)
+
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
     # However, it is slow to realize the query_lens on cpu.
@@ -857,7 +866,7 @@ def unified_attention(
     # Assigning default tile sizes for prefill and decode.
     # Note: each tile size must be at least 32 for "fp8" (q.element_size() == 1)
     # and at least 16 for all other data types.
-    TILE_SIZE_PREFILL = 32
+    TILE_SIZE_PREFILL = 64 #32
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
     # if batch contains a prefill
