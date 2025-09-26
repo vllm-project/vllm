@@ -3547,7 +3547,6 @@ class VllmConfig:
                 if "none" in self.compilation_config.custom_ops:
                     self.compilation_config.custom_ops.remove("none")
                 self.compilation_config.custom_ops.append("+rms_norm")
-                self.compilation_config.custom_ops.append("+silu_and_mul")
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.set_splitting_ops_for_v1()
 
