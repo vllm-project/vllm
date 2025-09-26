@@ -444,7 +444,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.device_config: DeviceConfig = vllm_config.device_config
         self.model_config: ModelConfig = vllm_config.model_config
         self.parallel_config: ParallelConfig = vllm_config.parallel_config
-        self.quant_config: QuantizationConfig = vllm_config.quant_config
+        self.quant_config: Optional[
+            QuantizationConfig] = vllm_config.quant_config
 
         self.pp_group = get_pp_group()
         self.pp_size = self.pp_group.world_size
@@ -453,7 +454,18 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         # Weights to skip in `self.load_weights`
         self.skip_prefixes: list[str] = []
+        """Skip loading weights whose qualname starts with these prefixes."""
         self.skip_substrs: list[str] = []
+        """Skip loading weights whose qualname contains these substrings."""
+        self.ignore_unexpected_prefixes: list[str] = []
+        """Ignore unexpected weights whose qualname starts with these prefixes.
+        """
+        self.ignore_unexpected_suffixes: list[str] = []
+        """Ignore unexpected weights whose qualname ends with these suffixes."""
+
+        # Skip loading extra bias for GPTQ models.
+        if self.quant_config and "gptq" in self.quant_config.get_name():
+            self.ignore_unexpected_suffixes.append(".bias")
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         # TODO: @raushan, use the public `model.set_attn_implementation()`
@@ -693,6 +705,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             self,
             skip_prefixes=self.skip_prefixes,
             skip_substrs=self.skip_substrs,
+            ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
+            ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
