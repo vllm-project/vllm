@@ -255,6 +255,14 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_kv_cache_usage = make_per_engine(gauge_kv_cache_usage,
                                                     engine_indexes, model_name)
 
+        gauge_kv_cache_avg_lifetime = self._gauge_cls(
+            name="vllm:kv_cache_avg_lifetime_seconds",
+            documentation="Average lifetime of KV cache blocks in seconds.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames)
+        self.gauge_kv_cache_avg_lifetime = make_per_engine(
+            gauge_kv_cache_avg_lifetime, engine_indexes, model_name)
+
         counter_prefix_cache_queries = self._counter_cls(
             name="vllm:prefix_cache_queries",
             documentation=(
@@ -549,6 +557,13 @@ class PrometheusStatLogger(StatLoggerBase):
                 scheduler_stats.prefix_cache_stats.queries)
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits)
+
+            # Update KV cache lifetime metric
+            if hasattr(scheduler_stats, 'kv_cache_lifetime_stats'):
+                lifetime_stats = scheduler_stats.kv_cache_lifetime_stats
+                if lifetime_stats.total_blocks_freed > 0:
+                    self.gauge_kv_cache_avg_lifetime[engine_idx].set(
+                        lifetime_stats.average_lifetime_seconds)
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(

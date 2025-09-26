@@ -27,6 +27,31 @@ class PrefixCacheStats:
 
 
 @dataclass
+class KVCacheLifetimeStats:
+    """Stores KV cache block lifetime statistics."""
+    # Total number of blocks that have been freed
+    total_blocks_freed: int = 0
+    # Sum of all block lifetimes (in seconds)
+    total_lifetime_seconds: float = 0.0
+    # Average lifetime of freed blocks (in seconds)
+    average_lifetime_seconds: float = 0.0
+    
+    def add_block_lifetime(self, lifetime_seconds: float) -> None:
+        """Add a new block lifetime to the statistics."""
+        self.total_blocks_freed += 1
+        self.total_lifetime_seconds += lifetime_seconds
+        self.average_lifetime_seconds = (
+            self.total_lifetime_seconds / self.total_blocks_freed
+        )
+    
+    def reset(self) -> None:
+        """Reset all lifetime statistics."""
+        self.total_blocks_freed = 0
+        self.total_lifetime_seconds = 0.0
+        self.average_lifetime_seconds = 0.0
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -41,6 +66,9 @@ class SchedulerStats:
 
     prefix_cache_stats: PrefixCacheStats = field(
         default_factory=PrefixCacheStats)
+    
+    kv_cache_lifetime_stats: KVCacheLifetimeStats = field(
+        default_factory=KVCacheLifetimeStats)
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
     kv_connector_stats: Optional[dict[str, Any]] = None

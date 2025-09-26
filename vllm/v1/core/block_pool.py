@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -13,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
                                          get_block_hash,
                                          make_block_hash_with_group_id,
                                          maybe_convert_block_hash)
+from vllm.v1.metrics.stats import KVCacheLifetimeStats
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -159,6 +161,9 @@ class BlockPool:
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
+        
+        # KV cache lifetime statistics
+        self.lifetime_stats = KVCacheLifetimeStats()
 
     def get_cached_block(
             self, block_hash: BlockHash,
@@ -272,15 +277,20 @@ class BlockPool:
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
         # In order to only iterate the list once, we duplicated code a bit
+        current_time = time.time()
         if self.enable_caching:
             for block in ret:
                 self._maybe_evict_cached_block(block)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
+                # Record allocation time for lifetime tracking
+                block.allocation_time = current_time
         else:
             for block in ret:
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
+                # Record allocation time for lifetime tracking
+                block.allocation_time = current_time
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -345,8 +355,19 @@ class BlockPool:
         """
         # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
+        current_time = time.time()
+        
         for block in blocks_list:
+            # Calculate and record lifetime if allocation time was tracked
+            if (block.allocation_time is not None and 
+                block.ref_cnt == 1 and not block.is_null):
+                lifetime = current_time - block.allocation_time
+                self.lifetime_stats.add_block_lifetime(lifetime)
+                # Clear allocation time when block is freed
+                block.allocation_time = None
+            
             block.ref_cnt -= 1
+            
         self.free_block_queue.append_n([
             block for block in blocks_list
             if block.ref_cnt == 0 and not block.is_null
@@ -414,3 +435,15 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+
+    def get_lifetime_stats(self) -> KVCacheLifetimeStats:
+        """Get the current KV cache lifetime statistics.
+        
+        Returns:
+            The current lifetime statistics.
+        """
+        return self.lifetime_stats
+
+    def reset_lifetime_stats(self) -> None:
+        """Reset the KV cache lifetime statistics."""
+        self.lifetime_stats.reset()
