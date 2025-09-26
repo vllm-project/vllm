@@ -390,9 +390,7 @@ __device__ void paged_attention_kernel(
         static_cast<int64_t>(block_table[block_idx]);
     const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
     const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
-    // L_vec logits_vec;
-    // from_float(logits_vec, *reinterpret_cast<Float_L_vec*>(logits + token_idx -
-    //                                                        start_token_idx));
+
     //Avoid type conversion and use original F32 data for higher precision dot product
     Float_L_vec logits_vec = *reinterpret_cast<Float_L_vec*>(logits + token_idx - start_token_idx);
 
@@ -425,7 +423,6 @@ __device__ void paged_attention_kernel(
             v_vec_ptr[j] = token_idx + j < seq_len ? v_vec_ptr[j] : zero_value;
           }
         }
-        // accs[i] += dot(logits_vec, v_vec);
         //Precision improvement: upgrade v_vec to F32 and dot product with F32 logits
         Float_L_vec v_vec_f32 = to_float(v_vec);
         accs[i] += dot(logits_vec, v_vec_f32);
