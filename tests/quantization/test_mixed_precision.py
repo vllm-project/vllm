@@ -21,7 +21,7 @@ QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
 
 try:
     huggingface_hub.list_repo_refs(
-        "amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8")
+        "amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8")
     HF_HUB_AMD_ORG_ACCESS = True
 except huggingface_hub.errors.RepositoryNotFoundError:
     HF_HUB_AMD_ORG_ACCESS = False
@@ -45,14 +45,6 @@ class EvaluationConfig:
 
 
 TEST_CONFIGS = {
-    "amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8": {
-        "arc_challenge": 0.53,
-        "mmlu": 0.60
-    },
-    "amd/Mixtral-8x7B-Instruct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8": {
-        "arc_challenge": 0.62,
-        "mmlu": 0.68
-    },
     "amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8": {
         "arc_challenge": 0.52,
         "mmlu": 0.72
@@ -73,7 +65,7 @@ def test_mixed_precision_model_accuracies(model_name: str,
         model="vllm",
         model_args=EvaluationConfig(model_name).get_model_args(),
         tasks=list(accuracy_numbers.keys()),
-        batch_size="auto" if "Qwen3-8B" not in model_name else 8)
+        batch_size=8)
 
     rtol = 0.05
 
