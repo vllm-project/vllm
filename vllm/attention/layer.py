@@ -586,10 +586,8 @@ def maybe_calc_kv_scales_fake(
 direct_register_custom_op(
     op_name="maybe_calc_kv_scales",
     op_func=maybe_calc_kv_scales,
-    mutates_args=[],
+    mutates_args=["query", "key", "value"],
     fake_impl=maybe_calc_kv_scales_fake,
-    dispatch_key=current_platform.dispatch_key,
-    tags=tag_cudagraph_unsafe,
 )
 
 
