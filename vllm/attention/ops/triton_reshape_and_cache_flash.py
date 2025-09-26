@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
@@ -138,7 +137,7 @@ def triton_reshape_and_cache_flash(
 
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
-    if torch.version.hip:
+    if torch.version.hip or torch.version.xpu:
         num_stages = 4
         num_warps = 8
     else:  # cuda
