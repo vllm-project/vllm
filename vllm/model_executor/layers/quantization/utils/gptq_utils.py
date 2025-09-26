@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
 from copy import deepcopy
 from fractions import Fraction
+from types import MappingProxyType
 from typing import Optional, Union
 
 import regex as re
@@ -70,6 +72,49 @@ def get_dynamic_override(
     return default_value
 
 
+def is_layer_gptq_quantized(
+    prefix: str,
+    quantized_layers: list[str],
+    fused_mapping: Mapping[str, list[str]] = MappingProxyType({})
+) -> bool:
+    # prefix: model.layers.0.self_attn.q_proj
+    # proj_name: q_proj
+
+    # GPTQ's `modules_in_block_to_quantize`:
+    # Substr: ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"]
+    # Full prefix ["model.layers.0.self_attn.q_proj"]
+
+    proj_name = prefix.split(".")[-1]
+
+    # Fused layers like gate_up_proj or qkv_proj will not be fused
+    # in the safetensors checkpoint. So, we convert the name
+    # from the fused version to unfused + check to make sure that
+    # each shard of the fused layer has the same scheme.
+    if proj_name in fused_mapping:
+        shard_prefixes = [
+            prefix.replace(proj_name, shard_proj_name)
+            for shard_proj_name in fused_mapping[proj_name]
+        ]
+
+        is_quantized = None
+        for shard_prefix in shard_prefixes:
+            is_shard_quantized = any(layer in shard_prefix
+                                     for layer in quantized_layers)
+
+            if is_quantized is None:
+                is_quantized = is_shard_quantized
+            elif is_shard_quantized != is_quantized:
+                raise ValueError(
+                    f"Detected some but not all shards of {prefix} "
+                    "are quantized. All shards of fused layers "
+                    "to have the same precision.")
+    else:
+        is_quantized = any(layer in prefix for layer in quantized_layers)
+
+    assert is_quantized is not None
+    return is_quantized
+
+
 def get_linear_quant_method(
     config: QuantizationConfig,
     layer: torch.nn.Module,
@@ -80,10 +125,15 @@ def get_linear_quant_method(
     parallel_lm_head_quantized = isinstance(
         layer, ParallelLMHead) and cloned_config.lm_head_quantized
     if isinstance(layer, LinearBase) or parallel_lm_head_quantized:
+        is_layer_quantized = is_layer_gptq_quantized(
+            prefix=prefix,
+            quantized_layers=cloned_config.modules_in_block_to_quantize,
+            fused_mapping=cloned_config.packed_modules_mapping)
         # False = skip module, None = no override, else = Positive match
         if get_dynamic_override(  # noqa: E712
                 cloned_config,  # noqa: E712
-                layer_name=prefix) == False:  # noqa: E712
+                layer_name=prefix) == False or (
+                    not is_layer_quantized):  # noqa: E712
             if parallel_lm_head_quantized:
                 return UnquantizedEmbeddingMethod()
             return UnquantizedLinearMethod()

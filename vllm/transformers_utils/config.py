@@ -4,6 +4,7 @@
 import json
 import os
 import time
+from dataclasses import asdict
 from functools import cache, partial
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, TypeVar, Union
@@ -27,7 +28,8 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import (check_gguf_file,
+                                           parse_safetensors_file_metadata)
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -997,6 +999,34 @@ def try_get_tokenizer_config(
         )
     except Exception:
         return None
+
+
+def get_safetensors_params_metadata(
+    model: str,
+    *,
+    revision: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Get the safetensors metadata for remote model repository.
+    """
+    full_metadata = {}
+    if (model_path := Path(model)).exists():
+        safetensors_to_check = model_path.glob("*.safetensors")
+        full_metadata = {
+            param_name: info
+            for file_path in safetensors_to_check if file_path.is_file()
+            for param_name, info in parse_safetensors_file_metadata(
+                file_path).items()
+        }
+    else:
+        repo_mt = try_get_safetensors_metadata(model, revision=revision)
+        if repo_mt and (files_mt := repo_mt.files_metadata):
+            full_metadata = {
+                param_name: asdict(info)
+                for file_mt in files_mt.values()
+                for param_name, info in file_mt.tensors.items()
+            }
+    return full_metadata
 
 
 def _download_mistral_config_file(model, revision) -> dict:
