@@ -332,11 +332,14 @@ class Qwen3_VisionTransformer(nn.Module):
             check_upstream_fa_availability(
                 torch.get_default_dtype()):
             self.attn_backend = _Backend.FLASH_ATTN
+            logger.debug_once("Upstream Flash Attention is available, "
+                              "set attn_backend to FLASH_ATTN.")
         if current_platform.is_device_capability(
                 100) and self.attn_backend != _Backend.TORCH_SDPA:
-            raise NotImplementedError(
-                f"Qwen3-VL does not support {self.attn_backend} backend now. "
-                f"Consider `export VLLM_ATTENTION_BACKEND=TORCH_SDPA` .")
+            logger.warning_once(
+                f"Qwen3-VL does not support {self.attn_backend} backend "
+                "on Blackwell now. Set attn_backend to TORCH_SDPA.")
+            self.attn_backend = _Backend.TORCH_SDPA
         logger.info_once(f"Qwen3-VL attn_backend: {self.attn_backend}")
 
     @property
