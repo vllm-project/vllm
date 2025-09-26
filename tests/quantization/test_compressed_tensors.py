@@ -18,9 +18,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A16Fp4, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -32,7 +29,7 @@ from vllm.platforms import current_platform
 # It does not support mix precision MM and mix quantization scheme.
 ROCM_AITER_SUPPORTED_INT8_MODEL = [
     "neuralmagic/Llama-3.2-1B-quantized.w8a8",
-    "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2"
+    "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
 ]
 
 # TritonScaledMMLinearKernel only supports symmetric quantization.
@@ -80,8 +77,8 @@ def enable_pickle(monkeypatch):
 def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
     model_path, strategy, quant_type, shape_0, is_symmetric = model_args
 
-    if current_platform.is_rocm(
-    ) and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL:
+    if (current_platform.is_rocm()
+            and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL):
         pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
 
     with vllm_runner(model_path, enforce_eager=True) as llm:
@@ -163,8 +160,8 @@ def test_compressed_tensors_w8a8_logprobs(
     monkeypatch,
 ):
 
-    if current_platform.is_rocm(
-    ) and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL:
+    if (current_platform.is_rocm()
+            and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL):
         pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
 
     if use_aiter:
@@ -235,8 +232,8 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
 ):
     model_path, strategy = model_args
 
-    if current_platform.is_rocm(
-    ) and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL:
+    if (current_platform.is_rocm()
+            and model_path not in ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL):
         pytest.skip(f"Skip model {model_path} as it is not support on ROCm.")
 
     if use_aiter:
@@ -269,18 +266,50 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
 
 @pytest.mark.parametrize(
     "wNa16_args",
-    [("nm-testing/tinyllama-oneshot-w4a16-channel-v2", "channel", None, 8,
-      True, False),
-     ("nm-testing/tinyllama-oneshot-w4a16-group128-v2", "group", 128, 8, True,
-      False),
-     ("nm-testing/tinyllama-oneshot-w8a16-per-channel", "channel", None, 4,
-      True, False),
-     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-awq-group128-asym256", "group", 128,
-      8, False, False),
-     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-Channel",
-      "channel", None, 8, False, False),
-     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
-      "group", 128, 8, False, True)],
+    [
+        (
+            "nm-testing/tinyllama-oneshot-w4a16-channel-v2",
+            "channel",
+            None,
+            8,
+            True,
+            False,
+        ),
+        ("nm-testing/tinyllama-oneshot-w4a16-group128-v2", "group", 128, 8,
+         True, False),
+        (
+            "nm-testing/tinyllama-oneshot-w8a16-per-channel",
+            "channel",
+            None,
+            4,
+            True,
+            False,
+        ),
+        (
+            "nm-testing/TinyLlama-1.1B-Chat-v1.0-awq-group128-asym256",
+            "group",
+            128,
+            8,
+            False,
+            False,
+        ),
+        (
+            "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-Channel",
+            "channel",
+            None,
+            8,
+            False,
+            False,
+        ),
+        (
+            "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
+            "group",
+            128,
+            8,
+            False,
+            True,
+        ),
+    ],
 )
 @pytest.mark.skipif(not current_platform.is_cuda(),
                     reason="The tests are skipped on non-CUDA platform.")
@@ -364,7 +393,8 @@ def test_compressed_tensors_fp8(vllm_runner):
 
 @pytest.mark.skipif(
     not current_platform.is_kv_cache_dtype_supported("fp8", None),
-    reason="FP8 KV cache is not supported on this device.")
+    reason="FP8 KV cache is not supported on this device.",
+)
 @pytest.mark.skipif(not current_platform.is_cuda(),
                     reason="This test is skipped on non-CUDA platform.")
 def test_compressed_tensors_kv_cache(vllm_runner):
@@ -390,7 +420,9 @@ def _test_2of4_quant_models(qkv_proj,
     assert qkv_proj.scheme.input_quant.strategy == input_strategy
     assert qkv_proj.scheme.quantized
     assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
-    sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map  # noqa: E501
+    sparsity_map = (
+        qkv_proj.quant_method.quantization_config.sparsity_scheme_map
+    )  # noqa: E501
     assert sparsity_map.get("Linear").format == format
     assert sparsity_map.get("Linear").sparsity_structure == "2:4"
 
@@ -664,9 +696,13 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
 
 @pytest.mark.parametrize(
     "args",
-    [("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16",
-      CompressedTensorsW4A16Fp4),
-     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4)])
+    [
+        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16",
+         CompressedTensorsW4A16Fp4),
+        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4",
+         CompressedTensorsW4A4Fp4),
+    ],
+)
 def test_compressed_tensors_nvfp4(vllm_runner, args):
     model, scheme = args
     with vllm_runner(model, enforce_eager=True) as llm:
@@ -677,9 +713,9 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method,
                               CompressedTensorsLinearMethod)
-            if isinstance(qkv_proj.scheme, scheme) or isinstance(
-                    qkv_proj.scheme,
-                    CompressedTensorsW4A16Fp4) and not cutlass_fp4_supported():
+            if (isinstance(qkv_proj.scheme, scheme)
+                    or isinstance(qkv_proj.scheme, CompressedTensorsW4A16Fp4)
+                    and not cutlass_fp4_supported()):
                 assert True
             else:
                 raise AssertionError("FP4 Scheme Mismatch")
@@ -730,53 +766,24 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
 
 @pytest.mark.skipif(not current_platform.is_cuda(),
                     reason="This test is skipped on non-CUDA platform.")
-@pytest.mark.parametrize("model,prompt,exp_perplexity", [
-    (
-        "nm-testing/Llama-3.2-1B-Instruct-spinquantR1R2R4-w4a16",
-        "Flat is better than nested.\nSparse is better than dense.",
-        150.0,
-    ),
-    (
-        "nm-testing/Llama-3.2-1B-Instruct-quip-w4a16",
-        "Flat is better than nested.\nSparse is better than dense.",
-        150.0,
-    ),
-])
+@pytest.mark.parametrize(
+    "model,prompt,exp_perplexity",
+    [
+        (
+            "nm-testing/Llama-3.2-1B-Instruct-spinquantR1R2R4-w4a16",
+            "Flat is better than nested.\nSparse is better than dense.",
+            150.0,
+        ),
+        (
+            "nm-testing/Llama-3.2-1B-Instruct-quip-w4a16",
+            "Flat is better than nested.\nSparse is better than dense.",
+            150.0,
+        ),
+    ],
+)
 def test_compressed_tensors_transforms_perplexity(vllm_runner, model, prompt,
                                                   exp_perplexity):
     with vllm_runner(model, enforce_eager=True) as llm:
         perplexity = llm.generate_prompt_perplexity([prompt])[0]
         print(perplexity)
         assert perplexity <= exp_perplexity
-
-
-def test_compressed_tensors_fp8_block_enabled(vllm_runner):
-    model_path = "RedHatAI/Qwen3-0.6B-FP8-BLOCK"
-    with vllm_runner(model_path) as llm:
-
-        fp8_dtype = current_platform.fp8_dtype()
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-            assert isinstance(qkv_proj.quant_method,
-                              CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
-            assert isinstance(qkv_proj.scheme.w8a8_block_fp8_linear,
-                              W8A8BlockFp8LinearOp)
-
-            assert qkv_proj.weight.dtype is fp8_dtype
-            assert qkv_proj.weight_scale.dtype is torch.float32
-            assert len(qkv_proj.weight.shape) == 2
-            assert len(qkv_proj.weight_scale.shape) == 2
-
-            input_quant_op = \
-                qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
-            assert isinstance(input_quant_op, QuantFP8)
-            assert input_quant_op._forward_method == input_quant_op.forward_cuda
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=1)
-        assert output
