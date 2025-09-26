@@ -37,7 +37,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
 
 import torch
 
@@ -336,7 +336,7 @@ class KVConnectorBase_V1(ABC):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int] | tuple[list[int], ...],
+        block_ids: Union[list[int], tuple[list[int], ...]],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.

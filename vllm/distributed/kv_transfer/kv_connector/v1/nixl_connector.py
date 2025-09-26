@@ -194,7 +194,7 @@ class NixlConnector(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        block_ids: tuple[list[int], ...] | list[int],
+        block_ids: Union[tuple[list[int], ...], list[int]],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
@@ -397,7 +397,7 @@ class NixlConnectorScheduler:
     def request_finished(
         self,
         request: "Request",
-        block_ids: tuple[list[int], ...] | list[int],
+        block_ids: Union[tuple[list[int], ...], list[int]],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Once a request is finished, determine whether request blocks

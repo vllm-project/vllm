@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
@@ -153,7 +153,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int] | tuple[list[int], ...],
+        block_ids: Union[list[int], tuple[list[int], ...]],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.

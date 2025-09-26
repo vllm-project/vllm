@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
@@ -108,7 +108,7 @@ class OffloadingConnector(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        block_ids: Union[list[int], tuple[list[int], ...]],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
@@ -344,7 +344,7 @@ class OffloadingConnectorScheduler:
     def request_finished(
         self,
         request: Request,
-        block_ids: tuple[list[int], ...] | list[int],
+        block_ids: Union[tuple[list[int], ...], list[int]],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
