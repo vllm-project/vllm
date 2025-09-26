@@ -66,7 +66,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend
+from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import is_list_of
@@ -332,9 +332,12 @@ class Qwen3_VisionTransformer(nn.Module):
             check_upstream_fa_availability(
                 torch.get_default_dtype()):
             self.attn_backend = _Backend.FLASH_ATTN
-        assert self.attn_backend == _Backend.TORCH_SDPA, \
-            f"Qwen3-VL does not support {self.attn_backend} backend now. " \
-            f"Consider `export VLLM_ATTENTION_BACKEND=TORCH_SDPA` to enable it."
+        if current_platform.is_device_capability(
+                100) and self.attn_backend != _Backend.TORCH_SDPA:
+            raise NotImplementedError(
+                f"Qwen3-VL does not support {self.attn_backend} backend now. "
+                f"Consider `export VLLM_ATTENTION_BACKEND=TORCH_SDPA` .")
+        logger.info_once(f"Qwen3-VL attn_backend: {self.attn_backend}")
 
     @property
     def dtype(self) -> torch.dtype:
