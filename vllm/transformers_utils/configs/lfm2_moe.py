@@ -70,12 +70,16 @@ class Lfm2MoeConfig(PretrainedConfig):
 
         self.layer_types = layer_types
         if self.layer_types is None:
-            full_attn_idxs = full_attn_idxs if full_attn_idxs is not None else list(range(num_hidden_layers))
+            full_attn_idxs = full_attn_idxs if full_attn_idxs is not None else list(  # noqa: E501
+                range(num_hidden_layers))
             self.layer_types = [
-                "full_attention" if i in full_attn_idxs else "conv" for i in range(num_hidden_layers)
+                "full_attention" if i in full_attn_idxs else "conv"
+                for i in range(num_hidden_layers)
             ]
 
-        tie_word_embeddings = kwargs.get("tie_embedding", tie_word_embeddings)  # to fit original config keys
+        tie_word_embeddings = kwargs.get(
+            "tie_embedding",
+            tie_word_embeddings)  # to fit original config keys
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
@@ -86,7 +90,10 @@ class Lfm2MoeConfig(PretrainedConfig):
 
     @property
     def layers_block_type(self):
-        return ["attention" if i in self.full_attn_idxs else "conv" for i in range(self.num_hidden_layers)]
+        return [
+            "attention" if i in self.full_attn_idxs else "conv"
+            for i in range(self.num_hidden_layers)
+        ]
 
 
 __all__ = ["Lfm2MoeConfig"]
