@@ -185,13 +185,8 @@ class MultiModalConfig:
         limit_data = self.limit_per_prompt.get(modality)
 
         if limit_data is None:
-            # If no configuration at all, default to 999
-            # If partial configuration exists,
-            # unspecified modalities should be 0
-            if not self.limit_per_prompt:
-                return 999
-            else:
-                return 0
+            # Unspecified modality is set to 999 by default
+            return 999
         elif isinstance(limit_data, int):
             return limit_data
         elif isinstance(limit_data, BaseModalityOptions):
