@@ -81,7 +81,7 @@ class TestBlockPoolLifetimeTracking:
         assert hasattr(pool, "lifetime_stats")
         assert isinstance(pool.lifetime_stats, KVCacheLifetimeStats)
 
-    @patch("time.time")
+    @patch("time.monotonic")
     def test_allocation_time_recording(self, mock_time):
         """Test that block allocation times are recorded."""
         mock_time.return_value = 100.0
@@ -97,7 +97,7 @@ class TestBlockPoolLifetimeTracking:
         for block in blocks:
             assert block.allocation_time == 100.0
 
-    @patch("time.time")
+    @patch("time.monotonic")
     def test_lifetime_calculation_on_free(self, mock_time):
         """Test that lifetimes are calculated when blocks are freed."""
         # Mock time progression
@@ -125,7 +125,7 @@ class TestBlockPoolLifetimeTracking:
         assert stats.total_blocks_freed == 2
         assert stats.average_lifetime_seconds == expected_lifetime
 
-    @patch("time.time")
+    @patch("time.monotonic")
     def test_null_block_lifetime_ignored(self, mock_time):
         """Test that null blocks don't contribute to lifetime stats."""
         mock_time.side_effect = [100.0, 105.0]
