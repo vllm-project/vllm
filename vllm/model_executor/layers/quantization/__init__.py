@@ -26,7 +26,6 @@ QuantizationMethods = Literal[
     "bitsandbytes",
     "hqq",
     "experts_int8",
-    "neuron_quant",
     "ipex",
     "quark",
     "moe_wna16",
@@ -35,6 +34,7 @@ QuantizationMethods = Literal[
     "rtn",
     "inc",
     "mxfp4",
+    "petit_nvfp4",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -107,7 +107,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
-    from .neuron_quant import NeuronQuantConfig
+    from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
     from .rtn import RTNConfig
     from .torchao import TorchAOConfig
@@ -133,7 +133,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "ptpc_fp8": PTPCFp8Config,
         "hqq": HQQMarlinConfig,
         "experts_int8": ExpertsInt8Config,
-        "neuron_quant": NeuronQuantConfig,
         "ipex": IPEXConfig,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
@@ -142,6 +141,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "rtn": RTNConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
+        "petit_nvfp4": PetitNvFp4Config,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

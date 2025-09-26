@@ -7,7 +7,12 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
+from vllm.logger import init_logger
+
 from .base_device_communicator import DeviceCommunicatorBase
+
+logger = init_logger(__name__)
 
 
 class XpuCommunicator(DeviceCommunicatorBase):
@@ -18,6 +23,18 @@ class XpuCommunicator(DeviceCommunicatorBase):
                  device_group: Optional[ProcessGroup] = None,
                  unique_name: str = ""):
         super().__init__(cpu_group, device, device_group, unique_name)
+        if self.use_all2all:
+            all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+            if all2all_backend != "naive":
+                logger.warning(
+                    "`%s` all2all manager is not supported on XPU."
+                    "Falling back to `naive` all2all manager for XPU.",
+                    all2all_backend)
+                all2all_backend = "naive"
+            if all2all_backend == "naive":
+                from .all2all import NaiveAll2AllManager
+                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
+                logger.info("Using naive all2all manager.")
 
     def all_reduce(self, input_) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
@@ -56,3 +73,16 @@ class XpuCommunicator(DeviceCommunicatorBase):
 
     def broadcast(self, input_: torch.Tensor, src: int = 0) -> None:
         dist.broadcast(input_, src=src, group=self.device_group)
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.all2all_manager is not None
+        hidden_states, router_logits = self.all2all_manager.dispatch(
+            hidden_states, router_logits)
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.all2all_manager is not None
+        hidden_states = self.all2all_manager.combine(hidden_states)
+        return hidden_states

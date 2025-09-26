@@ -5,13 +5,17 @@
 import asyncio
 import hashlib
 import json
+import os
 import pickle
 import socket
+import tempfile
 from collections.abc import AsyncIterator
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import torch
+import yaml
 import zmq
 from transformers import AutoTokenizer
 from vllm_test_utils.monitor import monitor
@@ -19,15 +23,16 @@ from vllm_test_utils.monitor import monitor
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.transformers_utils.detokenizer_utils import (
     convert_ids_list_to_tokens)
-from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
-                        MemorySnapshot, PlaceholderModule, StoreBoolean,
-                        bind_kv_cache, common_broadcastable_dtype,
-                        current_stream, deprecate_kwargs, get_open_port,
-                        get_tcp_uri, is_lossless_cast, join_host_port,
-                        make_zmq_path, make_zmq_socket, memory_profiling,
-                        merge_async_iterators, sha256, split_host_port,
-                        split_zmq_path, supports_kw, swap_dict_values)
 
+# isort: off
+from vllm.utils import (
+    CacheInfo, FlexibleArgumentParser, LRUCache, MemorySnapshot,
+    PlaceholderModule, bind_kv_cache, common_broadcastable_dtype,
+    current_stream, deprecate_kwargs, get_open_port, get_tcp_uri,
+    is_lossless_cast, join_host_port, make_zmq_path, make_zmq_socket,
+    memory_profiling, merge_async_iterators, sha256, split_host_port,
+    split_zmq_path, supports_kw, swap_dict_values, unique_filepath)
+# isort: on
 from ..utils import create_new_process_for_each_test, error_on_warning
 
 
@@ -375,9 +380,9 @@ def test_duplicate_dict_args(caplog_vllm, parser):
 def test_supports_kw(callable,kw_name,requires_kw_only,
                      allow_var_kwargs,is_supported):
     assert supports_kw(
-        callable=callable,
-        kw_name=kw_name,
-        requires_kw_only=requires_kw_only,
+            callable=callable,
+            kw_name=kw_name,
+            requires_kw_only=requires_kw_only,
         allow_var_kwargs=allow_var_kwargs
     ) == is_supported
 
@@ -495,34 +500,6 @@ def test_bind_kv_cache_non_attention():
     bind_kv_cache(ctx, [kv_cache])
     assert ctx['model.layers.20.attn'].kv_cache[0] is kv_cache[0]
     assert ctx['model.layers.28.attn'].kv_cache[0] is kv_cache[1]
-
-
-def test_bind_kv_cache_encoder_decoder(monkeypatch: pytest.MonkeyPatch):
-    # V1 TESTS: ENCODER_DECODER is not supported on V1 yet.
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-
-        from vllm.attention import Attention, AttentionType
-
-        # example from bart
-        ctx = {
-            'encoder.layers.0.self_attn.attn':
-                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
-            'decoder.layers.0.encoder_attn.attn':
-                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
-            'decoder.layers.0.self_attn.attn':
-                Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
-        }
-
-        kv_cache = [
-            torch.zeros((1, )),
-        ]
-        encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
-
-        bind_kv_cache(ctx, [kv_cache])
-        assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
-        assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
-        assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
 
 
 def test_bind_kv_cache_pp():
@@ -831,22 +808,20 @@ def test_model_specification(parser_with_config, cli_config_file,
 
 @pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
                                    (None, bool, [1, 2, 3])])
-@pytest.mark.parametrize("output", [0, 1, 2])
-def test_sha256(input: tuple, output: int):
-    hash = sha256(input)
-    assert hash is not None
-    assert isinstance(hash, int)
-    assert hash != 0
+def test_sha256(input: tuple):
+    digest = sha256(input)
+    assert digest is not None
+    assert isinstance(digest, bytes)
+    assert digest != b""
 
-    bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    assert hash == int.from_bytes(hashlib.sha256(bytes).digest(),
-                                  byteorder="big")
+    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    assert digest == hashlib.sha256(input_bytes).digest()
 
     # hashing again, returns the same value
-    assert hash == sha256(input)
+    assert digest == sha256(input)
 
     # hashing different input, returns different value
-    assert hash != sha256(input + (1, ))
+    assert digest != sha256(input + (1, ))
 
 
 @pytest.mark.parametrize(
@@ -944,6 +919,36 @@ def test_join_host_port():
     assert join_host_port("::1", 5555) == "[::1]:5555"
 
 
+def test_json_count_leaves():
+    """Test json_count_leaves function from jsontree utility."""
+    from vllm.utils.jsontree import json_count_leaves
+
+    # Single leaf values
+    assert json_count_leaves(42) == 1
+    assert json_count_leaves("hello") == 1
+    assert json_count_leaves(None) == 1
+
+    # Empty containers
+    assert json_count_leaves([]) == 0
+    assert json_count_leaves({}) == 0
+    assert json_count_leaves(()) == 0
+
+    # Flat structures
+    assert json_count_leaves([1, 2, 3]) == 3
+    assert json_count_leaves({"a": 1, "b": 2}) == 2
+    assert json_count_leaves((1, 2, 3)) == 3
+
+    # Nested structures
+    nested_dict = {"a": 1, "b": {"c": 2, "d": 3}}
+    assert json_count_leaves(nested_dict) == 3
+
+    nested_list = [1, [2, 3], 4]
+    assert json_count_leaves(nested_list) == 4
+
+    mixed_nested = {"list": [1, 2], "dict": {"x": 3}, "value": 4}
+    assert json_count_leaves(mixed_nested) == 4
+
+
 def test_convert_ids_list_to_tokens():
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
     token_ids = tokenizer.encode("Hello, world!")
@@ -991,3 +996,52 @@ def test_current_stream_multithread():
         child_thread.join(timeout=5)
         if child_thread.is_alive():
             pytest.fail("Child thread failed to exit properly")
+
+
+def test_load_config_file(tmp_path):
+    # Define the configuration data
+    config_data = {
+        "enable-logging": True,
+        "list-arg": ["item1", "item2"],
+        "port": 12323,
+        "tensor-parallel-size": 4
+    }
+
+    # Write the configuration data to a temporary YAML file
+    config_file_path = tmp_path / "config.yaml"
+    with open(config_file_path, "w") as config_file:
+        yaml.dump(config_data, config_file)
+
+    # Initialize the parser
+    parser = FlexibleArgumentParser()
+
+    # Call the function with the temporary file path
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    # Expected output
+    expected_args = [
+        "--enable-logging",
+        "--list-arg",
+        "item1",
+        "item2",
+        "--port",
+        "12323",
+        "--tensor-parallel-size",
+        "4",
+    ]
+
+    # Assert that the processed arguments match the expected output
+    assert processed_args == expected_args
+    os.remove(str(config_file_path))
+
+
+def test_unique_filepath():
+    temp_dir = tempfile.mkdtemp()
+    path_fn = lambda i: Path(temp_dir) / f"file_{i}.txt"
+    paths = set()
+    for i in range(10):
+        path = unique_filepath(path_fn)
+        path.write_text("test")
+        paths.add(path)
+    assert len(paths) == 10
+    assert len(list(Path(temp_dir).glob("*.txt"))) == 10

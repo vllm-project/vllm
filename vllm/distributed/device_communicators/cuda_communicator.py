@@ -7,6 +7,12 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.all_reduce_utils import (
+    should_nccl_symm_mem_allreduce)
+from vllm.distributed.device_communicators.pynccl import (
+    register_nccl_symmetric_ops)
+from vllm.distributed.device_communicators.pynccl_allocator import (
+    is_symmetric_memory_enabled)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -24,18 +30,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
                  unique_name: str = ""):
         super().__init__(cpu_group, device, device_group, unique_name)
         if "tp" not in unique_name:
-            # only tp uses custom allreduce
+            # custom allreduce or torch symm mem can be used only by tp
             use_custom_allreduce = False
+            use_torch_symm_mem = False
         else:
             from vllm.distributed.parallel_state import (
                 _ENABLE_CUSTOM_ALL_REDUCE)
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+            use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
 
         # ep does not use pynccl
         use_pynccl = "ep" not in unique_name
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
+        self.use_torch_symm_mem = use_torch_symm_mem
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -44,6 +53,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce)
+        from vllm.distributed.device_communicators.symm_mem import (
+            SymmMemCommunicator)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
@@ -51,14 +62,25 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
             )
+            if is_symmetric_memory_enabled():
+                register_nccl_symmetric_ops(self.pynccl_comm)
 
         self.ca_comm: Optional[CustomAllreduce] = None
         self.qr_comm: Optional[QuickAllReduce] = None
+        self.symm_mem_comm: Optional[SymmMemCommunicator] = None
+        if use_torch_symm_mem and current_platform.is_cuda():
+            self.symm_mem_comm = SymmMemCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
+                symm_mem_enabled=(self.symm_mem_comm is not None
+                                  and not self.symm_mem_comm.disabled),
             )
 
             if current_platform.is_rocm():
@@ -69,12 +91,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group,
                                               device=self.device)
+
         if self.use_all2all:
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
             if all2all_backend == "naive":
                 from .all2all import NaiveAll2AllManager
                 self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
                 logger.info("Using naive all2all manager.")
+            elif all2all_backend == "allgather_reducescatter":
+                from .all2all import AgRsAll2AllManager
+                self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
+                logger.info("Using AllGather-ReduceScatter all2all manager.")
             elif all2all_backend == "pplx":
                 from .all2all import PPLXAll2AllManager
                 self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
@@ -87,10 +114,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import DeepEPLLAll2AllManager
                 self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
                 logger.info("Using DeepEP Low-Latency all2all manager.")
+            elif all2all_backend == "flashinfer_all2allv":
+                from .all2all import FlashInferAllToAllManager
+                self.all2all_manager = FlashInferAllToAllManager(
+                    self.cpu_group)
+                logger.info("Using Flashinfer all2allv manager.")
             else:
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_):
+        # since currently we perform copy input -> symm_input -> out-of-place AR
+        # return symm_output, we don't need to check if input is symmetric
+        if self.pynccl_comm is not None and \
+            should_nccl_symm_mem_allreduce(self.pynccl_comm.world_size,input_):
+            out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
+            if out is not None:
+                return out
         # always try quick reduce first, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
@@ -103,6 +142,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if ca_comm is not None and not ca_comm.disabled and \
             ca_comm.should_custom_ar(input_):
             out = ca_comm.custom_all_reduce(input_)
+            assert out is not None
+            return out
+        symm_mem_comm = self.symm_mem_comm
+        if symm_mem_comm is not None and \
+            symm_mem_comm.should_use_symm_mem(input_):
+            out = symm_mem_comm.all_reduce(input_)
             assert out is not None
             return out
         pynccl_comm = self.pynccl_comm
@@ -137,7 +182,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                              dtype=input_tensor.dtype,
                              device=input_tensor.device)
 
-        pynccl_comm.reduce_scatter(output, input_)
+        pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -171,9 +216,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
                              device=input_tensor.device)
 
         if sizes is not None:
-            pynccl_comm.reduce_scatterv(output, input_, sizes=sizes)
+            pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
         else:
-            pynccl_comm.reduce_scatter(output, input_)
+            pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()

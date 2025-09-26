@@ -59,6 +59,30 @@ constexpr inline dnnl::memory::data_type get_dnnl_type() {
   return DNNLType<std::decay_t<T>>::type;
 }
 
+class DNNLScratchPadManager {
+ public:
+  static constexpr size_t allocation_unit = 4 * 1024 * 1024;  // 4KB
+
+  static DNNLScratchPadManager* get_dnnl_scratchpad_manager();
+
+  DNNLScratchPadManager();
+
+  template <typename T>
+  T* get_data() {
+    return reinterpret_cast<T*>(ptr_);
+  }
+
+  static size_t round(size_t size) {
+    return ((size + allocation_unit - 1) / allocation_unit) * allocation_unit;
+  }
+
+  void realloc(size_t new_size);
+
+ private:
+  size_t size_;
+  void* ptr_;
+};
+
 class DNNLMatMulPrimitiveHandler {
  public:
   virtual ~DNNLMatMulPrimitiveHandler() = default;
@@ -163,6 +187,56 @@ class W8A8MatMulPrimitiveHandler : public DNNLMatMulPrimitiveHandler {
   const bool use_azp_;
   const QuantizationStrategy a_qs_;
   const QuantizationStrategy b_qs_;
+  std::shared_ptr<MSizeCache> m_size_cache_;
+};
+
+class MatMulPrimitiveHandler : public DNNLMatMulPrimitiveHandler {
+ public:
+  struct Args : public DNNLMatMulPrimitiveHandler::Args {
+    dnnl::memory::data_type ab_type;
+  };
+
+  struct ClassMatmulCacheKey {
+    dnnl_dim_t b_n_size;
+    dnnl_dim_t b_k_size;
+
+    friend bool operator==(const ClassMatmulCacheKey& l,
+                           const ClassMatmulCacheKey& r);
+  };
+
+  struct MSizeCacheKey {
+    dnnl_dim_t a_m_size;
+    dnnl_dim_t a_m_stride;
+    bool use_bias;
+    dnnl::memory::data_type bias_type;
+
+    friend bool operator==(const MSizeCacheKey& l, const MSizeCacheKey& r);
+  };
+
+  using MSizeCache = DNNLPrimitiveCache<MSizeCacheKey, dnnl::matmul>;
+  using ClassMatmulCache =
+      DNNLPrimitiveCache<ClassMatmulCacheKey, std::shared_ptr<MSizeCache>>;
+
+  struct ExecArgs : public MSizeCacheKey {
+    const void* a_ptr;
+    const void* bias_ptr;
+    void* c_ptr;
+  };
+
+ public:
+  MatMulPrimitiveHandler(const Args& args);
+
+  void execute(ExecArgs& args);
+
+ private:
+  dnnl::matmul::primitive_desc create_primitive_desc(const MSizeCacheKey& key,
+                                                     bool first_time);
+
+  void init_runtime_memory_cache(const Args& args);
+
+  dnnl::matmul get_matmul_cache(const MSizeCacheKey& key);
+
+ private:
   std::shared_ptr<MSizeCache> m_size_cache_;
 };
 

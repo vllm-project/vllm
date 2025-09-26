@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, int4_w4a16_moe_quant_config,
+    int8_w8a16_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEConfig, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase,
@@ -124,7 +127,7 @@ class MoeWNA16Config(QuantizationConfig):
         awq_min_capability = AWQConfig.get_min_capability()
 
         gptq_compatible = quant_method == "gptq" and \
-                not desc_act and num_bits in [4, 8]
+            not desc_act and num_bits in [4, 8]
         awq_compatible = quant_method == "awq" and num_bits == 4 and \
             device_capability >= awq_min_capability
 
@@ -175,11 +178,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         quant_config: The MOE WNA16 (W8A16/W4A16) quantization config.
     """
 
-    def __init__(
-        self,
-        quant_config: MoeWNA16Config,
-        moe: FusedMoEConfig,
-    ):
+    def __init__(self, quant_config: MoeWNA16Config,
+                 moe: "FusedMoEConfig") -> None:
         super().__init__(moe)
         self.quant_config = quant_config
 
@@ -187,12 +187,13 @@ class MoeWNA16Method(FusedMoEMethodBase):
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
+        self.moe = layer
         layer.quant_config = self.quant_config
         bit8_pack_factor = self.quant_config.bit8_pack_factor
         group_size = self.quant_config.group_size
         group_size_div_factor = 1
 
-        # make intermediate_size and hidden_size diviable by group_size
+        # make intermediate_size and hidden_size divisible by group_size
         # we reduce the group size to ensure that
         # and we would repeat the loaded_weight later
         while intermediate_size_per_partition % group_size or \
@@ -285,6 +286,22 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 layer.register_parameter(key, param)
                 set_weight_attrs(param, extra_weight_attrs)
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        weight_bits = self.quant_config.weight_bits
+        has_zp = self.quant_config.has_zp
+        assert weight_bits == 4 or weight_bits == 8
+        config_builder = (int4_w4a16_moe_quant_config
+                          if weight_bits == 4 else int8_w8a16_moe_quant_config)
+
+        return config_builder(
+            w1_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w1_zp=layer.w13_qzeros if has_zp else None,
+            w2_zp=layer.w2_qzeros if has_zp else None,
+            block_shape=[0, layer.group_size],
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -299,6 +316,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -306,16 +324,15 @@ class MoeWNA16Method(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `MoeWNA16Method` yet.")
 
         from vllm.model_executor.layers.fused_moe import fused_experts
         assert activation == "silu", "Only SiLU activation is supported."
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -325,11 +342,9 @@ class MoeWNA16Method(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
-
-        weight_bits = self.quant_config.weight_bits
-        has_zp = self.quant_config.has_zp
 
         return fused_experts(
             x,
@@ -338,16 +353,11 @@ class MoeWNA16Method(FusedMoEMethodBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
-            use_int4_w4a16=weight_bits == 4,
-            use_int8_w8a16=weight_bits == 8,
-            global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
             expert_map=expert_map,
-            w1_scale=layer.w13_scales,
-            w2_scale=layer.w2_scales,
-            w1_zp=layer.w13_qzeros if has_zp else None,
-            w2_zp=layer.w2_qzeros if has_zp else None,
-            block_shape=[0, layer.group_size])
+            quant_config=self.moe_quant_config,
+        )
 
     @staticmethod
     def get_weight_loader(layer, weight_loader):
@@ -404,12 +414,14 @@ class MoeWNA16Method(FusedMoEMethodBase):
 
         def moe_wna16_weight_loader(param: torch.nn.Parameter,
                                     loaded_weight: torch.Tensor,
-                                    weight_name: str, shard_id: str,
-                                    expert_id: int):
+                                    weight_name: str,
+                                    shard_id: str,
+                                    expert_id: int,
+                                    return_success: bool = False):
             if "g_idx" in weight_name:
-                return
+                return False if return_success else None
             if not layer.quant_config.has_zp and "qzeros" in weight_name:
-                return
+                return False if return_success else None
 
             device = get_tp_group().device
             tp_rank = get_tensor_model_parallel_rank()
@@ -455,11 +467,18 @@ class MoeWNA16Method(FusedMoEMethodBase):
                     param.data[expert_id, :shard_size // 2] = tensor
                 else:
                     param.data[expert_id, shard_size // 2:] = tensor
+                return True if return_success else None
             elif "w2_qzeros" in weight_name:
                 param.data[expert_id] = loaded_weight.view(
                     loaded_weight.size(0), layer.tp_size, -1)[:, tp_rank]
+                return True if return_success else None
             else:
-                weight_loader(param, loaded_weight, weight_name, shard_id,
-                              expert_id)
+                # Delegate to the original loader, passing return_success
+                return weight_loader(param,
+                                     loaded_weight,
+                                     weight_name,
+                                     shard_id,
+                                     expert_id,
+                                     return_success=return_success)
 
         return moe_wna16_weight_loader

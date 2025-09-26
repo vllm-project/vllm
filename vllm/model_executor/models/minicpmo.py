@@ -24,11 +24,11 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Callable, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import torch
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.whisper.modeling_whisper import (ACT2FN,
                                                           WhisperAttention,
@@ -36,10 +36,6 @@ from transformers.models.whisper.modeling_whisper import (ACT2FN,
                                                           WhisperEncoder)
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
@@ -49,6 +45,7 @@ from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .minicpmv import (_MAX_FRAMES_PER_VIDEO, MiniCPMV2_6,
                        MiniCPMVDummyInputsBuilder,
@@ -61,35 +58,52 @@ from .utils import (AutoWeightsLoader, cast_overflow_tensors, flatten_bn,
 CPU_DEVICE = torch.device("cpu")
 
 
-class MiniCPMOAudioFeatureInputs(TypedDict):
-    type: Literal["audio_features"]
-    audio_features: Union[torch.Tensor, list[torch.Tensor]]
+class MiniCPMOAudioFeatureInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_audios * num_slices, num_channels, length)`
+    Dimensions:
+        - bns: Batch size * number of audios * number of slices
+        - bn: Batch size * number of audios
+        - c: Number of channels
+        - l: Length
+        - s: Number of slices
+    """
+    type: Literal["audio_features"] = "audio_features"
+
+    audio_features: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bns", "c", "l", dynamic_dims={"l"}),
+    ]
+    """
     Slice here means chunk. Audio that is too long will be split into slices,
-    which is the same as image.
-    Padding is used therefore `audio_features` is `torch.Tensor`.
+    which is the same as image. Padding is used therefore `audio_features` is 
+    `torch.Tensor`.
     """
 
-    audio_feature_lens: Union[torch.Tensor, list[torch.Tensor]]
+    audio_feature_lens: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "s"),
+    ]
     """
-    Shape: `(batch_size * num_audios, num_slices)`
-
     This should be feature length of each audio slice, 
     which equals to `audio_features.shape[-1]`
     """
 
 
-class MiniCPMOAudioEmbeddingInputs(TypedDict):
-    type: Literal["audio_embeds"]
-    audio_embeds: Union[torch.Tensor, list[torch.Tensor]]
+class MiniCPMOAudioEmbeddingInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_audios, num_slices, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
-    instead of a batched tensor.
+    Dimensions:
+        - bn: Batch size * number of audios
+        - s: Number of slices
+        - h: Hidden size (must match language model backbone)
+    
     Length of each slice may vary, so pass it as a list.
     """
+    type: Literal["audio_embeds"] = "audio_embeds"
+
+    audio_embeds: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "s", "h", dynamic_dims={"s"}),
+    ]
 
 
 MiniCPMOAudioInputs = Union[MiniCPMOAudioFeatureInputs,
@@ -529,36 +543,6 @@ class MiniCPMO(MiniCPMV2_6):
                                           prefix=maybe_prefix(prefix, "apm"))
 
         self.audio_token_id = None
-
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid vision encoder sections for some models.
-        # See: https://huggingface.co/openbmb/MiniCPM-o-2_6-int4
-        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
-            return None
-        return quant_config
-
-    def init_vision_module(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> nn.Module:
-        # MiniCPMO GPTQ model leave vpm unquantized.
-        quant_config = self._maybe_ignore_quant_config(quant_config)
-        return super().init_vision_module(config, quant_config, prefix)
-
-    def init_resampler(
-        self,
-        embed_dim: int,
-        vision_dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> nn.Module:
-        # MiniCPMO GPTQ model leave resampler unquantized.
-        quant_config = self._maybe_ignore_quant_config(quant_config)
-        return super().init_resampler(embed_dim, vision_dim, quant_config,
-                                      prefix)
 
     def init_audio_module(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # Do not use parameters temporarily

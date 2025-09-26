@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, int8_w8a16_moe_quant_config)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -106,6 +108,13 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                                       requires_grad=False)
         layer.register_parameter("w2_scale", w2_scale)
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return int8_w8a16_moe_quant_config(w1_scale=layer.w13_scale,
+                                           w2_scale=layer.w2_scale,
+                                           w1_zp=None,
+                                           w2_zp=None)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -120,6 +129,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -127,7 +137,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.fused_experts is None
 
         if enable_eplb:
@@ -136,7 +146,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
 
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -146,6 +156,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
@@ -157,12 +168,11 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
-            use_int8_w8a16=True,
-            global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
             expert_map=expert_map,
-            w1_scale=layer.w13_scale,
-            w2_scale=layer.w2_scale)
+            quant_config=self.moe_quant_config,
+        )
 
     @staticmethod
     def quantizing_weight_loader(layer, weight_loader):

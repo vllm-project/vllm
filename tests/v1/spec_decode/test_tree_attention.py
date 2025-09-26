@@ -187,7 +187,7 @@ def test_tree_attn_correctness() -> None:
                         dtype=torch.bfloat16,
                     )
 
-                    # Setup the block table and KV cache for paged KV.
+                    # Set up the block table and KV cache for paged KV.
                     assert max_sequence_length % block_size == 0
                     max_blocks_per_batch = max_sequence_length // block_size
                     kv_cache = torch.randn(
@@ -222,7 +222,7 @@ def test_tree_attn_correctness() -> None:
                                 num_alloc_blocks_per_batch] = block_ids.view(
                                     -1, num_alloc_blocks_per_batch)
 
-                    # Setup the slot mapping for the input KVs.
+                    # Set up the slot mapping for the input KVs.
                     tree_positions = sequence_position + torch.arange(
                         0,
                         tree_size_q,
@@ -278,7 +278,7 @@ def test_tree_attn_correctness() -> None:
                             block_table=block_table,
                             slot_mapping=branch_slot_mapping,
                             seqlen_k=sequence_position + q_len,
-                            backend=_Backend.FLASH_ATTN_VLLM_V1,
+                            backend=_Backend.FLASH_ATTN,
                         ).view(batch_size, -1, num_heads, dim_per_head)
 
                         # Compare the outputs.

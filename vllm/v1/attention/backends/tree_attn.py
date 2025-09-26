@@ -52,7 +52,7 @@ class TreeAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TREE_ATTN_VLLM_V1"
+        return "TREE_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["TreeAttentionImpl"]:
@@ -165,7 +165,8 @@ class TreeAttentionMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.kv_cache_spec = kv_cache_spec
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         self.block_size = kv_cache_spec.block_size
 
         spec_config = vllm_config.speculative_config
@@ -354,6 +355,7 @@ class TreeAttentionImpl(AttentionImpl):
         attn_metadata: TreeAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with TreeAttention.
 
@@ -361,14 +363,15 @@ class TreeAttentionImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
 
-        if output_scale is not None:
+        if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for TreeAttentionImpl")

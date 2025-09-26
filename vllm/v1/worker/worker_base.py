@@ -36,8 +36,8 @@ class WorkerBase(WorkerBaseV0):
             local_rank: Local device index
             rank: Global rank in distributed setup
             distributed_init_method: Distributed initialization method
-            is_driver_worker: Whether this worker handles driver 
-            responsibilities
+            is_driver_worker: Whether this worker handles driver
+                responsibilities
         """
         # Configuration storage
         super().__init__(vllm_config=vllm_config)

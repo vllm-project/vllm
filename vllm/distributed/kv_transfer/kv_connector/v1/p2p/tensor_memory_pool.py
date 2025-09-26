@@ -99,8 +99,9 @@ class TensorMemoryPool:
                                     addr=self.base_address)
         self.free_lists[self.max_block_size][
             initial_block.addr] = initial_block
-        logger.debug("TensorMemoryPool, base_address:", self.base_address,
-                     self.base_address % self.max_block_size)
+
+        logger.debug("TensorMemoryPool, base_address:%d, max_block_size:%d",
+                     self.base_address, self.max_block_size)
 
     def allocate(self, size: int) -> int:
         """Allocates a memory block of at least the requested size.
@@ -217,8 +218,9 @@ class TensorMemoryPool:
 
         return addr
 
-    def load_tensor(self, addr: int, dtype: torch.dtype,
-                    shape: tuple[int, ...], device) -> torch.Tensor:
+    def load_tensor(self, addr: int, dtype: torch.dtype, shape: tuple[int,
+                                                                      ...],
+                    device: torch.device) -> torch.Tensor:
         """Loads a tensor from pinned host memory to the specified device.
 
         Args:
