@@ -319,7 +319,7 @@ class BlockPool:
                              medium=MEDIUM_GPU))
         return True
 
-    def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
+    def touch(self, blocks: tuple[Optional[list[KVCacheBlock]], ...]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -328,7 +328,7 @@ class BlockPool:
             blocks: A list of blocks to touch.
         """
         for blocks_per_group in blocks:
-            for block in blocks_per_group:
+            for block in (blocks_per_group or []):
                 # ref_cnt=0 means this block is in the free list (i.e. eviction
                 # candidate), so remove it.
                 if block.ref_cnt == 0 and not block.is_null:

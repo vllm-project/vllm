@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
 from typing import Literal, Optional, overload
 
 from vllm.distributed.kv_events import KVCacheEvent
@@ -15,27 +14,31 @@ from vllm.v1.request import Request, RequestStatus
 logger = init_logger(__name__)
 
 
-@dataclass
 class KVCacheBlocks:
     """
     The allocation result of KVCacheManager, work as the interface between
     Scheduler and KVCacheManager, to hide KVCacheManager's internal data
     structure from the Scheduler.
+
+    blocks[i][j] refers to the i-th kv_cache_group and the j-th block of
+    tokens.
+    We don't use block of tokens as the outer dimension because it assumes
+    all kv_cache_groups have the same number of blocks, which is true for now
+    but will be broken if we want to give different block_size to
+    different kv_cache_groups in the future.
     """
-    blocks: tuple[list[KVCacheBlock], ...]
-    """
-    `blocks[i][j]` refers to the i-th kv_cache_group
-    and the j-th block of tokens.We don't use block of
-    tokens as the outer dimension because it assumes all
-    kv_cache_groups have the same number of blocks, which is true for now but 
-    will be broken if we want to give different block_size to different 
-    kv_cache_groups in the future.
-    """
+
+    def __init__(
+            self, blocks_per_group: tuple[Optional[list[KVCacheBlock]],
+                                          ...]) -> None:
+        self.blocks: tuple[Optional[list[KVCacheBlock]],
+                           ...] = tuple(blocks if blocks else None
+                                        for blocks in blocks_per_group)
 
     def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
         """Adds two KVCacheBlocks instances."""
         return KVCacheBlocks(
-            tuple(blk1 + blk2
+            tuple((blk1 or []) + (blk2 or [])
                   for blk1, blk2 in zip(self.blocks, other.blocks)))
 
     @overload
@@ -65,21 +68,22 @@ class KVCacheBlocks:
                 - each inner list contains the block_ids of the blocks in that
                   group
         """
-        if allow_none and all(len(group) == 0 for group in self.blocks):
+        if allow_none and all(not group for group in self.blocks):
             return None
-        return tuple([blk.block_id for blk in group] for group in self.blocks)
+        return tuple([blk.block_id for blk in (group or [])]
+                     for group in self.blocks)
 
     def get_unhashed_block_ids(self) -> list[int]:
         """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
         assert len(self.blocks) == 1, "Only one group is supported"
         return [
-            block.block_id for block in self.blocks[0]
+            block.block_id for block in (self.blocks[0] or [])
             if block.block_hash is None
         ]
 
     def new_empty(self) -> "KVCacheBlocks":
         """Creates a new KVCacheBlocks instance with no blocks."""
-        return KVCacheBlocks(tuple([] for _ in range(len(self.blocks))))
+        return KVCacheBlocks(tuple(None for _ in range(len(self.blocks))))
 
 
 class KVCacheManager:
@@ -242,7 +246,7 @@ class KVCacheManager:
             new_computed_block_list = new_computed_blocks.blocks
         else:
             new_computed_block_list = tuple(
-                [] for _ in range(len(self.kv_cache_config.kv_cache_groups)))
+                None for _ in range(len(self.kv_cache_config.kv_cache_groups)))
 
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
