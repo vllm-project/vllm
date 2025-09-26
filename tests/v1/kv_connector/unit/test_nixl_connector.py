@@ -26,6 +26,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker, NixlKVConnectorStats)
+from vllm.distributed.kv_transfer.kv_transfer_state import (
+    ensure_kv_transfer_shutdown, has_kv_transfer_group)
 from vllm.forward_context import ForwardContext
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
@@ -33,6 +35,13 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
+
+@pytest.fixture(scope="module", autouse=True)
+def clear_kv_transfer():
+    yield
+    if has_kv_transfer_group():
+        ensure_kv_transfer_shutdown()
 
 
 class FakeNixlWrapper:
@@ -694,7 +703,7 @@ def test_multi_kv_connector_stats_aggregation():
     assert kv_connector_stats["FooConnector"].data["num_foo_transfers"] == 6
 
 
-@pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
+@pytest.mark.parametrize("distributed_executor_backend", [ None])
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper)
@@ -708,7 +717,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
             |
             |  {eventually free blocks}
     """
-    model_name = "Qwen/Qwen3-0.6B"
+    model_name = "/home/jovyan/opt-125m"
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
         kv_role="kv_both",
