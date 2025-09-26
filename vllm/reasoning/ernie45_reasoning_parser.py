@@ -21,22 +21,17 @@ class Ernie45ReasoningParser(ReasoningParser):
     The Ernie45 thinking model ouput format is
         abc\n</think>\n\n\n<response>\ndef\n</response>\n
     or  abc\n</think>\ndef
-    or  abc\n</think>\n\n\n<tool_call>\nxyz\n</tool_call>\n
     """
 
     think_start_token_id: int
     think_end_token_id: int
     response_start_token_id: int
     response_end_token_id: int
-    tool_call_start_token_id: int
-    tool_call_end_token_id: int
 
     think_start_token: str = "<think>"
     think_end_token: str = "</think>"
     response_start_token: str = "<response>"
     response_end_token: str = "</response>"
-    tool_call_start_token: str = "<tool_call>"
-    tool_call_end_token: str = "</tool_call>"
     newline_token: str = "<0x0A>"
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
@@ -52,15 +47,11 @@ class Ernie45ReasoningParser(ReasoningParser):
         self.response_start_token_id = self.vocab.get(
             self.response_start_token)
         self.response_end_token_id = self.vocab.get(self.response_end_token)
-        self.tool_call_start_token_id = self.vocab.get(
-            self.tool_call_start_token)
-        self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         self.newline_token_id = self.vocab.get(self.newline_token)
 
         self.parser_token_ids = [
             self.think_start_token_id, self.think_end_token_id,
-            self.response_start_token_id, self.response_end_token_id,
-            self.tool_call_start_token_id, self.tool_call_end_token_id
+            self.response_start_token_id, self.response_end_token_id
         ]
 
         if self.think_start_token_id is None or self.think_end_token_id is None:
@@ -167,8 +158,6 @@ class Ernie45ReasoningParser(ReasoningParser):
         The Ernie45 thinking model ouput format is
             abc\n</think>\n\n\n<response>\ndef\n</response>\n
         or  abc\n</think>\ndef
-        or  abc\n</think>\n\n\n<tool_call>\nxyz\n</tool_call>\n
-
         - 'abc' goes to reasoning_content
         - 'def' goes to content
         Returns:
