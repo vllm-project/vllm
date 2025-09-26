@@ -2,13 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.worker.ubatch_utils import is_second_ubatch_empty
+from vllm.v1.worker.ubatch_utils import (UBatchSlices, check_ubatch_thresholds,
+                                         create_ubatch_slices,
+                                         is_second_ubatch_empty)
 
 logger = init_logger(__name__)
 
@@ -61,7 +65,7 @@ def _post_process_ubatch(tensor: torch.Tensor) -> bool:
     return should_ubatch
 
 
-def coordinate_batch_across_dp(
+def synchronize_dp_ranks(
     num_tokens_unpadded: int,
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
@@ -108,3 +112,58 @@ def coordinate_batch_across_dp(
     should_ubatch = _post_process_ubatch(tensor)
 
     return should_ubatch, num_tokens_after_padding
+
+
+def coordinate_batch_across_dp(
+    num_scheduled_tokens_per_request: np.ndarray,
+    num_tokens_unpadded: int,
+    num_tokens_padded: int,
+    parallel_config: ParallelConfig,
+    allow_microbatching: bool,
+    uniform_decode: bool,
+) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
+    """
+    Coordinates amongst all DP ranks to determine if and how the full batch
+    should be split into microbatches.
+
+    Returns: tuple[
+        ubatch_slices: if this is set then all DP ranks have agreed to 
+        microbatch
+        num_tokens_after_padding: A tensor containing the total number of
+        tokens per-microbatch for each DP rank including padding.
+    ]
+
+    """
+    dp_size = parallel_config.data_parallel_size
+    dp_rank = parallel_config.data_parallel_rank
+
+    # Check preconditions for microbatching
+    should_attempt_ubatching = check_ubatch_thresholds(
+        parallel_config,
+        num_tokens_unpadded,
+        uniform_decode=uniform_decode,
+    )
+
+    # If the caller has explicitly disabled microbatching.
+    if not allow_microbatching:
+        should_attempt_ubatching = False
+
+    (should_ubatch, num_tokens_after_padding) = synchronize_dp_ranks(
+        num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching,
+        dp_size, dp_rank)
+
+    # Don't microbatch unless every other DP worker is also microbatching
+    if not should_ubatch:
+        return (None, num_tokens_after_padding)
+
+    # This doesn't actually pad the ubatch slices. It just initializes the
+    # split point to the padded value so that padding can be applied
+    # to the second ubatch in pad_out_ubatch_slice after attention
+    # metadata creation
+    assert num_tokens_after_padding is not None
+    token_split_point = int(num_tokens_after_padding[0].item()) // 2
+
+    ubatch_slices = create_ubatch_slices(num_scheduled_tokens_per_request,
+                                         token_split_point)
+
+    return (ubatch_slices, num_tokens_after_padding)

@@ -96,14 +96,14 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.ubatch_splitting import (check_ubatch_thresholds,
-                                             ubatch_split)
-from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
+from vllm.v1.worker.ubatch_utils import (UBatchSlice, UBatchSlices,
+                                         check_ubatch_thresholds)
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
 from .utils import (AttentionGroup, MultiModalBudget,
@@ -1049,7 +1049,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             (max_num_scheduled_tokens == self.uniform_decode_query_len) and \
             (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
         ubatch_slices, num_tokens_after_padding = \
-            ubatch_split(num_scheduled_tokens,
+            coordinate_batch_across_dp(num_scheduled_tokens,
                         num_tokens_unpadded,
                         num_tokens_padded,
                         self.parallel_config,
@@ -2922,12 +2922,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                         dtype=np.int32)
         total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
 
-        ubatch_slices = None
-        num_tokens_after_padding = None
-
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
-        ubatch_slices, num_tokens_across_dp = ubatch_split(
+        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
             num_scheduled_tokens,
             total_num_scheduled_tokens,
             total_num_scheduled_tokens,
