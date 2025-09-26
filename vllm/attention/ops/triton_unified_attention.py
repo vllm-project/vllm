@@ -169,7 +169,7 @@ def kernel_unified_attention_2d(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    use_native_fp4: tl.constexpr = 2, #0 Original, 1 - native fp4, 2 - smoothed fp4 based on sage attention 2 
+    use_native_fp4: tl.constexpr = 1, #0 Original, 1 - native fp4, 2 - smoothed fp4 based on sage attention 2 
     PACK_ALONG_K: tl.constexpr = True,
 ):
     q_block_global_idx = tl.program_id(0)
@@ -214,14 +214,13 @@ def kernel_unified_attention_2d(
         other=0.0,
     )
 
-    if Q is not None:
-           pid0 = tl.program_id(axis=0)
-           pid1 = tl.program_id(axis=1)
-           if pid0 < -1 and pid1 < 1:
-              tl.device_print("Q:",Q.shape[0], Q.shape[1])
+    pid0 = tl.program_id(axis=0)
+    pid1 = tl.program_id(axis=1)
+
+    if pid0 < -1 and pid1 < 1:
+       tl.device_print("Q:",Q.shape[0], Q.shape[1])
 
     if use_native_fp4:
-       #q_fp4, scale_q = _mxfp4_quant_op(Q.to(tl.float32), HEAD_SIZE_PADDED, BLOCK_M, 32)
        if use_native_fp4 == 1:
           q_fp4, scale_q = _mxfp4_quant_op(Q, HEAD_SIZE_PADDED, BLOCK_M, 32)
        else:
@@ -230,9 +229,7 @@ def kernel_unified_attention_2d(
           ones = tl.full((1,HEAD_SIZE_PADDED), 1.0, dtype=tl.float32)
           q_avg = tl.dot(q_avg, ones)
 
-          pid0 = tl.program_id(axis=0)
-          pid1 = tl.program_id(axis=1)
-          if pid0 < 1 and pid1 < 1:
+          if pid0 < -1 and pid1 < 1:
               tl.device_print("q_avg:",q_avg.shape[0], q_avg.shape[1])
 
           Qr = Q - q_avg
@@ -365,9 +362,7 @@ def kernel_unified_attention_2d(
               kt -= k_avg
               detS = tl.dot(q_avg, tl.trans(kt))
            k_fp4, scale_k = _mxfp4_quant_op(kt, HEAD_SIZE_PADDED, TILE_SIZE, 32)
-           # debug info
-           pid0 = tl.program_id(axis=0)
-           pid1 = tl.program_id(axis=1)
+           # fp4 debug info
            if pid0 < -1 and pid1 < 1 and j == 0:
               tl.device_print("k_fp4:",k_fp4.shape[0], k_fp4.shape[1])
 
@@ -383,8 +378,7 @@ def kernel_unified_attention_2d(
                S2 += s_fp4
         #else:
         S += scale * tl.dot(Q, K)
-        pid0 = tl.program_id(axis=0)
-        pid1 = tl.program_id(axis=1)
+
         if pid0 < -1 and pid1 < 1 and j == 0:
            #tl.device_print("S ", S)
            #tl.device_print("S2 ",S2)
@@ -450,13 +444,11 @@ def kernel_unified_attention_2d(
            v_fp4_t   =  tl.trans(v_fp4)
            scale_v_t =  tl.trans(scale_v)
 
-           # debug info
-           pid0 = tl.program_id(axis=0)
-           pid1 = tl.program_id(axis=1)
+           # fp4 debug info
            if pid0 < -1 and pid1 < 1 and j == 0:
               tl.device_print("v_fp4:",v_fp4.shape[0], v_fp4.shape[1])
 
-           # copied from triton def dot_scaled()
+           # reference from triton def dot_scaled()
            # M, K_LHS = lhs.type.shape[-2:]
            # K_RHS, N = rhs.type.shape[-2:]
            acc = tl.dot_scaled(p_fp4, scale_p, "e2m1", v_fp4_t, scale_v_t, "e2m1", acc, lhs_k_pack=PACK_ALONG_K,
