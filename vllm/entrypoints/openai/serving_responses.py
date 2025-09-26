@@ -22,10 +22,10 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallCompletedEvent,
     ResponseCodeInterpreterCallInProgressEvent,
     ResponseCodeInterpreterCallInterpretingEvent,
-    ResponseFunctionCallArgumentsDeltaEvent,
     ResponseCodeInterpreterToolCallParam, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
-    ResponseCreatedEvent, ResponseFunctionToolCall, ResponseFunctionWebSearch,
+    ResponseCreatedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionToolCall, ResponseFunctionWebSearch,
     ResponseInProgressEvent, ResponseOutputItem, ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent, ResponseOutputMessage, ResponseOutputText,
     ResponseReasoningItem, ResponseReasoningTextDeltaEvent,
@@ -1412,13 +1412,14 @@ class OpenAIServingResponses(OpenAIServing):
                             logprobs=[],
                         ))
                 elif (ctx.parser.current_channel == "commentary"
-                      and ctx.parser.current_recipient is not None
-                      and ctx.parser.current_recipient.startswith("functions.")):
+                      and ctx.parser.current_recipient is not None and
+                      ctx.parser.current_recipient.startswith("functions.")):
                     # Start or continue streaming function-call arguments
                     if not sent_output_item_added:
                         sent_output_item_added = True
                         current_item_id = f"fc_{random_uuid()}"
-                        _func_name = ctx.parser.current_recipient.split(".", 1)[1]
+                        _func_name = ctx.parser.current_recipient.split(
+                            ".", 1)[1]
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
@@ -1536,7 +1537,8 @@ class OpenAIServingResponses(OpenAIServing):
                                 type="function_call",
                                 id=current_item_id or f"fc_{random_uuid()}",
                                 name=previous_item.recipient.split(".", 1)[1],
-                                call_id=f"call_{current_item_id}" if current_item_id else f"call_{random_uuid()}",
+                                call_id=f"call_{current_item_id}" if
+                                current_item_id else f"call_{random_uuid()}",
                                 arguments=previous_item.content[0].text,
                             ),
                         ))
