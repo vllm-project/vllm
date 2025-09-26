@@ -15,7 +15,6 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.utils import run_method
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
-from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
@@ -44,9 +43,11 @@ class UniProcExecutor(ExecutorBase):
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
             )
 
+        is_new_worker = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         self.collective_rpc("init_worker", args=([kwargs],))
-        self.collective_rpc("init_device")
-        self.collective_rpc("load_model")
+        if not is_new_worker:
+            self.collective_rpc("init_device")
+            self.collective_rpc("load_model")
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
@@ -90,17 +91,6 @@ class UniProcExecutor(ExecutorBase):
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as
         # it's running.
-        return
-
-    def reinitialize_distributed(
-        self, reconfig_request: ReconfigureDistributedRequest
-    ) -> None:
-        self.driver_worker.reinitialize_distributed(reconfig_request)
-        if (
-            reconfig_request.new_data_parallel_rank
-            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
-        ):
-            self.shutdown()
         return
 
     def shutdown(self) -> None:

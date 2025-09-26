@@ -29,8 +29,9 @@ class All2AllManagerBase:
     rank: int
     world_size: int
 
-    def __init__(self, cpu_group):
+    def __init__(self, cpu_group, tcp_store_group=None):
         self.cpu_group = cpu_group
+        self.tcp_store_group = tcp_store_group
 
         # compute some common properties
         from vllm.distributed.parallel_state import (
@@ -47,12 +48,17 @@ class All2AllManagerBase:
         # when we create this object
         self.dp_rank = self.dp_group.rank_in_group
         self.dp_world_size = self.dp_group.world_size
-        self.rank = dist.get_rank(cpu_group)
-        self.world_size = dist.get_world_size(cpu_group)
+        self.rank = cpu_group.rank()
+        self.world_size = cpu_group.size()
 
         # all2all communication often has separate implementations for
         # intra-node and inter-node communication
-        self.internode = not all(in_the_same_node_as(cpu_group, source_rank=0))
+        if tcp_store_group is None:
+            self.internode = not all(in_the_same_node_as(cpu_group, source_rank=0))
+        else:
+            self.internode = not all(
+                in_the_same_node_as(tcp_store_group, source_rank=0)
+            )
 
     def get_handle(self, kwargs):
         # get a handle for the all2all communication,
@@ -98,17 +104,36 @@ class DeviceCommunicatorBase:
         device: torch.device | None = None,
         device_group: ProcessGroup | None = None,
         unique_name: str = "",
+        global_ranks: list[int] | None = None,
+        global_world_size: int | None = None,
     ):
         self.device = device or torch.device("cpu")
         self.cpu_group = cpu_group
         self.device_group = device_group
         self.unique_name = unique_name
-        self.rank = dist.get_rank(cpu_group)
-        self.world_size = dist.get_world_size(cpu_group)
-        self.ranks = dist.get_process_group_ranks(cpu_group)
-        self.global_rank = dist.get_rank()
-        self.global_world_size = dist.get_world_size()
-        self.rank_in_group = dist.get_group_rank(self.cpu_group, self.global_rank)
+
+        # Check if this is a stateless process group
+        from torch.distributed.distributed_c10d import _world
+
+        is_stateless = _world.pg_map.get(cpu_group, None) is None
+
+        if is_stateless:
+            # For stateless groups, we can't use torch.distributed methods
+            self.rank = cpu_group.rank()
+            self.world_size = cpu_group.size()
+            assert global_ranks is not None
+            assert global_world_size is not None
+            self.ranks = global_ranks
+            self.global_rank = self.ranks[self.rank]
+            self.global_world_size = global_world_size
+            self.rank_in_group = self.rank
+        else:
+            self.rank = dist.get_rank(cpu_group)
+            self.world_size = dist.get_world_size(cpu_group)
+            self.ranks = dist.get_process_group_ranks(cpu_group)
+            self.global_rank = dist.get_rank()
+            self.global_world_size = dist.get_world_size()
+            self.rank_in_group = dist.get_group_rank(self.cpu_group, self.global_rank)
 
         use_ep = False
         all2all_backend = None
@@ -252,6 +277,13 @@ class DeviceCommunicatorBase:
         torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
 
+    def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
+        """Broadcast a tensor from source rank to all ranks."""
+        if self.world_size == 1:
+            return tensor
+        torch.distributed.broadcast(tensor, self.ranks[src], self.device_group)
+        return tensor
+
     def destroy(self):
         pass
 
@@ -295,3 +327,6 @@ class DeviceCommunicatorBase:
         This is a no-op in the base class.
         """
         return hidden_states
+
+    def batch_isend_irecv(self, p2p_ops: list):
+        raise NotImplementedError
