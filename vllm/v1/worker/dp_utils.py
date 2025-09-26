@@ -8,7 +8,6 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import round_up
 from vllm.v1.worker.ubatch_utils import is_second_ubatch_empty
 
 logger = init_logger(__name__)
