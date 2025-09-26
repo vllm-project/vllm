@@ -2916,15 +2916,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         if self.parallel_config.enable_dbo and allow_microbatching:
-            ubatch_slices, num_tokens_after_padding = ubatch_split(
+            ubatch_slices, num_tokens_across_dp = ubatch_split(
                 num_scheduled_tokens,
                 total_num_scheduled_tokens,
                 total_num_scheduled_tokens,
                 self.vllm_config.parallel_config,
             )
-            assert num_tokens_after_padding is not None
-            num_tokens_across_dp = num_tokens_after_padding
-            num_tokens_after_padding = int(num_tokens_after_padding[0].item())
+            assert num_tokens_across_dp is not None
+            num_tokens_after_padding = int(num_tokens_across_dp[0].item())
         else:
             should_ubatch = False
             dp_size = self.parallel_config.data_parallel_size
