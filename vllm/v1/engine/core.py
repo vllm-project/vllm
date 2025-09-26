@@ -594,7 +594,8 @@ class EngineCoreProc(EngineCore):
             local_handshake = self._perform_handshake(
                 input_ctx, client_handshake_address, identity, True, False,
                 vllm_config)
-            with handshake as (addresses, _), local_handshake as (client_addresses, zmq_socket):
+            with handshake as (addresses, 
+                               _), local_handshake as (client_addresses, zmq_socket):
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
                 yield (addresses, zmq_socket)
