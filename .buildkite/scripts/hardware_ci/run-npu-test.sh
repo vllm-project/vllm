@@ -5,45 +5,49 @@
 set -ex
 
 # Base ubuntu image with basic ascend development libraries and python installed
-TEST_RUN_CONFIG_URL="https://raw.githubusercontent.com/vllm-project/vllm-ascend/refs/heads/main/tests/e2e/vllm_interface/vllm_test.cfg"
+VLLM_ASCEND_REPO="https://github.com/vllm-project/vllm-ascend.git"
+CONFIG_FILE_REMOTE_PATH="tests/e2e/vllm_interface/vllm_test.cfg"
 TEST_RUN_CONFIG_FILE="vllm_test.cfg"
+VLLM_ASCEND_TMP_DIR=
+# Get the test run configuration file from the vllm-ascend repository
+fetch_vllm_test_cfg() {
+    VLLM_ASCEND_TMP_DIR=$(mktemp -d)
+    # Ensure that the temporary directory is cleaned up when an exception occurs during configuration file retrieval
+    cleanup() {
+        rm -rf "${VLLM_ASCEND_TMP_DIR}"
+    }
+    trap cleanup EXIT
 
-# This function checks for and installs 'curl' on Ubuntu if it's not found.
-install_curl() {
-  if ! command -v curl &> /dev/null; then
-    sudo yum update
-    if sudo yum install -y curl; then
-      echo "'curl' was installed successfully."
-    else
-      echo "Error: Failed to install 'curl'. Please check your network connection and package repositories."
-      return 1
+    GIT_TRACE=1 git clone -v --depth 1 "${VLLM_ASCEND_REPO}" "${VLLM_ASCEND_TMP_DIR}"
+    if [ ! -f "${VLLM_ASCEND_TMP_DIR}/${CONFIG_FILE_REMOTE_PATH}" ]; then
+        echo "Error: file '${CONFIG_FILE_REMOTE_PATH}' does not exist in the warehouse" >&2
+        exit 1
     fi
-  fi
-  return 0
+
+    # If the file already exists locally, just overwrite it
+    cp "${VLLM_ASCEND_TMP_DIR}/${CONFIG_FILE_REMOTE_PATH}" "${TEST_RUN_CONFIG_FILE}"
+    echo "Copied ${CONFIG_FILE_REMOTE_PATH} to ${TEST_RUN_CONFIG_FILE}"
+
+    # Since the trap will be overwritten later, and when it is executed here, the task of cleaning up resources
+    # when the trap is abnormal has been completed, so the temporary resources are manually deleted here.
+    rm -rf "${VLLM_ASCEND_TMP_DIR}"
+    trap - EXIT
 }
 
 # Downloads test run configuration file from a remote URL.
 # Loads the configuration into the current script environment.
 get_config() {
-  # Call the helper function to ensure curl is installed.
-  install_curl
-  if [ $? -ne 0 ]; then
-    return 1
-  fi
-  
-  # Use curl to download the configuration file and check if the download was successful.
-  if curl -s -o "${TEST_RUN_CONFIG_FILE}" "${TEST_RUN_CONFIG_URL}"; then
-    echo "Configuration file downloaded successfully."
+    if [ ! -f "${TEST_RUN_CONFIG_FILE}" ]; then
+        echo "Error: file '${TEST_RUN_CONFIG_FILE}' does not exist in the warehouse" >&2
+        exit 1
+    fi
     source "${TEST_RUN_CONFIG_FILE}"
     echo "Base docker image name that get from configuration: ${BASE_IMAGE_NAME}"
     return 0
-  else
-    echo "Error: Failed to download configuration from ${TEST_RUN_CONFIG_URL}."
-    return 1
-  fi
 }
 
 # get test running configuration.
+fetch_vllm_test_cfg
 get_config
 # Check if the function call was successful. If not, exit the script.
 if [ $? -ne 0 ]; then
