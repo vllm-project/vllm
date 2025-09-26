@@ -41,9 +41,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -119,12 +116,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                                 enable_eplb=self.enable_eplb,
                                 num_redundant_experts=self.n_redundant_experts)
 
-        self.gate = ReplicatedLinear(
-            config.hidden_size,
-            config.num_experts,
-            bias=False,
-            quant_config=self._maybe_ignore_quant_config(quant_config),
-            prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(config.hidden_size,
+                                     config.num_experts,
+                                     bias=False,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.gate")
 
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = Qwen3NextMLP(
@@ -141,16 +137,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.shared_expert_gate = torch.nn.Linear(config.hidden_size,
                                                   1,
                                                   bias=False)
-
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid gate quantization while AutoRound does.
-        if isinstance(
-                quant_config,
-            (GPTQConfig,
-             GPTQMarlinConfig)) and not quant_config.autoround_version:
-            return None
-        return quant_config
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
