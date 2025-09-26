@@ -366,9 +366,6 @@ def process_video(video: Any) -> Mapping[str, Any]:
         f"Invalid video input {video}. Must be a string of local path/remote url, or a dictionary with raw video bytes in the form of `{{'bytes': raw_video_bytes}}`."  # noqa: E501
     )
 
-# -----------------------------------------------------------------------------
-# Random Dataset Implementation (Synthetic Data)
-# -----------------------------------------------------------------------------
 
 def gen_prompt_decode_to_target_len(
     tokenizer: PreTrainedTokenizerBase,
@@ -421,6 +418,10 @@ def gen_prompt_decode_to_target_len(
         remain_num_try -= 1
 
     return prompt, token_sequence
+
+# -----------------------------------------------------------------------------
+# Random Dataset Implementation (Synthetic Data)
+# -----------------------------------------------------------------------------
 
 class RandomDataset(BenchmarkDataset):
     """
