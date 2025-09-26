@@ -2167,7 +2167,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
-        logger.info("==== EXECUTE")
+        # logger.info("==== EXECUTE")
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
@@ -2219,7 +2219,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        logger.info(f"{uniform_decode=} | {num_input_tokens=} | {cudagraph_runtime_mode=} | {ubatch_slices=}")
+        
+        if uniform_decode and ubatch_slices is None:
+            logger.info(f"{uniform_decode=} | {num_input_tokens=} | {cudagraph_runtime_mode=} | {ubatch_slices=}")
+            logger.info("===== OMG OMG OMG ====")
         with (set_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -2359,7 +2362,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
 
-        logger.info("==== DONE")
+        # logger.info("==== DONE")
         output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
