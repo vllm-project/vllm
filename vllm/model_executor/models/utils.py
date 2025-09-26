@@ -249,15 +249,17 @@ class AutoWeightsLoader:
 
                 if expert_mapping is not None and child_prefix == "experts":
                     for expert_name, loaded_weight in child_weights:
-                        for (param_name, weight_name, expert_id,
-                             shard_id) in expert_mapping:
-                            if weight_name not in f"experts.{expert_name}":
+                        for e_m in expert_mapping:
+                            param_name, weight_name, expert_id, shard_id = e_m
+                            experts_name = f"experts.{expert_name}"
+                            if weight_name not in experts_name:
                                 continue
                             fused_moe = child_modules[child_prefix]
-                            param_name = (
-                                f"{param_name.removeprefix('experts.')}weight")
-                            param = getattr(fused_moe, param_name)
-                            weight_name = maybe_prefix(prefix, param_name)
+                            mapped_name = experts_name.replace(
+                                weight_name,
+                                param_name).removeprefix("experts.")
+                            param = getattr(fused_moe, mapped_name)
+                            weight_name = maybe_prefix(prefix, mapped_name)
                             fused_moe.weight_loader(
                                 param=param,
                                 loaded_weight=loaded_weight,
@@ -266,7 +268,7 @@ class AutoWeightsLoader:
                                 expert_id=expert_id,
                             )
                             logger.debug("Loaded %s for expert %d into %s",
-                                         param_name, expert_id, prefix)
+                                         mapped_name, expert_id, prefix)
                             yield weight_name
 
                 yield from self._load_module(prefix,
