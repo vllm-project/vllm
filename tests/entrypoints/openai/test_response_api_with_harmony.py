@@ -3,6 +3,7 @@
 
 import json
 import time
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -767,3 +768,26 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str,
     assert response.status == "completed"
     assert len(response.input_messages) > 0
     assert len(response.output_messages) > 0
+
+
+def mock_render_for_completion():
+    return list(range(1000000))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@patch("vllm.entrypoints.openai.serving_responses.render_for_completion",
+       mock_render_for_completion)
+async def test_prompt_length_exceeds_max_model_len(client: OpenAI,
+                                                   model_name: str):
+
+    with pytest.raises(BadRequestError) as exc_info:
+        await client.responses.create(
+            model=model_name,
+            input="hello",
+        )
+
+    # Verify the error message matches what's expected from lines 287-294
+    error = exc_info.value
+    assert "The engine prompt length exceeds the max_model_len" in str(error)
+    assert "Please reduce prompt" in str(error)
