@@ -543,7 +543,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input)
 
         # Expert selection
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -1454,10 +1454,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
             if use_llama4_routing:
                 routing_method_type = flashinfer.RoutingMethodType.Llama4
+            routing_bias = e_score_correction_bias
+            if routing_bias is not None:
+                routing_bias = routing_bias.to(torch.bfloat16)
             out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
                 routing_logits=router_logits
                 if use_llama4_routing else router_logits.to(torch.float32),
-                routing_bias=e_score_correction_bias,
+                routing_bias=routing_bias,
                 hidden_states=hidden_states_fp4,
                 hidden_states_scale=hidden_states_scale_linear_fp4.view(
                     torch.float8_e4m3fn).flatten(),
@@ -1491,7 +1494,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )[0]
             return out
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,

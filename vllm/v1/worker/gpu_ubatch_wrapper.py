@@ -104,6 +104,7 @@ class UBatchWrapper:
             self.graph_pool = current_platform.get_global_graph_pool()
 
         self.sm_control = self._create_sm_control_context(vllm_config)
+        self.device = device
 
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
@@ -168,6 +169,7 @@ class UBatchWrapper:
 
         @torch.inference_mode()
         def _capture_ubatch_thread(results, ubatch_metadata):
+            torch.cuda.set_device(self.device)
             ubatch_context = ubatch_metadata.context
             with torch.cuda.stream(ubatch_context.compute_stream):
                 _ = torch.cuda.current_blas_handle()
@@ -364,7 +366,8 @@ class UBatchWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
             with self.sm_control:
                 return self._capture_ubatches(ubatch_metadata, self.model)
-        elif num_tokens in self.cudagraphs:
+        elif num_tokens in self.cudagraphs \
+            and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             cudagraph_metadata = self.cudagraphs[num_tokens]
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs
