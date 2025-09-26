@@ -121,7 +121,7 @@ def test_quantization(
     num_logprobs: int,
 ) -> None:
     if (current_platform.is_rocm()
-            and "bitsandbytes" in quantization_kwargs.values()):
+            and quantization_kwargs.get("quantization", "") == "bitsandbytes"):
         pytest.skip(
             "bitsandbytes quantization is currently not supported in rocm.")
 
