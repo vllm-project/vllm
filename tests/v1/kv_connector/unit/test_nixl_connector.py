@@ -703,7 +703,7 @@ def test_multi_kv_connector_stats_aggregation():
     assert kv_connector_stats["FooConnector"].data["num_foo_transfers"] == 6
 
 
-@pytest.mark.parametrize("distributed_executor_backend", [ None])
+@pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper)
@@ -717,7 +717,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
             |
             |  {eventually free blocks}
     """
-    model_name = "/home/jovyan/opt-125m"
+    model_name = "Qwen/Qwen3-0.6B"
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
         kv_role="kv_both",
