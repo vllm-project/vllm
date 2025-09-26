@@ -416,7 +416,7 @@ def _chunk_scan_fwd(
         chunk_indices_ptr=chunk_indices,
         chunk_offsets_ptr=chunk_offsets,
         chunk_meta_num=len(chunk_indices) if chunk_indices is not None else 0,
-        cu_chunk_seqlens=cu_chunk_seqlens,
+        cu_chunk_seqlens_ptr=cu_chunk_seqlens,
         chunk_size=chunk_size,
         hdim=headdim,
         dstate=dstate,

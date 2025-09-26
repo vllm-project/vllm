@@ -200,7 +200,6 @@ def _bmm_chunk_fwd(a,
         b = b.contiguous()
 
     nchunks = len(cu_chunk_seqlens) - 1
-
     # Allocates output.
     out_dtype = a.dtype if output_dtype is None else output_dtype
     out = torch.empty((nchunks, ngroups, chunk_size, chunk_size),
@@ -219,7 +218,7 @@ def _bmm_chunk_fwd(a,
             b_ptr=b,
             out_ptr=out,
             seq_idx_ptr=seq_idx,
-            cu_chunk_seqlens=cu_chunk_seqlens,
+            cu_chunk_seqlens_ptr=cu_chunk_seqlens,
             seqlen=seqlen,
             chunk_size=chunk_size,
             K=k,

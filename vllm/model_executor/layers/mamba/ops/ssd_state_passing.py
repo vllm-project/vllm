@@ -140,7 +140,7 @@ def _state_passing_fwd(
             chunk_offsets_ptr=chunk_offsets,
             chunk_meta_num=len(chunk_offsets)
             if chunk_offsets is not None else 0,
-            cu_chunk_seqlens=cu_chunk_seqlens,
+            cu_chunk_seqlens_ptr=cu_chunk_seqlens,
             dim=dim,
             nchunks=nchunks,
             seqlen=seqlen if seq_idx is not None else 0,

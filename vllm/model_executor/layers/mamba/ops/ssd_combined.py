@@ -163,9 +163,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         initial_states=initial_states,
     )
 
-    varlen_states = states[:, last_chunk, ...].clone().squeeze(0)
-
-    return varlen_states
+    return states[last_chunk]
 
 
 def mamba_chunk_scan_combined_varlen(
