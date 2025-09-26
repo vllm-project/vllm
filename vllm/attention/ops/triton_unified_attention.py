@@ -169,7 +169,7 @@ def kernel_unified_attention_2d(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    use_native_fp4: tl.constexpr = 2, #True,
+    use_native_fp4: tl.constexpr = 2, #0 Original, 1 - native fp4, 2 - smoothed fp4 based on sage attention 2 
     PACK_ALONG_K: tl.constexpr = True,
 ):
     q_block_global_idx = tl.program_id(0)
