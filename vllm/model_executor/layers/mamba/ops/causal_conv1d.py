@@ -427,7 +427,7 @@ def causal_conv1d_fn(
         batch_ptr = metadata.batch_ptr
         token_chunk_offset_ptr = metadata.token_chunk_offset_ptr
     else:
-        seqlens = np.diff(query_start_loc.to('cpu'))
+        seqlens = query_start_loc.diff().to('cpu')
         args = seqlens
         MAX_NUM_PROGRAMS = 1024
 
