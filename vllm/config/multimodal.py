@@ -9,7 +9,6 @@ from typing import Any, Literal, Optional, Union
 
 from pydantic.dataclasses import dataclass
 
-import vllm.envs as envs
 from vllm.config.utils import config
 
 
@@ -44,7 +43,6 @@ class ImageDummyOptions(BaseModalityOptions):
     count: int = 999
     width: Optional[int] = None
     height: Optional[int] = None
-    max_size: Optional[tuple[int, int]] = None
 
     def __post_init__(self):
         if self.count < 0:
@@ -60,18 +58,12 @@ class AudioDummyOptions(BaseModalityOptions):
     """Options for generating dummy audio data during profiling."""
     count: int = 999
     duration: Optional[float] = None
-    sample_rate: Optional[int] = None
-    channels: Optional[int] = None
 
     def __post_init__(self):
         if self.count < 0:
             raise ValueError("count must be non-negative")
         if self.duration is not None and self.duration <= 0:
             raise ValueError("duration must be positive")
-        if self.sample_rate is not None and self.sample_rate <= 0:
-            raise ValueError("sample_rate must be positive")
-        if self.channels is not None and self.channels <= 0:
-            raise ValueError("channels must be positive")
 
 
 # Union type for all supported option types
@@ -193,7 +185,13 @@ class MultiModalConfig:
         limit_data = self.limit_per_prompt.get(modality)
 
         if limit_data is None:
-            return 999 if envs.VLLM_USE_V1 else 1
+            # If no configuration at all, default to 999
+            # If partial configuration exists,
+            # unspecified modalities should be 0
+            if not self.limit_per_prompt:
+                return 999
+            else:
+                return 0
         elif isinstance(limit_data, int):
             return limit_data
         elif isinstance(limit_data, BaseModalityOptions):

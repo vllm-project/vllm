@@ -74,10 +74,19 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
     ) -> MultiModalDataDict:
         """
         Build the multimodal input which, after processing, results in
         the maximum possible number of placeholder tokens.
+
+        Args:
+            seq_len: Sequence length
+            mm_counts: Count of items per modality
+            mm_options: Configurable options per modality (optional).
+                       If None, use model defaults for backward compatibility.
+                       If provided, models can use these to customize dummy 
+                       data generation.
         """
         raise NotImplementedError
 
@@ -98,154 +107,14 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         """
         dummy_text = self.get_dummy_text(mm_counts)
 
-        # Use configurable options to guide dummy data generation if provided
-        if mm_options:
-            dummy_mm_data = self._get_configurable_dummy_data(
-                seq_len, mm_counts, mm_options)
-        else:
-            dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+        # Use the unified function for both legacy and configurable cases
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
 
         tokenization_kwargs = {"truncation": False}
 
         return ProcessorInputs(prompt=dummy_text,
                                mm_data=dummy_mm_data,
                                tokenization_kwargs=tokenization_kwargs)
-
-    def _get_configurable_dummy_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, ModalityDummyOptions],
-    ) -> MultiModalDataDict:
-        """
-        Generate dummy data with configurable options using parameter
-        interception.
-        """
-        dummy_data = {}
-
-        # Handle images
-        if "image" in mm_counts and mm_counts["image"] > 0:
-            # Get model defaults
-            vid_dims_known = True
-            try:
-                default_width, default_height = \
-                    self.info.get_image_size_with_most_features()
-            except (AttributeError, Exception):
-                default_width, default_height = 224, 224
-                vid_dims_known = False
-
-            # Override with configurable options if provided
-            target_width, target_height = default_width, default_height
-            if "image" in mm_options:
-                image_opts = mm_options["image"]
-                if hasattr(image_opts, 'max_size') and image_opts.max_size:
-                    target_width, target_height = image_opts.max_size
-                elif hasattr(image_opts, 'width') and hasattr(
-                        image_opts, 'height'):
-                    if image_opts.width:
-                        target_width = image_opts.width
-                    if image_opts.height:
-                        target_height = image_opts.height
-
-            # Simple bounds checking
-            target_width = max(target_width, 1)
-            target_height = max(target_height, 1)
-            if vid_dims_known:
-                target_width = min(target_width, default_width)
-                target_height = min(target_height, default_height)
-
-            dummy_data["image"] = self._get_dummy_images(
-                width=target_width,
-                height=target_height,
-                num_images=mm_counts["image"])
-
-        # Handle videos
-        if "video" in mm_counts and mm_counts["video"] > 0:
-            # Get model defaults
-            vid_dims_known = True
-            try:
-                default_width, default_height = \
-                    self.info.get_image_size_with_most_features()
-            except (AttributeError, Exception):
-                default_width, default_height = 224, 224
-                vid_dims_known = False
-
-            vid_frames_known = True
-            try:
-                default_frames = self.info.get_num_frames_with_most_features(
-                    seq_len, mm_counts)
-            except (AttributeError, Exception):
-                default_frames = 16
-                vid_frames_known = False
-
-            # Override with configurable options if provided
-            target_width, target_height, target_frames = (default_width,
-                                                          default_height,
-                                                          default_frames)
-            if "video" in mm_options:
-                video_opts = mm_options["video"]
-                if hasattr(video_opts, 'num_frames') and video_opts.num_frames:
-                    target_frames = video_opts.num_frames
-                if hasattr(video_opts, 'width') and video_opts.width:
-                    target_width = video_opts.width
-                if hasattr(video_opts, 'height') and video_opts.height:
-                    target_height = video_opts.height
-
-            # Simple bounds checking
-            target_width = max(target_width, 1)
-            target_height = max(target_height, 1)
-            if vid_dims_known:
-                target_width = min(target_width, default_width)
-                target_height = min(target_height, default_height)
-            target_frames = max(target_frames, 1)
-            if vid_frames_known:
-                target_frames = min(target_frames, default_frames)
-
-            dummy_data["video"] = self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-                num_frames=target_frames,
-                num_videos=mm_counts["video"])
-
-        # Handle audio
-        if "audio" in mm_counts and mm_counts["audio"] > 0:
-            # Get model defaults
-            try:
-                feature_extractor = self.info.get_feature_extractor()
-                default_sample_rate = int(feature_extractor.sampling_rate)
-                # Most audio processors expose chunk_length in seconds
-                default_duration_s = float(
-                    getattr(feature_extractor, "chunk_length", 1))
-            except (AttributeError, Exception):
-                default_sample_rate = 16000
-                default_duration_s = 1.0
-
-            # Override with configurable options if provided
-            target_sample_rate = default_sample_rate
-            target_duration_s = default_duration_s
-            target_channels = 1
-            if mm_options and "audio" in mm_options:
-                audio_opts = mm_options["audio"]
-                if hasattr(audio_opts,
-                           'sample_rate') and audio_opts.sample_rate:
-                    target_sample_rate = int(audio_opts.sample_rate)
-                if hasattr(audio_opts, 'duration') and audio_opts.duration:
-                    target_duration_s = float(audio_opts.duration)
-                if hasattr(audio_opts, 'channels') and audio_opts.channels:
-                    target_channels = int(audio_opts.channels)
-
-            # Compute effective profiling length
-            length_per_channel = max(
-                1, int(target_sample_rate * target_duration_s))
-            effective_length = max(
-                1, length_per_channel * max(1, target_channels))
-
-            # Return arrays (consistent with legacy builders)
-            audios = self._get_dummy_audios(length=effective_length,
-                                            num_audios=mm_counts["audio"])
-            dummy_data["audio"] = audios
-
-        return dummy_data
 
     def _get_dummy_audios(
         self,

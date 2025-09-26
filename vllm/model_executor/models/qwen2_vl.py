@@ -43,6 +43,8 @@ from transformers.models.qwen2_vl.video_processing_qwen2_vl import (
 
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
+from vllm.config.multimodal import (ImageDummyOptions, ModalityDummyOptions,
+                                    VideoDummyOptions)
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
@@ -1038,14 +1040,39 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
+        # Get model defaults
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         target_num_frames = \
             self.info.get_num_frames_with_most_features(seq_len, mm_counts)
+
+        # Apply configurable options if provided
+        if mm_options:
+            # Handle image configuration
+            if "image" in mm_options:
+                image_opts = mm_options["image"]
+                if isinstance(image_opts, ImageDummyOptions):
+                    if image_opts.width:
+                        target_width = min(target_width, image_opts.width)
+                    if image_opts.height:
+                        target_height = min(target_height, image_opts.height)
+
+            # Handle video configuration
+            if "video" in mm_options:
+                video_opts = mm_options["video"]
+                if isinstance(video_opts, VideoDummyOptions):
+                    if video_opts.num_frames:
+                        target_num_frames = min(target_num_frames,
+                                                video_opts.num_frames)
+                    if video_opts.width:
+                        target_width = min(target_width, video_opts.width)
+                    if video_opts.height:
+                        target_height = min(target_height, video_opts.height)
 
         return {
             "image":
