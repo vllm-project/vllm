@@ -18,7 +18,7 @@ from vllm.config import CompilationConfig, CompilationLevel, CUDAGraphMode, Pass
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
 
-from ..utils import create_new_process_for_each_test
+from ..utils import create_new_process_for_each_test, multi_gpu_test
 
 
 def models_list(*, all: bool = True, keywords: list[str] | None = None):
@@ -235,6 +235,61 @@ def test_default_fusion(
         run_model(compilation_config, model, model_kwargs)
 
     assert "Fused quant onto 48 attention nodes" in caplog_vllm.text, caplog_vllm.text
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("custom_ops", ["+quant_fp8", "-quant_fp8"])
+@pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+def test_default_fusion_tp2(
+    custom_ops: str, inductor_graph_partition: bool, caplog_vllm, monkeypatch
+):
+    model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
+    model_kwargs = {"kv_cache_dtype": "fp8", "max_model_len": 1024}
+    backend = _Backend.FLASHINFER
+
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+
+    if inductor_graph_partition:
+        mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        splitting_ops: Optional[list[str]] = None
+    else:
+        mode = CUDAGraphMode.FULL_DECODE_ONLY
+        splitting_ops = []
+
+    # Disable, compile cache to make sure custom passes run.
+    # Otherwise, we can't verify fusion happened through the logs.
+    # Log capture also doesn't work with multiprocessing yet.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    model_kwargs["tensor_parallel_size"] = 2
+    compilation_config = CompilationConfig(
+        # Testing properties
+        use_inductor_graph_partition=inductor_graph_partition,
+        cudagraph_mode=mode,
+        custom_ops=custom_ops_list,
+        splitting_ops=splitting_ops,
+        # Common
+        level=CompilationLevel.PIECEWISE,
+        pass_config=PassConfig(
+            enable_attn_fusion=True,
+            enable_noop=True,
+            enable_fi_allreduce_fusion=True,
+        ),
+        # Inductor caches custom passes by default as well via uuid
+        inductor_compile_config={"force_disable_caches": True},
+    )
+
+    with (
+        caplog_vllm.at_level(logging.DEBUG),
+        global_force_attn_backend_context_manager(backend),
+    ):
+        run_model(compilation_config, model, model_kwargs)
+
+    assert "Fused quant onto 48 attention nodes" in caplog_vllm.text, caplog_vllm.text
+
+    # TODO fill in correct number
+    assert "Replaced 5 patterns" in caplog_vllm.text, caplog_vllm.text
 
 
 def run_model(
