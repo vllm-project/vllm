@@ -340,7 +340,6 @@ class UBatchWrapper:
             if cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 assert batch_descriptor is not None
                 if batch_descriptor.num_tokens in self.cudagraphs:
-                    logger.info("DISABLEING CUDAGRAPHS")
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
 
             if cudagraph_runtime_mode in (CUDAGraphMode.NONE,
