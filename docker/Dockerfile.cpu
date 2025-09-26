@@ -201,3 +201,35 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install dist/*.whl
 
 ENTRYPOINT ["vllm", "serve"]
+
+######################### RELEASE IMAGE WITH MODEL #########################
+FROM base AS vllm-openai-model
+
+WORKDIR /workspace/
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=bind,from=vllm-build,src=/workspace/vllm/dist,target=dist \
+    uv pip install dist/*.whl && \
+    uv pip install "huggingface-hub[cli]"
+
+ARG MODEL_NAME=""
+ENV MODEL_NAME="${MODEL_NAME}"
+ENV MODEL_PATH="/root/.cache/${MODEL_NAME}"
+
+RUN if [ -z "${MODEL_NAME}" ]; then \
+        echo "ERROR: MODEL_NAME build argument is required" >&2 && exit 1; \
+    fi && \
+    mkdir -p "${MODEL_PATH}"
+
+RUN --mount=type=secret,id=hf_token \
+    if [ -f /run/secrets/hf_token ]; then \
+        HF_TOKEN=$(cat /run/secrets/hf_token) && \
+        hf download "${MODEL_NAME}" --local-dir "${MODEL_PATH}" --token "${HF_TOKEN}"; \
+    else \
+        hf download "${MODEL_NAME}" --local-dir "${MODEL_PATH}"; \
+    fi && rm -rf /root/.cache/huggingface "${MODEL_PATH}/original"
+
+# Use shell form to enable MODEL_PATH environment variable substitution
+# Additional arguments passed to `docker run` are appended via "$@"
+ENTRYPOINT ["sh", "-c", "exec vllm serve \"$MODEL_PATH\" \"$@\"", "--"]
