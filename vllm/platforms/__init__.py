@@ -162,31 +162,6 @@ def cpu_platform_plugin() -> Optional[str]:
             if is_cpu:
                 logger.debug("Confirmed CPU platform is available"
                              " because the machine is MacOS.")
-        # This handles CPU-only head nodes scenarios like Ray clusters
-        if not is_cpu:
-            try:
-                from vllm.utils import import_pynvml
-                pynvml = import_pynvml()
-                pynvml.nvmlInit()
-                try:
-                    gpu_count = pynvml.nvmlDeviceGetCount()
-                    if gpu_count <= 0:
-                        is_cpu = True
-                        logger.debug("Confirmed CPU platform is available because"
-                                     " no CUDA GPUs are found.")
-                finally:
-                    pynvml.nvmlShutdown()
-            except Exception as e:
-                logger.debug("Exception happens when checking CUDA for CPU fallback: %s",
-                             str(e))
-                if "nvml" in e.__class__.__name__.lower() or "libcuda.so" in str(e):
-                    # NVML/CUDA libraries not available, fallback to CPU
-                    is_cpu = True
-                    logger.debug("Confirmed CPU platform is available because"
-                                 " CUDA libraries are not available: %s", str(e))
-                else:
-                    # If the error is not related to NVML/CUDA, re-raise it
-                    raise e
 
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
