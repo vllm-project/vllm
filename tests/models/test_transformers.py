@@ -59,6 +59,7 @@ def check_implementation(
     [
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
         ("hmellor/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
+        ("Qwen/Qwen1.5-MoE-A2.7B-Chat", "transformers"),  # MoE
     ])  # trust_remote_code=True by default
 def test_models(
     hf_runner: type[HfRunner],
