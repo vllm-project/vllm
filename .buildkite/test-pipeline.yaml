@@ -870,25 +870,27 @@ steps:
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
     - python3 ../examples/offline_inference/data_parallel.py --dp-size=2 --tp-size=1 --node-size=2 --node-rank=1 --master-addr=192.168.10.10 --master-port=12345 --enforce-eager --trust-remote-code
 
-- label: Distributed Tests (2 GPUs) # 110min
-  timeout_in_minutes: 150
+- label: Distributed Tests (2 GPUs) # 68min
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
+  - vllm/compilation/
   - vllm/distributed/
   - vllm/engine/
   - vllm/executor/
-  - vllm/model_executor/models/
-  - tests/distributed/
-  - vllm/compilation
   - vllm/worker/worker_base.py
-  - entrypoints/llm/test_collective_rpc.py
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/compile/test_basic_correctness.py
+  - tests/compile/test_wrapper.py
+  - tests/distributed/
+  - tests/entrypoints/llm/test_collective_rpc.py
   - tests/v1/test_async_llm_dp.py
   - tests/v1/test_external_lb_dp.py
   - tests/v1/entrypoints/openai/test_multi_api_servers.py
-  - vllm/v1/engine/
-  - vllm/v1/worker/
+  - tests/v1/shutdown
   - tests/v1/worker/test_worker_memory_snapshot.py
   commands:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
@@ -898,20 +900,29 @@ steps:
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+  - pytest -v -s distributed/test_sequence_parallel.py
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
+  - pytest -v -s v1/worker/test_worker_memory_snapshot.py
+
+- label: Distributed Model Tests (2 GPUs) # 37min
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental]
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/sharded_state_loader.py
+  - vllm/model_executor/models/
+  - tests/basic_correctness/
+  - tests/model_executor/model_loader/test_sharded_state_loader.py
+  - tests/models/
+  commands:
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
-  # test sequence parallel
-  - pytest -v -s distributed/test_sequence_parallel.py
-  # this test fails consistently.
-  # TODO: investigate and fix
-  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
-  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
-  - pytest -v -s models/multimodal/generation/test_maverick.py
-  - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
 - label: Plugin Tests (2 GPUs) # 40min
   timeout_in_minutes: 60
