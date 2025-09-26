@@ -345,7 +345,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN_VLLM_V1"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionImpl"]:
