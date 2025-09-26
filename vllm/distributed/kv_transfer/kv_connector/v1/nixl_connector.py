@@ -577,8 +577,8 @@ class NixlConnectorWorker:
                                    use_mla=self.use_mla)
         self.backend_name = backend.get_name()
         attn_backend = backend_name_to_enum(self.backend_name)
-        self._use_flashinfer = attn_backend == _Backend.FLASHINFER_VLLM_V1
-        self._use_pallas_v1 = attn_backend == _Backend.PALLAS_VLLM_V1
+        self._use_flashinfer = attn_backend == _Backend.FLASHINFER
+        self._use_pallas = attn_backend == _Backend.PALLAS
         self.kv_cache_layout = get_kv_cache_layout()
         logger.debug("Detected attention backend %s", self.backend_name)
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
@@ -749,7 +749,7 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         # Conversely for FlashInfer, K and V are registered in the same region
         # to better exploit the memory layout (ie num_blocks is the first dim).
-        split_k_and_v = not (self.use_mla or self._use_pallas_v1
+        split_k_and_v = not (self.use_mla or self._use_pallas
                              or self._use_flashinfer)
         tensor_size_bytes = None
         for layer_name, cache_or_caches in xfer_buffers.items():
@@ -938,7 +938,7 @@ class NixlConnectorWorker:
         tp_ratio = divide(self._tp_size[self.engine_id],
                           self._tp_size[engine_id])
         assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
-        assert not self._use_pallas_v1 or tp_ratio == 1, \
+        assert not self._use_pallas or tp_ratio == 1, \
                "TPU (pallas_v1) DOES NOT support heterogeneous TP yet."
 
         # Handle tp_size>num_kv_heads: replicate KV cache.
