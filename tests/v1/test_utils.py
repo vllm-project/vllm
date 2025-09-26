@@ -9,6 +9,8 @@ import torch
 from tests.utils import RemoteOpenAIServer
 from vllm.v1.worker.utils import bind_kv_cache
 
+pytestmark = pytest.mark.cpu_test
+
 
 def test_bind_kv_cache():
     from vllm.attention import Attention
