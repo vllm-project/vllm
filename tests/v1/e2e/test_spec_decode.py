@@ -87,7 +87,6 @@ def test_ngram_correctness(
     should be the same when using ngram speculative decoding.
     '''
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         test_prompts = get_test_prompts(mm_enabled=False)
 
         ref_llm = LLM(model=model_name, max_model_len=1024)
@@ -180,7 +179,6 @@ def test_eagle_correctness(
             #  with FLASH_ATTN and needs to fall back to Flex Attn
             pass
         else:
-            m.setenv("VLLM_USE_V1", "1")
             m.setenv("VLLM_MLA_DISABLE", "1")
             m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
