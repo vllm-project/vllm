@@ -212,7 +212,6 @@ def test_eagle_correctness(
                 "max_model_len": 2048,
             },
             max_model_len=2048,
-            enforce_eager=True
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
