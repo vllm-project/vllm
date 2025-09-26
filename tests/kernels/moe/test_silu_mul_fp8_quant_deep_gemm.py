@@ -57,7 +57,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
         device="cuda",
     ) * 0 + T
 
-    # Run the Triton kernel
+    # Run the SiLU V2 kernel
     y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(y,
                                                  tokens_per_expert,
                                                  group_size=group_size)
