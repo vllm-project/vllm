@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-import itertools
-from collections.abc import Iterable
-from typing import Any
 
 import pytest
 import torch._dynamo
 
 from tests.compile.backend import LazyInitPass, TestBackend
+from tests.utils import flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention import Attention, AttentionMetadata
@@ -285,13 +283,6 @@ if is_torch_equal_or_newer("2.9.0.dev") and current_platform.is_cuda():
     USE_INDUCTOR_GRAPH_PARTITION = [False, True]
 else:
     USE_INDUCTOR_GRAPH_PARTITION = [False]
-
-
-def flat_product(*iterables: Iterable[Any]):
-    """Flatten lists of tuples into cartesian product."""
-    for element in itertools.product(*iterables):
-        normalized = (e if isinstance(e, tuple) else [e] for e in element)
-        yield list(itertools.chain(*normalized))
 
 
 @pytest.mark.parametrize("num_qo_heads, num_kv_heads", HEADS)

@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 import tempfile
-from typing import Any, Union
+from collections.abc import Iterable
+from typing import Any, Optional, Union
 
 import pytest
 import torch
@@ -18,7 +20,7 @@ from vllm.config import CompilationConfig, CompilationLevel, CUDAGraphMode, Pass
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
 
-from ..utils import create_new_process_for_each_test, multi_gpu_test
+from ..utils import create_new_process_for_each_test, flat_product, multi_gpu_test
 
 
 def models_list(*, all: bool = True, keywords: list[str] | None = None):
@@ -103,7 +105,7 @@ def test_full_graph(
     with monkeypatch.context():
         print(f"MODEL={model}")
 
-        run_model(optimization_level, model, model_kwargs)
+        run_model(optimization_level, model, **model_kwargs)
 
 
 # TODO(luka) add other supported compilation config scenarios here
@@ -168,7 +170,49 @@ def test_custom_compile_config(
 
     model, model_kwargs = model_info
     print(f"MODEL={model}")
-    run_model(compilation_config, model, model_kwargs)
+    run_model(compilation_config, model, **model_kwargs)
+
+
+MODELS_FP8: list[tuple[str, dict[str, Any], _Backend]] = []
+MODELS_FP4: list[tuple[str, dict[str, Any], _Backend]] = []
+MODELS: list[tuple[str, dict[str, Any], _Backend]] = []  # tp-only
+
+if current_platform.is_cuda():
+    MODELS_FP8 += [
+        (
+            "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+            {"max_model_len": 1024},
+            _Backend.TRITON_ATTN,
+        )
+    ]
+
+    if current_platform.is_device_capability((10, 0)):
+        MODELS_FP8 += [
+            (
+                "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+                {"kv_cache_dtype": "fp8", "max_model_len": 1024},
+                _Backend.FLASHINFER,
+            )
+        ]
+
+        MODELS_FP4 += [
+            (
+                "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+                {"kv_cache_dtype": "fp8", "max_model_len": 1024},
+                _Backend.FLASHINFER,
+            )
+        ]
+
+        MODELS += [
+            (
+                "meta-llama/Llama-3.1-8B-Instruct",
+                {"max_model_len": 1024},
+                _Backend.FLASHINFER,
+            )
+        ]
+
+elif current_platform.is_rocm():
+    MODELS_FP8 += [("amd/Llama-3.1-8B-Instruct-FP8-KV", {}, _Backend.TRITON_ATTN)]
 
 
 @pytest.mark.parametrize(
@@ -183,23 +227,34 @@ def test_fp8_kv_scale_compile(optimization_level: int):
         "calculate_kv_scales": True,
         "max_model_len": 512,
     }
-    run_model(optimization_level, model, model_kwargs)
+    run_model(optimization_level, model, **model_kwargs)
 
 
 INDUCTOR_GRAPH_PARTITION = (
     [False, True] if (is_torch_equal_or_newer("2.9.0.dev")) else [False]
 )
 
+# TODO(luka) test both in nightly
+CUSTOM_OPS_FP8 = ["-quant_fp8"]  # , "+quant_fp8"]
 
-@pytest.mark.parametrize("custom_ops", ["+quant_fp8", "-quant_fp8"])
+
+@pytest.mark.parametrize(
+    "model_name, model_kwargs, backend, custom_ops",
+    # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
+    list(flat_product(MODELS_FP8, CUSTOM_OPS_FP8))
+    # quant_fp4 only has the custom impl
+    + list(flat_product(MODELS_FP4, [""])),
+)
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
-def test_default_fusion(
-    custom_ops: str, inductor_graph_partition: bool, caplog_vllm, monkeypatch
+def test_e2e_fusion_attn_quant(
+    model_name: str,
+    model_kwargs: dict[str, Any],
+    backend: _Backend,
+    custom_ops: str,
+    inductor_graph_partition: bool,
+    caplog_vllm,
+    monkeypatch,
 ):
-    model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
-    model_kwargs = {"kv_cache_dtype": "fp8", "max_model_len": 1024}
-    backend = _Backend.FLASHINFER
-
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     if inductor_graph_partition:
@@ -232,21 +287,47 @@ def test_default_fusion(
         caplog_vllm.at_level(logging.DEBUG),
         global_force_attn_backend_context_manager(backend),
     ):
-        run_model(compilation_config, model, model_kwargs)
+        run_model(compilation_config, model_name, **model_kwargs)
 
     assert "Fused quant onto 48 attention nodes" in caplog_vllm.text, caplog_vllm.text
 
 
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("custom_ops", ["+quant_fp8", "-quant_fp8"])
-@pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
-def test_default_fusion_tp2(
-    custom_ops: str, inductor_graph_partition: bool, caplog_vllm, monkeypatch
-):
-    model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
-    model_kwargs = {"kv_cache_dtype": "fp8", "max_model_len": 1024}
-    backend = _Backend.FLASHINFER
+# TODO(luka) test both in nightly
+CUSTOM_OPS_RMS_NORM = ["-rms_norm"]  # , "+rms_norm"]
 
+
+def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
+    for op_list in itertools.product(*custom_ops_lists):
+        yield ",".join(op_list)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    "model_name, model_kwargs, backend, custom_ops",
+    # Toggle RMSNorm and QuantFP8 for FP8 models
+    list(
+        flat_product(
+            MODELS_FP8, custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM)
+        )
+    )
+    # Toggle RMSNorm for FP4 models and unquant models
+    + list(flat_product(MODELS_FP4 + MODELS, CUSTOM_OPS_RMS_NORM)),
+)
+@pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.has_device_capability((10, 0)),
+    reason="allreduce+rmsnorm fusion only supported on blackwell",
+)
+def test_e2e_fusion_tp2_attn_quant_allreduce_rmsnorm(
+    model_name,
+    model_kwargs,
+    backend,
+    custom_ops: str,
+    inductor_graph_partition: bool,
+    caplog_vllm,
+    monkeypatch,
+):
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     if inductor_graph_partition:
@@ -262,7 +343,6 @@ def test_default_fusion_tp2(
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    model_kwargs["tensor_parallel_size"] = 2
     compilation_config = CompilationConfig(
         # Testing properties
         use_inductor_graph_partition=inductor_graph_partition,
@@ -284,19 +364,25 @@ def test_default_fusion_tp2(
         caplog_vllm.at_level(logging.DEBUG),
         global_force_attn_backend_context_manager(backend),
     ):
-        run_model(compilation_config, model, model_kwargs)
+        run_model(
+            compilation_config, model_name, tensor_parallel_size=2, **model_kwargs
+        )
 
     assert "Fused quant onto 48 attention nodes" in caplog_vllm.text, caplog_vllm.text
 
     # TODO fill in correct number
-    assert "Replaced 5 patterns" in caplog_vllm.text, caplog_vllm.text
+    assert "Replaced 96 patterns" in caplog_vllm.text, caplog_vllm.text
 
 
 def run_model(
-    compile_config: Union[int, CompilationConfig],
-    model: str,
-    model_kwargs: dict[str, Any],
+    compile_config: Union[int, CompilationConfig], model: str, **model_kwargs
 ):
+    compilation_config = (
+        compile_config
+        if isinstance(compile_config, CompilationConfig)
+        else CompilationConfig(level=compile_config)
+    )
+
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -304,12 +390,17 @@ def run_model(
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0)
+    # Allow override from model_kwargs
+    model_kwargs = {"tensor_parallel_size": 1, **model_kwargs}
+    model_kwargs = {"disable_custom_all_reduce": True, **model_kwargs}
+
+    # No cudagraphs by default
+    if compilation_config.cudagraph_mode is None:
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
     llm = LLM(
         model=model,
-        enforce_eager=True,
-        tensor_parallel_size=1,
-        disable_custom_all_reduce=True,
-        compilation_config=compile_config,
+        compilation_config=compilation_config,
         **model_kwargs,
     )
     outputs = llm.generate(prompts, sampling_params)

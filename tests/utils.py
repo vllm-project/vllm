@@ -6,6 +6,7 @@ import contextlib
 import copy
 import functools
 import importlib
+import itertools
 import json
 import os
 import random
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import time
 import warnings
+from collections.abc import Iterable
 from contextlib import ExitStack, contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
@@ -1260,3 +1262,10 @@ def check_answers(
     frac_ok = numok / len(answer)
     print(f"Num OK: {numok}/{len(answer)} {frac_ok}")
     assert frac_ok >= accept_rate
+
+
+def flat_product(*iterables: Iterable[Any]):
+    """Flatten lists of tuples into cartesian product."""
+    for element in itertools.product(*iterables):
+        normalized = (e if isinstance(e, tuple) else [e] for e in element)
+        yield list(itertools.chain(*normalized))
