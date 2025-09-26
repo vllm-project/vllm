@@ -196,6 +196,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "Cohere2ForCausalLM": _HfExamplesInfo("CohereForAI/c4ai-command-r7b-12-2024", # noqa: E501
                                          trust_remote_code=True),
+    "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", # noqa: E501
+                                      trust_remote_code=True,
+                                      is_available_online=False),
     "DbrxForCausalLM": _HfExamplesInfo("databricks/dbrx-instruct"),
     "DeciLMForCausalLM": _HfExamplesInfo("nvidia/Llama-3_3-Nemotron-Super-49B-v1", # noqa: E501
                                          trust_remote_code=True),
@@ -528,7 +531,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                               trust_remote_code=True),
     "Llama_Nemotron_Nano_VL" : _HfExamplesInfo("nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1", # noqa: E501
                                                      trust_remote_code=True),
-    "NemotronH_Nano_VL": _HfExamplesInfo("nano_vl_dummy",
+    "NemotronH_Nano_VL_V2": _HfExamplesInfo("nano_vl_dummy",
                                           is_available_online=False,
                                           trust_remote_code=True),
     "Ovis": _HfExamplesInfo("AIDC-AI/Ovis2-1B", trust_remote_code=True,
