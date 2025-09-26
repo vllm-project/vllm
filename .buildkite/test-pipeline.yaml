@@ -126,7 +126,7 @@ steps:
   - vllm/
   - tests/entrypoints/openai/basic
   - tests/entrypoints/openai/individual
-  #- tests/entrypoints/openai/lora
+  - tests/entrypoints/openai/lora
   - tests/entrypoints/openai/multimodal
   - tests/entrypoints/test_chat_utils.py
   - tests/entrypoints/openai/test_collective_rpc.py
@@ -135,7 +135,7 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
   - pytest -v -s entrypoints/openai/basic/
   - pytest -v -s entrypoints/openai/individual/
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/lora/
+  #- PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/lora/
   - pytest -v -s entrypoints/openai/multimodal/
   - pytest -v -s entrypoints/test_chat_utils.py
 
