@@ -360,8 +360,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                          dtype=torch.int64)
         self.num_discarded_requests = 0
 
-        self.num_draft_tokens = self._make_buffer(self.max_num_reqs,
-                                                  dtype=torch.int32)
+        self.num_decode_draft_tokens = self._make_buffer(self.max_num_reqs,
+                                                         dtype=torch.int32)
         self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
                                                      dtype=torch.int64)
 
@@ -1103,17 +1103,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            # For chunked prefills, use -1 as mask rather than 0, as guided
+            # decoding may rollback speculative tokens.
+            num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
             for req_id, draft_token_ids in (
                     scheduler_output.scheduled_spec_decode_tokens.items()):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 num_draft_tokens[req_idx] = len(draft_token_ids)
-
+                num_decode_draft_tokens[req_idx] = (len(draft_token_ids) if (
+                    self.input_batch.num_computed_tokens_cpu[req_idx]
+                    >= self.input_batch.num_prompt_tokens[req_idx]) else -1)
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
-            self.num_draft_tokens.np[:num_reqs] = num_draft_tokens
-            self.num_draft_tokens.np[num_reqs:].fill(0)
-            self.num_draft_tokens.copy_to_gpu()
+
+            # For DECODE only cuda graph of some attention backends (e.g., GDN).
+            self.num_decode_draft_tokens.np[:
+                                            num_reqs] = num_decode_draft_tokens
+            self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
+            self.num_decode_draft_tokens.copy_to_gpu()
 
         logits_indices_padded = None
         if self.cache_config.kv_sharing_fast_prefill:
@@ -1217,7 +1225,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     extra_attn_metadata_args = dict(
                         num_accepted_tokens=self.num_accepted_tokens.
                         gpu[:num_reqs],
-                        num_draft_tokens=self.num_draft_tokens.gpu[:num_reqs],
+                        num_decode_draft_tokens_cpu=self.
+                        num_decode_draft_tokens.cpu[:num_reqs],
                     )
 
                 if ubatch_slices is not None:
