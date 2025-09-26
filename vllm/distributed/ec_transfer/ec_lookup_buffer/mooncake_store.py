@@ -10,7 +10,6 @@ from collections import deque
 import json
 import os
 from dataclasses import dataclass
-import time
 from typing import List, Optional
 import torch
 import numpy as np
@@ -443,8 +442,6 @@ class ECMooncakeStore:
         # assert count == 2
 
     def _pool_allocate(self, size: int) -> int:
-        assert size <= DEFAULT_TENSOR_POOL_SIZE
-
         while True:
             try:
                 return self.tensor_pool.allocate(size)
