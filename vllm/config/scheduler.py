@@ -221,8 +221,7 @@ class SchedulerConfig:
         if self.enable_chunked_prefill:
             logger.info(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
-                self.max_num_batched_tokens,
-            )
+                self.max_num_batched_tokens)
 
         self.chunked_prefill_enabled = self.enable_chunked_prefill
         if self.max_num_partial_prefills > 1:
@@ -234,10 +233,8 @@ class SchedulerConfig:
                 "Concurrent partial prefills enabled with "
                 "max_num_partial_prefills=%d, max_long_partial_prefills=%d, "
                 "long_prefill_token_threshold=%d",
-                self.max_num_partial_prefills,
-                self.max_long_partial_prefills,
-                self.long_prefill_token_threshold,
-            )
+                self.max_num_partial_prefills, self.max_long_partial_prefills,
+                self.long_prefill_token_threshold)
 
         # NOTE: Default set cuda_graph_sizes to [min(max_num_seqs * 2, 512)].
         # This avoids OOM in tight memory scenarios with small max_num_seqs,
@@ -250,7 +247,7 @@ class SchedulerConfig:
             self.scheduler_cls = (
                 "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
 
-    @model_validator(mode="after")
+    @model_validator(mode='after')
     def _verify_args(self) -> Self:
         if (self.max_num_batched_tokens < self.max_model_len
                 and not self.chunked_prefill_enabled):
@@ -273,8 +270,7 @@ class SchedulerConfig:
                 "max_num_batched_tokens (%d) exceeds max_num_seqs "
                 "* max_model_len (%d). This may lead to unexpected behavior.",
                 self.max_num_batched_tokens,
-                self.max_num_seqs * self.max_model_len,
-            )
+                self.max_num_seqs * self.max_model_len)
 
         if self.num_lookahead_slots < 0:
             raise ValueError(
