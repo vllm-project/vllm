@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 import os
 import shutil
 import signal
-import tempfile
 from typing import Optional
 
+from vllm import envs
+from vllm.assets.base import get_cache_dir
 from vllm.logger import init_logger
 from vllm.utils import PlaceholderModule
 
@@ -33,7 +35,6 @@ def list_safetensors(path: str = "") -> list[str]:
 
     Args:
         path: The object storage path to list from.
-        allow_pattern: A list of patterns of which files to pull.
 
     Returns:
         list[str]: List of full object storage paths allowed by the pattern
@@ -54,19 +55,23 @@ class ObjectStorageModel:
         dir: The temporary created directory.
 
     Methods:
-        pull_files(): Pull model from object storage to the temporary
-        directory.
+        pull_files(): Pull model from object storage to the temporary directory.
     """
 
-    def __init__(self) -> None:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            existing_handler = signal.getsignal(sig)
-            signal.signal(sig, self._close_by_signal(existing_handler))
+    def __init__(self, url: str) -> None:
+        if envs.VLLM_ASSETS_CACHE_MODEL_CLEAN:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                existing_handler = signal.getsignal(sig)
+                signal.signal(sig, self._close_by_signal(existing_handler))
 
-        self.dir = tempfile.mkdtemp()
-
-    def __del__(self):
-        self._close()
+        dir_name = os.path.join(
+            get_cache_dir(), "model_streamer",
+            hashlib.sha256(str(url).encode()).hexdigest()[:8])
+        if os.path.exists(dir_name):
+            shutil.rmtree(dir_name)
+        os.makedirs(dir_name)
+        self.dir = dir_name
+        logger.debug("Init object storage, model cache path is: %s", dir_name)
 
     def _close(self) -> None:
         if os.path.exists(self.dir):

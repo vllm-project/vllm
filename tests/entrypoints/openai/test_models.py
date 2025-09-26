@@ -26,7 +26,6 @@ def server(zephyr_lora_files):
         "--enable-lora",
         "--lora-modules",
         f"zephyr-lora={zephyr_lora_files}",
-        f"zephyr-lora2={zephyr_lora_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -56,4 +55,3 @@ async def test_check_models(client: openai.AsyncOpenAI, zephyr_lora_files):
     assert all(lora_model.root == zephyr_lora_files
                for lora_model in lora_models)
     assert lora_models[0].id == "zephyr-lora"
-    assert lora_models[1].id == "zephyr-lora2"

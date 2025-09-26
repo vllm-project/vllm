@@ -39,7 +39,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
-from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -234,8 +233,9 @@ class Ernie4_5_VisionAttention(nn.Module):
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
                    for x in (q, k, v))
         if rotary_pos_emb is not None:
-            q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
-            k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
+            qk_concat = torch.cat([q, k], dim=0)
+            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
+            q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
             # from vllm_flash_attn.flash_attn_interface import (
@@ -261,8 +261,8 @@ class Ernie4_5_VisionAttention(nn.Module):
                                             causal=False)
 
             context_layer = rearrange(output,
-                                      "(b s) ... -> b s ...",
-                                      b=batch_size)
+                                      "(b s) h d -> s b (h d)",
+                                      b=batch_size).contiguous()
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             outputs = []
@@ -281,6 +281,8 @@ class Ernie4_5_VisionAttention(nn.Module):
                 output_i = rearrange(output_i, "b h s d -> b s h d ")
                 outputs.append(output_i)
             context_layer = torch.cat(outputs, dim=1)
+            context_layer = rearrange(context_layer,
+                                      "b s h d -> s b (h d)").contiguous()
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
@@ -291,8 +293,8 @@ class Ernie4_5_VisionAttention(nn.Module):
 
             context_layer = xops.memory_efficient_attention_forward(
                 q, k, v, attn_bias=attn_bias, p=0, scale=None)
-        context_layer = rearrange(context_layer,
-                                  "b s h d -> s b (h d)").contiguous()
+            context_layer = rearrange(context_layer,
+                                      "b s h d -> s b (h d)").contiguous()
 
         output, _ = self.proj(context_layer)
         return output
@@ -1289,11 +1291,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         """compute logits"""
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def _vision_forward(
         self,
@@ -1446,7 +1446,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary

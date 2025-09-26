@@ -67,31 +67,16 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
         "package to enable FP8 kernels.")
 
 
-def _resolve_symbol(module, new: str, old: str) -> Callable[..., Any] | None:
-    """Return the *new* symbol if it exists, otherwise the *old* one."""
-    if hasattr(module, new):
-        return getattr(module, new)
-    if hasattr(module, old):
-        # TODO(wentao): deprecate old symbol in the future.
-        logger.warning_once(
-            "Found legacy DeepGEMM symbol `%s`. Please upgrade the `deep_gemm` "
-            "package so that `%s` is available. Support for the legacy symbol "
-            "will be removed in a future vLLM release.",
-            old,
-            new,
-        )
-        return getattr(module, old)
-    return None
-
-
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _grouped_impl: Callable[..., Any] | None = None
 _grouped_masked_impl: Callable[..., Any] | None = None
+_get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
-    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl
+    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl,\
+         _get_mn_major_tma_aligned_tensor_impl
 
     # fast path
     if (_fp8_gemm_nt_impl is not None or _grouped_impl is not None
@@ -109,14 +94,19 @@ def _lazy_init() -> None:
 
     _dg = importlib.import_module("deep_gemm")
 
-    _fp8_gemm_nt_impl = _resolve_symbol(_dg, "fp8_gemm_nt",
-                                        "gemm_fp8_fp8_bf16_nt")
-    _grouped_impl = _resolve_symbol(
-        _dg, "m_grouped_fp8_gemm_nt_contiguous",
-        "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous")
-    _grouped_masked_impl = _resolve_symbol(
-        _dg, "fp8_m_grouped_gemm_nt_masked",
-        "m_grouped_gemm_fp8_fp8_bf16_nt_masked")
+    _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
+    _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
+    _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
+    _get_mn_major_tma_aligned_tensor_impl = getattr(
+        _dg, "get_mn_major_tma_aligned_tensor", None)
+
+
+def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
+    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor"""
+    _lazy_init()
+    if _get_mn_major_tma_aligned_tensor_impl is None:
+        return _missing()
+    return _get_mn_major_tma_aligned_tensor_impl(x)
 
 
 def fp8_gemm_nt(*args, **kwargs):
@@ -157,7 +147,7 @@ DEFAULT_BLOCK_SIZE = [128, 128]
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/dd6ed14acbc7445dcef224248a77ab4d22b5f240/deep_gemm/utils/math.py#L38
-# TODO(wentao): optimize this function, using triton or cuda kernel
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def per_block_cast_to_fp8(
         x: torch.Tensor,
         block_size: list[int] = DEFAULT_BLOCK_SIZE,
@@ -209,4 +199,5 @@ __all__ = [
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
     "should_use_deepgemm_for_fp8_linear",
+    "get_col_major_tma_aligned_tensor",
 ]

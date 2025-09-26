@@ -68,7 +68,7 @@ class TritonPlaceholder(types.ModuleType):
 
     def __init__(self):
         super().__init__("triton")
-        self.__version__ = "3.3.0"
+        self.__version__ = "3.4.0"
         self.jit = self._dummy_decorator("jit")
         self.autotune = self._dummy_decorator("autotune")
         self.heuristics = self._dummy_decorator("heuristics")
@@ -93,3 +93,4 @@ class TritonLanguagePlaceholder(types.ModuleType):
         self.dtype = None
         self.int64 = None
         self.int32 = None
+        self.tensor = None

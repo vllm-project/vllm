@@ -15,29 +15,46 @@ from transformers import AutoConfig
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "facebook/opt-125m"
 
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 
 
 @pytest.fixture(scope="module")
-def default_server_args(
-    zephyr_lora_files,
-    zephyr_lora_added_tokens_files,
-) -> list[str]:
+def default_server_args() -> list[str]:
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "8192",
+        "2048",
         "--max-num-seqs",
         "128",
         "--enforce-eager",
         # Prompt Embeds server args
         "--enable-prompt-embeds",
-        "--no-enable-chunked-prefill",
     ]
+
+
+EXAMPLE_PROMPTS = [
+    "Hello, my name is",
+    "What is an LLM?",
+]
+
+
+def _encode_embeds(embeds: torch.Tensor):
+    buffer = io.BytesIO()
+    torch.save(embeds, buffer)
+    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+
+@pytest.fixture(scope="module")
+def example_prompt_embeds(hf_runner):
+    """Create example embeddings and return them as base64 encoded string."""
+    with hf_runner(MODEL_NAME) as hf_model:
+        example_embeddings = hf_model.get_prompt_embeddings(EXAMPLE_PROMPTS)
+
+    return [_encode_embeds(item) for item in example_embeddings]
 
 
 @pytest.fixture(scope="module",
@@ -56,20 +73,16 @@ async def client_with_prompt_embeds(server_with_prompt_embeds):
         yield async_client
 
 
-def create_dummy_embeds(num_tokens: int = 5) -> str:
-    """Create dummy embeddings and return them as base64 encoded string."""
-    dummy_embeds = torch.randn(num_tokens, CONFIG.hidden_size)
-    buffer = io.BytesIO()
-    torch.save(dummy_embeds, buffer)
-    return base64.b64encode(buffer.getvalue()).decode('utf-8')
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completions_with_prompt_embeds(
-        client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str):
+    example_prompt_embeds,
+    client_with_prompt_embeds: openai.AsyncOpenAI,
+    model_name: str,
+):
+    encoded_embeds, encoded_embeds2 = example_prompt_embeds
+
     # Test case: Single prompt embeds input
-    encoded_embeds = create_dummy_embeds()
     completion = await client_with_prompt_embeds.completions.create(
         model=model_name,
         prompt="",  # Add empty prompt as required parameter
@@ -80,7 +93,6 @@ async def test_completions_with_prompt_embeds(
     assert completion.choices[0].prompt_logprobs is None
 
     # Test case: batch completion with prompt_embeds
-    encoded_embeds2 = create_dummy_embeds()
     completion = await client_with_prompt_embeds.completions.create(
         model=model_name,
         prompt="",  # Add empty prompt as required parameter
@@ -92,7 +104,6 @@ async def test_completions_with_prompt_embeds(
     assert len(completion.choices[1].text) >= 1
 
     # Test case: streaming with prompt_embeds
-    encoded_embeds = create_dummy_embeds()
     single_completion = await client_with_prompt_embeds.completions.create(
         model=model_name,
         prompt="",  # Add empty prompt as required parameter
@@ -120,7 +131,6 @@ async def test_completions_with_prompt_embeds(
     assert "".join(chunks) == single_output
 
     # Test case: batch streaming with prompt_embeds
-    encoded_embeds2 = create_dummy_embeds()
     stream = await client_with_prompt_embeds.completions.create(
         model=model_name,
         prompt="",  # Add empty prompt as required parameter
@@ -142,7 +152,6 @@ async def test_completions_with_prompt_embeds(
     assert len(chunks_stream_embeds[1]) > 0
 
     # Test case: mixed text and prompt_embeds
-    encoded_embeds = create_dummy_embeds()
     completion_mixed = await client_with_prompt_embeds.completions.create(
         model=model_name,
         prompt="This is a prompt",
@@ -187,10 +196,14 @@ async def test_completions_errors_with_prompt_embeds(
 @pytest.mark.parametrize("logprobs_arg", [1, 0])
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completions_with_logprobs_and_prompt_embeds(
-        client_with_prompt_embeds: openai.AsyncOpenAI, logprobs_arg: int,
-        model_name: str):
+    example_prompt_embeds,
+    client_with_prompt_embeds: openai.AsyncOpenAI,
+    logprobs_arg: int,
+    model_name: str,
+):
+    encoded_embeds, encoded_embeds2 = example_prompt_embeds
+
     # Test case: Logprobs using prompt_embeds
-    encoded_embeds = create_dummy_embeds()
     completion = await client_with_prompt_embeds.completions.create(
         model=model_name,
         prompt="",  # Add empty prompt as required parameter
@@ -210,7 +223,6 @@ async def test_completions_with_logprobs_and_prompt_embeds(
     assert len(logprobs.tokens) == 5
 
     # Test case: Log probs with batch completion and prompt_embeds
-    encoded_embeds2 = create_dummy_embeds()
     completion = await client_with_prompt_embeds.completions.create(
         model=model_name,
         prompt="",  # Add empty prompt as required parameter
@@ -231,3 +243,23 @@ async def test_completions_with_logprobs_and_prompt_embeds(
             assert max(logprobs_arg,
                        1) <= len(top_logprobs) <= logprobs_arg + 1
         assert len(logprobs.tokens) == 5
+
+
+@pytest.mark.asyncio
+async def test_prompt_logprobs_raises_error(
+    example_prompt_embeds,
+    client_with_prompt_embeds: openai.AsyncOpenAI,
+):
+    encoded_embeds, _ = example_prompt_embeds
+
+    with pytest.raises(BadRequestError, match="not compatible"):
+        await client_with_prompt_embeds.completions.create(
+            model=MODEL_NAME,
+            prompt="",
+            max_tokens=5,
+            temperature=0.0,
+            extra_body={
+                "prompt_embeds": encoded_embeds,
+                "prompt_logprobs": True
+            },
+        )
