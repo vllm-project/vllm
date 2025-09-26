@@ -1739,7 +1739,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         model = self.get_model()
         assert is_mixture_of_experts(model)
         self.eplb_state.step(
-            model,
             is_dummy,
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
@@ -2419,7 +2418,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 indices = []
                 offset = 0
-                assert spec_decode_metadata is not None
+                assert spec_decode_metadata is not None, \
+                "No spec decode metadata for medusa"
                 for num_draft, tokens in zip(
                         spec_decode_metadata.num_draft_tokens,
                         sampled_token_ids):
@@ -2534,34 +2534,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             eep_scale_up: the model loading is for elastic EP scale up.
         """
         logger.info("Starting to load model %s...", self.model_config.model)
-        if eep_scale_up:
-            from vllm.distributed.parallel_state import get_ep_group
-            num_local_physical_experts = torch.empty(1,
-                                                     dtype=torch.int32,
-                                                     device="cpu")
-            torch.distributed.broadcast(num_local_physical_experts,
-                                        group=get_ep_group().cpu_group,
-                                        group_src=0)
-            num_local_physical_experts = int(num_local_physical_experts.item())
-            new_ep_size = get_ep_group().world_size
-            global_expert_load, old_global_expert_indices = (
-                EplbState.recv_state())
-            num_logical_experts = global_expert_load.shape[1]
-            self.parallel_config.eplb_config.num_redundant_experts = (
-                num_local_physical_experts * new_ep_size - num_logical_experts)
-            assert old_global_expert_indices.shape[
-                1] % num_local_physical_experts == 0
-            old_ep_size = old_global_expert_indices.shape[
-                1] // num_local_physical_experts
-            rank_mapping = {
-                old_ep_rank: old_ep_rank
-                for old_ep_rank in range(old_ep_size)
-            }
-        else:
-            global_expert_load = None
-            old_global_expert_indices = None
-            rank_mapping = None
+        global_expert_loads, old_global_expert_indices_per_model, \
+            rank_mapping = EplbState.get_epp_state(eep_scale_up)
 
+        if self.parallel_config.enable_eplb:
+            self.eplb_state = EplbState(self.parallel_config, self.device)
+            eplb_models = 0
         with DeviceMemoryProfiler() as m:
             time_before_load = time.perf_counter()
             model_loader = get_model_loader(self.load_config)
@@ -2574,6 +2552,29 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
+                if (hasattr(self.drafter, "model")
+                        and is_mixture_of_experts(self.drafter.model)
+                        and self.parallel_config.enable_eplb):
+                    logger.info(
+                        "EPLB is enabled for drafter model %s.",
+                        self.vllm_config.speculative_config.draft_model_config.
+                        model)
+
+                    global_expert_load = global_expert_loads[
+                        eplb_models] if global_expert_loads else None
+                    old_global_expert_indices = \
+                        old_global_expert_indices_per_model[eplb_models] \
+                        if old_global_expert_indices_per_model else None
+                    if self.eplb_state is None:
+                        self.eplb_state = EplbState(self.parallel_config,
+                                                    self.device)
+                    self.eplb_state.add_model(
+                        self.drafter.model,
+                        self.vllm_config.speculative_config.draft_model_config,
+                        global_expert_load, old_global_expert_indices,
+                        rank_mapping)
+                    eplb_models += 1
+
             if self.use_aux_hidden_state_outputs:
                 if supports_eagle3(self.model):
                     self.model.set_aux_hidden_state_layers(
@@ -2588,19 +2589,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
-
         if is_mixture_of_experts(
                 self.model) and self.parallel_config.enable_eplb:
             logger.info("EPLB is enabled for model %s.",
                         self.model_config.model)
-            self.eplb_state = EplbState.build(
-                self.model,
-                self.device,
-                self.parallel_config,
-                global_expert_load,
-                old_global_expert_indices,
-                rank_mapping,
-            )
+            global_expert_load = global_expert_loads[
+                eplb_models] if global_expert_loads else None
+            old_global_expert_indices = old_global_expert_indices_per_model[
+                eplb_models] if old_global_expert_indices_per_model else None
+            assert self.eplb_state is not None
+            self.eplb_state.add_model(self.model, self.model_config,
+                                      global_expert_load,
+                                      old_global_expert_indices, rank_mapping)
 
         if (
             self.vllm_config.compilation_config.level == \
@@ -3080,7 +3080,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
-                self.drafter.dummy_run(num_tokens)
+                self.drafter.dummy_run(num_tokens,
+                                       skip_eplb=skip_eplb,
+                                       is_profile=is_profile)
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real

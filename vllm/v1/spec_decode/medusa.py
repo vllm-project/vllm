@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
 
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.v1.sample.metadata import SamplingMetadata
 
 # Initialize logger
@@ -33,6 +36,8 @@ class MedusaProposer:
             draft_model_config.get_hidden_size(
         )
         self.dtype = vllm_config.model_config.dtype
+        self.eplb_state: Optional[EplbState] = None
+        self.device = device
 
     def propose(
         self,
@@ -49,15 +54,21 @@ class MedusaProposer:
         draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
         return [list(row) for row in zip(*draft_tokens)]
 
-    def load_model(self, target_model: nn.Module) -> None:
+    def load_model(self,
+                   target_model: nn.Module,
+                   eep_scale_up: bool = False) -> None:
         from vllm.compilation.backends import set_model_tag
         with set_model_tag("medusa_head"):
             self.model = get_model(vllm_config=self.vllm_config,
                                    model_config=self.vllm_config.
                                    speculative_config.draft_model_config)
+        assert not is_mixture_of_experts(self.model)
 
     @torch.inference_mode()
-    def dummy_run(self, num_tokens: int) -> None:
+    def dummy_run(self,
+                  num_tokens: int,
+                  skip_eplb: bool = False,
+                  is_profile: bool = False) -> None:
         hidden_states = torch.zeros((self.max_num_tokens, self.hidden_size),
                                     dtype=self.dtype,
                                     device=self.device)

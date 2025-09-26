@@ -193,6 +193,8 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 scale=logit_scale)
+        # Set MoE hyperparameters
+        self.set_moe_parameters()
 
     def forward(
         self,
