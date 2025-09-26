@@ -284,6 +284,7 @@ steps:
 
 - label: V1 Test others # 42min
   timeout_in_minutes: 60
+  fast_check: true
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/

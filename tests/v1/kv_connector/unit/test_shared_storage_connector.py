@@ -8,6 +8,8 @@ from PIL import Image
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_transfer_state import (
+    ensure_kv_transfer_shutdown)
 from vllm.multimodal.utils import encode_image_base64
 
 MODEL_NAME = "RedHatAI/Qwen2.5-VL-3B-Instruct-quantized.w8a8"
@@ -114,9 +116,12 @@ def process_prompt(processor, llm: LLM, question: str,
 def test_shared_storage_connector_hashes(tmp_path):
     """
     Tests that SharedStorageConnector saves KV to the storage locations
-    with proper hashes; that are unique for inputs with identical text but 
+    with proper hashes; that are unique for inputs with identical text but
     different images (same size), or same multiple images but different orders.
     """
+    # Shutdown the KV transfer process if it is still running
+    ensure_kv_transfer_shutdown()
+
     # Using tmp_path as the storage path to store KV
     print(f"KV storage path at: {str(tmp_path)}")
 
