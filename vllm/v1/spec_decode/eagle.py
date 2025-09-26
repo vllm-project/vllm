@@ -84,8 +84,8 @@ class EagleProposer:
         if self.uses_mrope:
             # M-RoPE need (3, max_num_tokens)
             self.mrope_positions = torch.zeros((3, self.max_num_tokens),
-                                                dtype=torch.int64,
-                                                device=device)
+                                               dtype=torch.int64,
+                                               device=device)
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens,
