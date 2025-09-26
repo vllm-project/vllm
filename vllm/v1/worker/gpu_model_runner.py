@@ -1048,7 +1048,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         uniform_decode = \
             (max_num_scheduled_tokens == self.uniform_decode_query_len) and \
             (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-        ubatch_slices, num_tokens_after_padding = \
+        ubatch_slices, num_tokens_across_dp= \
             coordinate_batch_across_dp(num_scheduled_tokens,
                         num_tokens_unpadded,
                         num_tokens_padded,
@@ -1268,8 +1268,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
-                max_num_scheduled_tokens, ubatch_slices,
-                num_tokens_after_padding, use_cascade_attn)
+                max_num_scheduled_tokens, ubatch_slices, num_tokens_across_dp,
+                use_cascade_attn)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -2188,15 +2188,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Prepare the decoder inputs.
                 (attn_metadata, logits_indices, spec_decode_metadata,
                  num_scheduled_tokens_np, spec_decode_common_attn_metadata,
-                 max_query_len, ubatch_slices, num_tokens_after_padding,
+                 max_query_len, ubatch_slices, num_tokens_across_dp,
                  use_cascade_attn) = self._prepare_inputs(scheduler_output)
 
             if ubatch_slices:
-                assert num_tokens_after_padding is not None
-                num_input_tokens = int(num_tokens_after_padding[0].item())
+                assert num_tokens_across_dp is not None
+                num_input_tokens = int(num_tokens_across_dp[0].item())
                 self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-            elif num_tokens_after_padding is not None:
-                num_input_tokens = int(num_tokens_after_padding[0].item())
+            elif num_tokens_across_dp is not None:
+                num_input_tokens = int(num_tokens_across_dp[0].item())
             else:
                 num_input_tokens = self._get_num_input_tokens(
                     scheduler_output.total_num_scheduled_tokens)
@@ -2227,7 +2227,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_after_padding,
+                num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_descriptor,
                 ubatch_slices=ubatch_slices,
