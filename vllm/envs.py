@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
+    VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
@@ -143,6 +144,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0_HOPPER: bool = False
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput",
@@ -155,7 +157,8 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx",
                                   "deepep_high_throughput",
                                   "deepep_low_latency",
-                                  "allgather_reducescatter"] = \
+                                  "allgather_reducescatter",
+                                  "flashinfer_all2allv"] = \
                                   "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
@@ -198,6 +201,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
+    VLLM_USE_FBGEMM: bool = False
 
 
 def get_default_cache_root():
@@ -699,6 +703,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
             os.path.join(get_default_cache_root(), "vllm", "assets"),
         )),
 
+    # If the env var is set, we will clean model file in
+    # this path $VLLM_ASSETS_CACHE/model_streamer/$model_name
+    "VLLM_ASSETS_CACHE_MODEL_CLEAN":
+    lambda: bool(int(os.getenv("VLLM_ASSETS_CACHE_MODEL_CLEAN", "0"))),
+
     # Timeout for fetching images when serving multimodal models
     # Default is 5 seconds
     "VLLM_IMAGE_FETCH_TIMEOUT":
@@ -1139,6 +1148,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))),
 
     # Allow use of FlashInfer MoE kernels for fused moe ops.
+    "VLLM_USE_FLASHINFER_MOE_FP16":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))),
+
+    # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
 
@@ -1203,12 +1216,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "pplx": use pplx kernels
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
+    # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
     "VLLM_ALL2ALL_BACKEND":
     env_with_choices("VLLM_ALL2ALL_BACKEND", "allgather_reducescatter",
                      ["naive", "pplx",
                      "deepep_high_throughput",
                      "deepep_low_latency",
-                     "allgather_reducescatter"]),
+                     "allgather_reducescatter",
+                     "flashinfer_all2allv"]),
 
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
@@ -1438,7 +1453,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH":
     lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
-
+    # Flag to enable FBGemm kernels on model execution
+    "VLLM_USE_FBGEMM": lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1507,6 +1523,7 @@ def compute_hash() -> str:
         "VLLM_USE_DEEP_GEMM_E8M0_HOPPER",
         "VLLM_USE_TRTLLM_FP4_GEMM",
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
+        "VLLM_USE_FLASHINFER_MOE_FP16",
         "VLLM_USE_FLASHINFER_MOE_FP8",
         "VLLM_USE_FLASHINFER_MOE_FP4",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
@@ -1533,6 +1550,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
         "VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE",
         "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
+        "VLLM_USE_FBGEMM",
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,
