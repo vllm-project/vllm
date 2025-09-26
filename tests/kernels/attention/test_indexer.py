@@ -2,9 +2,10 @@ import random
 
 import torch
 
+from vllm.v1.attention.backends.mla.indexer import kv_spans_from_batches
 from vllm.utils.tile_lang_kernels import act_quant, fp8_index
 from vllm import _custom_ops as ops
-from vllm.model_executor.models.deepseek_v2 import kv_spans_from_batches, indexer_k_quant_and_cache
+from vllm.model_executor.models.deepseek_v2 import indexer_k_quant_and_cache
 from vllm.utils.deep_gemm import (
     fp8_mqa_logits,
     get_paged_mqa_logits_metadata,
@@ -28,8 +29,10 @@ def ref_compute_logits_fp8(q, kv, weights, mask, block_size):
 
 def ref_indexer(seq_len, q, kv, weights, block_size, topk):
     B = seq_len.shape[0]
-    varlen_logits = []
+    total_seqlen = torch.sum(seq_len)
+    varlen_logits = torch.full((total_seqlen, total_seqlen), float("-inf"), device="cuda")
     
+    current_context_ptr = 0
     for i in range(B):
         S = seq_len[i]
         q_s = q[i][:S].contiguous().unsqueeze(0)
@@ -39,25 +42,17 @@ def ref_indexer(seq_len, q, kv, weights, block_size, topk):
             (S, S), float("-inf"),
             device="cuda").triu_(1)
         logits = ref_compute_logits_fp8(q_s, kv_s, weights_s, mask, block_size)
-        varlen_logits.append(logits)
-    # topk_indices = index_score.topk(topk,
-    #                                 dim=-1)[1]
+        logits = logits.squeeze(0)
+        
+        varlen_logits[current_context_ptr:current_context_ptr + S, current_context_ptr: current_context_ptr + S] = logits
+        current_context_ptr += S
     return varlen_logits
 
 def deepgemm_mqa_indexer(seq_len, q, kv, weights, block_size, topk):
-    NUM_BLOCKS = 8
-    BLOCK_SIZE = 32
-
     B = seq_len.shape[0]
     concat_q = []
     concat_kv = []
     concat_weights = []
-    total_slots = NUM_BLOCKS * BLOCK_SIZE
-    head_dim = kv.shape[-1]
-    max_num_block_per_batch = torch.max(seq_len)
-    block_table = torch.empty((B, max_num_block_per_batch),
-                              dtype=torch.int32,
-                              device="cuda")
 
     for i in range(B):
         S = seq_len[i]
@@ -71,29 +66,8 @@ def deepgemm_mqa_indexer(seq_len, q, kv, weights, block_size, topk):
     q = torch.cat(concat_q, dim=0)
     kv = torch.cat(concat_kv, dim=0)
     weights = torch.cat(concat_weights, dim=0)
-    q_fp8, q_scale = act_quant(q, 128, "ue8m0")
-    kv_fp8, kv_scale = act_quant(kv, 128, "ue8m0")
-
-    # write to kv cache based on slot mapping
-    entry_size = head_dim + 4
-    num_tokens = q.size(0)
-    slot_mapping_lst = random.sample(range(total_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping_lst,
-                                dtype=torch.long,
-                                device="cuda")
-    kv_cache = torch.zeros(
-        NUM_BLOCKS,
-        BLOCK_SIZE,
-        entry_size,
-        dtype=torch.uint8,
-        device="cuda"
-    )
-
-    current_index = 0
-    for i in range(B):
-        S = seq_len[i]
-        block_table[i][:S] = slot_mapping[current_index: current_index + S]
-        current_index += S
+    q_fp8, q_scale = act_quant(q, block_size, "ue8m0")
+    kv_fp8, kv_scale = act_quant(kv, block_size, "ue8m0")
     
     weights = weights.unsqueeze(-1) * (128**(-0.5)) * q_scale
     weights = weights.squeeze(-1)
@@ -117,8 +91,8 @@ def deepgemm_mqa_indexer(seq_len, q, kv, weights, block_size, topk):
     topk_indices = topk_indices.masked_fill(~mask, -1)
     return logits
 
-def test_paged_indexer_python():
-    B = 
+def test_prefill_indexer():
+    B = 3
     S = 128
     SKV = S
     H = 64
@@ -135,11 +109,10 @@ def test_paged_indexer_python():
                      dtype=torch.bfloat16)
     weights = torch.randn(B, S, H, device=device, dtype=torch.float32) * H**-0.5
 
-    ref_indices = ref_indexer(seq_len, q, kv, weights, block_size, topk)
-    torch_indices = deepgemm_mqa_indexer(seq_len, q, kv, weights, block_size, topk)
-    import pdb; pdb.set_trace()
-    print(ref_indices)
+    ref_logits = ref_indexer(seq_len, q, kv, weights, block_size, topk)
+    deepgemm_logits = deepgemm_mqa_indexer(seq_len, q, kv, weights, block_size, topk)
+    torch.testing.assert_close(ref_logits, deepgemm_logits)
 
 
 if __name__ == "__main__":
-    test_paged_indexer_python()
+    test_prefill_indexer()
