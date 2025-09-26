@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
+# This script is used to build FlashInfer wheels with AOT kernels
 
 set -ex
 
-# Build FlashInfer with AOT kernels
-# This script is used by both the Dockerfile and standalone wheel building
-
-# FlashInfer configuration - keep FLASHINFER_GIT_REF in sync with requirements/cuda.txt
+# FlashInfer configuration
 FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-FLASHINFER_GIT_REF="${FLASHINFER_GIT_REF:-v0.3.1}"  # Must match requirements/cuda.txt
-CUDA_VERSION="${CUDA_VERSION:-12.8.1}"
+FLASHINFER_GIT_REF="${FLASHINFER_GIT_REF}"
+CUDA_VERSION="${CUDA_VERSION}"
 BUILD_WHEEL="${BUILD_WHEEL:-true}"
+
+if [[ -z "${FLASHINFER_GIT_REF}" ]]; then
+    echo "❌ FLASHINFER_GIT_REF must be specified" >&2
+    exit 1
+fi
+
+if [[ -z "${CUDA_VERSION}" ]]; then
+    echo "❌ CUDA_VERSION must be specified" >&2
+    exit 1
+fi
 
 echo "🏗️  Building FlashInfer ${FLASHINFER_GIT_REF} for CUDA ${CUDA_VERSION}"
 
@@ -36,20 +44,17 @@ pushd flashinfer
     export UV_TORCH_BACKEND=cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
     # Build AOT kernels
+    export TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}"
     export FLASHINFER_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}"
-    TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-        python3 -m flashinfer.aot
+    python3 -m flashinfer.aot
     
     if [[ "${BUILD_WHEEL}" == "true" ]]; then
         # Build wheel for distribution
-        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            uv build --wheel --out-dir ../flashinfer-dist .
-        # mkdir -p /output && cp /wheels/*.whl /output/
+        uv build --no-build-isolation --wheel --out-dir ../flashinfer-dist .
         echo "✅ FlashInfer wheel built successfully in flashinfer-dist/"
     else
         # Install directly (for Dockerfile)
-        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            uv pip install --system --no-build-isolation --force-reinstall .
+        uv pip install --system --no-build-isolation --force-reinstall .
         echo "✅ FlashInfer installed successfully"
     fi
 popd
