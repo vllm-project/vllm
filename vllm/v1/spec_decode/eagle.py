@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention.backends.abstract import AttentionMetadataBuilder
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
@@ -25,7 +24,8 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -169,7 +169,6 @@ class EagleProposer:
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
-
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
         self.input_ids[:num_tokens - 1] = target_token_ids[1:]
@@ -184,8 +183,9 @@ class EagleProposer:
         builder = (self._get_attention_metadata_builder()
                    if self.attn_metadata_builder is None else
                    self.attn_metadata_builder)
-        attn_metadata = builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata, draft_index=0)
+        attn_metadata = builder.build_for_drafting(  # type: ignore
+            common_attn_metadata=common_attn_metadata,
+            draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -222,7 +222,8 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
-            if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp"):
+            if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp",
+                               "longcat_flash_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
@@ -236,7 +237,10 @@ class EagleProposer:
             return draft_token_ids.view(-1, 1)
 
         positions = target_positions[last_token_indices]
-        hidden_states = hidden_states[last_token_indices]
+        if self.method in ("deepseek_mtp", "ernie_mtp", "longcat_flash_mtp"):
+            hidden_states = self.hidden_states[last_token_indices]
+        else:
+            hidden_states = hidden_states[last_token_indices]
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
@@ -319,7 +323,7 @@ class EagleProposer:
                 exceeds_max_model_len, PADDING_SLOT_ID)
 
             # Rebuild attention metadata
-            attn_metadata = builder.build_for_drafting(
+            attn_metadata = builder.build_for_drafting(  # type: ignore
                 common_attn_metadata=common_attn_metadata,
                 draft_index=token_index + 1)
             for layer_name in self.attn_layer_names:
@@ -349,7 +353,7 @@ class EagleProposer:
                     inputs_embeds=inputs_embeds,
                 )
                 if self.method in ("deepseek_mtp", "ernie_mtp",
-                                   "qwen3_next_mtp"):
+                                   "qwen3_next_mtp", "longcat_flash_mtp"):
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states
                 else:
