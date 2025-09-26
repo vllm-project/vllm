@@ -1312,3 +1312,33 @@ def baseline_scaled_mm(a: torch.Tensor,
         output = output + bias
 
     return output
+
+
+def create_strided_tensor(size: tuple[int, ...], stride: tuple[int, ...],
+                          dtype: torch.dtype) -> torch.Tensor:
+    """
+    Helper function to create a tensor with specific size and stride.
+    """
+    assert len(size) == len(
+        stride), "Size and stride must have the same number of dimensions"
+
+    # Sort dims according to strides.
+    sorted_stride, sorted_size = zip(*sorted(zip(stride, size)))
+
+    # Validate if sizes and strides make sense:
+    # (1) Stride must be a multiple of the next smaller stride.
+    nb_dims = len(sorted_size)
+    for i in range(nb_dims - 1):
+        assert sorted_stride[i + 1] % sorted_stride[i] == 0, \
+            f"Invalid size {size} and stride {stride}: Stride must be a " \
+            f"multiple of the next smaller stride."
+    # (2) Stride must be at least size * stride of the next smaller dim.
+    for i in range(nb_dims - 1):
+        assert sorted_stride[i + 1] >= sorted_size[i] * sorted_stride[i], \
+            f"Invalid size {size} and stride {stride}: Stride must be at " \
+            f"least size * stride of the next smaller dim."
+
+    # Allocate large enough memory using the largest stride times the dimension
+    # size.
+    return torch.empty(sorted_size[-1] * sorted_stride[-1],
+                       dtype=dtype).as_strided(size, stride)
