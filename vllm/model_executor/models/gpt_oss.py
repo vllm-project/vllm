@@ -658,16 +658,19 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         packed_modules_mapping["experts"] = []
 
         # FIXME: Updated to match lora adapter syntax but may not be necessary
-        for _, weight_name, _, _ in expert_params_mapping:
-            weight_str = weight_name.split('.')
-            weight_name = "model.layers." + weight_str[1] + ".mlp." + weight_str[0] #  + "." + "experts" #weight_str[2]# + ".weight" 
-            packed_modules_mapping["experts"].append(weight_name)
+        # for _, weight_name, _, _ in expert_params_mapping:
+        #     weight_str = weight_name.split('.')
+        #     print("weight-str", weight_str)
+        #     weight_name = "model.layers." + weight_str[1] + ".mlp." + weight_str[0] + "." + weight_str[2] # + ".weight" 
+        #     print("weight", weight_name)
+        #     packed_modules_mapping["experts"].append(weight_name)
 
         # print(packed_modules_mapping)
-        # packed_modules_mapping["experts"] = [
-        #     weight_name.rstrip(".")
-        #     for _, weight_name, _, _ in expert_params_mapping
-        # ]
+        packed_modules_mapping["experts"] = [
+            weight_name.rstrip(".")
+            for _, weight_name, _, _ in expert_params_mapping
+        ]
+        print(packed_modules_mapping)
         return packed_modules_mapping
 
     def __init__(
@@ -713,10 +716,10 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         # (param_name, weight_name, expert_id, shard_id)
         # FIXME: LoRA adapter format is 'model.layers.4.mlp.experts without proj
         return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="", #gate_up_proj", #"lora_A", #"gate_proj",
+            ckpt_gate_proj_name="base_layer", #gate_up_proj", #"lora_A", #"gate_proj",
             ckpt_down_proj_name="", #"down_proj",#"down_proj",
             #ckpt_up_proj_name="",#"up_proj",
-            num_experts=self.config.num_local_experts, # self.config.n_routed_experts
+            num_experts=self.config.num_local_experts, # FIXME: we aggregate over experts at layer level self.config.n_routed_experts
             num_redundant_experts=0)
 
     def load_weights(self, weights: Iterable[tuple[str,
