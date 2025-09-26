@@ -3536,3 +3536,22 @@ def set_env_var(key, value):
             del os.environ[key]
         else:
             os.environ[key] = old
+
+
+def is_port_available(host: str = "127.0.0.1", port: int = 8000) -> bool:
+    """Checks if a port is available for binding on the given host."""
+    try:
+        address_family = socket.AF_INET
+        if is_valid_ipv6_address(host):
+            address_family = socket.AF_INET6
+        with socket.socket(address_family, socket.SOCK_STREAM) as sock:
+            sock.bind((host, port))
+            return True
+    except OSError as e:
+        logger.error("Port %s:%s is already in " \
+        "use or cannot be bound: %s", host, port, e)
+        return False
+    except Exception as e:
+        logger.error("An unexpected error occurred " \
+        "while checking port %s:%s: %s", host, port, e)
+        return False

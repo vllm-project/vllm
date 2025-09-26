@@ -33,7 +33,7 @@ from vllm.distributed.utils import divide
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import make_zmq_path, make_zmq_socket
+from vllm.utils import is_port_available, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -868,6 +868,15 @@ class NixlConnectorWorker:
             attn_backend_name=self.backend_name,
             kv_cache_layout=self.kv_cache_layout)
         ready_event = threading.Event()
+        port = self.side_channel_port + self.tp_rank
+        if not is_port_available(envs.VLLM_NIXL_SIDE_CHANNEL_HOST, port):
+            raise RuntimeError(
+                f"TP Rank {self.tp_rank} is trying to use port " \
+                f"{self.side_channel_port + self.tp_rank} which is " \
+                "not available. Update `VLLM_NIXL_SIDE_CHANNEL_PORT` "
+                "such that `VLLM_NIXL_SIDE_CHANNEL_PORT through " \
+                "`VLLM_NIXL_SIDE_CHANNEL_PORT + tp_size` are free"
+            )
         self._nixl_handshake_listener_t = threading.Thread(
             target=self._nixl_handshake_listener,
             args=(metadata, ready_event, self.side_channel_port, self.tp_rank),
