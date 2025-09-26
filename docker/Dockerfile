@@ -407,12 +407,15 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
             export FLASHINFER_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}"
             # Build AOT kernels
             uv pip install --system cuda-python
-            python3 -m flashinfer.aot
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+                python3 -m flashinfer.aot
             # Install with no-build-isolation since we already built AOT kernels
-            uv pip install --system --no-build-isolation . \
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+                uv pip install --system --no-build-isolation . \
                 --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
             # Download pre-compiled cubins
-            python3 -m flashinfer --download-cubin || echo "WARNING: Failed to download flashinfer cubins."
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+                python3 -m flashinfer --download-cubin || echo "WARNING: Failed to download flashinfer cubins."
         else
             echo "🏗️  Installing FlashInfer without AOT compilation in JIT mode"
             uv pip install --system . \
