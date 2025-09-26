@@ -106,6 +106,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
+    VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
+    VLLM_ROCM_USE_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -201,6 +203,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
+    VLLM_USE_FBGEMM: bool = False
 
 
 def get_default_cache_root():
@@ -933,6 +936,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in
              ("true", "1")),
 
+    # Whether to use aiter fp4 gemm asm.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in
+             ("true", "1")),
+
+    # Whether to use aiter rope.
+    # By default is disabled.
+    "VLLM_ROCM_USE_TRITON_ROPE":
+    lambda: (os.getenv("VLLM_ROCM_USE_TRITON_ROPE", "False").lower() in
+             ("true", "1")),
+
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_FP8BMM":
@@ -1452,7 +1467,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH":
     lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
-
+    # Flag to enable FBGemm kernels on model execution
+    "VLLM_USE_FBGEMM": lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1537,6 +1553,8 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_RMSNORM",
         "VLLM_ROCM_USE_AITER_MLA",
         "VLLM_ROCM_USE_AITER_MHA",
+        "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
+        "VLLM_ROCM_USE_TRITON_ROPE",
         "VLLM_ROCM_USE_AITER_FP8BMM",
         "VLLM_ROCM_USE_SKINNY_GEMM",
         "VLLM_ROCM_FP8_PADDING",
@@ -1548,6 +1566,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
         "VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE",
         "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
+        "VLLM_USE_FBGEMM",
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,

@@ -90,7 +90,7 @@ class XFormersAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "XFORMERS_VLLM_V1"
+        return "XFORMERS"
 
     @staticmethod
     def get_impl_cls() -> type["XFormersAttentionImpl"]:

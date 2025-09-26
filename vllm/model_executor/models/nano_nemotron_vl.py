@@ -869,8 +869,8 @@ class NanoNemotronVLDummyInputsBuilder(
     info=NanoNemotronVLProcessingInfo,
     dummy_inputs=NanoNemotronVLDummyInputsBuilder,
 )
-class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
-                        SupportsMultiModal):
+class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
+                           SupportsMultiModal):
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -1249,7 +1249,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
 
         try:
             print("=" * 100)
-            print("NemotronH_Nano_VL Model Architecture")
+            print("NemotronH_Nano_VL_V2 Model Architecture")
             print("=" * 100)
 
             total_params = 0
@@ -1333,7 +1333,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
             component_info[component]["size"] += param.numel()
 
         return {
-            "model_name": "NemotronH_Nano_VL",
+            "model_name": "NemotronH_Nano_VL_V2",
             "total_parameters": total_params,
             "memory_estimate_mb": total_params * 2 / (1024**2),  # bfloat16
             "components": component_info,
