@@ -355,7 +355,7 @@ def _rocm_aiter_fp4_gemm_with_dynamic_quant_impl(
     weight_scale: torch.Tensor,
     out_dtype: Optional[torch.dtype] = torch.bfloat16,
     x_scales: Optional[torch.Tensor] = None,
-):
+) -> torch.Tensor:
     from aiter import gemm_a4w4, per_1x32_f4_quant_hip
 
     M = x.shape[0]

@@ -36,11 +36,11 @@ class QuarkW4A4MXFP4(QuarkScheme):
             assert (self.use_aiter_fp4_asm_gemm or
                     self.use_aiter_fp4_triton_gemm), \
             f"{self.__class__.__name__} requires AITER to be installed"
-            "for non-emulation mode!"
-            "ASM kernel and Triton kernels are avaible"
-            "from AITER package for this mode."
-            "Enable ASM kernel using VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1"
-            "else Triton Kernel utilized."
+            "for non-emulation mode! "
+            "ASM and Triton kernels are available "
+            "from the AITER package in this mode. "
+            "Enable the ASM kernel using VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1; "
+            "otherwise, the Triton kernel will be used. "
             "Please refer to https://github.com/ROCm/aiter "
             "for installation details."
 
