@@ -292,6 +292,11 @@ def is_layer_skipped(
                     f"Detected some but not all shards of {prefix} "
                     "are quantized. All shards of fused layers "
                     "to have the same precision.")
+    elif "experts" in prefix:
+        return any([
+            prefix in layer_name for layer_name in ignored_layers
+            if "experts" in layer_name
+        ])
     else:
         is_skipped = prefix in ignored_layers
 
