@@ -139,6 +139,7 @@ def ubatch_split(
     num_scheduled_tokens_per_request: np.ndarray,
     num_tokens_unpadded: int,
     num_tokens_padded: int,
+    uniform_decode: bool,
     vllm_config: VllmConfig,
 ) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
     """
@@ -164,7 +165,7 @@ def ubatch_split(
     should_attempt_ubatching = check_ubatch_thresholds(
         parallel_config,
         num_tokens_unpadded,
-        vllm_config,
+        uniform_decode=uniform_decode,
     )
 
     # Don't microbatch unless every other DP worker is also microbatching
