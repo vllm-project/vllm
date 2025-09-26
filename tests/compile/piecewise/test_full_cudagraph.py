@@ -3,12 +3,11 @@
 import contextlib
 import os
 import weakref
-from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
+from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
@@ -32,89 +31,6 @@ def temporary_environ(env_vars):
             else:
                 os.environ[k] = v
 
-
-@dataclass
-class BackendConfig:
-    name: str
-    env_vars: dict
-    comp_config: dict
-    specific_gpu_arch: Optional[tuple] = None
-
-
-# Define all backend configurations of full cudagraph to be tested
-backend_configs = {
-    # FA3 on Hopper
-    "FA3":
-    BackendConfig(name="FA3",
-                  env_vars={
-                      "VLLM_FLASH_ATTN_VERSION": "3",
-                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
-                  },
-                  comp_config={
-                      "cudagraph_mode": "FULL",
-                  },
-                  specific_gpu_arch=(9, 0)),
-    # FlashMLA on Hopper
-    "FlashMLA":
-    BackendConfig(name="FlashMLA",
-                  env_vars={
-                      "VLLM_ATTENTION_BACKEND": "FLASHMLA",
-                  },
-                  comp_config={
-                      "cudagraph_mode": "FULL_AND_PIECEWISE",
-                  },
-                  specific_gpu_arch=(9, 0)),
-    # FlashAttention MLA on Hopper
-    "FlashAttentionMLA":
-    BackendConfig(name="FlashAttentionMLA",
-                  env_vars={
-                      "VLLM_ATTENTION_BACKEND": "FLASH_ATTN_MLA",
-                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
-                  },
-                  comp_config={
-                      "cudagraph_mode": "FULL_DECODE_ONLY",
-                  },
-                  specific_gpu_arch=(9, 0)),
-    # Cutlass MLA on Blackwell
-    "CutlassMLA":
-    BackendConfig(
-        name="CutlassMLA",
-        env_vars={
-            "VLLM_USE_V1": "1",
-            "VLLM_ATTENTION_BACKEND": "CUTLASS_MLA",
-            "FORCE_NUM_KV_SPLITS":
-            "1",  # TODO: remove this when hang issue is fixed
-        },
-        comp_config={
-            "cudagraph_mode": "FULL_AND_PIECEWISE",
-            "cudagraph_capture_sizes": [16, 32, 64, 128, 256, 512],
-        },
-        specific_gpu_arch=(10, 0)),
-    # FA2
-    "FA2":
-    BackendConfig(name="FA2",
-                  env_vars={
-                      "VLLM_FLASH_ATTN_VERSION": "2",
-                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
-                  },
-                  comp_config={
-                      "cudagraph_mode": "FULL",
-                  }),
-    # Triton Attention
-    "TritonAttn":
-    BackendConfig(name="TritonAttn",
-                  env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN"},
-                  comp_config={
-                      "cudagraph_mode": "FULL",
-                  }),
-    # FlashInfer
-    "FlashInfer":
-    BackendConfig(name="FlashInfer",
-                  env_vars={"VLLM_ATTENTION_BACKEND": "FLASHINFER"},
-                  comp_config={
-                      "cudagraph_mode": "FULL_AND_PIECEWISE",
-                  }),
-}
 
 test_params_full_cudagraph = []
 
