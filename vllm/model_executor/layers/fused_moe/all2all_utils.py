@@ -175,9 +175,9 @@ def maybe_make_prepare_finalize(
 
         all_to_all_args = dict(
             hidden_dim=moe.hidden_dim,
-            max_num_of_tokens_per_dp_rank=moe.max_num_tokens,
+            max_num_of_tokens_per_rank=moe.max_num_tokens,
             num_local_experts=(moe.num_experts // all2all_manager.world_size),
-            num_experts=moe.num_experts,
+            num_of_experts=moe.num_experts,
             use_fp8=use_fp8,
         )
 
