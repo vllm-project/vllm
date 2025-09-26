@@ -64,6 +64,12 @@ class SupportsMultiModal(Protocol):
     `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
+    merge_by_field_config: ClassVar[bool] = False
+    """
+    A flag that indicates which implementation of
+    `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         """
@@ -109,6 +115,42 @@ class SupportsMultiModal(Protocol):
         ...
 
 
+@runtime_checkable
+class SupportsMultiModalPruning(Protocol):
+    """The interface required for models that support returning both input
+    embeddings and positions. Model may require custom positions for dynamic
+    pruning of multimodal embeddings.
+    """
+    supports_multimodal_pruning: ClassVar[Literal[True]] = True
+
+    def recompute_mrope_positions(
+            self, input_ids: list[int],
+            multimodal_embeddings: MultiModalEmbeddings,
+            mrope_positions: torch.LongTensor, num_computed_tokens: int
+    ) -> tuple[MultiModalEmbeddings, Tensor, int]:
+        """
+        Update part of input mrope positions (starting with
+        num_computed_tokens index). Original mrope_positions are computed
+        for unpruned sequence and becomes incorrect once pruning occurs,
+        so once we prune media tokens we should reflect this in the
+        mrope_positions before we feed it to LLM.
+
+        Args:
+            input_ids: (N,) All input tokens of the prompt containing
+                entire sequence.
+            multimodal_embeddings: Tuple of multimodal embeddings that
+                fits into the prefill chunk that is being processed.
+            mrope_positions: Existing mrope positions (3, N) for entire
+                sequence
+            num_computed_tokens: A number of computed tokens so far.
+
+        Returns:
+            Tuple of (multimodal_embeddings, mrope_positions,
+                mrope_position_delta).
+        """
+        ...
+
+
 @overload
 def supports_multimodal(
         model: type[object]) -> TypeIs[type[SupportsMultiModal]]:
@@ -134,6 +176,25 @@ def supports_multimodal_raw_input_only(
 def supports_multimodal_encoder_tp_data(
         model: Union[type[object], object]) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)
+
+
+@overload
+def supports_multimodal_pruning(
+        model: type[object]) -> TypeIs[type[SupportsMultiModalPruning]]:
+    ...
+
+
+@overload
+def supports_multimodal_pruning(
+        model: object) -> TypeIs[SupportsMultiModalPruning]:
+    ...
+
+
+def supports_multimodal_pruning(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsMultiModalPruning]],
+           TypeIs[SupportsMultiModalPruning]]:
+    return getattr(model, "supports_multimodal_pruning", False)
 
 
 @runtime_checkable
