@@ -3,7 +3,7 @@
 """Utility functions for attention-related v1 tests."""
 
 from dataclasses import dataclass
-from typing import Union
+from typing import Optional, Union
 
 import pytest
 import torch
@@ -260,3 +260,88 @@ def create_dummy_kv_cache(block_size: int,
         dtype=dtype,
         device=device)
     return kv_cache
+
+
+@dataclass
+class BackendConfig:
+    name: str
+    env_vars: dict
+    comp_config: dict  # compilation config
+    specific_gpu_arch: Optional[tuple] = None
+
+
+# Define all backend configurations of full cudagraph to be tested
+full_cg_backend_configs = {
+    # FA3 on Hopper
+    "FA3":
+    BackendConfig(name="FA3",
+                  env_vars={
+                      "VLLM_ATTENTION_BACKEND": "FLASH_ATTN",
+                      "VLLM_FLASH_ATTN_VERSION": "3",
+                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
+                  },
+                  comp_config={
+                      "cudagraph_mode": "FULL",
+                  },
+                  specific_gpu_arch=(9, 0)),
+    # FlashMLA on Hopper
+    "FlashMLA":
+    BackendConfig(name="FlashMLA",
+                  env_vars={
+                      "VLLM_ATTENTION_BACKEND": "FLASHMLA",
+                  },
+                  comp_config={
+                      "cudagraph_mode": "FULL_AND_PIECEWISE",
+                  },
+                  specific_gpu_arch=(9, 0)),
+    # Cutlass MLA on Blackwell
+    "CutlassMLA":
+    BackendConfig(
+        name="CutlassMLA",
+        env_vars={
+            "VLLM_USE_V1": "1",
+            "VLLM_ATTENTION_BACKEND": "CUTLASS_MLA",
+            "FORCE_NUM_KV_SPLITS":
+            "1",  # TODO: remove this when hang issue is fixed
+        },
+        comp_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+        },
+        specific_gpu_arch=(10, 0)),
+    # FlashAttention MLA on Hopper
+    "FlashAttentionMLA":
+    BackendConfig(name="FlashAttentionMLA",
+                  env_vars={
+                      "VLLM_ATTENTION_BACKEND": "FLASH_ATTN_MLA",
+                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
+                  },
+                  comp_config={
+                      "cudagraph_mode": "FULL_DECODE_ONLY",
+                  },
+                  specific_gpu_arch=(9, 0)),
+    # FA2
+    "FA2":
+    BackendConfig(name="FA2",
+                  env_vars={
+                      "VLLM_ATTENTION_BACKEND": "FLASH_ATTN",
+                      "VLLM_FLASH_ATTN_VERSION": "2",
+                      "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
+                  },
+                  comp_config={
+                      "cudagraph_mode": "FULL_AND_PIECEWISE",
+                  }),
+    # Triton Attention
+    "TritonAttn":
+    BackendConfig(name="TritonAttn",
+                  env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN"},
+                  comp_config={
+                      "cudagraph_mode": "FULL_AND_PIECEWISE",
+                  }),
+    # FlashInfer
+    "FlashInfer":
+    BackendConfig(name="FlashInfer",
+                  env_vars={"VLLM_ATTENTION_BACKEND": "FLASHINFER"},
+                  comp_config={
+                      "cudagraph_mode": "FULL_AND_PIECEWISE",
+                  }),
+}
