@@ -248,6 +248,7 @@ def kernel_unified_attention_2d(
 
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
+    acc_fp4 = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -380,9 +381,8 @@ def kernel_unified_attention_2d(
         S += scale * tl.dot(Q, K)
 
         if pid0 < -1 and pid1 < 1 and j == 0:
-           #tl.device_print("S ", S)
-           #tl.device_print("S2 ",S2)
            tl.device_print("S-S2 ",S - S2)
+
         S = S2
 
         if USE_SOFTCAP:
@@ -435,8 +435,8 @@ def kernel_unified_attention_2d(
         M = m_j
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        if use_native_fp4:
-           p_fp4, scale_p = _mxfp4_quant_op(P, TILE_SIZE, BLOCK_M, 32)
+        if use_native_fp4 >= 3: # PV quant to fp4 will significantly increase error
+           p_fp4, scale_p = _mxfp4_quant_op(P*6.0, TILE_SIZE, BLOCK_M, 32)
 
            vt = tl.trans(V)
            v_fp4, scale_v = _mxfp4_quant_op(vt, TILE_SIZE, HEAD_SIZE_PADDED, 32)
@@ -451,10 +451,15 @@ def kernel_unified_attention_2d(
            # reference from triton def dot_scaled()
            # M, K_LHS = lhs.type.shape[-2:]
            # K_RHS, N = rhs.type.shape[-2:]
-           acc = tl.dot_scaled(p_fp4, scale_p, "e2m1", v_fp4_t, scale_v_t, "e2m1", acc, lhs_k_pack=PACK_ALONG_K,
-                                   rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32)
-        else:
+           acc_fp4 = tl.dot_scaled(p_fp4, scale_p, "e2m1", v_fp4_t, scale_v_t, "e2m1", acc*6.0, lhs_k_pack=PACK_ALONG_K,
+                                   rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32) / 6.0
+        elif use_native_fp4 == 2:
+           acc += tl.dot(P.to(tl.float8e5), V.to(tl.float8e5))
+        else:           
            acc += tl.dot(P.to(V.dtype), V)
+
+        if pid0 < -1 and pid1 < 1 and j == 0:
+           tl.device_print("acc - acc_fp4 ",acc - acc_fp4)
 
     # epilogue
     acc = acc / L[:, None]
