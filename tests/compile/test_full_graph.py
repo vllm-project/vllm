@@ -25,22 +25,29 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
     TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
         ("facebook/opt-125m", {}),
         (
-            "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
-            {
-                "dtype": torch.float16,
-            },
-        ),
-        (
             "neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic",
             {
                 "dtype": torch.float16,
             },
         ),
-        ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
 
     if all:
+        if not current_platform.has_device_capability((10, 0)):
+            # int8 removed on Blackwell
+            TEST_MODELS.extend(
+                [
+                    ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
+                    (
+                        "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
+                        {
+                            "dtype": torch.float16,
+                        },
+                    ),
+                ]
+            )
+
         # TODO: figure out why this fails.
         if False and is_quant_method_supported("gguf"):  # noqa: SIM223
             TEST_MODELS.append(
@@ -85,15 +92,14 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
     "optimization_level",
     [CompilationLevel.DYNAMO_ONCE, CompilationLevel.PIECEWISE],
 )
-@pytest.mark.parametrize("model_info", models_list(all=True))
+@pytest.mark.parametrize("model, model_kwargs", models_list(all=True))
 @create_new_process_for_each_test()
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
-    model_info: tuple[str, dict[str, Any]],
+    model: str,
+    model_kwargs: dict[str, Any],
     optimization_level: int,
 ):
-    model, model_kwargs = model_info
-
     with monkeypatch.context():
         print(f"MODEL={model}")
 
@@ -180,40 +186,55 @@ def test_fp8_kv_scale_compile(optimization_level: int):
     run_model(optimization_level, model, model_kwargs)
 
 
-def test_inductor_graph_partition_attn_fusion(caplog_vllm):
-    if not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+INDUCTOR_GRAPH_PARTITION = (
+    [False, True] if (is_torch_equal_or_newer("2.9.0.dev")) else [False]
+)
 
+
+@pytest.mark.parametrize("custom_ops", ["+quant_fp8", "-quant_fp8"])
+@pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+def test_default_fusion(
+    custom_ops: str, inductor_graph_partition: bool, caplog_vllm, monkeypatch
+):
     model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
+    model_kwargs = {"kv_cache_dtype": "fp8", "max_model_len": 1024}
+    backend = _Backend.FLASHINFER
+
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+
+    if inductor_graph_partition:
+        mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        splitting_ops: Optional[list[str]] = None
+    else:
+        mode = CUDAGraphMode.FULL_DECODE_ONLY
+        splitting_ops = []
+
+    # Disable, compile cache to make sure custom passes run.
+    # Otherwise, we can't verify fusion happened through the logs.
+    # Log capture also doesn't work with multiprocessing yet.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
     compilation_config = CompilationConfig(
+        # Testing properties
+        custom_ops=custom_ops_list,
+        use_inductor_graph_partition=inductor_graph_partition,
+        cudagraph_mode=mode,
+        splitting_ops=splitting_ops,
+        # Common
         level=CompilationLevel.PIECEWISE,
-        use_inductor_graph_partition=True,
-        cudagraph_mode=CUDAGraphMode.PIECEWISE,
-        custom_ops=["+quant_fp8"],
         pass_config=PassConfig(enable_attn_fusion=True, enable_noop=True),
+        # Inductor caches custom passes by default as well via uuid
+        inductor_compile_config={"force_disable_caches": True},
     )
-    model_kwargs = {
-        "kv_cache_dtype": "fp8",
-        "max_model_len": 1024,
-    }
+
     with (
         caplog_vllm.at_level(logging.DEBUG),
-        global_force_attn_backend_context_manager(_Backend.FLASHINFER),
+        global_force_attn_backend_context_manager(backend),
     ):
         run_model(compilation_config, model, model_kwargs)
 
-    try:
-        assert "Fused quantization onto 48 attention nodes" in caplog_vllm.text, (
-            caplog_vllm.text
-        )
-    except AssertionError:
-        # Note: this message is only triggered when the compilation goes
-        # through the custom pass. Due to multiple layers of cache on
-        # PyTorch side, the compilation of a graph may be cached such
-        # that custom pass directly goes through cache. In this case,
-        # we go through this branch and assert that the pass is not
-        # triggered.
-        assert "Fused quantization" not in caplog_vllm.text
+    assert "Fused quant onto 48 attention nodes" in caplog_vllm.text, caplog_vllm.text
 
 
 def run_model(
