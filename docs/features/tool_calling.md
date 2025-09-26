@@ -310,6 +310,15 @@ Flags:
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
 
+### LongCat-Flash-Chat Models (`longcat`)
+
+Supported models:
+
+* `meituan-longcat/LongCat-Flash-Chat`
+* `meituan-longcat/LongCat-Flash-Chat-FP8`
+
+Flags: `--tool-call-parser longcat`
+
 ### GLM-4.5 Models (`glm45`)
 
 Supported models:
