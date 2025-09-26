@@ -421,6 +421,10 @@ def get_num_available_blocks_tt(vllm_config: VllmConfig) -> int:
           and is_wormhole):
         # Llama90B on WH T3K
         max_tokens_all_users = 65536
+    elif ("Qwen2.5-VL-72B" in model_config.model and num_devices_per_model == 8
+          and is_wormhole):
+        # Qwen2.5-VL-72B on WH T3K
+        max_tokens_all_users = 65536
     else:
         # Note: includes num vision tokens for multi-modal
         max_tokens_all_users = 131072
