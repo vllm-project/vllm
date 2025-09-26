@@ -607,10 +607,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             ).parallel_config.pipeline_parallel_size)
         ]
 
-        # Align with Attention's scale attributes so MLA backends can access
-        # scaling fields via the shared AttentionLayer protocol.
-        # These are initialized to 1.0 and can be optionally updated by
-        # calc_kv_scales() if/when MLA adds dynamic scale calculation.
+        # Align with Attention's scale attributes for MLA backends.
+
         self.calculate_kv_scales = calculate_kv_scales
         self._k_scale = torch.tensor(1.0, dtype=torch.float32)
         self._v_scale = torch.tensor(1.0, dtype=torch.float32)
@@ -623,8 +621,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self._v_scale_float = 1.0
         self._o_scale_float: Optional[float] = None
 
-        # Optional ranges for dynamic scale calculation (kept for parity with
-        # Attention; not strictly required unless calculate_kv_scales is used).
+        # Initialize q/k/v range constants.
         try:
             self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT,
                                         dtype=torch.float32)
@@ -708,8 +705,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                        k_pe: torch.Tensor) -> None:
         """Optional scale calculation for MLA inputs.
 
-        Mirrors Attention.calc_kv_scales but adapts to MLA inputs. Not all
-        MLA backends require this; kept for protocol completeness.
+        Mirrors Attention.calc_kv_scales. Not all MLA backends require this
         """
         # Use safe defaults if ranges are not present
         q_range = getattr(self, "q_range", torch.tensor(1.0))

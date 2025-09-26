@@ -124,6 +124,8 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
     for _, module in model.named_modules():
         if (isinstance(module, (Attention, MLAAttention))
                 and hasattr(module, "process_weights_after_loading")):
+            # TODO(lucas): see if there is a way to unify the signatures
+            # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
 
 
