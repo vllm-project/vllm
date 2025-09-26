@@ -151,11 +151,9 @@ class RMSNorm(CustomOp):
         self.variance_epsilon = eps
         self.variance_size_override = (None if var_hidden_size == hidden_size
                                        else var_hidden_size)
-        self.weight = None
-        if has_weight:
-            dtype = dtype or torch.get_default_dtype()
-            self.weight = nn.Parameter(torch.ones(hidden_size, dtype=dtype))
-        weight_dtype = self.weight.data.dtype
+        weight_dtype = dtype or torch.get_default_dtype()
+        self.has_weight = has_weight
+        self.weight = nn.Parameter(torch.ones(hidden_size, dtype=weight_dtype))
 
         if current_platform.is_rocm():
             self.rocm_norm_func = dispatch_rocm_rmsnorm_func(
@@ -205,16 +203,17 @@ class RMSNorm(CustomOp):
             return x, residual
 
     def forward_native(
-            self,
-            x: torch.Tensor,
-            residual: Optional[torch.Tensor] = None,
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
+
         return self.forward_static(
             x,
             self.variance_epsilon,
             self.hidden_size,
-            self.weight.data,
+            self.weight.data if self.has_weight else None,
             residual,
             self.variance_size_override,
         )
