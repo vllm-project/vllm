@@ -2570,7 +2570,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 target_token_ids = self.input_ids.gpu[token_indices]
                 # TODO(woosuk): Support M-RoPE.
                 target_positions = self.positions.gpu[token_indices]
-                if self.use_aux_hidden_state_outputs:
+                if self.speculative_config.uses_draft_model():
+                    target_hidden_states = None
+                elif self.use_aux_hidden_state_outputs:
                     assert aux_hidden_states is not None
                     target_hidden_states = torch.cat(
                         [h[token_indices] for h in aux_hidden_states], dim=-1)

@@ -81,6 +81,14 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         new_slot_mapping = self.runner.input_batch.block_table[
             kv_cache_group_id].slot_mapping.gpu[:new_num_actual_tokens]
 
+        # new_positions = self.runner.positions.gpu[:new_num_actual_tokens]
+        # block_numbers = new_positions // self.block_size
+        # block_ids = new_block_table_tensor.gather(
+        #     dim=1, index=block_numbers.view(1, -1))
+        # block_ids = block_ids.view(-1)
+        # new_slot_mapping = (block_ids * self.block_size
+        #                     + new_positions % self.block_size)
+
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
             query_start_loc_cpu=new_query_start_loc.to("cpu"),
