@@ -278,6 +278,11 @@ class InputPreprocessor:
             raise ValueError(
                 "prompt_embeds must be of shape (seq_len, hidden_size).")
 
+        # Tensors must be on CPU for serialization between processes
+        # in the MsgpackEncoder. Casting to CPU here ensures that there is no
+        # hidden device transfer in the critical path of generation.
+        prompt_embeds = prompt_embeds.cpu()
+
         return embeds_inputs(prompt_embeds=prompt_embeds,
                              cache_salt=parsed_content.get("cache_salt"))
 
