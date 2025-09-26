@@ -453,8 +453,8 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
                 if p_pivots_sum_0 >= p:
                     if p_pivots_sum_0 - min_larger_0 < p:
                         p_pivot = p_pivot_0
-                    elif tl.abs(p_pivots_sum_0 - min_larger_0) < 1e-6:
-                        p_pivot = (p_pivot_0 + min_larger_0) / 2.0
+                        if tl.abs(p_pivots_sum_0 - min_larger_0) < 1e-6:
+                            p_pivot = (p_pivot_0 + min_larger_0) / 2.0
                     else:
                         min_range = p_pivot_0
                 else:
