@@ -94,7 +94,7 @@ def ubatch_split(
     # to the second ubatch in pad_out_ubatch_slice after attention
     # metadata creation
     assert num_tokens_after_padding is not None
-    token_split_point = int(num_tokens_after_padding[0].item())
+    token_split_point = int(num_tokens_after_padding[0].item()) // 2
 
     ubatch_slices = create_ubatch_slices(num_scheduled_tokens_per_request,
                                          token_split_point)

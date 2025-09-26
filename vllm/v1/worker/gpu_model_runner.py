@@ -2111,10 +2111,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                  max_query_len, ubatch_slices, num_tokens_after_padding
                  ) = self._prepare_inputs(scheduler_output)
 
-            assert num_tokens_after_padding is not None
             if ubatch_slices:
                 assert num_tokens_after_padding is not None
-                num_input_tokens = int(num_tokens_after_padding[0].item() * 2)
+                num_input_tokens = int(num_tokens_after_padding[0].item())
                 self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
             elif num_tokens_after_padding is not None:
                 num_input_tokens = int(num_tokens_after_padding[0].item())
@@ -2143,8 +2142,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # This is currently to get around the assert in the DPMetadata
         # where it wants `num_tokens_across_dp` to align with `num_tokens`
-        if ubatch_slices is not None:
-            num_input_tokens = ubatch_slices[0].num_tokens
+        # if ubatch_slices is not None:
+        #     num_input_tokens = ubatch_slices[0].num_tokens
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.

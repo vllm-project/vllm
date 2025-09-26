@@ -106,16 +106,6 @@ def coordinate_batch_across_dp(
                                             device="cpu",
                                             dtype=torch.int32)
 
-    # If we are using ubatching, then we need to divide the num_tokens
-    # in num_tokens_after_padding in half and round up to the next multiple
-    # of two
     should_ubatch = _post_process_ubatch(tensor)
-    if should_ubatch:
-        # Round up to the next multiple of two for even divisibility
-        num_tokens_per_ubatch = round_up(max_num_tokens, 2) // 2
-        num_tokens_after_padding = torch.tensor([num_tokens_per_ubatch] *
-                                                len(num_tokens_across_dp),
-                                                device="cpu",
-                                                dtype=torch.int32)
 
     return should_ubatch, num_tokens_after_padding

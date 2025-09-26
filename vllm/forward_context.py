@@ -79,14 +79,7 @@ class DPMetadata:
         assert num_tokens_across_dp is not None
         assert parallel_config.data_parallel_size > 1
         dp_rank = parallel_config.data_parallel_rank
-        if attn_metadata is not None and hasattr(attn_metadata,
-                                                 "num_prefill_tokens"):
-            # for v0 attention backends
-            batchsize = attn_metadata.num_prefill_tokens + \
-                attn_metadata.num_decode_tokens
-        else:
-            # for v1 attention backends or no attn_metadata
-            batchsize = num_tokens
+        batchsize = num_tokens
 
         # If num_tokens_across_dp is None, it will be computed by all_reduce
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
