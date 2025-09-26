@@ -1243,15 +1243,14 @@ class Scheduler(SchedulerInterface):
 
         num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
 
+        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+
         if not supports_hma(self.connector) or num_kv_cache_groups == 1:
             # NOTE(Kuntai): this code path is a hack.
             # We should remove this code path after all connectors
             # support hybrid memory allocator.
-            (block_ids, ) = self.kv_cache_manager.get_block_ids(
-                request.request_id)
-            return self.connector.request_finished(request, block_ids)
+            return self.connector.request_finished(request, block_ids[0])
         else:
-            block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
             return self.connector.request_finished(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
