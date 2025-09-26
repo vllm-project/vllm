@@ -83,15 +83,24 @@ class MiniCPM3Attention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.q_a_proj = ReplicatedLinear(self.hidden_size,
-                                         self.q_lora_rank,
-                                         bias=False,
-                                         quant_config=quant_config)
-        self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-        self.q_b_proj = ColumnParallelLinear(q_lora_rank,
-                                             self.num_heads * self.qk_head_dim,
+        if self.q_lora_rank is not None:
+            self.q_a_proj = ReplicatedLinear(self.hidden_size,
+                                             self.q_lora_rank,
                                              bias=False,
                                              quant_config=quant_config)
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank,
+                                         eps=config.rms_norm_eps)
+            self.q_b_proj = ColumnParallelLinear(self.q_lora_rank,
+                                                 self.num_heads *
+                                                 self.qk_head_dim,
+                                                 bias=False,
+                                                 quant_config=quant_config)
+        else:
+            self.q_proj = ColumnParallelLinear(self.hidden_size,
+                                               self.num_heads *
+                                               self.qk_head_dim,
+                                               bias=False,
+                                               quant_config=quant_config)
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(self.hidden_size,
                                                    self.kv_lora_rank +
@@ -131,10 +140,14 @@ class MiniCPM3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        q, _ = self.q_a_proj(hidden_states)
-        q = self.q_a_layernorm(q)
-        q, _ = self.q_b_proj(q)
-        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
+        if self.q_lora_rank is not None:
+            q = self.q_a_proj(hidden_states)[0]
+            q = self.q_a_layernorm(q)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
+                                         self.qk_head_dim)
+        else:
+            q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads,
+                                                   self.qk_head_dim)
         _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                           dim=-1)
         latent_cache, _ = self.kv_a_proj_with_mqa(hidden_states)
