@@ -276,21 +276,15 @@ class BlockPool:
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
-        # In order to only iterate the list once, we duplicated code a bit
-        current_time = time.time()
-        if self.enable_caching:
-            for block in ret:
+        # Record allocation time for lifetime tracking
+        current_time = time.monotonic()
+        for block in ret:
+            if self.enable_caching:
                 self._maybe_evict_cached_block(block)
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                # Record allocation time for lifetime tracking
-                block.allocation_time = current_time
-        else:
-            for block in ret:
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                # Record allocation time for lifetime tracking
-                block.allocation_time = current_time
+            assert block.ref_cnt == 0
+            block.ref_cnt += 1
+            # Record allocation time for lifetime tracking
+            block.allocation_time = current_time
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -355,7 +349,7 @@ class BlockPool:
         """
         # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
-        current_time = time.time()
+        current_time = time.monotonic()
         
         for block in blocks_list:
             # Calculate and record lifetime if allocation time was tracked
