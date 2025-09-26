@@ -57,11 +57,18 @@ fi
 image_name="npu/vllm-ci:${BUILDKITE_COMMIT}_${EPOCHSECONDS}"
 container_name="npu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
+# BUILDKITE_AGENT_NAME format is {hostname}-{agent_idx}-{npu_card_num}cards
+agent_idx=$(echo "${BUILDKITE_AGENT_NAME}" | awk -F'-' '{print $(NF-1)}')
+echo "agent_idx: ${agent_idx}"
+builder_name="cachebuilder${agent_idx}"
+builder_cache_dir="/mnt/docker-cache${agent_idx}"
+mkdir -p ${builder_cache_dir}
+
 # Try building the docker image
 cat <<EOF | DOCKER_BUILDKIT=1 docker build \
     --add-host cache-service-vllm.nginx-pypi-cache.svc.cluster.local:${PYPI_CACHE_HOST} \
-    --builder cachebuilder --cache-from type=local,src=/mnt/docker-cache \
-                           --cache-to type=local,dest=/mnt/docker-cache,mode=max \
+    --builder ${builder_name} --cache-from type=local,src=${builder_cache_dir} \
+                           --cache-to type=local,dest=${builder_cache_dir},mode=max \
     --progress=plain --load -t ${image_name} -f - .
 FROM ${BASE_IMAGE_NAME}
 
@@ -162,9 +169,8 @@ devices=$(parse_and_gen_devices "${BUILDKITE_AGENT_NAME}") || exit 1
 # Run the image and execute the Out-Of-Tree (OOT) platform interface test case on Ascend NPU hardware.
 # This test checks whether the OOT platform interface is functioning properly in conjunction with
 # the hardware plugin vllm-ascend.
-model_cache_dir_idx=$(echo "${BUILDKITE_AGENT_NAME}" | awk -F'-' '{print $(NF-1)}')
-echo "model_cache_dir_idx: ${model_cache_dir_idx}"
-mkdir -p /mnt/modelscope${model_cache_dir_idx}
+model_cache_dir=/mnt/modelscope${agent_idx}
+mkdir -p ${model_cache_dir}
 docker run \
     ${devices} \
     --device /dev/davinci_manager \
@@ -175,7 +181,7 @@ docker run \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /mnt/modelscope${model_cache_dir_idx}:/root/.cache/modelscope \
+    -v ${model_cache_dir}:/root/.cache/modelscope \
     --entrypoint="" \
     --name "${container_name}" \
     "${image_name}" \
