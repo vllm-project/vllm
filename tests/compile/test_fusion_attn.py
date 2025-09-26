@@ -1,20 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from typing import Optional
+import itertools
+from collections.abc import Iterable
+from typing import Any
 
 import pytest
 import torch._dynamo
 
 from tests.compile.backend import LazyInitPass, TestBackend
-from tests.models.utils import check_outputs_equal
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata)
-from vllm import LLM, SamplingParams
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.selector import global_force_attn_backend_context_manager
-from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
@@ -24,7 +23,7 @@ from vllm.config import (CacheConfig, CompilationConfig, CompilationLevel,
                          set_current_vllm_config)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey, kFp8StaticTensorSym, kNvfp4Quant)
+    kFp8StaticTensorSym, kNvfp4Quant)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform
@@ -33,128 +32,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
-
-# globals needed for string-import custom Dynamo backend field
-backend: Optional[TestBackend] = None
-backend_unfused: Optional[TestBackend] = None
-
-
-@pytest.mark.parametrize(
-    "model, quant_key",
-    [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)])
-@pytest.mark.parametrize("use_triton_fa", [True, False])
-@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="V0 attn quant fusion only on ROCm")
-def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
-                             quant_key: QuantKey, use_triton_fa: bool):
-    # Clean Dynamo cache to avoid reusing other test cases
-    # (for some reason the reset at the end is not enough)
-    torch._dynamo.reset()
-
-    # Use global backends
-    global backend, backend_unfused
-
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-    monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
-
-    # Prompt 4 seems too open-ended, differs between fused and unfused
-    # (both outputs look reasonable though)
-    prompts = example_prompts[:4] + example_prompts[5:]
-
-    compile_config = CompilationConfig(
-        # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
-        # DYNAMO_ONCE does not properly propagate shapes.
-        level=CompilationLevel.DYNAMO_AS_IS,
-        backend="tests.compile.test_fusion_attn.backend_unfused",
-        custom_ops=["+quant_fp8"],
-    )
-    vllm_config = VllmConfig(compilation_config=compile_config,
-                             model_config=ModelConfig(
-                                 model=model,
-                                 dtype=torch.bfloat16,
-                             ))
-    backend_unfused = TestBackend(NoOpEliminationPass(vllm_config))
-
-    llm = LLM(model,
-              enforce_eager=True,
-              compilation_config=compile_config,
-              gpu_memory_utilization=0.5,
-              max_model_len=2048)
-
-    sampling_params = SamplingParams(temperature=0.0,
-                                     max_tokens=10,
-                                     top_p=0.95)
-
-    unfused_output = llm.generate(prompts, sampling_params)
-    backend_unfused = None  # Reset backend to make sure llm gets released
-    del llm
-
-    compile_config = CompilationConfig(
-        # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
-        # DYNAMO_ONCE does not properly propagate shapes.
-        level=CompilationLevel.DYNAMO_AS_IS,
-        backend="tests.compile.test_fusion_attn.backend",
-        custom_ops=["+quant_fp8"],
-    )
-    vllm_config = VllmConfig(compilation_config=compile_config,
-                             model_config=ModelConfig(
-                                 model=model,
-                                 dtype=torch.bfloat16,
-                             ))
-
-    # AttnFusionPass needs attention layers to be registered in config upon init
-    # so we initialize it during compilation.
-    attn_pass = LazyInitPass(AttnFusionPass, vllm_config)
-    backend = TestBackend(NoOpEliminationPass(vllm_config), attn_pass)
-    llm2 = LLM(model,
-               enforce_eager=True,
-               compilation_config=compile_config,
-               gpu_memory_utilization=0.5,
-               max_model_len=2048)
-
-    # check support
-    attn_fusion_supported = [
-        layer.impl.fused_output_quant_supported(quant_key)
-        for key, layer in compile_config.static_forward_context.items()
-    ]
-
-    print(f"{attn_fusion_supported=}")
-    if any(attn_fusion_supported):
-        # Check quant ops
-        backend.check_before_ops([QUANT_OPS[quant_key]], fully_replaced=False)
-
-    # attention ops present in both, just output_scale param changes
-    attn_nodes_pre = list(find_op_nodes(ATTN_OP, backend.graph_pre_pass))
-    attn_nodes_post = list(find_op_nodes(ATTN_OP, backend.graph_post_pass))
-    assert len(attn_nodes_pre) == len(attn_nodes_post)
-
-    for i in range(len(attn_nodes_pre)):
-        assert attn_nodes_pre[i].kwargs["output_scale"] is None
-        fused = attn_nodes_post[i].kwargs["output_scale"] is not None
-        assert fused == attn_fusion_supported[i], \
-            f"Node {i} {'' if fused else 'not '} expected " \
-            f"to have fused output quant"
-
-    # check outputs
-    fused_output = llm2.generate(prompts, sampling_params)
-
-    # transform outputs to format expected by check_outputs_equal
-    sample_outs = lambda s: (list(s.token_ids), s.text)
-    outs_lst = lambda ros: [sample_outs(ro.outputs[0]) for ro in ros]
-
-    check_outputs_equal(
-        outputs_0_lst=outs_lst(unfused_output),
-        outputs_1_lst=outs_lst(fused_output),
-        name_0="unfused",
-        name_1="fused",
-    )
-
-    # Clean Dynamo cache to avoid polluting other case(s)
-    torch._dynamo.reset()
-
-    # Reset backend to make sure llm2 gets released
-    backend = None
 
 
 class AttentionQuantPatternModel(torch.nn.Module):
@@ -225,13 +102,15 @@ class AttentionQuantPatternModel(torch.nn.Module):
                                self.head_size,
                                dtype=self.kv_cache_dtype,
                                device=self.device)
+
+        # TODO use get_kv_cache_stride_order
         if current_platform.is_rocm():
             # k/v as 1st dimention
             if use_hnd:
                 kv_cache = kv_cache.permute(1, 0, 2, 3, 4)
             else:
                 kv_cache = kv_cache.permute(1, 0, 3, 2, 4)
-        else:
+        elif self.attn.backend == _Backend.FLASHINFER:
             # k/v as 2nd dimention
             # Create kv_cache in HND layout and permute to NHD layout
             # (later will be permuted back to HND layout in forward pass)
@@ -315,19 +194,45 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
                                      out_dtype=attn_output.dtype)
 
 
+MODELS_FP8 = []
+MODELS_FP4 = []
+HEADS = []
+SPLIT_ATTENTION = []
+BACKENDS_FP8: list[_Backend] = []
+BACKENDS_FP4: list[_Backend] = []
+
 if current_platform.is_cuda():
-    MODELS = [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
-               TestAttentionFp8StaticQuantPatternModel),
-              ("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
-               TestAttentionNvfp4QuantPatternModel)]
+    MODELS_FP8 = [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+                   TestAttentionFp8StaticQuantPatternModel)]
     HEADS = [(64, 8), (40, 8)]
+    SPLIT_ATTENTION = [False]
+    BACKENDS_FP8 = [_Backend.TRITON_ATTN]
+
+    if current_platform.is_device_capability((10, 0)):
+        BACKENDS_FP8 += [_Backend.FLASHINFER]
+        BACKENDS_FP4 += [_Backend.FLASHINFER]
+        MODELS_FP4 += [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+                        TestAttentionNvfp4QuantPatternModel)]
+
 elif current_platform.is_rocm():
-    MODELS = [("amd/Llama-3.1-8B-Instruct-FP8-KV",
-               TestAttentionFp8StaticQuantPatternModel)]
+    MODELS_FP8 = [("amd/Llama-3.1-8B-Instruct-FP8-KV",
+                   TestAttentionFp8StaticQuantPatternModel)]
     HEADS = [(32, 8), (40, 8)]
+    SPLIT_ATTENTION = [False, True]
+    BACKENDS = [_Backend.TRITON_ATTN]
+
+# TODO(boyuan/luka): test inductor graph partition on rocm
+if is_torch_equal_or_newer("2.9.0.dev") and current_platform.is_cuda():
+    USE_INDUCTOR_GRAPH_PARTITION = [False, True]
 else:
-    MODELS = []
-    HEADS = []
+    USE_INDUCTOR_GRAPH_PARTITION = [False]
+
+
+def flat_product(*iterables: Iterable[Any]):
+    """ Flatten lists of tuples into cartesian product."""
+    for element in itertools.product(*iterables):
+        normalized = (e if isinstance(e, tuple) else [e] for e in element)
+        yield list(itertools.chain(*normalized))
 
 
 @pytest.mark.parametrize("num_qo_heads, num_kv_heads", HEADS)
@@ -335,38 +240,27 @@ else:
 @pytest.mark.parametrize("batch_size",
                          [7, 256, 533] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("model_name, model_class", MODELS)
-@pytest.mark.parametrize("backend",
-                         [_Backend.FLASHINFER] if current_platform.is_cuda()
-                         else [_Backend.TRITON_ATTN])
 @pytest.mark.parametrize(
-    "split_attention",
-    [False, True] if current_platform.is_rocm() else [False])
-# TODO(boyuan): test inductor graph partition on rocm
-@pytest.mark.parametrize(
-    "use_inductor_graph_partition",
-    [False] if current_platform.is_rocm() else [False, True])
+    "backend, model_name, model_class, custom_ops",
+    # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
+    list(flat_product(BACKENDS_FP8, MODELS_FP8, ["+quant_fp8", "-quant_fp8"]))
+    # quant_fp4 only has the custom impl
+    + list(flat_product(BACKENDS_FP4, MODELS_FP4, [""])))
+@pytest.mark.parametrize("split_attention", SPLIT_ATTENTION)
+@pytest.mark.parametrize("use_inductor_graph_partition",
+                         USE_INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(not current_platform.is_cuda_alike(),
                     reason="Only test ROCm or CUDA")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
-@pytest.mark.skipif(current_platform.is_cuda()
-                    and not current_platform.is_device_capability((10, 0)),
-                    reason="On CUDA only test on SM100(Blackwell)")
-@pytest.mark.skipif(not current_platform.is_cuda_alike(),
-                    reason="Only test ROCm or CUDA")
-def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
-                                 head_size: int, batch_size: int,
-                                 dtype: torch.dtype, model_name: str,
-                                 model_class: type[AttentionQuantPatternModel],
-                                 backend: _Backend, split_attention: bool,
-                                 use_inductor_graph_partition: bool,
-                                 monkeypatch, dist_init, caplog_vllm):
+def test_attention_quant_pattern(
+        num_qo_heads: int, num_kv_heads: int, head_size: int, batch_size: int,
+        dtype: torch.dtype, custom_ops: str, model_name: str,
+        model_class: type[AttentionQuantPatternModel], backend: _Backend,
+        split_attention: bool, use_inductor_graph_partition: bool, monkeypatch,
+        dist_init, caplog_vllm):
     """Test AttentionStaticQuantPattern fusion pass"""
 
-    if use_inductor_graph_partition and not is_torch_equal_or_newer(
-            "2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available "
-                    "in PyTorch 2.9+")
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
     if split_attention:
@@ -384,7 +278,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         scheduler_config=SchedulerConfig(max_num_seqs=1024),
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
-            custom_ops=["+quant_fp8"],
+            custom_ops=custom_ops_list,
             use_inductor_graph_partition=use_inductor_graph_partition,
         ),
         cache_config=CacheConfig(cache_dtype="fp8"))
@@ -483,13 +377,11 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         layer.impl.fused_output_quant_supported(quant_key) for key, layer in
         vllm_config.compilation_config.static_forward_context.items()
     ]
-    if any(attn_fusion_supported):
-        # Check quantization ops in the graph before and after fusion
-        test_backend.check_before_ops([QUANT_OPS[quant_key]],
-                                      fully_replaced=True)
+    assert sum(attn_fusion_supported) == len(attn_fusion_supported), \
+        "All layers should support attention fusion"
 
     # access the underlying `AttnFusionPass` on the `LazyInitPass`
-    assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
+    assert attn_pass.pass_.matched_count == 1
 
     # Check attention ops in the graph before and after fusion
     attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
