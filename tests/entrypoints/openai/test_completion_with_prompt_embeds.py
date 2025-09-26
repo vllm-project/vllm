@@ -22,7 +22,7 @@ LORA_SERVING_MODEL_NAME = "opt125m-lora"
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 
 
-@pytest.fixture(scope="module", params=["use-lora"])  # True -> with LoRA
+@pytest.fixture(scope="module", params=["use-lora"])
 def default_server_args(request: pytest.FixtureRequest,
                         opt125_lora_files: str) -> list[str]:
     args = [
