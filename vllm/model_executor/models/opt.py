@@ -29,7 +29,7 @@ from transformers import OPTConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -199,21 +199,16 @@ class OPTDecoder(nn.Module):
         config: OPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
         self.config = config
         self.max_target_positions = config.max_position_embeddings
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
+            config.vocab_size,
             config.word_embed_proj_dim,
-            org_num_embeddings=config.vocab_size,
-            quant_config=quant_config,
         )
         # Positional embeddings are replicated (not sharded).
         self.embed_positions = OPTLearnedPositionalEmbedding(
@@ -297,12 +292,10 @@ class OPTModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.decoder = OPTDecoder(config,
                                   cache_config,
                                   quant_config,
-                                  lora_config,
                                   prefix=f"{prefix}.decoder")
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(["hidden_states"],
@@ -364,7 +357,6 @@ class OPTModel(nn.Module):
 class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
@@ -382,32 +374,18 @@ class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         self.config = config
         self.quant_config = quant_config
         self.model = OPTModel(vllm_config=vllm_config,
                               prefix=maybe_prefix(prefix, "model"))
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.word_embed_proj_dim,
-            org_num_embeddings=config.vocab_size,
-            padding_size=(
-                DEFAULT_VOCAB_PADDING_SIZE
-                # We need bigger padding if using lora for kernel
-                # compatibility
-                if not lora_config else lora_config.lora_vocab_padding_size),
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        if config.tie_word_embeddings:
-            self.lm_head = self.lm_head.tie_weights(
-                self.model.decoder.embed_tokens)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, org_vocab_size=config.vocab_size)
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.model.decoder.embed_tokens
+        else:
+            self.lm_head = ParallelLMHead(config.vocab_size,
+                                          config.word_embed_proj_dim,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
