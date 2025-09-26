@@ -349,6 +349,52 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     return torch.empty_like(x), torch.empty_like(residual)
 
 
+def _rocm_aiter_fp4_gemm_with_dynamic_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: Optional[torch.dtype] = torch.bfloat16,
+    x_scales: Optional[torch.Tensor] = None,
+):
+    from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
+    M = x.shape[0]
+
+    if x_scales is None:
+        # use hip quant kernel for performance
+        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+    else:
+        x_q = x
+        x_s = x_scales
+
+        # 32 alignment is enough for dim0 padding of output for
+        # gemm_a4w4 kernel
+        y = torch.empty((M + 31) // 32 * 32,
+                        weight.shape[0],
+                        device=x_q.device,
+                        dtype=out_dtype)
+
+        gemm_a4w4(x_q,
+                  weight,
+                  x_s,
+                  weight_scale.view(x_s.dtype),
+                  y,
+                  bpreshuffle=True)
+        return y[:M]
+
+
+def _rocm_aiter_fp4_gemm_with_dynamic_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    x_scales: torch.Tensor = None,
+    out_dtype: Optional[torch.dtype] = torch.bfloat16,
+) -> torch.Tensor:
+    return torch.empty((*x.shape[:-1], weight.shape[0]),
+                       dtype=out_dtype,
+                       device=x.device)
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -363,6 +409,13 @@ class rocm_aiter_ops:
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_USE_AITER_UNIFIED_ATTENTION
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+    _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+
+    @classmethod
+    @is_aiter_supported
+    def is_enabled(cls) -> bool:
+        """Verifies device specs and availability of aiter main env variable."""
+        return cls._AITER_ENABLED
 
     @classmethod
     @is_aiter_supported
@@ -416,6 +469,11 @@ class rocm_aiter_ops:
     @is_aiter_supported
     def is_fp8bmm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
+
+    @classmethod
+    @is_aiter_supported
+    def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM
 
     @staticmethod
     @is_aiter_supported
@@ -504,6 +562,14 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
                 mutates_args=[],
                 fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_fp4_gemm_with_dynamic_quant",
+                op_func=_rocm_aiter_fp4_gemm_with_dynamic_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_fp4_gemm_with_dynamic_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -647,6 +713,47 @@ class rocm_aiter_ops:
                                                  kv_last_page_lens,
                                                  sm_scale=sm_scale,
                                                  logit_cap=logit_cap)
+
+    @staticmethod
+    def asm_fp4_gemm_dynamic_quant(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        out_dtype: Optional[torch.dtype] = torch.bfloat16,
+        x_scales: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_fp4_gemm_with_dynamic_quant(
+            x,
+            weight,
+            weight_scale,
+            out_dtype,
+            x_scales,
+        )
+
+    @staticmethod
+    def triton_fp4_gemm_dynamic_qaunt(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        out_dtype: Optional[torch.dtype] = torch.bfloat16,
+        x_scales: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+        if x_scales is None:
+            x_q, x_s = dynamic_mxfp4_quant(x)
+        else:
+            x_q = x
+            x_s = x_scales
+
+        y = torch.empty(x_q.shape[0],
+                        weight.shape[0],
+                        device=x_q.device,
+                        dtype=out_dtype)
+
+        gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
+        return y
 
     @staticmethod
     def triton_fp8_bmm(
