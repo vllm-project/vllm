@@ -824,10 +824,3 @@ More information on the performance benchmarks and their parameters can be found
 
 [](){ #performance-benchmarks }
 
-## Nightly Benchmarks
-
-These compare vLLM's performance against alternatives (`tgi`, `trt-llm`, and `lmdeploy`) when there are major updates of vLLM (e.g., bumping up to a new version). They are primarily intended for consumers to evaluate when to choose vLLM over other options and are triggered on every commit with both the `perf-benchmarks` and `performance-benchmarks` labels.
-
-The latest nightly benchmark results are shared in major release blog posts such as [vLLM v0.6.0](https://blog.vllm.ai/2024/09/05/perf-update.html).
-
-More information on the nightly benchmarks and their parameters can be found [here](gh-file:.buildkite/performance-benchmarks/nightly-descriptions.md).
