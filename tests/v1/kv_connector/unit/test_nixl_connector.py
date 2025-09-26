@@ -39,6 +39,12 @@ from .utils import create_request, create_scheduler, create_vllm_config
 
 @pytest.fixture(scope="module", autouse=True)
 def clear_kv_transfer():
+    """
+    The test cases in this file use `VLLM_ENABLE_V1_MULTIPROCESSING=0`,
+    causing the global variable `_KV_CONNECTOR_AGENT` to be assigned but never deleted.
+    Since the current pytest process does not terminate and instead continues running tests from other files,
+    this global variable remains in memory and interferes with test cases in other modules.
+    """
     yield
     if has_kv_transfer_group():
         ensure_kv_transfer_shutdown()
