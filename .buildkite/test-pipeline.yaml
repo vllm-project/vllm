@@ -1151,6 +1151,19 @@ steps:
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
 
+- label: Elastic EP Scaling Test
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/compilation/
+  - tests/distributed/
+  commands:
+  - pytest -v -s distributed/test_elastic_ep.py
+
 - label: Plugin Tests (2 GPUs) # 40min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
