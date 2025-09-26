@@ -13,8 +13,7 @@ from torch import nn
 from typing_extensions import assert_never
 
 from vllm.attention import Attention
-from vllm.config import (ModelConfig, ModelImpl, VllmConfig,
-                         set_current_vllm_config)
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
@@ -166,7 +165,11 @@ def device_loading_context(module: torch.nn.Module,
         # New parameters or parameters already on target device are untouched
 
 
-def get_model_architecture(
+_MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
+"""Caches the outputs of `_get_model_architecture`."""
+
+
+def _get_model_architecture(
         model_config: ModelConfig) -> tuple[type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
 
@@ -176,8 +179,8 @@ def get_model_architecture(
     )
 
     if arch == model_config._get_transformers_backend_cls():
-        assert model_config.model_impl != ModelImpl.VLLM
-        if model_config.model_impl == ModelImpl.AUTO:
+        assert model_config.model_impl != "vllm"
+        if model_config.model_impl == "auto":
             logger.warning_once(
                 "%s has no vLLM implementation, falling back to Transformers "
                 "implementation. Some features may not be supported and "
@@ -208,6 +211,24 @@ def get_model_architecture(
         assert_never(convert_type)
 
     return model_cls, arch
+
+
+def get_model_architecture(
+        model_config: ModelConfig) -> tuple[type[nn.Module], str]:
+    key = hash((
+        model_config.model,
+        model_config.convert_type,
+        model_config.runner_type,
+        model_config.trust_remote_code,
+        model_config.model_impl,
+        tuple(getattr(model_config.hf_config, "architectures", [])),
+    ))
+    if key in _MODEL_ARCH_BY_HASH:
+        return _MODEL_ARCH_BY_HASH[key]
+
+    model_arch = _get_model_architecture(model_config)
+    _MODEL_ARCH_BY_HASH[key] = model_arch
+    return model_arch
 
 
 def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:

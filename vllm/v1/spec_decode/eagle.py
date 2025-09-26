@@ -3,7 +3,7 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Optional, Protocol
+from typing import Optional
 
 import numpy as np
 import torch
@@ -24,28 +24,17 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
-
-
-class EagleAttentionMetadata(Protocol):
-    # Required attributes
-    num_actual_tokens: int
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    max_seq_len: int
-    seq_lens: torch.Tensor
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
 
 
 class EagleProposer:
@@ -77,6 +66,8 @@ class EagleProposer:
 
         self.is_multimodal_model = vllm_config.model_config \
             .is_multimodal_model
+
+        self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
@@ -118,7 +109,7 @@ class EagleProposer:
             with_numpy=True)
 
         # Determine allowed attention backends once during initialization.
-        self.allowed_attn_types: tuple[type[EagleAttentionMetadata], ...]
+        self.allowed_attn_types: Optional[tuple] = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
             # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
@@ -127,9 +118,6 @@ class EagleProposer:
                     AiterFlashAttentionMetadata)
                 rocm_types.append(AiterFlashAttentionMetadata)
             self.allowed_attn_types = tuple(rocm_types)
-        else:
-            self.allowed_attn_types = (FlashAttentionMetadata,
-                                       TreeAttentionMetadata)
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
@@ -181,7 +169,6 @@ class EagleProposer:
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
-
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
         self.input_ids[:num_tokens - 1] = target_token_ids[1:]
@@ -191,12 +178,14 @@ class EagleProposer:
 
         assert self.runner is not None
 
-        # FIXME: need to consider multiple kv_cache_groups
-        ubatch_id = dbo_current_ubatch_id()
-        attn_metadata_builder = \
-            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
-        attn_metadata = attn_metadata_builder.build_for_drafting(
-            common_attn_metadata=common_attn_metadata, draft_index=0)
+        # Select the correct attention metadata builders for EAGLE layers.
+        # Get the attention metadata builders once and reuse for later.
+        builder = (self._get_attention_metadata_builder()
+                   if self.attn_metadata_builder is None else
+                   self.attn_metadata_builder)
+        attn_metadata = builder.build_for_drafting(  # type: ignore
+            common_attn_metadata=common_attn_metadata,
+            draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -233,13 +222,14 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
-            if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp"):
+            if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp",
+                               "longcat_flash_mtp"):
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+        logits = self.model.compute_logits(sample_hidden_states)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
@@ -247,7 +237,10 @@ class EagleProposer:
             return draft_token_ids.view(-1, 1)
 
         positions = target_positions[last_token_indices]
-        hidden_states = hidden_states[last_token_indices]
+        if self.method in ("deepseek_mtp", "ernie_mtp", "longcat_flash_mtp"):
+            hidden_states = self.hidden_states[last_token_indices]
+        else:
+            hidden_states = hidden_states[last_token_indices]
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
@@ -263,7 +256,8 @@ class EagleProposer:
 
         draft_token_ids = logits.argmax(dim=-1)
 
-        if not isinstance(attn_metadata, self.allowed_attn_types):
+        if self.allowed_attn_types is not None and \
+            not isinstance(attn_metadata, self.allowed_attn_types):
             raise ValueError(
                 f"Unsupported attention metadata type for speculative "
                 "decoding with num_speculative_tokens > 1: "
@@ -329,11 +323,9 @@ class EagleProposer:
                 exceeds_max_model_len, PADDING_SLOT_ID)
 
             # Rebuild attention metadata
-            attn_metadata_builder = \
-                self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
-            attn_metadata = attn_metadata_builder\
-                .build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                draft_index=token_index + 1)
+            attn_metadata = builder.build_for_drafting(  # type: ignore
+                common_attn_metadata=common_attn_metadata,
+                draft_index=token_index + 1)
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
@@ -361,14 +353,13 @@ class EagleProposer:
                     inputs_embeds=inputs_embeds,
                 )
                 if self.method in ("deepseek_mtp", "ernie_mtp",
-                                   "qwen3_next_mtp"):
+                                   "qwen3_next_mtp", "longcat_flash_mtp"):
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states
                 else:
                     last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
-            logits = self.model.compute_logits(last_hidden_states[:batch_size],
-                                               None)
+            logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
@@ -539,9 +530,8 @@ class EagleProposer:
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> list[torch.Tensor]:
-        ubatch_id = dbo_current_ubatch_id()
         tree_attn_metadata_builder = \
-            self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
+            self.runner.attn_groups[0][0].get_metadata_builder()
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 
@@ -678,9 +668,7 @@ class EagleProposer:
             # Get the output logits for the draft tokens.
             logits = self.model.compute_logits(
                 draft_last_hidden_states.reshape(batch_size * level_num_drafts,
-                                                 -1),
-                None,
-            )
+                                                 -1))
 
             # Sample a draft token for each child at the next tree level.
             num_children = self.child_drafts_per_level[level + 1]
@@ -826,15 +814,29 @@ class EagleProposer:
         else:
             target_language_model = target_model
         # share embed_tokens with the target model if needed
-        if get_pp_group().world_size == 1 \
-                and self.model.model.embed_tokens.weight.shape \
-            == target_language_model.model.embed_tokens.weight.shape:
-            logger.info(
-                "Assuming the EAGLE head shares the same vocab embedding"
-                " with the target model.")
-            del self.model.model.embed_tokens
-            self.model.model.embed_tokens = (
-                target_language_model.model.embed_tokens)
+        if get_pp_group().world_size == 1:
+            if hasattr(target_language_model.model, 'embed_tokens'):
+                target_embed_tokens = target_language_model.model.embed_tokens
+            elif hasattr(target_language_model.model, 'embedding'):
+                target_embed_tokens = target_language_model.model.embedding
+            else:
+                raise AttributeError(
+                    "Target model does not have 'embed_tokens' or 'embedding' "
+                    "attribute")
+
+            # Check if shapes match and we found the embedding
+            eagle_shape = self.model.model.embed_tokens.weight.shape
+            target_shape = target_embed_tokens.weight.shape
+            if eagle_shape == target_shape:
+                logger.info(
+                    "Assuming the EAGLE head shares the same vocab embedding"
+                    " with the target model.")
+                del self.model.model.embed_tokens
+                self.model.model.embed_tokens = target_embed_tokens
+            else:
+                logger.info(
+                    "The EAGLE head's vocab embedding will be loaded separately"
+                    " from the target model.")
         else:
             logger.info(
                 "The EAGLE head's vocab embedding will be loaded separately"
@@ -843,10 +845,24 @@ class EagleProposer:
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3" and \
-                hasattr(target_language_model, "lm_head"):
-            logger.info("Loading EAGLE LM head weights from the target model.")
-            self.model.lm_head = target_language_model.lm_head
+        if self.vllm_config.speculative_config.method != "eagle3":
+            if hasattr(target_language_model, "lm_head"):
+                logger.info(
+                    "Loading EAGLE LM head weights from the target model.")
+                self.model.lm_head = target_language_model.lm_head
+        else:
+            if (hasattr(self.model, "lm_head")
+                    and hasattr(target_language_model, "lm_head")
+                    and self.model.lm_head.weight.shape
+                    == target_language_model.lm_head.weight.shape):
+                logger.info("Assuming the EAGLE head shares the same lm_head"
+                            " with the target model.")
+                del self.model.lm_head
+                self.model.lm_head = target_language_model.lm_head
+            else:
+                logger.info(
+                    "The EAGLE head's lm_head will be loaded separately"
+                    " from the target model.")
 
     @torch.inference_mode()
     def dummy_run(
@@ -868,6 +884,31 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
+
+    def _get_attention_metadata_builder(
+            self) -> list[AttentionMetadataBuilder]:
+        """Find and return the attention metadata builders for EAGLE layers.
+        
+        Returns:
+            The metadata builders for EAGLE layers.
+            
+        Raises:
+            AssertionError: If no metadata builders are found for EAGLE layers.
+        """
+        builder = None
+        chosen_layer = self.attn_layer_names[0]
+
+        for kv_cache_group in self.runner.attn_groups:
+            for attn_group in kv_cache_group:
+                if chosen_layer in attn_group.layer_names:
+                    builder = attn_group.get_metadata_builder()
+                    break
+            if builder is not None:
+                break
+
+        assert builder is not None, (
+            "Failed to find attention metadata builder for EAGLE layers.")
+        return builder
 
     def validate_same_kv_cache_group(self,
                                      kv_cache_config: KVCacheConfig) -> None:
