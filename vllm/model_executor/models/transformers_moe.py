@@ -142,14 +142,20 @@ class TransformersMoEBase(TransformersBase):
 
         # Positional arguments
         num_experts = self.model_config.get_num_experts()
-        top_k = text_config.num_experts_per_tok
+        top_k = getattr_iter(text_config, ["num_experts_per_tok", "top_k"],
+                             None)
+        assert top_k is not None
         hidden_size = text_config.hidden_size
-        names = ["moe_intermediate_size", "intermediate_size"]
-        intermediate_size = getattr_iter(text_config, names, None)
+        intermediate_size = getattr_iter(
+            text_config, ["moe_intermediate_size", "intermediate_size"], None)
+        assert intermediate_size is not None
 
-        # Reduction kwargs
-        names = ["num_experts_shared", "shared_expert_intermediate_size"]
-        reduce_results = getattr_iter(text_config, names, 0) == 0
+        # If there are shared experts, the results are
+        # reduced after mlp.forward() not inside FusedMoE
+        num_experts_shared = getattr_iter(text_config, [
+            "num_experts_shared", "n_shared_experts", "moe_num_shared_experts"
+        ], 0)
+        reduce_results = num_experts_shared == 0
 
         def reduce_results_hook(module, _, output):
             """Forward hook that performs all-reduce on a nn.Module's output if
@@ -194,14 +200,24 @@ class TransformersMoEBase(TransformersBase):
                 qual_name = maybe_prefix(prefix, child_name)
                 if (child_name == "experts"
                         and isinstance(child_module, nn.ModuleList)):
+                    # Alias for readability
+                    mlp = module
+                    experts = child_module
                     # Do the experts have biases
                     has_bias = False
-                    for param_name, _ in child_module.named_parameters():
-                        if "bias" in param_name:
+                    for experts_param_name, _ in experts.named_parameters():
+                        if "bias" in experts_param_name:
                             has_bias = True
                             break
+                    # Double check there are no shared experts
+                    nonlocal reduce_results
+                    if reduce_results:
+                        for mlp_param_name, _ in mlp.named_parameters():
+                            if "shared_expert" in mlp_param_name:
+                                reduce_results = False
+                                break
                     # Replace experts module with FusedMoE
-                    new_module = TransformersFusedMoE(
+                    fused_experts = TransformersFusedMoE(
                         num_experts=num_experts,
                         top_k=top_k,
                         hidden_size=hidden_size,
@@ -219,13 +235,13 @@ class TransformersMoEBase(TransformersBase):
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
                     )
-                    setattr(module, child_name, new_module)
-                    log_replacement(qual_name, child_module, new_module)
+                    setattr(mlp, child_name, fused_experts)
+                    log_replacement(qual_name, experts, fused_experts)
                     # If results are not all-reduced in FusedMoE, ensure they
-                    # are all-reduced at the end of module.forward()
-                    if not reduce_results and (new_module.tp_size > 1
-                                               or new_module.ep_size > 1):
-                        module.register_forward_hook(reduce_results_hook)
+                    # are all-reduced at the end of mlp.forward()
+                    if not reduce_results and (fused_experts.tp_size > 1
+                                               or fused_experts.ep_size > 1):
+                        mlp.register_forward_hook(reduce_results_hook)
                 else:
                     _fused_moe(child_module, prefix=qual_name)
 
