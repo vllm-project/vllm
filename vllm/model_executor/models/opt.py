@@ -48,8 +48,6 @@ from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-DEFAULT_VOCAB_PADDING_SIZE = 64
-
 
 class OPTLearnedPositionalEmbedding(nn.Embedding):
 
