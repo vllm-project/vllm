@@ -2188,6 +2188,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Prepare the decoder inputs.
                 (attn_metadata, logits_indices, spec_decode_metadata,
                  num_scheduled_tokens_np, spec_decode_common_attn_metadata,
+                 # max_query_len=max_num_SCHEDULED_tokens
                  max_query_len, ubatch_slices, num_tokens_after_padding
                  ) = self._prepare_inputs(scheduler_output)
 
@@ -2203,6 +2204,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ) = self._preprocess(scheduler_output, intermediate_tensors,
                                  ubatch_slices, num_tokens_after_padding)
 
+            # uniform decode looks only at local situation.
             uniform_decode = (max_query_len
                               == self.uniform_decode_query_len) and (
                                   num_scheduled_tokens
@@ -2219,10 +2221,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        
-        if uniform_decode and ubatch_slices is None:
-            logger.info(f"{uniform_decode=} | {num_input_tokens=} | {cudagraph_runtime_mode=} | {ubatch_slices=}")
-            logger.info("===== OMG OMG OMG ====")
+        logger.info(f"{uniform_decode=} | {num_input_tokens=} | {cudagraph_runtime_mode=} | {ubatch_slices=} | {batch_descriptor=}")
+    
         with (set_forward_context(
                 attn_metadata,
                 self.vllm_config,
