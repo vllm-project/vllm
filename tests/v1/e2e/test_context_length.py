@@ -41,7 +41,7 @@ def test_models(
     """
 
     # Construct a prompt of size max_model_len
-    prompt_ids = [[42] * max_model_len]
+    prompt_ids = [[43] * max_model_len]
 
     # Generate max_tokens new tokens deterministically.
     sampling_params = [
