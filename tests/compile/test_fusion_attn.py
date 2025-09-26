@@ -77,9 +77,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-    def build_attn_metadata(self, batch_size: int, use_hnd: bool,
-                            kv_first: bool) \
-            -> AttentionMetadata:
+    def build_attn_metadata(self, batch_size: int,
+                            backend: _Backend) -> AttentionMetadata:
         """Initialize attention metadata."""
 
         # Create common attn metadata
@@ -95,30 +94,30 @@ class AttentionQuantPatternModel(torch.nn.Module):
                       1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        # Create dummy KV cache for FlashInfer TRTLLM
-        #   - NHD: [num_blocks, block_size, num_kv_heads, head_size]
-        #   - HND: [num_blocks, num_kv_heads, block_size, head_size]
-        if kv_first:
+        # Create dummy KV cache for the selected backend
+        if backend == _Backend.ROCM_ATTN:
             # k/v as 1st dimention
-            if use_hnd:
-                kv_cache = torch.zeros(2,
-                                       num_blocks,
-                                       self.num_kv_heads,
-                                       self.block_size,
-                                       self.head_size,
-                                       dtype=self.kv_cache_dtype,
-                                       device=self.device)
-            else:
-                kv_cache = torch.zeros(2,
-                                       num_blocks,
-                                       self.block_size,
-                                       self.num_kv_heads,
-                                       self.head_size,
-                                       dtype=self.kv_cache_dtype,
-                                       device=self.device)
+            # HND: [num_blocks, num_kv_heads, block_size, head_size]
+            kv_cache = torch.zeros(2,
+                                   num_blocks,
+                                   self.num_kv_heads,
+                                   self.block_size,
+                                   self.head_size,
+                                   dtype=self.kv_cache_dtype,
+                                   device=self.device)
+        elif backend == _Backend.ROCM_AITER_UNIFIED_ATTN:
+            # k/v as 1st dimention
+            # NHD: [num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache = torch.zeros(2,
+                                   num_blocks,
+                                   self.block_size,
+                                   self.num_kv_heads,
+                                   self.head_size,
+                                   dtype=self.kv_cache_dtype,
+                                   device=self.device)
         else:
             # k/v as 2nd dimention
-            # Create kv_cache in NHD layout
+            # NHD: [num_blocks, block_size, num_kv_heads, head_size]
             kv_cache = torch.zeros(num_blocks,
                                    2,
                                    self.num_kv_heads,
@@ -302,12 +301,6 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
     torch._dynamo.mark_dynamic(k, 0)
     torch._dynamo.mark_dynamic(v, 0)
 
-    use_hnd = backend in (_Backend.ROCM_ATTN, )
-    kv_first = backend in (
-        _Backend.ROCM_AITER_UNIFIED_ATTN,
-        _Backend.ROCM_ATTN,
-    )
-
     # Run model directly without compilation and fusion
     vllm_config_unfused = copy.deepcopy(vllm_config)
     with set_current_vllm_config(vllm_config_unfused), set_forward_context(
@@ -322,7 +315,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
         forward_ctx = get_forward_context()
         forward_ctx.attn_metadata = model_unfused.build_attn_metadata(
-            batch_size, use_hnd=use_hnd, kv_first=kv_first)
+            batch_size, backend=backend)
 
         # Run model directly without compilation and fusion
         result_unfused = model_unfused(q, k, v)
@@ -343,7 +336,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
         forward_ctx = get_forward_context()
         forward_ctx.attn_metadata = model_fused.build_attn_metadata(
-            batch_size, use_hnd=use_hnd, kv_first=kv_first)
+            batch_size, backend=backend)
 
         # Create test backend with fusion passes enabled
         noop_pass = NoOpEliminationPass(vllm_config)
