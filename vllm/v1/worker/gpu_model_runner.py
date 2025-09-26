@@ -2103,7 +2103,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampled_ids = valid_sampled_token_ids[req_idx]
             if not sampled_ids:
                 continue
-            print("------- sampled_ids: ", len(sampled_ids))
+
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + len(sampled_ids)
             assert end_idx <= self.max_model_len, (
