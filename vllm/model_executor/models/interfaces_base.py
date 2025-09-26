@@ -13,11 +13,9 @@ from vllm.utils import supports_kw
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.pooler import Pooler
-    from vllm.model_executor.sampling_metadata import SamplingMetadata
 else:
     VllmConfig = Any
     Pooler = Any
-    SamplingMetadata = Any
 
 logger = init_logger(__name__)
 
@@ -100,7 +98,6 @@ class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
     def compute_logits(
         self,
         hidden_states: T,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[T]:
         """Return `None` if TP rank > 0."""
         ...
