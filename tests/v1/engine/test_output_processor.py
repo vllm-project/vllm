@@ -12,6 +12,7 @@ from tests.v1.engine.utils import (NUM_PROMPT_LOGPROBS_UNDER_TEST,
                                    STOP_STRINGS,
                                    DummyOutputProcessorTestVectors,
                                    MockEngineCore)
+from vllm import PoolingParams
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -998,3 +999,35 @@ async def test_cumulative_output_collector_n():
     third = [k for k in result.outputs if k.index == 2]
     assert len(third) == 1
     assert third[0].text == "c"
+
+
+@pytest.mark.parametrize("runner", ["generate", "pooling"])
+def test_abort_requests(runner: str, dummy_test_vectors):
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer,
+                                       log_stats=True)
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}",
+            prompt_token_ids=prompt_tokens,
+            mm_features=None,
+            eos_token_id=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams() if runner == "generate" else None,
+            pooling_params=PoolingParams(
+                task="embed") if runner == "pooling" else None,
+        ) for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
+    ]
+
+    for request in requests:
+        if runner == "generate":
+            output_kind = request.sampling_params.output_kind
+        else:
+            output_kind = request.pooling_params.output_kind
+        queue = RequestOutputCollector(output_kind=output_kind)
+        output_processor.add_request(request, None, queue=queue)
+
+    for request in requests:
+        output_processor.abort_requests([request.request_id])
