@@ -173,7 +173,8 @@ class CudaPlatformBase(Platform):
                 logger.info("Forcing kv cache block size to 128 for "
                             "CUTLASS_MLA backend.")
 
-            if use_flashinfer_mla and cache_config.block_size % 64 != 0:
+            if use_flashinfer_mla and cache_config.block_size != 32 and \
+                    cache_config.block_size % 64 != 0:
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashInferMLA "
