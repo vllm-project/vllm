@@ -37,10 +37,11 @@ def can_initialize(model: str, extra_args: list[str]):
     ]
 
     # Launch server and make a simple request
-    with RemoteOpenAIServer(model,
-                            server_args,
-                            max_wait_seconds=600, # Due to FlashInfer compile
-                            override_hf_configs=dummy_hf_overrides) as server:
+    with RemoteOpenAIServer(
+            model,
+            server_args,
+            max_wait_seconds=600,  # Due to FlashInfer compile
+            override_hf_configs=dummy_hf_overrides) as server:
         client = server.get_client()
         # Make a simple request to verify the server works
         completion = client.completions.create(
