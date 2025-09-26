@@ -49,6 +49,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
         self.handle = None
+        self.expert_probs = None
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
@@ -114,9 +115,8 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = quant_config.a1_scale
 
-        self.handle = None
         (
-            expert_x, expert_probs, expert_x_scale, _, _, self.handle
+            expert_x, expert_probs, expert_x_scale, handle
         ) = self.buffer.dispatch(
             tensor=a1,
             scaling_factor=a1q_scale,
@@ -126,7 +126,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             handle=None,
             num_of_tokens_for_experts=-1, #??
         )
-
+        self.handle = handle
         expert_tokens_meta = None
 
         # Dispatch and Quant
