@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
 from vllm.plugins import load_plugins_by_group
-from vllm.utils import resolve_obj_by_qualname, supports_xccl
+from vllm.utils import resolve_obj_by_qualname, supports_xccl, _is_benchmark_command
 
 from .interface import _Backend  # noqa: F401
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -215,6 +215,15 @@ def resolve_current_platform_cls_qualname() -> str:
             activated_builtin_plugins[0]]()
         logger.info("Automatically detected platform %s.",
                     activated_builtin_plugins[0])
+    elif _is_benchmark_command():
+        # can safely fallback to CPU platform for benchmark commands instead of UnspecifiedPlatform
+        # benchmark command are just running some LLM API calls, so it doesn't matter which platform is used
+        # else, may cause errors in benchmark execution when initializing the the CLI parsers
+        platform_cls_qualname = "vllm.platforms.cpu.CpuPlatform"
+        logger.warning(
+            "No platform detected while running benchmark commands, but defaults to CPU Platform instead of UnspecifiedPlatform to avoid CLI parser errors. "
+            "This may be expected when running your benchmark commands on CPU-only machines (Ray cluster head node for example) "
+        )
     else:
         platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"
         logger.info(
