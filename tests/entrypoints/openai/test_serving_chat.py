@@ -350,7 +350,7 @@ async def test_serving_chat_tool_choice_required_streaming():
         },
     ]
 
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
