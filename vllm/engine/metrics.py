@@ -12,6 +12,7 @@ from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
+from vllm.v1.metrics.loggers import GlobalStatLogger as GlobalStatLoggerV1
 
 if ray is not None:
     from ray.util import metrics as ray_metrics
@@ -347,25 +348,12 @@ def get_throughput(tracked_stats: List[int], now: float,
     return float(np.sum(tracked_stats) / (now - last_log))
 
 
-class AvgTracker:
-    """Tracks running average of a value."""
-
-    def __init__(self) -> None:
-        self.avg = 0.0
-        self.count = 0
-
-    def update(self, new_val: float) -> None:
-        self.count += 1
-        self.avg += (new_val - self.avg) / self.count
-
-
-class GlobalStatLogger(StatLoggerBase):
+class GlobalStatLogger(GlobalStatLoggerV1):
     """GlobalStatLogger is used in LLMEngine to track stats across the entire 
     generation (until manually reset)"""
 
-    def __init__(self) -> None:
-        self.time_to_first_token = AvgTracker()
-        self.time_per_output_token = AvgTracker()
+    def __init__(self, vllm_config: VllmConfig) -> None:
+        super().__init__(vllm_config)
 
     def log(self, stats: Stats) -> None:
         """Called by LLMEngine. Updates stats at end of each step"""
@@ -373,29 +361,14 @@ class GlobalStatLogger(StatLoggerBase):
         def avg_list(list):
             return sum(list) / len(list)
 
-        if len(stats.time_to_first_tokens_iter) > 0:
-            self.time_to_first_token.update(
-                avg_list(stats.time_to_first_tokens_iter))
-        if len(stats.time_per_output_tokens_iter) > 0:
-            self.time_per_output_token.update(
-                avg_list(stats.time_per_output_tokens_iter))
-
-    def log_out(self):
-        ttft = self.time_to_first_token
-        tpot = self.time_per_output_token
-        if ttft.count != 0:
-            logger.info("Average time to first token (batch): %f s", ttft.avg)
-        if tpot.count != 0:
-            decode_throughput = 1 / tpot.avg if tpot.avg != 0 else 0
-            logger.info("Average decode throughput: %f t/s/u",
-                        decode_throughput)
-
-    def reset(self) -> None:
-        self.time_to_first_token = AvgTracker()
-        self.time_per_output_token = AvgTracker()
-
-    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
-        raise NotImplementedError
+        batch_ttfts = stats.time_to_first_tokens_iter
+        N_ttfts = len(batch_ttfts)
+        if N_ttfts > 0:
+            self.time_to_first_token.update(avg_list(batch_ttfts), N_ttfts)
+        batch_tpots = stats.time_per_output_tokens_iter
+        N_tpots = len(batch_tpots)
+        if N_tpots > 0:
+            self.time_per_output_token.update(avg_list(batch_tpots), N_tpots)
 
 
 class LoggingStatLogger(StatLoggerBase):

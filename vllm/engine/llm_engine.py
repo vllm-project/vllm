@@ -376,7 +376,7 @@ class LLMEngine:
                 }
                 if log_global_stats:
                     from vllm.engine.metrics import GlobalStatLogger
-                    self.stat_loggers["global"] = GlobalStatLogger()
+                    self.stat_loggers["global"] = GlobalStatLogger(vllm_config)
                 self.stat_loggers["prometheus"].info("cache_config",
                                                      self.cache_config)
 

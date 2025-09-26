@@ -158,6 +158,7 @@ class LLMEngine:
         return cls(vllm_config=vllm_config,
                    executor_class=executor_class,
                    log_stats=not engine_args.disable_log_stats,
+                   log_global_stats=engine_args.log_global_stats,
                    usage_context=usage_context,
                    stat_loggers=stat_loggers,
                    multiprocess_mode=enable_multiprocessing)

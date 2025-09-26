@@ -56,9 +56,22 @@ class AvgTracker:
         self.avg = 0.0
         self.count = 0
 
-    def update(self, new_val: float) -> None:
-        self.count += 1
-        self.avg += (new_val - self.avg) / self.count
+    def update(self, new_val: float, count: int = 1) -> None:
+        """Update the running average with a value that represents one or
+        more observations.
+
+        Args:
+            new_val: The value to incorporate into the running average. If
+                ``count`` > 1, ``new_val`` is treated as the average of those
+                ``count`` observations.
+            count: Number of observations represented by ``new_val``.
+        """
+        if count <= 0:
+            return
+        new_total = self.count + count
+        # Weighted average combining prior observations with the new batch.
+        self.avg = (self.avg * self.count + new_val * count) / new_total
+        self.count = new_total
 
 
 class GlobalStatLogger(StatLoggerBase):
@@ -81,12 +94,14 @@ class GlobalStatLogger(StatLoggerBase):
             return sum(list) / len(list)
 
         assert isinstance(iteration_stats, IterationStats)
-        if len(iteration_stats.time_to_first_tokens_iter) > 0:
-            self.time_to_first_token.update(
-                avg_list(iteration_stats.time_to_first_tokens_iter))
-        if len(iteration_stats.time_per_output_tokens_iter) > 0:
-            self.time_per_output_token.update(
-                avg_list(iteration_stats.time_per_output_tokens_iter))
+        batch_ttfts = iteration_stats.time_to_first_tokens_iter
+        N_ttfts = len(batch_ttfts)
+        if N_ttfts > 0:
+            self.time_to_first_token.update(avg_list(batch_ttfts), N_ttfts)
+        batch_tpots = iteration_stats.time_per_output_tokens_iter
+        N_tpots = len(batch_tpots)
+        if N_tpots > 0:
+            self.time_per_output_token.update(avg_list(batch_tpots), N_tpots)
 
     def log_out(self):
         ttft = self.time_to_first_token
