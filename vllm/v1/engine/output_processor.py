@@ -330,12 +330,21 @@ class OutputProcessor:
         for request_id in request_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
+                # Set pooling_output is not None to
+                # correctly enter the abort pooling branch
+                pooling_output = torch.randn(
+                    0, device="cpu") if req_state.detokenizer is None else None
+
                 self.lora_states.abort_request(req_state)
                 request_ids_to_abort.append(request_id)
                 # Produce final abort output.
                 if req_state.queue is not None and (
                         request_output := req_state.make_request_output(
-                            [], None, FinishReason.ABORT, None, None)):
+                            new_token_ids=[],
+                            pooling_output=pooling_output,
+                            finish_reason=FinishReason.ABORT,
+                            stop_reason=None,
+                            kv_transfer_params=None)):
                     req_state.queue.put(request_output)
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.
