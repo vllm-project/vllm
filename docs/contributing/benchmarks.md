@@ -7,8 +7,7 @@ toc_depth: 4
 vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
 
 - **[Benchmark CLI]**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
-- **[Performance benchmarks][performance-benchmarks]**: Automated CI benchmarks for development
-- **[Nightly benchmarks][nightly-benchmarks]**: Comparative benchmarks against alternatives
+- **[Performance benchmarks][performance-benchmarks]**: Benchmarks for development
 
 [Benchmark CLI]: #benchmark-cli
 
@@ -803,7 +802,7 @@ docker run -it --entrypoint /bin/bash -v /data/huggingface:/root/.cache/huggingf
 Then, run below command inside the docker instance.
 
 ```bash
-bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
+bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 When run, benchmark script generates results under **benchmark/results** folder, along with the benchmark_results.md and benchmark_results.json.
@@ -817,18 +816,18 @@ When run, benchmark script generates results under **benchmark/results** folder,
 - `REMOTE_HOST`: IP for the remote vLLM service to benchmark. Default value is empty string.
 - `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
 
-For more results visualization, check the [visualizing the results](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md#visualizing-the-results).
+For more results visualization, check the [visualizing the results](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/performance-benchmarks/README.md#visualizing-the-results).
 
 The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](gh-file:.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
+More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/performance-benchmarks/README.md) and [performance benchmark description](gh-file:.buildkite/performance-benchmarks/performance-benchmarks-descriptions.md).
 
-[](){ #nightly-benchmarks }
+[](){ #performance-benchmarks }
 
 ## Nightly Benchmarks
 
-These compare vLLM's performance against alternatives (`tgi`, `trt-llm`, and `lmdeploy`) when there are major updates of vLLM (e.g., bumping up to a new version). They are primarily intended for consumers to evaluate when to choose vLLM over other options and are triggered on every commit with both the `perf-benchmarks` and `nightly-benchmarks` labels.
+These compare vLLM's performance against alternatives (`tgi`, `trt-llm`, and `lmdeploy`) when there are major updates of vLLM (e.g., bumping up to a new version). They are primarily intended for consumers to evaluate when to choose vLLM over other options and are triggered on every commit with both the `perf-benchmarks` and `performance-benchmarks` labels.
 
 The latest nightly benchmark results are shared in major release blog posts such as [vLLM v0.6.0](https://blog.vllm.ai/2024/09/05/perf-update.html).
 
-More information on the nightly benchmarks and their parameters can be found [here](gh-file:.buildkite/nightly-benchmarks/nightly-descriptions.md).
+More information on the nightly benchmarks and their parameters can be found [here](gh-file:.buildkite/performance-benchmarks/nightly-descriptions.md).
