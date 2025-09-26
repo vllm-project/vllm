@@ -115,7 +115,7 @@ class Mamba2AttentionMetadata:
     num_prefill_tokens: int
     num_decodes: int
     num_decode_tokens: int
-    query_start_loc: torch.Tensor
+    query_start_loc_p: torch.Tensor
     seq_lens: torch.Tensor
 
     prep_initial_states: bool
@@ -151,7 +151,7 @@ class Mamba2AttentionMetadataBuilder(
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> Mamba2AttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_p = None
         seq_lens = common_attn_metadata.seq_lens
 
         seq_idx_p = None
@@ -179,7 +179,7 @@ class Mamba2AttentionMetadataBuilder(
                 num_computed_tokens_cpu[num_reqs - num_prefills:num_reqs] > 0)
             prep_initial_states = torch.any(has_initial_states_cpu).item()
             has_initial_states_p = has_initial_states_cpu.to(
-                query_start_loc.device)
+                common_attn_metadata.query_start_loc.device)
 
             query_start_loc_p = common_attn_metadata.query_start_loc[
                 -num_prefills - 1:] - num_decode_tokens
@@ -190,7 +190,6 @@ class Mamba2AttentionMetadataBuilder(
                 device=query_start_loc_p.device),
                                                 query_start_loc_p.diff(),
                                                 output_size=num_prefill_tokens)
-            seq_idx_p.unsqueeze_(0)
 
             # We compute metadata for chunked prefill once at the top level
             # model forward and reuse them in mamba layers. If not needed,
@@ -217,7 +216,7 @@ class Mamba2AttentionMetadataBuilder(
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            query_start_loc=query_start_loc,
+            query_start_loc_p=query_start_loc_p,
             seq_lens=seq_lens,
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
