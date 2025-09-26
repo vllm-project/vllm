@@ -42,9 +42,11 @@ class UniProcExecutor(Executor):
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
             )
 
+        is_new_worker = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
         self.driver_worker.init_worker(all_kwargs=[kwargs])
-        self.driver_worker.init_device()
-        self.driver_worker.load_model()
+        if not is_new_worker:
+            self.driver_worker.init_device()
+            self.driver_worker.load_model()
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
@@ -89,16 +91,6 @@ class UniProcExecutor(Executor):
         # UniProcExecutor will always be healthy as long as
         # it's running.
         return
-
-    def reinitialize_distributed(
-        self, reconfig_request: ReconfigureDistributedRequest
-    ) -> None:
-        self.driver_worker.reinitialize_distributed(reconfig_request)
-        if (
-            reconfig_request.new_data_parallel_rank
-            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
-        ):
-            self.shutdown()
 
     def shutdown(self) -> None:
         if worker := self.driver_worker:

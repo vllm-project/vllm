@@ -161,6 +161,9 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    enable_elastic_ep: bool = False
+    """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
+
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
 
@@ -219,6 +222,21 @@ class ParallelConfig:
 
     _data_parallel_master_port_list: list[int] = Field(default_factory=list)
     """List of open port auto-queried for data parallel messaging.
+    Set to be private as it's not intended to be configured by users.
+    """
+
+    _stateless_world_group_port_list: list[int] = Field(default_factory=list)
+    """List of open ports for stateless world group when enable_elastic_ep is True.
+    Set to be private as it's not intended to be configured by users.
+    """
+
+    _stateless_dp_group_port_list: list[int] = Field(default_factory=list)
+    """List of open ports for stateless DP groups when enable_elastic_ep is True.
+    Set to be private as it's not intended to be configured by users.
+    """
+
+    _stateless_ep_group_port_list: list[int] = Field(default_factory=list)
+    """List of open ports for stateless EP groups when enable_elastic_ep is True.
     Set to be private as it's not intended to be configured by users.
     """
 
@@ -314,7 +332,16 @@ class ParallelConfig:
 
         return answer
 
-    def stateless_init_dp_group(self) -> ProcessGroup:
+    def get_next_stateless_world_group_port(self) -> list[int]:
+        return self._stateless_world_group_port_list.pop(0)
+
+    def get_next_stateless_dp_group_port(self) -> list[int]:
+        return self._stateless_dp_group_port_list.pop(0)
+
+    def get_next_stateless_ep_group_port(self) -> list[int]:
+        return self._stateless_ep_group_port_list.pop(0)
+
+    def stateless_init_dp_group(self, return_store: bool = False) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
         # condition when calling `get_open_port()`. When the first
@@ -338,7 +365,8 @@ class ParallelConfig:
                     self.get_next_dp_init_port(),
                     self.data_parallel_rank,
                     self.data_parallel_size,
-                    backend=current_platform.dist_backend,
+                    backend='gloo',
+                    return_store=return_store,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -473,6 +501,36 @@ class ParallelConfig:
         if self.distributed_executor_backend == "external_launcher":
             logger.info("Using external launcher for distributed inference.")
             self.world_size *= self.data_parallel_size
+
+        # Initialize stateless group ports for elastic EP
+        if self.enable_elastic_ep:
+            num_world_groups = 1
+            num_dp_groups = max(1, self.world_size_across_dp // self.data_parallel_size)
+            num_ep_groups = max(
+                1,
+                self.world_size_across_dp
+                // (self.data_parallel_size * self.tensor_parallel_size),
+            )
+
+            total_ports_needed = (num_world_groups + num_dp_groups + num_ep_groups) * 3
+
+            if not self._stateless_world_group_port_list:
+                all_ports = get_open_ports_list(total_ports_needed + 5)
+                self._data_parallel_master_port_list = all_ports[-5:]
+                all_ports = all_ports[:-5]
+                self._stateless_world_group_port_list = [
+                    all_ports[i : i + 3] for i in range(0, num_world_groups * 3, 3)
+                ]
+                start_idx = num_world_groups * 3
+                self._stateless_dp_group_port_list = [
+                    all_ports[i : i + 3]
+                    for i in range(start_idx, start_idx + num_dp_groups * 3, 3)
+                ]
+                start_idx += num_dp_groups * 3
+                self._stateless_ep_group_port_list = [
+                    all_ports[i : i + 3]
+                    for i in range(start_idx, start_idx + num_ep_groups * 3, 3)
+                ]
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
