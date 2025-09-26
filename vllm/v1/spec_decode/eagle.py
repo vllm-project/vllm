@@ -235,8 +235,7 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
-            if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp",
-                               "longcat_flash_mtp"):
+            if self.method == "mtp":
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
@@ -365,8 +364,7 @@ class EagleProposer:
                     hidden_states=self.hidden_states[:input_batch_size],
                     inputs_embeds=inputs_embeds,
                 )
-                if self.method in ("deepseek_mtp", "ernie_mtp",
-                                   "qwen3_next_mtp", "longcat_flash_mtp"):
+                if self.method == "mtp":
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states
                 else:
@@ -922,10 +920,10 @@ class EagleProposer:
     def _get_attention_metadata_builder(
             self) -> list[AttentionMetadataBuilder]:
         """Find and return the attention metadata builders for EAGLE layers.
-        
+
         Returns:
             The metadata builders for EAGLE layers.
-            
+
         Raises:
             AssertionError: If no metadata builders are found for EAGLE layers.
         """
