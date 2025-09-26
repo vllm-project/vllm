@@ -146,13 +146,13 @@ def expert_info(kind) -> ExpertInfo:
     return info
 
 
-register_prepare_and_finalize(
-    MoEPrepareAndFinalizeNoEP,
-    standard_format,
-    common_float_types,
-    blocked_quantization_support=True,
-    backend=None,
-)
+# register_prepare_and_finalize(
+#     MoEPrepareAndFinalizeNoEP,
+#     standard_format,
+#     common_float_types,
+#     blocked_quantization_support=True,
+#     backend=None,
+# )
 
 register_experts(
     BatchedTritonExperts,
@@ -227,7 +227,7 @@ if False and has_pplx():
         backend="pplx",
     )
 
-if (has_flashinfer_cutlass_fused_moe()
+if False and (has_flashinfer_cutlass_fused_moe()
         and current_platform.has_device_capability(100)):
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
         FlashInferExperts)
