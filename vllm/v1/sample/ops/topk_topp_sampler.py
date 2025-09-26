@@ -163,8 +163,6 @@ def original_apply_top_k_top_p(
             top_k_mask = logits_sort < top_k_mask
             logits_sort.masked_fill_(top_k_mask, -float("inf"))
 
-        probs = logits_sort.softmax(dim=-1)
-        probs = probs.scatter(dim=-1, index=logits_idx, src=probs)
 
         if p is not None:
             # Apply top-p.
@@ -177,7 +175,7 @@ def original_apply_top_k_top_p(
 
         # Re-sort the probabilities.
         logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
-    return logits, probs
+    return logits
 
 @triton.jit
 def _topk_kernel(LOGITS, PROBS, K, B, 
@@ -191,7 +189,7 @@ def _topk_kernel(LOGITS, PROBS, K, B,
         p_pivot = -float('inf')
 
         LOGITS_ROW = LOGITS + row_id * N
-        PROBS_ROW = PROBS + row_id * N
+        PROBS_ROW = PROBS + pid * N
 
         search_addr = LOGITS_ROW
         search_range = N
@@ -306,7 +304,7 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
         p_pivot = -float('inf')
 
         LOGITS_ROW = LOGITS + row_id * N
-        PROBS_ROW = PROBS + row_id * N
+        PROBS_ROW = PROBS + pid * N
 
         search_addr = LOGITS_ROW
         search_range = N
@@ -430,22 +428,26 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
             min_range = min_probs
 
             num_iters = 0
+            p_pivots_sum_0 = 0.0
             while p_pivot == -float('inf') and num_iters < 32:
                 p_pivot_0 = (max_range - min_range) * 1.0 / 2.0 + min_range
                 p_pivots_sum_0 = 0.0
 
-                min_larger_0 = float('inf')
-                max_smaller_0 = -float('inf')
+                min_larger_0 = 1.0
+                max_smaller_0 = 0.0
+                second_max_smaller_0 = 0.0
 
                 for i in range(0, search_iters):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < search_range
                     probs_blk = tl.load(PROBS_ROW + offs_n, mask=mask_n, other=0.0)
 
-                    masked_larger_0 = tl.where(probs_blk > p_pivot_0, probs_blk, float('inf'))
+                    masked_larger_0 = tl.where(probs_blk > p_pivot_0, probs_blk, 1.0)
                     min_larger_0 = tl.minimum(min_larger_0, tl.min(masked_larger_0))
                     masked_smaller_0 = probs_blk * (probs_blk < p_pivot_0)
                     max_smaller_0 = tl.maximum(max_smaller_0, tl.max(masked_smaller_0))
+                    masked_second_smaller_0 = probs_blk * (probs_blk < max_smaller_0)
+                    second_max_smaller_0 = tl.maximum(second_max_smaller_0, tl.max(masked_second_smaller_0))
                     p_pivots_sum_0 += tl.sum(probs_blk * (probs_blk > p_pivot_0))
 
                 # Check if any of the pivots are equal to k
@@ -457,18 +459,40 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
                     min_range = p_pivot_0
                 elif p_pivots_sum_0 < p:
                     if p_pivots_sum_0 + max_smaller_0 > p:
-                        
-                        p_pivot = max_smaller_0 
+                        p_pivot = second_max_smaller_0
                     max_range = p_pivot_0
                 
                 num_iters += 1
                 if num_iters >= 32 or tl.abs(min_range - max_range) < 1e-6:
                     p_pivot = p_pivot_0
-
-            # Transform p_pivot into equivalent logit
+                
+                if row_id == 0:
+                    tl.store(DEBUG_PTR + num_iters * 17 + 0, p_pivots_sum_0)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 1, p_pivot_0)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 2, min_probs)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 3, max_probs)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 4, min_range)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 5, max_range)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 6, num_iters)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 7, sum_exp_logits)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 8, p_pivot)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 9, tl.log(p_pivot * sum_exp_logits))
+                    tl.store(DEBUG_PTR + num_iters * 17 + 10, min_larger_0)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 11, max_smaller_0)
+                    tl.store(DEBUG_PTR + num_iters * 17 + 12, second_max_smaller_0)
             # Subtract a small value to include the nearest smaller value
             # If the nearest smaller value very small, it may cause numerical instability
-            p_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit - 1e-6
+            if row_id == 0:
+                tl.store(DEBUG_PTR + num_iters * 17 + 13, p_pivots_sum_0)
+                tl.store(DEBUG_PTR + num_iters * 17 + 14, p_pivot)
+                tl.store(DEBUG_PTR + num_iters * 17 + 15, num_iters)
+            p_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
+            if row_id == 0:
+                tl.store(DEBUG_PTR + num_iters * 17 + 16, p_pivot)
+                tl.store(DEBUG_PTR + num_iters * 17 + 17, p)
+
+            # Transform p_pivot into equivalent logit
+            # p_pivot = tl.log(p_pivot * sum_exp_logits)
 
         # Sixth pass: Apply mask
         if k_pivot != -float('inf') or p_pivot != -float('inf'):
@@ -489,7 +513,8 @@ def triton_apply_top_k_top_p(
     BLOCK_SIZE = 4096
     NUM_PROGRAMS = 128
     NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
-    probs = torch.full_like(logits, -float('inf'))
+    probs = torch.full((NUM_PROGRAMS, vocab_size), -float('inf'), device=logits.device)
+    debug = torch.full((32, 18), -float('inf'), device=logits.device)
     print(b_str("Launch params:") + f"logits.shape: {logits.shape}, probs.shape: {probs.shape}, "
           f"k.shape: {k.shape if k is not None else None}, p.shape: {p.shape if p is not None else None}, "
           f"batch_size: {batch_size}, vocab_size: {vocab_size}, BLOCK_SIZE: {BLOCK_SIZE}, NUM_TILES: {NUM_TILES}")
@@ -499,10 +524,11 @@ def triton_apply_top_k_top_p(
                                       vocab_size, BLOCK_SIZE, NUM_TILES)
     else:
         _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
-                                           vocab_size, BLOCK_SIZE, NUM_TILES)
+                                           vocab_size, BLOCK_SIZE, NUM_TILES, debug)
+    print(f"debug: {debug[:, :17]}")
     # print(f"Output logits: {logits}")
     # print(f"Output probs: {probs}")
-    return logits, probs
+    return logits
 
 @torch.compile
 def compiled_apply_top_k_top_p(
@@ -524,9 +550,11 @@ def apply_top_k_top_p(
 
     The logits tensor may be updated in-place.
     """
+    # logits = torch.full_like(logits, -10.0)
+    # logits[:, :11] = torch.arange(1, 12, dtype=torch.float32, device=logits.device)
     input_logits = logits.clone()
     print(f"input_logits: {input_logits[:12, :12]}")
-    original_logits, original_probs = original_apply_top_k_top_p(input_logits, k, p)
+    original_logits = original_apply_top_k_top_p(input_logits, k, p)
     # original_probs = torch.softmax(input_logits, dim=-1)
 
     batch_size, vocab_size = logits.shape
@@ -537,21 +565,16 @@ def apply_top_k_top_p(
     
     # logits = original_apply_top_k_top_p(logits, k, p)
     # logits = compiled_apply_top_k_top_p(logits, k, p)
-    logits, probs = triton_apply_top_k_top_p(logits, k, p)
+    logits = triton_apply_top_k_top_p(logits, k, p)
         
     torch.cuda.synchronize()
     time_taken = time.time() - start_time
     print(y_str(f"apply_top_k_top_p done in {time_taken} seconds"))
 
-    if not torch.allclose(probs, original_probs):
-        print(r_str("Error: probs are not close"))
-    print(f"probs: {probs[:12, :12]}")
-    print(f"original_probs: {original_probs[:12, :12]}")
-
     if not torch.allclose(logits, original_logits):
         print(r_str("Error: logits are not close"))
-    print(f"logits: {logits[:12, :12]}")
-    print(f"original_logits: {original_logits[:12, :12]}")
+    # print(f"logits: {logits[:12, :12]}")
+    # print(f"original_logits: {original_logits[:12, :12]}")
 
     start_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(start_time))
     out_dir = "./sampler_input_output"
