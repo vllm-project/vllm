@@ -15,6 +15,7 @@ from typing import Any, Literal, Optional, TypedDict, TypeVar, Union
 import numpy.typing as npt
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchEncoding, PretrainedConfig, TensorType
@@ -31,6 +32,8 @@ import numpy as np
 from queue import Queue
 import io
 import time
+import atexit
+from dataclasses import dataclass
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -353,9 +356,12 @@ class external_reader(media_ext_reader_op_impl):
         img_list = shared_q.get()
         for i in range(len(img_list)):
             # NOTE: this padding is needed because of HW alignmnet requirment
-            img_list[i] = np.pad(img_list[i],
-                                       (0, 64 - len(img_list[i]) % 64),
-                                       'constant')
+            rem = len(img_list[i]) % 64
+            pad = (64 - rem) % 64
+            if pad:
+                img_list[i] = np.pad(img_list[i],
+                                    (0, pad),
+                                    'constant')
         return img_list
 
     def get_media_output_type(self):
@@ -395,15 +401,16 @@ class hpuMediaPipe(MediaPipe):
             device="hpu", output_format=it.RGB_I, resize=[img_width, img_height])
 
         self.mean_node = fn.MediaConst(
-            data=np.array([127.5, 127.5, 127.5], dtype=dt.FLOAT32),
-            shape=[1, 1, 3],
-            dtype=dt.FLOAT32
-        )
+            data=np.array([IMAGENET_MEAN[0]*255.0,
+                           IMAGENET_MEAN[1]*255.0,
+                           IMAGENET_MEAN[2]*255.0], dtype=dt.FLOAT32),
+            shape=[1, 1, 3], dtype=dt.FLOAT32)
+
         self.std_node = fn.MediaConst(
-            data=np.array([1/127.5, 1/127.5, 1/127.5], dtype=dt.FLOAT32),
-            shape=[1, 1, 3],
-            dtype=dt.FLOAT32
-        )
+            data=np.array([1.0/(IMAGENET_STD[0]*255.0),
+                           1.0/(IMAGENET_STD[1]*255.0),
+                           1.0/(IMAGENET_STD[2]*255.0)], dtype=dt.FLOAT32),
+            shape=[1, 1, 3], dtype=dt.FLOAT32)
 
         self.cmn = fn.CropMirrorNorm(crop_w=img_width, crop_h=img_height, dtype=dt.FLOAT32, device="hpu")
 
@@ -423,6 +430,61 @@ class hpuMediaPipe(MediaPipe):
 
         # Return the full processed image - we'll do tiling in Python
         return images
+
+
+# -----------------------------------------------------------------------------
+# MediaPipe manager (persist pipes/iterators)
+# -----------------------------------------------------------------------------
+@dataclass
+class _PipeState:
+    pipe:   hpuMediaPipe | None = None
+    it:     MediaGenericPytorchIterator | None = None
+    bsz:    int | None = None
+    H:      int | None = None
+    W:      int | None = None
+
+
+class MediaPipeTiler:
+    """Owns and reuses MediaPipe pipes/iterators for main path"""
+    def __init__(self) -> None:
+        self._main  = _PipeState()
+
+    def _rebuild(self, st: _PipeState, *, bsz: int, H: int, W: int) -> None:
+        if st.pipe is not None:
+            try:
+                st.pipe.close()
+            except Exception:
+                pass
+        pipe = hpuMediaPipe("legacy", 0, bsz, 1, "cpu", H, W)
+        pipe.build()
+        st.pipe, st.it, st.bsz, st.H, st.W = pipe, iter(MediaPytorchIterator(pipe)), bsz, H, W
+
+    def ensure_main(self, *, bsz: int, H: int, W: int) -> tuple[hpuMediaPipe, MediaGenericPytorchIterator]:
+        st = self._main
+        if st.pipe is None or st.bsz != bsz or st.H != H or st.W != W:
+            self._rebuild(st, bsz=bsz, H=H, W=W)
+        return st.pipe, st.it  # type: ignore[return-value]
+
+    def reset_iter(self) -> None:
+        st = self._main
+        if st.pipe is not None:
+            st.it = iter(MediaPytorchIterator(st.pipe))
+
+    def close_all(self) -> None:
+        st = self._main
+        try:
+            if st.pipe is not None:
+                st.pipe.close()
+        except Exception:
+            pass
+        finally:
+            st.pipe = None
+            st.it = None
+            st.bsz = st.H = st.W = None
+
+
+_MP = MediaPipeTiler()
+atexit.register(_MP.close_all)
 
 def get_image_info(data):
     # Get image info using PIL without decoding
@@ -466,31 +528,9 @@ def preprocess_images(
     img_sizes.append(img_size)
     batch_sizes.append(batch_size)
 
-    thumbs = None
-    if use_thumbnail and len(images) > 0:
-        batch_size = len(images)
-        pipe = hpuMediaPipe("legacy", queue_depth, batch_size,
-                        num_threads, "cpu",
-                        patch_size, patch_size)
-        pipe.build()
-        data_loader = MediaPytorchIterator(pipe)
-        data_loader = iter(data_loader)
-
-        img_list = np.empty(shape=[batch_size, ], dtype=object)
-        for i in range(batch_size):
-            img_list[i] = np.frombuffer(images[i], np.uint8)
-
-        shared_q.put(img_list)
-        thumbs = next(data_loader)[0]
-
-        shared_q.task_done()
-        pipe.close()
-        del pipe
-
     image_num_patches = torch.zeros(len(images), dtype=torch.int64)
 
-    patches = []
-    thumb_idx = 0
+    batch_patches = []
     image_num_patches_idx = 0
     for batch_size, img_size in zip(batch_sizes, img_sizes):
         # calculate the number of blocks without thumbnail
@@ -502,48 +542,62 @@ def preprocess_images(
             use_thumbnail=False,
         )
 
-        num_patches = blocks + 1 if use_thumbnail and thumbs is not None and blocks > 1 else blocks
-        image_num_patches[image_num_patches_idx:image_num_patches_idx+batch_size] = num_patches
-
-        pipe = hpuMediaPipe("legacy", queue_depth, batch_size,
-                        num_threads, "cpu",
-                        target_height, target_width)
-        pipe.build()
-        data_loader = MediaPytorchIterator(pipe)
-        data_loader = iter(data_loader)
+        # if batch, H, W is changed, create new one
+        main_pipe, main_iter = _MP.ensure_main(bsz=batch_size, H=target_height, W=target_width)
 
         img_list = np.empty(shape=[batch_size, ], dtype=object)
         for i in range(batch_size):
             img_list[i] = np.frombuffer(images[i], np.uint8)
 
         shared_q.put(img_list)
-        processed_images = next(data_loader)[0]
+        try:
+            processed_images = next(main_iter)[0]
+        except StopIteration:
+            _MP.reset_iter()
+            _, main_iter = _MP.ensure_main(bsz=batch_size, H=target_height, W=target_width)
+            processed_images = next(main_iter)[0]
+        finally:
+            shared_q.task_done()
 
-        shared_q.task_done()
-        pipe.close()
-        del pipe
+        # tiling vectorization: [N,C,H,W] -> [N,Ty,Tx,C,ps,ps] -> [N, T, C, ps, ps]
+        N, C, H, W = processed_images.shape
+        Ty, Tx = H // patch_size, W // patch_size
+        T = Ty * Tx
 
-        # Extract tiles
-        tiles = []
-        H, W = target_height, target_width
-        for h_idx in range(H // patch_size):
-            for w_idx in range(W // patch_size):
-                h_start = h_idx * patch_size
-                h_end = h_start + patch_size
-                w_start = w_idx * patch_size
-                w_end = w_start + patch_size
+        use_thumb_now = use_thumbnail and (T > 1)
 
-                tile = processed_images[:, :, h_start:h_end, w_start:w_end]
-                tiles.append(tile)
+        x = processed_images.view(N, C, Ty, patch_size, Tx, patch_size) \
+                              .permute(0, 2, 4, 1, 3, 5) \
+                              .contiguous() \
+                              .view(N, T, C, patch_size, patch_size)  # [N,T,C,ps,ps]
 
-        for i in range(batch_size):
-            for t in tiles:
-                patches.append(t[i])
-            if use_thumbnail and thumbs is not None and len(tiles) > 1:
-                patches.append(thumbs[thumb_idx])
-            thumb_idx += 1
+        if use_thumb_now:
+            # [N,3,ps,ps]
+            thumbs_batch = F.interpolate(processed_images, size=(patch_size, patch_size),
+                                         mode="bilinear", align_corners=False)
 
-    patches_flat = torch.stack(patches, dim=0)
+        num_patches = T + 1 if use_thumb_now else T
+        image_num_patches[image_num_patches_idx:image_num_patches_idx+batch_size] = num_patches
+        image_num_patches_idx += batch_size
+
+        # consist tensor batch based (tile + thumbnail)
+        if use_thumb_now:
+            out = torch.empty((N, T + 1, C, patch_size, patch_size),
+                              dtype=processed_images.dtype, device=processed_images.device)
+            out[:, :T] = x
+            out[:, T]  = thumbs_batch
+            out = out.view(N * (T + 1), C, patch_size, patch_size)  # [N*(T+1),C,ps,ps]
+        else:
+            # no thumbnail (T==1 or off)
+            out = x.view(N * T, C, patch_size, patch_size)          # [N*T,C,ps,ps]
+
+        batch_patches.append(out)
+
+    patches_flat = (
+        torch.cat(batch_patches, dim=0)
+        if batch_patches
+        else torch.empty((0, 3, patch_size, patch_size), dtype=torch.float32)
+    )
     return patches_flat, image_num_patches
 
 
