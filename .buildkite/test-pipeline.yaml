@@ -469,8 +469,8 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
-  - vllm/model_executor/model_loader
-  - tests/model_loader
+  - vllm/model_executor
+  - tests/model_executor
   - tests/entrypoints/openai/test_tensorizer_entrypoint.py
   commands:
     - apt-get update && apt-get install -y curl libsodium23
