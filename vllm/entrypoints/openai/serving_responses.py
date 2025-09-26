@@ -284,15 +284,17 @@ class OpenAIServingResponses(OpenAIServing):
             available_tools = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
-                if default_max_tokens < 0:
+                if self.max_model_len <= len(
+                        engine_prompt["prompt_token_ids"]):
                     return self.create_error_response(
                         err_type="invalid_request_error",
                         message=("The engine prompt length exceeds the "
                                  "max_model_len. Please reduce prompt."),
                         status_code=HTTPStatus.BAD_REQUEST,
                     )
+                default_max_tokens = self.max_model_len - len(
+                    engine_prompt["prompt_token_ids"])
+
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params)
 
