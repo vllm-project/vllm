@@ -937,7 +937,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     flattened_indices.append(flattened_index)
                     num_draft_tokens = num_tokens[cur_index].item() - 1
                     for i in range(num_draft_tokens):
-                        draft_flattened_indices.append(flattened_index + i +1)
+                        draft_flattened_indices.append(flattened_index + i + 1)
                         src_draft_flattened_indices.append(
                             prev_index * \
                                 self.speculative_config.num_speculative_tokens + i)
@@ -2296,7 +2296,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # No Spec decode tokens
                 self.input_batch.prev_sampled_token_ids = \
                     sampled_token_ids
-            else:
+            elif max(spec_decode_metadata.num_draft_tokens)>0:
                 # Include spec decode tokens, only the verified token
                 # the prev_sampled_token_ids and prev_num_rejected_tokens
                 # should have been updated before
@@ -2326,7 +2326,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     sampled_ids = valid_sampled_token_ids[req_idx] if \
                         req_idx not in invalid_req_indices_set else None
                 else:
-                    max_sampled_tokens = 1 if not self.speculative_config \
+                    has_proposed_tokens = self.speculative_config is not None \
+                        and max(spec_decode_metadata.num_draft_tokens) > 0
+                    max_sampled_tokens = 1 if not has_proposed_tokens \
                        else (1 + self.speculative_config.num_speculative_tokens)
                     sampled_ids = [-1] * max_sampled_tokens if \
                         req_idx not in invalid_req_indices_set else None
@@ -2755,10 +2757,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             valid_sampled_tokens_count)
                     
                     if self.use_async_scheduling:
-                        self.input_batch.prev_num_rejected_tokens = \
-                            num_rejected_tokens
-                        self.input_batch.prev_num_rejected_tokens_calc_event = \
-                            num_rejected_tokens_calc_event
+                        if max(spec_decode_metadata.num_draft_tokens)>0:
+                            self.input_batch.prev_num_rejected_tokens = \
+                                num_rejected_tokens
+                            self.input_batch.\
+                                prev_num_rejected_tokens_calc_event = \
+                                num_rejected_tokens_calc_event
+                        else:
+                            self.input_batch.prev_num_rejected_tokens = None
+                            self.input_batch.\
+                                prev_num_rejected_tokens_calc_event = None
 
                 target_token_ids = self.input_ids.gpu[token_indices]
                 target_positions = self._get_positions(token_indices)
