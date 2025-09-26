@@ -174,7 +174,7 @@ def test_eagle_correctness(
     '''
     with monkeypatch.context() as m:
         if "Llama-4-Scout" in model_setup[
-                1] and attn_backend == "FLASH_ATTN_VLLM_V1":
+                1] and attn_backend == "FLASH_ATTN":
             # Scout requires default backend selection
             # because vision encoder has head_dim 88 being incompatible
             #  with FLASH_ATTN and needs to fall back to Flex Attn
@@ -212,7 +212,7 @@ def test_eagle_correctness(
                 "max_model_len": 2048,
             },
             max_model_len=2048,
-            # enforce_eager=True
+            enforce_eager=True
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
