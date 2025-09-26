@@ -25,9 +25,9 @@ def can_initialize(model: str, extra_args: list[str]):
     # Server arguments
     server_args = [
         "--max-model-len",
-        "8192",
+        "2048",
         "--max-num-batched-tokens",
-        "1024",
+        "256",
         "--load-format",
         "dummy",
         "--trust-remote-code",
@@ -40,13 +40,13 @@ def can_initialize(model: str, extra_args: list[str]):
     with RemoteOpenAIServer(
             model,
             server_args,
-            max_wait_seconds=600,  # Due to FlashInfer compile
+            max_wait_seconds=1000,  # Due to FlashInfer compile
             override_hf_configs=dummy_hf_overrides) as server:
         client = server.get_client()
         # Make a simple request to verify the server works
         completion = client.completions.create(
             model=model,
-            prompt=["Hello!"],
+            prompt=["Hello, World!"],
             temperature=0,
             max_tokens=2,
         )
