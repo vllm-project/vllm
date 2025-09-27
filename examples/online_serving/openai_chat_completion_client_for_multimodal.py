@@ -184,7 +184,7 @@ def run_video(model: str, max_completion_tokens: int) -> None:
     )
 
     result = chat_completion_from_base64.choices[0].message.content
-    print("Chat completion output from base64 encoded image:\n", result)
+    print("Chat completion output from base64 encoded video:\n", result)
 
 
 # Audio input inference
