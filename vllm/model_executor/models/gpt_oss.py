@@ -659,6 +659,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             weight_name.rstrip(".")
             for _, weight_name, _, _ in expert_params_mapping
         ]
+
         return packed_modules_mapping
 
     def __init__(
@@ -703,9 +704,9 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="base_layer", # "gate_proj"
-            ckpt_down_proj_name="", # "down_proj"
-            ckpt_up_proj_name="", # "up_proj",
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
             num_experts=self.config.num_local_experts, # FIXME: we aggregate over experts at layer level self.config.n_routed_experts
             num_redundant_experts=0)
 

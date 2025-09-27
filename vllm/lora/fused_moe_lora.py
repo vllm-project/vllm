@@ -90,7 +90,6 @@ def fused_moe_lora(
         return
 
     # get the expert_id to process curr shard
-    # FIXME: Memory error here
     ind = lora_idx * stride_el + pid_m
     expert_id = tl.load(expert_ids_ptr + ind, ind < top_k*stride_el, 0.0)
     if expert_id >= num_experts:

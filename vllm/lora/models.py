@@ -418,7 +418,7 @@ class LoRAModelManager(AdapterModelManager):
                         " without --enable-lora-bias.")
                 # Note (gnovack) - If MOE lora weights are not split into num_experts chunks, we split them here
                 if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(module_lora.lora_a):
-                    # TODO: Handle FSDP file format where experts.base_layer is the gate_up_proj and experts is the down_proj
+                    # Handle FSDP file format where experts.base_layer is the gate_up_proj and experts is the down_proj
                     gate_up_proj_lora = self._get_lora_layer_weights(lora_model, module_name + ".base_layer")
                     down_proj_lora = module_lora
                     num_experts = module_lora.lora_a.shape[-1] // module_lora.rank
