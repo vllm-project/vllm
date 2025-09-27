@@ -561,7 +561,7 @@ class EngineCoreProc(EngineCore):
         Here, "front-end" process can mean the process containing the engine
         core client (which is the API server process in the case the API
         server is not scaled out), OR the launcher process running the
-        run_multi_api_server() function in serve.py.
+        run_multi_api_server() function in api_server.py.
         """
         input_ctx = zmq.Context()
         is_local = local_client and client_handshake_address is None
