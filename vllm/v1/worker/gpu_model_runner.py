@@ -3525,6 +3525,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # This usually takes 5~20 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
+
         return cuda_graph_size
 
     def _capture_cudagraphs(self, compilation_cases: list[int],
@@ -3732,15 +3733,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     CUDAGraphMode.NONE
             logger.warning(msg)
 
-        # double check that we can support full cudagraph if they are requested
-        # even after automatic downgrades
+        # Check that we can support the requested cudagraph mode
         if cudagraph_mode.has_full_cudagraphs() \
             and min_cg_support == AttentionCGSupport.NEVER:
-            raise ValueError(f"CUDAGraphMode.{cudagraph_mode.name} is not "
-                             f"supported with {min_cg_builder_name} backend ("
-                             f"support:{min_cg_support}) "
-                             "; please try cudagraph_mode=PIECEWISE, "
-                             "and make sure compilation level is piecewise")
+            raise ValueError(
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported with "
+                f"{min_cg_builder_name} backend (support: {min_cg_support}). "
+                f"Please use a compatible attention backend or set "
+                f"cudagraph_mode=NONE.")
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).

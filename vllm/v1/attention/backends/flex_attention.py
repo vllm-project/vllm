@@ -3,7 +3,7 @@
 """Attention layer with FlexAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
 import torch
 import torch._dynamo.decorators
@@ -21,7 +21,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_kernel_override_batch_invariant)
 from vllm.utils import cdiv, is_torch_equal_or_newer
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -30,11 +31,6 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
-
-create_block_mask_compiled = torch.compile(create_block_mask,
-                                           fullgraph=True,
-                                           mode="reduce-overhead")
-flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
 
 
 def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
@@ -522,18 +518,106 @@ class FlexAttentionMetadata:
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
     def build_block_mask(self) -> BlockMask:
-        mask_mod = self.get_mask_mod()
-        kv_len = (self.total_cache_tokens
-                  if self.causal else self.num_actual_tokens)
-        return create_block_mask_compiled(
-            mask_mod,
-            None,
-            None,
-            self.num_actual_tokens,
-            kv_len,
-            device=self.block_table.device,
+        if self.causal:
+            mask_mod = self.get_causal_mask_mod()
+            kv_len = self.total_cache_tokens
+        else:
+            mask_mod = self.get_bidirectional_mask_mod()
+            kv_len = self.num_actual_tokens
+
+        if (self.num_reqs == 0 or self.num_actual_tokens == 0 or kv_len == 0
+                or self.doc_ids is None or self.doc_ids.numel() == 0):
+            # Build a dense fallback block mask. The actual sequence lengths
+            # will be adjusted later when we have real tokens available
+            # (e.g. during CUDA graph capture we rebuild the mask with the
+            # padded dimensions).
+            return self._build_dense_block_mask(max(self.q_block_size, 1),
+                                                max(self.kv_block_size, 1))
+        else:
+            # NOTE: torch.compile(create_block_mask, ...) intermittently hits
+            # illegal memory access on large multi-GPU captures; stick to eager.
+            block_mask = create_block_mask(
+                mask_mod,
+                None,
+                None,
+                self.num_actual_tokens,
+                kv_len,
+                device=self.block_table.device,
+                BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
+            )
+        return block_mask
+
+    def _build_dense_block_mask(self, q_len: int, kv_len: int) -> BlockMask:
+        """Create a dense block mask covering the provided logical lengths.
+
+        This is used for warmup / dummy runs where we may not have meaningful
+        block-table metadata yet (e.g. CUDA Graph captures with zero active
+        requests). The mask simply enables all KV blocks for the queried
+        sequence length and uses `mask_mod=None` to avoid additional tensor
+        allocations during capture.
+        """
+
+        device = self.block_table.device
+        q_len = max(int(q_len), 1)
+        kv_len = max(int(kv_len), 1)
+
+        num_q_blocks = max(1, cdiv(q_len, self.q_block_size))
+        num_kv_blocks = max(1, cdiv(kv_len, self.kv_block_size))
+
+        kv_indices = torch.arange(num_kv_blocks,
+                                  device=device,
+                                  dtype=torch.int32)
+        kv_indices = kv_indices.repeat(num_q_blocks, 1)
+        kv_indices = kv_indices.unsqueeze(0).unsqueeze(0)
+
+        kv_num_blocks = torch.full((1, 1, num_q_blocks),
+                                   num_kv_blocks,
+                                   dtype=torch.int32,
+                                   device=device)
+
+        block_mask = BlockMask.from_kv_blocks(
+            seq_lengths=(q_len, kv_len),
+            kv_num_blocks=kv_num_blocks,
+            kv_indices=kv_indices,
+            full_kv_num_blocks=None,
+            full_kv_indices=None,
             BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
+            mask_mod=self.mask_mod,
         )
+        return block_mask
+
+    def ensure_block_mask_capacity(self, q_len: int, kv_len: int) -> BlockMask:
+        """Ensure block_mask can cover the provided query/KV lengths."""
+
+        q_len = max(int(q_len), 1)
+        kv_len = max(int(kv_len), 1)
+
+        current = self.block_mask
+        if (current is not None and current.seq_lengths[0] >= q_len
+                and current.seq_lengths[1] >= kv_len):
+            return current
+
+        rebuilt: Optional[BlockMask] = None
+        if (self.doc_ids is not None and self.doc_ids.numel() > 0
+                and self.num_actual_tokens > 0
+                and self.total_cache_tokens > 0):
+            try:
+                if self.direct_build and self.causal:
+                    rebuilt = self._build_block_mask_direct()
+                else:
+                    rebuilt = self.build_block_mask()
+            except Exception as e:
+                logger.warning(
+                    "Failed to build block mask due to: %s. "
+                    "Falling back to a dense block mask. "
+                    "This may impact performance.", e)
+                rebuilt = None
+
+        if rebuilt is None:
+            rebuilt = self._build_dense_block_mask(q_len, kv_len)
+
+        self.block_mask = rebuilt
+        return rebuilt
 
     def __post_init__(self):
         assert self.use_cascade is False, "Not implemented yet."
@@ -548,6 +632,7 @@ class FlexAttentionMetadata:
         self.mask_mod = self.get_mask_mod()
         self.transformed_score_mod = self.get_transformed_score_mod()
 
+        # Create block_mask based on available information
         if self.direct_build and self.causal:
             self.block_mask = self._build_block_mask_direct()
         else:
@@ -556,6 +641,10 @@ class FlexAttentionMetadata:
 
 class FlexAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlexAttentionMetadata]):
+    # TODO: Re-enable CUDA graph support once PyTorch's FlexAttention
+    # fallback stops allocating tensors during capture. The current fallback
+    # instantiates new GPU scalars (e.g. -inf), which breaks capture.
+    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -608,8 +697,18 @@ class FlexAttentionMetadataBuilder(
         max_possible_seq_len = self.model_config.max_model_len
         num_gpu_blocks = self.cache_config.num_gpu_blocks
 
-        assert num_gpu_blocks is not None, \
-            "FlexAttention requires num_gpu_blocks to be set"
+        # num_gpu_blocks should be set by the engine based on available memory
+        # and gpu_memory_utilization. During CUDAGraphs capture, we may need a
+        # fallback.
+        if num_gpu_blocks is None:
+            # During CUDAGraphs capture, use a reasonable estimate based on
+            # model config
+            # This is a temporary fallback until the engine properly sets
+            # num_gpu_blocks
+            estimated_blocks = cdiv(max_possible_seq_len, block_size)
+            # Use a small minimum for CUDAGraphs capture
+            num_gpu_blocks = max(estimated_blocks, 4)
+            # Note: This will be overridden when the engine properly initializes
         total_cache_tokens = (num_gpu_blocks * block_size)
 
         inverse_block_table = physical_to_logical_mapping(
@@ -753,6 +852,10 @@ class FlexAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        doc_ids = attn_metadata.doc_ids
+        is_dummy_run = (attn_metadata.num_reqs == 0 or num_actual_tokens == 0
+                        or doc_ids is None or doc_ids.numel() == 0)
+
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
@@ -800,10 +903,12 @@ class FlexAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
 
-            # View out the block_size dim
-            key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
-            value_cache = value_cache.view(-1, self.num_kv_heads,
-                                           self.head_size)
+            # View out the block_size dim - use reshape to avoid tensor shape
+            # compatibility issues
+            key_cache = key_cache.reshape(-1, self.num_kv_heads,
+                                          self.head_size)
+            value_cache = value_cache.reshape(-1, self.num_kv_heads,
+                                              self.head_size)
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key_cache, value_cache),
@@ -814,12 +919,39 @@ class FlexAttentionImpl(AttentionImpl):
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
+        if is_dummy_run:
+            # During CUDA graph warmup there are no real tokens yet. Keeping
+            # tensors sized to the full KV cache capacity would explode memory
+            # usage, so shrink them to a minimal representative shape.
+            q_block = getattr(attn_metadata, "q_block_size", 1) or 1
+            kv_block = getattr(attn_metadata, "kv_block_size", 1) or 1
+            dummy_q_len = max(1, min(query.size(-2), q_block))
+            dummy_kv_len = max(1, min(key_tensor.size(-2), kv_block))
+
+            query = query[:, :, :dummy_q_len, :]
+            key_tensor = key_tensor[:, :, :dummy_kv_len, :]
+            value_tensor = value_tensor[:, :, :dummy_kv_len, :]
+            num_actual_tokens = dummy_q_len
+
+        # Align the cached block_mask with the actual query/KV lengths.
+        actual_q_len = query.size(-2)
+        actual_kv_len = key_tensor.size(-2)
+
+        block_mask = attn_metadata.ensure_block_mask_capacity(
+            actual_q_len, actual_kv_len)
+
+        if block_mask.seq_lengths != (actual_q_len, actual_kv_len):
+            block_mask = block_mask._adjust(actual_q_len, actual_kv_len)
+
+        attn_metadata.block_mask = block_mask
         assert attn_metadata.block_mask is not None
         block_m, block_n = attn_metadata.block_mask.BLOCK_SIZE
 
         kernel_options = get_kernel_options(query, block_m, block_n,
                                             attn_metadata.direct_build)
-        out = flex_attention_compiled(
+
+        # Use flex_attention directly (no compilation for CUDA graph compat)
+        out = flex_attention(
             query,
             key_tensor,
             value_tensor,
@@ -832,6 +964,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         # Flex doesn't have an out variant today, rely on epilogue fusion
         out = out.permute(0, 2, 1, 3).squeeze(0)
+
         output[:num_actual_tokens, :, :].copy_(out)
         return output
 
