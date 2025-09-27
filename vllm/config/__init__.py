@@ -548,9 +548,7 @@ class VllmConfig:
 
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = \
-            Path(self.compilation_config.debug_dump_path).absolute()
-        else:
-            self.compilation_config.debug_dump_path = None
+                self.compilation_config.debug_dump_path.absolute()
         if envs.VLLM_DEBUG_DUMP_PATH is not None:
             self.compilation_config.debug_dump_path = Path(
                 envs.VLLM_DEBUG_DUMP_PATH).absolute()
@@ -717,6 +715,15 @@ class VllmConfig:
                                  f"must be 'runai_streamer', "
                                  f"but got '{self.load_config.load_format}'. "
                                  f"Model: {self.model_config.model}")
+
+    def compile_debug_dump_path(self, rank: int) -> Path:
+        """returns the path to dump the torch.compile 
+            debug information for the given rank.
+        """
+        assert self.compilation_config.debug_dump_path is not None, \
+            "debug_dump_path is not set."
+        path = self.compilation_config.debug_dump_path / f"rank_{rank}"
+        return path
 
     def __str__(self):
         return (
