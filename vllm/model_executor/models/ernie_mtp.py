@@ -29,10 +29,9 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -47,13 +46,11 @@ class ErnieMultiTokenPredictorLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        vllm_config: VllmConfig,
         prefix: str,
-        model_config: ModelConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
 
         self.mtp_emb_norm = RMSNorm(config.hidden_size,
                                     eps=config.rms_norm_eps)
@@ -62,8 +59,7 @@ class ErnieMultiTokenPredictorLayer(nn.Module):
         self.mtp_linear_proj = nn.Linear(config.hidden_size * 2,
                                          config.hidden_size,
                                          bias=False)
-        self.mtp_block = LlamaDecoderLayer(config, cache_config, quant_config,
-                                           prefix)
+        self.mtp_block = LlamaDecoderLayer(vllm_config, prefix)
 
     def forward(
         self,
@@ -102,10 +98,8 @@ class ErnieMultiTokenPredictor(nn.Module):
         self.layers = torch.nn.ModuleDict({
             str(idx):
             ErnieMultiTokenPredictorLayer(
-                config,
+                vllm_config,
                 f"{prefix}.layers.{idx}",
-                model_config=vllm_config.model_config,
-                cache_config=vllm_config.cache_config,
             )
             for idx in range(self.mtp_start_layer_idx,
                              self.mtp_start_layer_idx + self.num_mtp_layers)

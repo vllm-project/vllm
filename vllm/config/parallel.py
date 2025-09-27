@@ -279,6 +279,24 @@ class ParallelConfig:
         assert last_exc is not None
         raise last_exc
 
+    # The all_reduce at the end of attention (during o_proj) means that
+    # inputs are replicated across each rank of the tensor parallel group.
+    # If using expert-parallelism with DeepEP All2All ops, replicated
+    # tokens results in useless duplicate computation and communication.
+    #
+    # In this case, ensure the input to the experts is sequence parallel
+    # to avoid the excess work.
+    #
+    # Not needed for pplx-kernels as it can handle duplicate input tokens.
+    @property
+    def use_sequence_parallel_moe(self) -> bool:
+        return (envs.VLLM_ALL2ALL_BACKEND
+                in ("allgather_reducescatter", "naive",
+                    "deepep_high_throughput", "deepep_low_latency")
+                and self.enable_expert_parallel
+                and self.tensor_parallel_size > 1
+                and self.data_parallel_size > 1)
+
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup,
                           has_unfinished: bool) -> bool:
