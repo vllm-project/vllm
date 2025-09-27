@@ -208,6 +208,8 @@ hip_compat.h
 
 # Benchmark dataset
 benchmarks/**/*.json
+benchmarks/scripts/
+benchmarks/run-*.sh
 
 # Linting
 actionlint
