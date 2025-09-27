@@ -12,6 +12,7 @@ import textwrap
 from contextlib import contextmanager
 from dataclasses import field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
+from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Literal, Optional, Protocol, TypeVar,
                     Union, cast)
 
@@ -541,6 +542,17 @@ class VllmConfig:
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
+        if self.compilation_config.debug_dump_path:
+            self.compilation_config.debug_dump_path = \
+                self.compilation_config.debug_dump_path.absolute().expanduser()
+        if envs.VLLM_DEBUG_DUMP_PATH is not None:
+            env_path = Path(envs.VLLM_DEBUG_DUMP_PATH).absolute().expanduser()
+            if self.compilation_config.debug_dump_path:
+                logger.warning(
+                    "Config-specified debug dump path is overridden"
+                    " by VLLM_DEBUG_DUMP_PATH to %s", env_path)
+            self.compilation_config.debug_dump_path = env_path
+
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
@@ -671,6 +683,20 @@ class VllmConfig:
                                  f"must be 'runai_streamer', "
                                  f"but got '{self.load_config.load_format}'. "
                                  f"Model: {self.model_config.model}")
+
+    def compile_debug_dump_path(self) -> Optional[Path]:
+        """Returns a rank-aware path for dumping 
+        torch.compile debug information.
+        """
+        if self.compilation_config.debug_dump_path is None:
+            return None
+        tp_rank = self.parallel_config.rank
+        dp_rank = self.parallel_config.data_parallel_rank
+        data_parallel_size = self.parallel_config.data_parallel_size
+        append_path = f"rank_{tp_rank}" if data_parallel_size == 1 \
+            else f"rank_{tp_rank}_dp_{dp_rank}"
+        path = self.compilation_config.debug_dump_path / append_path
+        return path
 
     def __str__(self):
         return (

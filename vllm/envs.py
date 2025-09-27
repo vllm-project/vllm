@@ -199,6 +199,7 @@ if TYPE_CHECKING:
     VLLM_DBO_COMM_SMS: int = 20
     GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
+    VLLM_DEBUG_DUMP_PATH: Optional[str] = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
@@ -512,6 +513,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
     "VLLM_PATTERN_MATCH_DEBUG":
     lambda: os.environ.get("VLLM_PATTERN_MATCH_DEBUG", None),
+
+    # Dump fx graphs to the given directory.
+    # It will override CompilationConfig.debug_dump_path if set.
+    "VLLM_DEBUG_DUMP_PATH":
+    lambda: os.environ.get("VLLM_DEBUG_DUMP_PATH", None),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
