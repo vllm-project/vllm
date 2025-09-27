@@ -204,7 +204,7 @@ sampling_params = vllm.SamplingParams(
     max_tokens=1024,
 )
 outputs = model.generate(
-    "My name is John and",
+    ["My name is John and"],
     sampling_params=sampling_params,
 )
 ```
