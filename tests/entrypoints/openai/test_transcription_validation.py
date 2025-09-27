@@ -194,6 +194,54 @@ async def test_stream_options(winning_call, client):
     assert final and continuous
 
 
+@pytest.fixture
+def server_with_force_include_usage():
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-num-seqs",
+        "1",
+        "--enforce-eager",
+        "--enable-force-include-usage",
+        "--gpu-memory-utilization",
+        "0.2"
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client_with_force_include_usage(server_with_force_include_usage):
+    async with server_with_force_include_usage.get_async_client(
+    ) as async_client:
+        yield async_client
+
+
+@pytest.mark.asyncio
+async def test_transcription_with_enable_force_include_usage(
+        client_with_force_include_usage, winning_call):
+    res = await client_with_force_include_usage.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=winning_call,
+        language="en",
+        temperature=0.0,
+        stream=True,
+        timeout=30)
+
+    async for chunk in res:
+        if not len(chunk.choices):
+            # final usage sent
+            usage = chunk.usage
+            assert isinstance(usage, dict)
+            assert usage['prompt_tokens'] > 0
+            assert usage['completion_tokens'] > 0
+            assert usage['total_tokens'] > 0
+        else:
+            assert not hasattr(chunk, 'usage')
+
+
 @pytest.mark.asyncio
 async def test_sampling_params(mary_had_lamb, client):
     """

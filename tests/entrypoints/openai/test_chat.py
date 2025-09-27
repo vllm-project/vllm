@@ -49,10 +49,42 @@ def server(monkeypatch_module, zephyr_lora_files):  #noqa: F811
         "2",
         "--max-num-seqs",
         "128",
+        "--gpu-memory-utilization",
+        "0.7"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
+
+
+@pytest.fixture(scope="function")
+def server_with_force_include_usage(request):  #noqa: F811
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "128",
+        "--enforce-eager",
+        "--max-num-seqs",
+        "1",
+        "--enable-force-include-usage",
+        "--port",
+        "55857",
+        "--gpu-memory-utilization",
+        "0.2"
+    ]
+
+    with RemoteOpenAIServer("Qwen/Qwen3-0.6B", args,
+                            auto_port=False) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client_with_force_include_usage(server_with_force_include_usage):
+    async with server_with_force_include_usage.get_async_client(
+    ) as async_client:
+        yield async_client
 
 
 @pytest_asyncio.fixture
@@ -468,6 +500,41 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
         last_completion_tokens = chunk.usage.completion_tokens
 
     assert last_completion_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_chat_with_enable_force_include_usage(
+        client_with_force_include_usage: openai.AsyncOpenAI):
+    messages = [{
+        "role": "system",
+        "content": "You are a helpful assistant."
+    }, {
+        "role": "user",
+        "content": "What is the capital of France?"
+    }]
+
+    stream = await client_with_force_include_usage.chat.completions.create(
+        model="Qwen/Qwen3-0.6B",
+        messages=messages,
+        max_completion_tokens=10,
+        extra_body=dict(min_tokens=10),
+        temperature=0.0,
+        stream=True,
+    )
+    last_completion_tokens = 0
+    async for chunk in stream:
+        if not len(chunk.choices):
+            assert chunk.usage.prompt_tokens >= 0
+            assert last_completion_tokens == 0 or \
+               chunk.usage.completion_tokens > last_completion_tokens or \
+               (
+                   not chunk.choices and
+                   chunk.usage.completion_tokens == last_completion_tokens
+               )
+            assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
+                                                chunk.usage.completion_tokens)
+        else:
+            assert chunk.usage is None
 
 
 @pytest.mark.asyncio
