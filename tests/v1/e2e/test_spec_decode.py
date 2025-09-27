@@ -186,7 +186,9 @@ def test_eagle_correctness(
             m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         method, model_name, spec_model_name, tp_size = model_setup
-
+        if "Qwen2.5-VL" in model_name:
+            pytest.skip("FLASH_ATTN does not support Qwen2.5-VL "
+                        "due to its head_dim not being a a multiple of 32")
         ref_llm = LLM(model=model_name,
                       max_model_len=2048,
                       tensor_parallel_size=tp_size)
