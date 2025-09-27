@@ -157,7 +157,7 @@ class MLPBlock(torch.nn.Module):
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.experts",
                                 apply_router_weight_on_input=False,
-                                has_bias=True, # FIXME: Turn back to True and drop bias terms
+                                has_bias=True,
                                 activation="swigluoai")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
