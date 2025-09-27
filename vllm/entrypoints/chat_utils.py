@@ -638,6 +638,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self._model_config.allowed_local_media_path
 
     @property
+    def allowed_media_domains(self):
+        return self._model_config.allowed_media_domains
+
+    @property
     def mm_registry(self):
         return MULTIMODAL_REGISTRY
 
@@ -837,6 +841,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._connector = MediaConnector(
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
+            allowed_media_domains=tracker.allowed_media_domains,
         )
 
     def parse_image(
@@ -921,6 +926,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._connector = MediaConnector(
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
+            allowed_media_domains=tracker.allowed_media_domains,
         )
 
     def parse_image(
