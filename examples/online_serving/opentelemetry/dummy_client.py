@@ -32,3 +32,6 @@ with tracer.start_as_current_span("client-span", kind=SpanKind.CLIENT) as span:
         # "stream": True,
     }
     response = requests.post(url, headers=headers, json=payload)
+
+
+print(response.json())

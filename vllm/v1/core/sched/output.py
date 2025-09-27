@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -35,6 +36,7 @@ class NewRequestData:
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
     prompt_embeds: Optional[torch.Tensor] = None
+    trace_headers: Optional[TraceHeaders] = None
 
     @classmethod
     def from_request(
@@ -52,6 +54,7 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
+            trace_headers=request.trace_headers,
         )
 
     def __repr__(self) -> str:
@@ -66,6 +69,7 @@ class NewRequestData:
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request},"
                 f"prompt_embeds_shape={prompt_embeds_shape}"
+                f"trace_headers={self.trace_headers}"
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
@@ -84,7 +88,11 @@ class NewRequestData:
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request},"
                 f"prompt_embeds_shape={prompt_embeds_shape}"
+                f"trace_headers={self.trace_headers}"
                 ")")
+
+
+TraceHeaders = Mapping[str, str]
 
 
 @bc_linter_include
