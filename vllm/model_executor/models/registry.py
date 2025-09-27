@@ -303,9 +303,9 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
-    "TransformersEmbeddingModel": ("transformers", "TransformersEmbeddingModel"),  # noqa: E501
-    "TransformersForSequenceClassification": ("transformers", "TransformersForSequenceClassification"),  # noqa: E501
-    "TransformersForReward": ("transformers", "TransformersForReward"),
+    "TransformersEmbeddingModel": ("transformers_pooling", "TransformersEmbeddingModel"),  # noqa: E501
+    "TransformersForSequenceClassification": ("transformers_pooling", "TransformersForSequenceClassification"),  # noqa: E501
+    "TransformersForReward": ("transformers_pooling", "TransformersForReward"),
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
     "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
 }
