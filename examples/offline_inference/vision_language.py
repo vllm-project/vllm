@@ -848,6 +848,42 @@ def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData
     )
 
 
+def run_llava_onevision1_5(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "lmms-lab/LLaVA-OneVision-1.5-8B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=1,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={
+            "min_pixels": 4 * 28 * 28,
+            "max_pixels": 16384 * 28 * 28,
+        },
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Mantis
 def run_mantis(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
