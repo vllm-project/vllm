@@ -22,8 +22,7 @@ class KVCacheBlocks:
     Scheduler and KVCacheManager, to hide KVCacheManager's internal data
     structure from the Scheduler.
     """
-
-    blocks: tuple[list[KVCacheBlock], ...]
+    blocks: tuple[tuple[KVCacheBlock, ...], ...]
     """
     `blocks[i][j]` refers to the i-th kv_cache_group
     and the j-th block of tokens.We don't use block of
@@ -75,7 +74,7 @@ class KVCacheBlocks:
 
     def new_empty(self) -> "KVCacheBlocks":
         """Creates a new KVCacheBlocks instance with no blocks."""
-        return KVCacheBlocks(tuple([] for _ in range(len(self.blocks))))
+        return KVCacheBlocks(tuple(() for _ in range(len(self.blocks))))
 
 
 class KVCacheManager:
@@ -130,6 +129,9 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
+        # Pre-constructed KVCacheBlocks with no blocks
+        self.empty_block_list = KVCacheBlocks(
+            tuple(() for _ in range(self.num_kv_cache_groups)))
 
     @property
     def usage(self) -> float:
@@ -166,11 +168,10 @@ class KVCacheManager:
         """
         # Prefix caching is disabled or
         # When the request requires prompt logprobs, we skip prefix caching.
-        if not self.enable_caching or (
-            request.sampling_params is not None
-            and request.sampling_params.prompt_logprobs is not None
-        ):
-            return self.create_empty_block_list(), 0
+        if (not self.enable_caching
+                or (request.sampling_params is not None
+                    and request.sampling_params.prompt_logprobs is not None)):
+            return self.empty_block_list, 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
@@ -251,9 +252,7 @@ class KVCacheManager:
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
         else:
-            new_computed_block_list = tuple(
-                [] for _ in range(len(self.kv_cache_config.kv_cache_groups))
-            )
+            new_computed_block_list = self.empty_block_list.blocks
 
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
@@ -305,7 +304,7 @@ class KVCacheManager:
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
-            return KVCacheBlocks(new_blocks)
+            return self.create_kv_cache_blocks(new_blocks)
 
         # NOTE(woosuk): We want to commit (cache) up to num_computed_tokens +
         # num_new_tokens, but must exclude "non-committable" tokens (e.g.,
@@ -316,7 +315,7 @@ class KVCacheManager:
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
-        return KVCacheBlocks(new_blocks)
+        return self.create_kv_cache_blocks(new_blocks)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -388,7 +387,8 @@ class KVCacheManager:
 
     def get_blocks(self, request_id: str) -> KVCacheBlocks:
         """Get the blocks of a request."""
-        return KVCacheBlocks(self.coordinator.get_blocks(request_id))
+        return self.create_kv_cache_blocks(
+            self.coordinator.get_blocks(request_id))
 
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""
@@ -399,6 +399,9 @@ class KVCacheManager:
         if self.enable_caching:
             self.coordinator.cache_blocks(request, num_computed_tokens)
 
-    def create_empty_block_list(self) -> KVCacheBlocks:
-        """Creates a new KVCacheBlocks instance with no blocks."""
-        return KVCacheBlocks(tuple([] for _ in range(self.num_kv_cache_groups)))
+    def create_kv_cache_blocks(
+            self, blocks: tuple[list[KVCacheBlock], ...]) -> KVCacheBlocks:
+        if any(blocks):
+            return KVCacheBlocks(blocks)
+        else:
+            return self.empty_block_list
