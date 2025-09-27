@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 import os
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
@@ -332,13 +331,32 @@ class ParallelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.pipeline_parallel_size)
-        factors.append(self.tensor_parallel_size)
-        factors.append(self.enable_expert_parallel)
-        factors.append(self.data_parallel_size)
-        factors.append(envs.VLLM_ALL2ALL_BACKEND)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
+        ignored_factors = {
+            # Derived/runtime topology, networking, or launch details
+            "data_parallel_rank",
+            "data_parallel_rank_local",
+            "data_parallel_master_ip",
+            "data_parallel_rpc_port",
+            "data_parallel_master_port",
+            "data_parallel_backend",
+            "data_parallel_external_lb",
+            "data_parallel_hybrid_lb",
+            "max_parallel_loading_workers",
+            "disable_custom_all_reduce",
+            "ray_workers_use_nsight",
+            "ray_runtime_env",
+            "placement_group",
+            "distributed_executor_backend",
+            "worker_cls",
+            "sd_worker_cls",
+            "worker_extension_cls",
+        }
+
+        from vllm.config.utils import get_hash_factors, hash_factors
+        factors = get_hash_factors(self, ignored_factors)
+        # Explicitly include backend affecting env factor as before
+        factors["VLLM_ALL2ALL_BACKEND"] = str(envs.VLLM_ALL2ALL_BACKEND)
+        return hash_factors(factors)
 
     def __post_init__(self) -> None:
         # Forward deprecated fields to their new location
