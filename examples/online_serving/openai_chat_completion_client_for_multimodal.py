@@ -163,7 +163,7 @@ def run_video(model: str, max_completion_tokens: int) -> None:
     )
 
     result = chat_completion_from_url.choices[0].message.content
-    print("Chat completion output from image url:\n", result)
+    print("Chat completion output from video url:\n", result)
 
     ## Use base64 encoded video in the payload
     chat_completion_from_base64 = client.chat.completions.create(
