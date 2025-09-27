@@ -335,7 +335,14 @@ class OutputProcessor:
                 # Produce final abort output.
                 if req_state.queue is not None and (
                         request_output := req_state.make_request_output(
-                            [], None, FinishReason.ABORT, None, None)):
+                            new_token_ids=[],
+                            # Set pooling_output is not None to
+                            # correctly enter the abort pooling branch
+                            pooling_output=torch.randn(0, device="cpu")
+                            if req_state.detokenizer is None else None,
+                            finish_reason=FinishReason.ABORT,
+                            stop_reason=None,
+                            kv_transfer_params=None)):
                     req_state.queue.put(request_output)
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.

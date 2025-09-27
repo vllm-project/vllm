@@ -86,6 +86,8 @@ class LLM:
             or videos from directories specified by the server file system.
             This is a security risk. Should only be enabled in trusted
             environments.
+        allowed_media_domains: If set, only media URLs that belong to this 
+            domain can be used for multi-modal inputs.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
@@ -130,11 +132,6 @@ class LLM:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
-        max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
-            to eager mode. Additionally for encoder-decoder models, if the
-            sequence length of the encoder input is larger than this, we fall
-            back to the eager mode.
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
         hf_token: The token to use as HTTP bearer authorization for remote files
@@ -174,6 +171,7 @@ class LLM:
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
+        allowed_media_domains: Optional[list[str]] = None,
         tensor_parallel_size: int = 1,
         dtype: ModelDType = "auto",
         quantization: Optional[QuantizationMethods] = None,
@@ -184,7 +182,6 @@ class LLM:
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: bool = False,
-        max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
@@ -270,6 +267,7 @@ class LLM:
             skip_tokenizer_init=skip_tokenizer_init,
             trust_remote_code=trust_remote_code,
             allowed_local_media_path=allowed_local_media_path,
+            allowed_media_domains=allowed_media_domains,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             quantization=quantization,
@@ -281,7 +279,6 @@ class LLM:
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
-            max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             hf_token=hf_token,
             hf_overrides=hf_overrides,
@@ -1468,7 +1465,7 @@ class LLM:
 
     def _validate_and_add_requests(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
+        prompts: Union[PromptType, Sequence[PromptType], DataPrompt],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
         *,
@@ -1478,7 +1475,7 @@ class LLM:
     ) -> None:
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
-            prompts = [prompts]
+            prompts = [prompts]  # type: ignore[list-item]
 
         num_requests = len(prompts)
         if isinstance(params, Sequence) and len(params) != num_requests:

@@ -30,8 +30,20 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         if envs.VLLM_USE_TRTLLM_FP4_GEMM:
             assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
             self.backend = "flashinfer-trtllm"
+            logger.info_once("Using flashinfer-trtllm for FP4")
+        elif envs.VLLM_USE_FBGEMM:
+            self.backend = "fbgemm"
+            try:
+                import fbgemm_gpu  # noqa: F401
+            except ImportError as exc:
+                raise ImportError(
+                    "Backend fbgemm requires fbgemm.f4f4bf16 operator, "
+                    "Please install with: pip install fbgemm-gpu-genai"
+                ) from exc
+            logger.info_once("Using FGBEMM-GPU-GENAI for FP4")
         elif has_flashinfer():
             self.backend = "flashinfer-cutlass"
+            logger.info_once("Using flashinfer-cutlass for FP4")
         else:
             self.backend = "cutlass"
         self.group_size = 16
@@ -116,6 +128,9 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             layer.weight_packed = Parameter(weight, requires_grad=False)
         else:
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
+            if self.backend == "fbgemm":
+                swizzled_weight_scale = swizzled_weight_scale.view(-1).view(
+                    torch.uint8)
             layer.weight_scale = Parameter(swizzled_weight_scale,
                                            requires_grad=False)
             layer.weight_packed = Parameter(layer.weight_packed.data,
@@ -153,6 +168,15 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             out = flashinfer_scaled_fp4_mm(*mm_args, backend="trtllm")
         elif self.backend == "flashinfer-cutlass":
             out = flashinfer_scaled_fp4_mm(*mm_args, backend="cutlass")
+        elif self.backend == "fbgemm":
+            out = torch.ops.fbgemm.f4f4bf16(
+                x_fp4,
+                layer.weight_packed,
+                x_blockscale.view(-1).view(torch.uint8),
+                layer.weight_scale,
+                layer.alpha,
+                use_mx=False,
+            ).to(output_dtype)
         else:
             out = cutlass_scaled_fp4_mm(*mm_args)
 

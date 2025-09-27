@@ -12,11 +12,11 @@ from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
 from vllm.config import ModelConfig
-from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        InputProcessingContext)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                cached_tokenizer_from_config,
                                                encode_tokens)
@@ -213,6 +213,7 @@ _IGNORE_MM_KEYS = {
 MM_DATA_PATCHES = {
     # GLM4.1V and Qwen3-VL requires video metadata to be included in the input
     "glm4v": glm4_1v_patch_mm_data,
+    "glm4v_moe": glm4_1v_patch_mm_data,
     "qwen3_vl": qwen3_vl_patch_mm_data,
     "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
