@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Union, ClassVar
 
 import numpy as np
 import torch
@@ -222,12 +222,16 @@ def triton_convert_req_index_to_global_index(
 class FlashMLASparseMetadataBuilder(
         MLACommonMetadataBuilder[FlashMLASparseMetadata]):
 
+    reorder_batch_threshold: ClassVar[int] = 1
+
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device,
                          FlashMLASparseMetadata)
         self.topk_tokens = vllm_config.model_config.hf_config\
             .attn_module_list_cfg[0]["topk_tokens"]
+        self.num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
+        self.reorder_batch_threshold += self.num_speculative_tokens
 
     def _build_prefill(
         self, common_attn_metadata: CommonAttentionMetadata

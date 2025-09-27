@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.config import VllmConfig
@@ -154,6 +154,7 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
+    reorder_batch_threshold: ClassVar[int] = 1
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         max_model_len = self.vllm_config.model_config.max_model_len
@@ -161,6 +162,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # NOTE(Chen): an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(
             self.vllm_config)
+        self.num_speculative_tokens = self.vllm_config.speculative_config.num_speculative_tokens
+        self.reorder_batch_threshold += self.num_speculative_tokens
 
     def build(self,
               common_prefix_len: int,
@@ -176,7 +179,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         query_start_loc = common_attn_metadata.query_start_loc
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata)
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold)
 
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens

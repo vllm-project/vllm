@@ -67,6 +67,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv, direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend, DeepseekV32IndexerMetadata
+from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, extract_layer_index,
@@ -736,9 +737,22 @@ def sparse_attn_indexer(
         decode_metadata = attn_metadata.decode
         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
         # we only have [num_block, block_size, head_dim],
+        query_start_loc = attn_metadata.query_start_loc
+        decode_lens = query_start_loc[1:attn_metadata.num_decodes+1] - query_start_loc[:attn_metadata.num_decodes]
         kv_cache = kv_cache.unsqueeze(-2)
+        require_padding = (decode_lens.max() > decode_lens.min()).item()
+        if require_padding:
+            # pad in edge case where we have short chunked prefill length < 
+            # decode_threshold since we unstrictly split 
+            # prefill and decode by decode_threshold (currently set to 1 + speculative tokens)
+            padded_q_fp8_decode_tokens = pack_seq_triton(q_fp8[:num_decode_tokens], decode_lens)
+        else:
+            padded_q_fp8_decode_tokens = q_fp8[:num_decode_tokens].reshape(decode_lens.shape[0], -1, *q_fp8.shape[1:])
+        # TODO: move and optimize below logic with triton kernels
+        batch_size = padded_q_fp8_decode_tokens.shape[0]
+        assert batch_size == decode_metadata.seq_lens.shape[0]
         logits = fp8_paged_mqa_logits(
-            q_fp8[:num_decode_tokens].unsqueeze(1),
+            padded_q_fp8_decode_tokens,
             kv_cache,
             weights[:num_decode_tokens],
             decode_metadata.seq_lens,
@@ -746,20 +760,32 @@ def sparse_attn_indexer(
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
         )
-        positions = torch.arange(max_model_len, device="cuda").unsqueeze(
-            0)  # [1, max_model_len]
-        next_n_offset = torch.arange(num_decode_tokens, device="cuda")
-        # NOTE(Chen): not true for spec decode
-        # [1, max_model_len] < [num_decode_tokens, 1] -> [num_decode_tokens, max_model_len]
-        mask = positions <= (decode_metadata.seq_lens - 1 +
-                             next_n_offset).unsqueeze(1)
-        logits = logits.masked_fill(~mask, float("-inf"))
-        topk_indices = logits.topk(
-            min(topk_tokens, logits.shape[-1]),
-            dim=-1)[1].to(torch.int32)  # [num_decode_tokens, topk_tokens]
-        topk_indices[topk_indices >= decode_metadata.seq_lens[:, None]] = -1
+        # [B, N, L]
+        next_n = padded_q_fp8_decode_tokens.shape[1]
+        # padded query len
+        current_device = padded_q_fp8_decode_tokens.device
+        padded_num_tokens = batch_size * next_n
+        positions = torch.arange(max_model_len, device=current_device).unsqueeze(0).expand(
+            batch_size * next_n, -1)
+        row_indices = torch.arange(padded_num_tokens, device=current_device) // next_n
+        next_n_offset = torch.arange(padded_num_tokens, device=padded_q_fp8_decode_tokens.device) % next_n
+        index_end_pos = (decode_metadata.seq_lens[row_indices] - next_n + next_n_offset).unsqueeze(1)
+        # index_end_pos: [B * N, 1]
+        mask = positions <= index_end_pos
+        # mask: [B * N, L]
+        logits = logits.masked_fill(~mask, float('-inf'))
+        topk_indices = logits.topk(topk_tokens, dim=-1)[1].to(
+                torch.int32)  # [B * N, K]
+        # ensure we don't set indices for the top k that out of range(masked already) 
+        # this will happen if context length is shorter than K
+        topk_indices[topk_indices > index_end_pos] = -1
+        if require_padding:
+            # if padded, we need to unpack the topk indices removing padded tokens
+            topk_indices = unpack_seq_triton(topk_indices.reshape(batch_size, -1, logits.shape[-1]), decode_lens)
         topk_indices_buffer[:num_decode_tokens, :topk_indices.
-                            shape[-1]] = topk_indices.to(dtype=torch.int32)
+                            shape[-1]] = topk_indices.to(
+                                dtype=torch.int32)
+        
     return topk_indices_buffer
 
 
@@ -853,10 +879,6 @@ class Indexer(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, qr: torch.Tensor, positions,
                 rotary_emb) -> torch.Tensor:
-        # hidden_states.shape: torch.Size([16, 7168]), qr.shape: torch.Size([16, 1536]), positions.shape: torch.Size([16])
-
-        # print(f"hidden_states: {torch.isinf(hidden_states).any()}, qr: {torch.isinf(qr).any()}")
-        # print(f"weight_proj: {torch.isneginf(self.weights_proj.weight.to(torch.float32)).any()}")
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
         q_pe, q_nope = torch.split(
@@ -1182,9 +1204,9 @@ class DeepseekV2Model(nn.Module):
             config, "attn_module_list_cfg"
         ) and "attn_index" in config.attn_module_list_cfg[0]
         if self.is_v32:
-            # TODO(Chen): remove this hardcode
+            topk_tokens = config.attn_module_list_cfg[0]["topk_tokens"]
             topk_indices_buffer = torch.empty(vllm_config.scheduler_config.max_num_batched_tokens,
-                                              2048,
+                                              topk_tokens,
                                               dtype=torch.int32,
                                               device="cuda")
         else:
