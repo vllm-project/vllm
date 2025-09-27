@@ -474,6 +474,12 @@ ENV CUDA_HOME=/usr/local/cuda
 RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a+PTX}" \
     && bash install_python_libraries.sh
 
+# CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
+# return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
+# consistently from the host (see https://github.com/vllm-project/vllm/issues/18859).
+# Until then, add /usr/local/nvidia/lib64 before the image cuda path to allow override.
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
+
 #################### vLLM installation IMAGE ####################
 
 #################### TEST IMAGE ####################
