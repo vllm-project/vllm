@@ -692,7 +692,7 @@ class VllmConfig:
         dp_rank = self.parallel_config.data_parallel_rank
         data_parallel_size = self.parallel_config.data_parallel_size
         append_path = f"rank_{tp_rank}" if data_parallel_size == 1 \
-            else f"rank_{tp_rank}_dprank_{dp_rank}"
+            else f"rank_{tp_rank}_dp_{dp_rank}"
         path = self.compilation_config.debug_dump_path / append_path
         return path
 
