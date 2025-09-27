@@ -1280,7 +1280,13 @@ class EngineArgs:
         data_parallel_rpc_port = self.data_parallel_rpc_port if (
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
-
+        eagles = (
+            "eagle",
+            "eagle3",
+            "deepseek_mtp",
+            "ernie_mtp",
+            "qwen3_next_mtp",
+        )
         if self.async_scheduling:
             # Async scheduling does not work with the uniprocess backend.
             if self.distributed_executor_backend is None:
@@ -1291,12 +1297,13 @@ class EngineArgs:
                 raise ValueError("Async scheduling is not supported with "
                                  "pipeline-parallel-size > 1.")
 
-            # Currently, async scheduling does not support speculative decoding.
-            # TODO(woosuk): Support it.
-            if self.speculative_config is not None:
-                raise ValueError(
-                    "Currently, speculative decoding is not supported with "
-                    "async scheduling.")
+            # Currently, async scheduling only support eagle speculative
+            # decoding.
+            # TODO(woosuk): Support other kinds of speculative decoding.
+            if (self.speculative_config is not None
+                    and self.speculative_config.get("method") not in eagles):
+                raise ValueError("Currently, async scheduling is only support "
+                                 "with eagle kind of speculative decodeing.")
 
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:

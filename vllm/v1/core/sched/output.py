@@ -164,3 +164,10 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+    # Total number of speculative scheduled tokens for all requests.
+    # this is used when both enable async_scheduling and speculative decoding.
+    # define this field so we don't need to calculate it by iterate
+    # scheduled_spec_decode_tokens during prepare_input_ids phase,
+    # it could make a minor optimization.
+    total_num_scheduled_spec_tokens: int = 0
