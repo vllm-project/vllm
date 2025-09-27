@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
 
+from vllm.config.multimodal import (AudioDummyOptions, BaseDummyOptions,
+                                    ImageDummyOptions, ModalityDummyOptions,
+                                    VideoDummyOptions)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
@@ -52,7 +55,7 @@ class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
         ...
 
 
-class MultiModalProcessorFactory(Protocol[_I]):
+class MultiModalProcessorFactory(Protocol[_I]):  # type: ignore[misc]
     """
     Constructs a
     [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor]
@@ -95,6 +98,32 @@ class MultiModalRegistry:
         self._processor_factories = ClassRegistry[nn.Module,
                                                   _ProcessorFactories]()
 
+    def _extract_mm_options(
+        self,
+        model_config: "ModelConfig",
+    ) -> Optional[Mapping[str, ModalityDummyOptions]]:
+        """
+        Extract multimodal dummy options from model config.
+
+        Returns None if no configurable options are found, otherwise returns
+        a mapping of modality names to their dummy options.
+        """
+        if not model_config.multimodal_config:
+            return None
+
+        mm_options = {}
+        # Extract options for ALL modalities in the config,
+        # not just hardcoded ones
+        # This supports OOT models with custom modalities
+        for modality in model_config.multimodal_config.limit_per_prompt:
+            options = model_config.multimodal_config.get_dummy_options(
+                modality)
+            if isinstance(options, (BaseDummyOptions, ImageDummyOptions,
+                                    VideoDummyOptions, AudioDummyOptions)):
+                mm_options[modality] = options
+
+        return mm_options if len(mm_options) > 0 else None
+
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
         """
         Checks if the model supports multimodal inputs.
@@ -135,7 +164,7 @@ class MultiModalRegistry:
             return {}
 
         processor = self.create_processor(model_config, cache=cache)
-        profiler = MultiModalProfiler(processor)
+        profiler: MultiModalProfiler = MultiModalProfiler(processor)
 
         seq_len = model_config.max_model_len
         mm_limits = self.get_mm_limits_per_prompt(model_config, cache=cache)
@@ -189,7 +218,7 @@ class MultiModalRegistry:
             return {}
 
         processor = self.create_processor(model_config, cache=cache)
-        profiler = MultiModalProfiler(processor)
+        profiler: MultiModalProfiler = MultiModalProfiler(processor)
         return profiler.get_mm_limits()
 
     def register_processor(
@@ -285,8 +314,15 @@ class MultiModalRegistry:
         The model is identified by ``model_config``.
         """
         processor = self.create_processor(model_config, cache=cache)
-        profiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts)
+        profiler: MultiModalProfiler = MultiModalProfiler(processor)
+
+        # Extract configurable options from multimodal config.
+        # Only include modalities that use advanced option types so legacy
+        # count-only behavior remains unchanged.
+        mm_options = self._extract_mm_options(model_config)
+
+        dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts,
+                                                     mm_options)
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids
@@ -311,8 +347,15 @@ class MultiModalRegistry:
         The model is identified by ``model_config``.
         """
         processor = self.create_processor(model_config, cache=cache)
-        profiler = MultiModalProfiler(processor)
-        dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts)
+        profiler: MultiModalProfiler = MultiModalProfiler(processor)
+
+        # Extract configurable options from multimodal config.
+        # Only include modalities that use advanced option types so legacy
+        # count-only behavior remains unchanged.
+        mm_options = self._extract_mm_options(model_config)
+
+        dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts,
+                                                     mm_options)
 
         # Having more tokens is over-conservative but otherwise fine
         token_ids = dummy_data.prompt_token_ids
