@@ -51,9 +51,9 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .clip import CLIPVisionModel
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper,
+                    _merge_multimodal_embeddings, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -643,14 +643,31 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self.embed_tokens(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.image_token_id)
-        return inputs_embeds
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.embed_tokens,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229.")
+
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -666,8 +683,11 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         # condition is for v0 compatibility
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=self.image_token_id,
+            )
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,

@@ -79,7 +79,8 @@ from .qwen2_5_vl import (Qwen2_5_VisionAttention,
 from .qwen2_vl import Qwen2VLProcessingInfo
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
-                    maybe_prefix, merge_multimodal_embeddings)
+                    _merge_multimodal_embeddings, maybe_prefix,
+                    merge_multimodal_embeddings)
 from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
@@ -1324,17 +1325,22 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return multimodal_embeddings
 
     def _compute_deepstack_embeds(
-            self, input_ids: torch.Tensor, inputs_embeds: torch.Tensor,
-            multimodal_embeddings: MultiModalEmbeddings) -> torch.Tensor:
-        visual_lens = [
-            x.shape[0] if isinstance(x, torch.Tensor) else len(x)
-            for x in multimodal_embeddings
-        ]
+        self,
+        inputs_embeds: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        is_multimodal: torch.Tensor,
+    ) -> tuple[torch.Tensor, MultiModalEmbeddings]:
+        visual_lens = [len(x) for x in multimodal_embeddings]
         multimodal_embeddings_cat = torch.cat(multimodal_embeddings, dim=0)
 
-        multimodal_embeddings_main, multimodal_embeddings_multiscale = torch.split(  # noqa:E501
-            multimodal_embeddings_cat, [self.visual_dim, self.multiscale_dim],
-            dim=-1)
+        (
+            multimodal_embeddings_main,
+            multimodal_embeddings_multiscale,
+        ) = torch.split(
+            multimodal_embeddings_cat,
+            [self.visual_dim, self.multiscale_dim],
+            dim=-1,
+        )
 
         multimodal_embeddings = torch.split(multimodal_embeddings_main,
                                             visual_lens,
@@ -1346,39 +1352,62 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds.size(0),
             self.deepstack_num_level * inputs_embeds.size(1))
 
-        deepstack_input_embeds = merge_multimodal_embeddings(
-            input_ids,
-            deepstack_input_embeds,
-            multimodal_embeddings_multiscale,
-            placeholder_token_id=[
-                self.config.image_token_id, self.config.video_token_id
-            ],
+        deepstack_input_embeds = _merge_multimodal_embeddings(
+            inputs_embeds=deepstack_input_embeds,
+            multimodal_embeddings=multimodal_embeddings_multiscale,
+            is_multimodal=is_multimodal,
         )
         deepstack_input_embeds = deepstack_input_embeds.view(
             inputs_embeds.shape[0], self.deepstack_num_level, self.visual_dim)
         deepstack_input_embeds = deepstack_input_embeds.permute(1, 0, 2)
+
         return deepstack_input_embeds, multimodal_embeddings
 
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        deepstack_input_embeds = None
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
-            if self.use_deepstack:
-                deepstack_input_embeds, multimodal_embeddings = self._compute_deepstack_embeds(  # noqa:E501
-                    input_ids, inputs_embeds, multimodal_embeddings)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                [self.config.image_token_id, self.config.video_token_id])
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.language_model.get_input_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229.")
 
         if self.use_deepstack:
-            if deepstack_input_embeds is None:
-                deepstack_input_embeds = torch.zeros_like(
-                    inputs_embeds).unsqueeze(0).repeat(
-                        self.deepstack_num_level, 1, 1).contiguous()
+            (
+                deepstack_input_embeds,
+                multimodal_embeddings,
+            ) = self._compute_deepstack_embeds(
+                inputs_embeds=inputs_embeds,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+            )
+        else:
+            deepstack_input_embeds = None
+
+        inputs_embeds = _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
+
+        if deepstack_input_embeds is not None:
+            deepstack_input_embeds = torch.zeros_like(inputs_embeds).unsqueeze(
+                0).repeat(self.deepstack_num_level, 1, 1).contiguous()
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
         return inputs_embeds

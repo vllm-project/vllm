@@ -28,7 +28,7 @@ from .llava_next import LlavaNextProcessingInfo
 from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+                    maybe_prefix)
 
 
 class MiniMaxVL01ImagePixelInputs(TensorSchema):
@@ -218,22 +218,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.config.image_token_index,
-            )
-        return inputs_embeds
-
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
@@ -403,8 +387,11 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = None
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=input_ids == self.config.image_token_index,
+            )
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,

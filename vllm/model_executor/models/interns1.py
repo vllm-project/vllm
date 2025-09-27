@@ -40,8 +40,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, isin_list, maybe_prefix)
 
 
 class InternS1MultiModalProjector(nn.Module):
@@ -767,24 +766,24 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            context_token_ids = [
-                token_id for token_id in (self.img_context_token_id,
-                                          self.video_context_token_id)
-                if token_id is not None
-            ]
-            assert len(context_token_ids) >= 1
+        if multimodal_embeddings is not None and len(
+                multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                context_token_ids,
-            )
-        return inputs_embeds
+
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
+
+        return super().get_input_embeddings(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
 
     def forward(
         self,
@@ -802,9 +801,17 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
+            context_token_ids = [
+                token_id for token_id in (self.img_context_token_id,
+                                          self.video_context_token_id)
+                if token_id is not None
+            ]
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=isin_list(input_ids, context_token_ids),
+            )
             input_ids = None
 
         forward_kwargs = {

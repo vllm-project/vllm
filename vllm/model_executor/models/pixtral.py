@@ -50,8 +50,7 @@ from vllm.transformers_utils.tokenizer import (MistralTokenizer,
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .utils import flatten_bn, init_vllm_registered_model, maybe_prefix
 from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 try:
@@ -433,22 +432,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return self._process_image_input(image_input)
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.vision_args.image_token_id,
-            )
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -465,8 +448,11 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=input_ids == self.vision_args.image_token_id,
+            )
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,

@@ -48,7 +48,6 @@ from vllm.transformers_utils.processors.ovis import OvisProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import merge_multimodal_embeddings
 
 # Cannot find the following number from hf config.
 IMAGE_TOKEN = "<image>"
@@ -501,19 +500,6 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
         return image_features
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.llm.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.image_pad_token_id)
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -529,8 +515,11 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=input_ids == self.image_pad_token_id,
+            )
             input_ids = None
 
         # up until here we have an inputs_embeds 100% numerical identity

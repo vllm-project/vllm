@@ -33,8 +33,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 
 _AUDIO_PLACEHOLDER_OVERRIDE = "<|audio|>"
 _MAX_ENCODER_BATCH_SIZE = 16
@@ -555,19 +554,21 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        # Multi-modal token ID may exceed vocab size
+        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
-        # The audio token index is not included in the embedding table
-        # We need to remove it before embedding lookup
-        safe_input_ids = input_ids.clone()
-        safe_input_ids[safe_input_ids == self.config.audio_token_index] = 0
-        inputs_embeds = self.language_model.get_input_embeddings(
-            safe_input_ids)
-        if multimodal_embeddings is not None and len(
-                multimodal_embeddings) > 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.audio_token_index)
-        return inputs_embeds
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
+
+        return super().get_input_embeddings(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -601,8 +602,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         elif inputs_embeds is None:
             multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
 
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                multimodal_embeddings,
+                is_multimodal=input_ids == self.config.audio_token_index,
+            )
             input_ids = None
 
         language_model = self.language_model
