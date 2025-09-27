@@ -50,9 +50,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -66,7 +63,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend
+from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import is_list_of
@@ -162,6 +159,8 @@ class Qwen3_VisionBlock(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend: _Backend = _Backend.TORCH_SDPA,
+        use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -174,7 +173,9 @@ class Qwen3_VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            use_data_parallel=use_data_parallel)
+            use_data_parallel=use_data_parallel,
+            attn_backend=attn_backend,
+            use_upstream_fa=use_upstream_fa)
         self.mlp = Qwen3_VisionMLP(dim,
                                    mlp_hidden_dim,
                                    act_fn=act_fn,
@@ -291,19 +292,6 @@ class Qwen3_VisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
-        self.blocks = nn.ModuleList([
-            Qwen3_VisionBlock(
-                dim=self.hidden_size,
-                num_heads=self.num_heads,
-                mlp_hidden_dim=vision_config.intermediate_size,
-                act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
-                norm_layer=norm_layer,
-                quant_config=quant_config,
-                prefix=f"{prefix}.blocks.{layer_idx}",
-                use_data_parallel=use_data_parallel)
-            for layer_idx in range(vision_config.depth)
-        ])
-
         self.merger = Qwen3_VisionPatchMerger(
             d_model=vision_config.out_hidden_size,
             context_dim=self.hidden_size,
@@ -329,10 +317,42 @@ class Qwen3_VisionTransformer(nn.Module):
 
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim, dtype=torch.get_default_dtype())
+        use_upstream_fa = False
         if self.attn_backend != _Backend.FLASH_ATTN and \
             check_upstream_fa_availability(
                 torch.get_default_dtype()):
             self.attn_backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
+
+        if self.attn_backend not in {
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
+                _Backend.ROCM_AITER_FA
+        }:
+            raise RuntimeError(
+                f"Qwen3-VL does not support {self.attn_backend} backend now.")
+        if current_platform.is_device_capability(
+                100) and self.attn_backend != _Backend.TORCH_SDPA:
+            # TODO(Roger/Wentao): remove this after FA
+            # or XFORMERS's issue fixed on Blackwell
+            logger.info_once("Qwen3-VL vision attention does not support "
+                             f"{self.attn_backend} backend on Blackwell now. "
+                             "Vision attention backend is set to TORCH_SDPA.")
+            self.attn_backend = _Backend.TORCH_SDPA
+
+        self.blocks = nn.ModuleList([
+            Qwen3_VisionBlock(
+                dim=self.hidden_size,
+                num_heads=self.num_heads,
+                mlp_hidden_dim=vision_config.intermediate_size,
+                act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
+                norm_layer=norm_layer,
+                quant_config=quant_config,
+                prefix=f"{prefix}.blocks.{layer_idx}",
+                use_data_parallel=use_data_parallel,
+                attn_backend=self.attn_backend,
+                use_upstream_fa=use_upstream_fa)
+            for layer_idx in range(vision_config.depth)
+        ])
 
     @property
     def dtype(self) -> torch.dtype:
@@ -1059,7 +1079,7 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.visual = Qwen3_VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
             use_data_parallel=self.use_data_parallel,
         )
@@ -1116,13 +1136,6 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if num_tokens > 0:
             for idx in range(self.deepstack_num_level):
                 self.deepstack_input_embeds[idx][:num_tokens].zero_()
-
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid vision encoder sections for some models.
-        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
-            return None
-        return quant_config
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
