@@ -18,7 +18,7 @@ if not current_platform.is_rocm():
     from xformers import ops as xops
     from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
-    from vllm.attention.backends.xformers import _make_alibi_bias
+    from tests.kernels.utils import make_alibi_bias
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
@@ -29,17 +29,14 @@ MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 NUM_BLOCKS = 4321  # Arbitrary values for testing
 PARTITION_SIZE = 512
 PARTITION_SIZE_ROCM = 256
-# flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
-DTYPES = [
-    torch.half, torch.bfloat16, torch.float
-] if not current_platform.is_rocm() else [torch.half, torch.bfloat16]
+DTYPES = [torch.bfloat16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 
 # This should be sync with get_supported_head_sizes() in
 # vllm.attention.ops.paged_attn.PagedAttention
-HEAD_SIZES = [32, 64, 80, 96, 112, 120, 128, 192, 256]
+HEAD_SIZES = [32, 80, 128, 256]
 
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
@@ -432,8 +429,8 @@ def test_multi_query_kv_attention(
     alibi_bias = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
-        attn_bias = _make_alibi_bias(alibi_slopes, num_kv_heads, dtype,
-                                     seq_lens)
+        attn_bias = make_alibi_bias(alibi_slopes, num_kv_heads, dtype,
+                                    seq_lens)
         output = torch.empty_like(query)
         start = 0
         # Dynamic sequence length not supported with custom attn_bias.

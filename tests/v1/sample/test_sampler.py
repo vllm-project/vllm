@@ -9,7 +9,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.v1.sample.logits_processor import LogitsProcessorManager
+from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
@@ -72,8 +72,10 @@ def _create_allowed_token_ids(
 
 
 def _create_bad_words_token_ids(
-        batch_size: int, vocab_size: int,
-        bad_words_lengths: list[tuple[int]]) -> dict[int, list[list[int]]]:
+    batch_size: int,
+    vocab_size: int,
+    bad_words_lengths: tuple[int, ...],
+) -> dict[int, list[list[int]]]:
     bad_words_token_ids = {}
     for batch_idx in range(batch_size):
         token_ids_single_batch = []
@@ -90,6 +92,27 @@ def _create_bad_words_token_ids(
     return bad_words_token_ids
 
 
+# Returns all last tokens of bad word sequences that share the same prefix
+# as `given_prefix` (excluding the last token).
+def _collect_suffixes_with_same_prefix(
+        given_prefix: list[int],
+        bad_words_token_ids: list[list[int]]) -> list[int]:
+    return [bwt[-1] for bwt in bad_words_token_ids if bwt[:-1] == given_prefix]
+
+
+# generate a valid token id that is not in bad_words_token_ids
+def _generate_valid_token_id(bad_words_token_ids: list[list[int]],
+                             vocab_size: int) -> int:
+    forbidden_start_tokens = set()
+    for bad_word in bad_words_token_ids:
+        forbidden_start_tokens.add(bad_word[0])
+    # Get a safe token that's not in forbidden starts
+    safe_token_candidates = list(
+        set(range(vocab_size)) - forbidden_start_tokens)
+    # Pick a random safe token
+    return np.random.choice(safe_token_candidates)
+
+
 def _update_output_token_ids_for_bad_words(
         metadata: SamplingMetadata, vocab_size: int) -> dict[int, list[int]]:
     bad_words_last_tokens = {}
@@ -104,12 +127,17 @@ def _update_output_token_ids_for_bad_words(
                 prefix_length = len(bad_word_token_ids) - 1
                 has_bad_words = np.random.choice([True, False])
                 if has_bad_words:
-                    output_token_ids[-prefix_length:] = bad_word_token_ids[:-1]
-                    bad_words_last_token.append(bad_word_token_ids[-1])
+                    prefix = bad_word_token_ids[:-1]
+                    output_token_ids[-prefix_length:] = prefix
+                    # Collect all last tokens from other bad words
+                    # that share this prefix
+                    bad_words_last_token.extend(
+                        _collect_suffixes_with_same_prefix(
+                            prefix, bad_words_token_ids))
                     break  # Maximum one update to output_token_ids
                 else:  # Make sure no accidental match to bad words
-                    output_token_ids[-1] = (bad_word_token_ids[-2] +
-                                            1) % vocab_size
+                    output_token_ids[-1] = _generate_valid_token_id(
+                        bad_words_token_ids, vocab_size)
         bad_words_last_tokens[batch_idx] = bad_words_last_token
     return bad_words_last_tokens
 
@@ -147,7 +175,7 @@ def _create_default_sampling_metadata(
         no_penalties=True,
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
-        logitsprocs=LogitsProcessorManager(),
+        logitsprocs=LogitsProcessors(),
     )
     return fake_sampling_metadata
 
@@ -376,7 +404,7 @@ def test_sampler_allowed_token_ids(device: str, batch_size: int,
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 @pytest.mark.parametrize("bad_words_lengths", [(1, ), (1, 3), (2, 2)])
 def test_sampler_bad_words(device: str, batch_size: int,
-                           bad_words_lengths: list[tuple[int]]):
+                           bad_words_lengths: tuple[int, ...]):
     """
     Test to verify that when the bad words restriction is present, tokens
     are penalized based on their match with the bad words.

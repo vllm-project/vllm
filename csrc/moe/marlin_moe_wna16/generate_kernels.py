@@ -20,6 +20,7 @@ namespace MARLIN_NAMESPACE_NAME {
 TEMPLATE = ("template __global__ void Marlin<"
             "{{scalar_t}}, "
             "{{w_type_id}}, "
+            "{{s_type_id}}, "
             "{{threads}}, "
             "{{thread_m_blocks}}, "
             "{{thread_n_blocks}}, "
@@ -77,6 +78,7 @@ def generate_new_kernels():
             if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 8]:
                 continue
             # nvfp4 only supports group_size == 16
+            # mxfp4 only supports group_size == 32
             if scalar_type == "vllm::kFE2M1f" and group_blocks not in [1, 2]:
                 continue
             # other quantization methods don't support group_size = 16
@@ -89,9 +91,22 @@ def generate_new_kernels():
 
             c_dtype = "half" if dtype == "fp16" else "nv_bfloat16"
 
+            if scalar_type == "vllm::kFE2M1f" and group_blocks == 1:
+                s_type = "vllm::kFE4M3fn"
+            elif scalar_type == "vllm::kFE2M1f" and group_blocks == 2:
+                s_type = "vllm::kFE8M0fnu"
+                if dtype == "fp16":
+                    # we cannot safely dequantize e8m0 to fp16, so skip this
+                    continue
+            elif dtype == "fp16":
+                s_type = "vllm::kFloat16"
+            elif dtype == "bf16":
+                s_type = "vllm::kBFloat16"
+
             template_str = jinja2.Template(TEMPLATE).render(
                 scalar_t=c_dtype,
                 w_type_id=scalar_type + ".id()",
+                s_type_id=s_type + ".id()",
                 threads=threads,
                 thread_m_blocks=max(m_blocks, 1),
                 thread_n_blocks=n_blocks,

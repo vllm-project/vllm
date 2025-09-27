@@ -28,6 +28,8 @@ class Cache:
 
 
 class All2AllManagerBase:
+    rank: int
+    world_size: int
 
     def __init__(self, cpu_group):
         self.cpu_group = cpu_group
@@ -40,6 +42,7 @@ class All2AllManagerBase:
         # all2all lives in ep group, which is merged from dp and tp group
         self.dp_group = get_dp_group()
         self.tp_group = get_tp_group()
+
         # no self.ep_group since self.ep_group is still in construction
         # when we create this object
         self.dp_rank = self.dp_group.rank_in_group
@@ -60,11 +63,21 @@ class All2AllManagerBase:
         # and reuse it for the same config.
         raise NotImplementedError
 
-    def dispatch(self, hidden_states: torch.Tensor,
-                 router_logits: torch.Tensor):
+    def dispatch(self,
+                 hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor,
+                 is_sequence_parallel: bool = False):
         raise NotImplementedError
 
-    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def set_num_sms(self, num_sms: int):
+        pass
+
+    def max_sms_used(self) -> Optional[int]:
+        return None  # None means it could use the whole GPU
+
+    def combine(self,
+                hidden_states: torch.Tensor,
+                is_sequence_parallel: bool = False):
         raise NotImplementedError
 
     def destroy(self):
@@ -105,7 +118,8 @@ class DeviceCommunicatorBase:
             # we initialize the all2all manager used in expert parallel.
             use_ep = config.parallel_config.data_parallel_size > 1
 
-        self.use_all2all = "ep" in unique_name and use_ep
+        self.is_ep_communicator = "ep" in unique_name
+        self.use_all2all = self.is_ep_communicator and use_ep
         self.all2all_manager: Optional[All2AllManagerBase] = None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
@@ -219,7 +233,7 @@ class DeviceCommunicatorBase:
         return output_tensor
 
     def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
-        """Sends a tensor to the destination rank in a non-blocking way"""
+        """Sends a tensor to the destination rank in a blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
@@ -246,26 +260,34 @@ class DeviceCommunicatorBase:
         """
         Prepare the communication buffer for the model.
         """
-        if not self.use_all2all:
+        if not self.is_ep_communicator:
             return
 
         moe_modules = [
             module for module in model.modules()
-            if module.__class__.__name__ == "FusedMoE"
+            # TODO(bnell): Should use isinstance but can't.  Maybe search for
+            # presence of quant_method.init_prepare_finalize?
+            if (module.__class__.__name__ == "FusedMoE"
+                or module.__class__.__name__ == "SharedFusedMoE")
         ]
         for module in moe_modules:
-            module.quant_method.init_prepare_finalize(module.moe_config)
+            module.quant_method.init_prepare_finalize(module)
 
     def dispatch(
-            self, hidden_states: torch.Tensor,
-            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Dispatch the hidden states and router logits to the appropriate device.
         This is a no-op in the base class.
         """
         return hidden_states, router_logits
 
-    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def combine(self,
+                hidden_states: torch.Tensor,
+                is_sequence_parallel: bool = False) -> torch.Tensor:
         """
         Combine the hidden states and router logits from the appropriate device.
         This is a no-op in the base class.

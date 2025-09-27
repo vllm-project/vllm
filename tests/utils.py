@@ -2,20 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import copy
 import functools
+import importlib
+import json
 import os
+import random
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 import warnings
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
+from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Union
+from unittest.mock import patch
 
 import cloudpickle
+import httpx
 import openai
 import pytest
 import requests
@@ -74,6 +81,25 @@ VLLM_PATH = Path(__file__).parent.parent
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
+    def _start_server(self, model: str, vllm_serve_args: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        """Subclasses override this method to customize server process launch
+        """
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        if env_dict is not None:
+            env.update(env_dict)
+        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
+        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        self.proc: subprocess.Popen = subprocess.Popen(
+            serve_cmd,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+
     def __init__(self,
                  model: str,
                  vllm_serve_args: list[str],
@@ -81,16 +107,19 @@ class RemoteOpenAIServer:
                  env_dict: Optional[dict[str, str]] = None,
                  seed: Optional[int] = 0,
                  auto_port: bool = True,
-                 max_wait_seconds: Optional[float] = None) -> None:
+                 max_wait_seconds: Optional[float] = None,
+                 override_hf_configs: Optional[dict[str, Any]] = None) -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
                 raise ValueError("You have manually specified the port "
                                  "when `auto_port=True`.")
 
-            # Don't mutate the input args
-            vllm_serve_args = vllm_serve_args + [
-                "--port", str(get_open_port())
-            ]
+            # No need for a port if using unix sockets
+            if "--uds" not in vllm_serve_args:
+                # Don't mutate the input args
+                vllm_serve_args = vllm_serve_args + [
+                    "--port", str(get_open_port())
+                ]
         if seed is not None:
             if "--seed" in vllm_serve_args:
                 raise ValueError("You have manually specified the seed "
@@ -98,13 +127,24 @@ class RemoteOpenAIServer:
 
             vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
 
+        if override_hf_configs is not None:
+            vllm_serve_args = vllm_serve_args + [
+                "--hf-overrides",
+                json.dumps(override_hf_configs)
+            ]
+
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         parser = ServeSubcommand().subparser_init(subparsers)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
-        self.host = str(args.host or 'localhost')
-        self.port = int(args.port)
+        self.uds = args.uds
+        if args.uds:
+            self.host = None
+            self.port = None
+        else:
+            self.host = str(args.host or 'localhost')
+            self.port = int(args.port)
 
         self.show_hidden_metrics = \
             args.show_hidden_metrics_for_version is not None
@@ -119,18 +159,7 @@ class RemoteOpenAIServer:
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
 
-        env = os.environ.copy()
-        # the current process might initialize cuda,
-        # to be safe, we should use spawn method
-        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-        if env_dict is not None:
-            env.update(env_dict)
-        self.proc = subprocess.Popen(
-            ["vllm", "serve", model, *vllm_serve_args],
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
+        self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
                               timeout=max_wait_seconds)
@@ -146,19 +175,25 @@ class RemoteOpenAIServer:
             # force kill if needed
             self.proc.kill()
 
+    def _poll(self) -> Optional[int]:
+        """Subclasses override this method to customize process polling"""
+        return self.proc.poll()
+
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
         start = time.time()
+        client = (httpx.Client(transport=httpx.HTTPTransport(
+            uds=self.uds)) if self.uds else requests)
         while True:
             try:
-                if requests.get(url).status_code == 200:
+                if client.get(url).status_code == 200:
                     break
             except Exception:
                 # this exception can only be raised by requests.get,
                 # which means the server is not ready yet.
                 # the stack trace is not useful, so we suppress it
                 # by using `raise from None`.
-                result = self.proc.poll()
+                result = self._poll()
                 if result is not None and result != 0:
                     raise RuntimeError("Server exited unexpectedly.") from None
 
@@ -169,7 +204,8 @@ class RemoteOpenAIServer:
 
     @property
     def url_root(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        return (f"http://{self.uds.split('/')[-1]}"
+                if self.uds else f"http://{self.host}:{self.port}")
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
@@ -191,6 +227,48 @@ class RemoteOpenAIServer:
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
                                   **kwargs)
+
+
+class RemoteOpenAIServerCustom(RemoteOpenAIServer):
+    """Launch test server with custom child process"""
+
+    def _start_server(self, model: str, vllm_serve_args: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        self.proc: Process = Process(
+            target=self.child_process_fxn,
+            args=(env_dict, model,
+                  vllm_serve_args))  # type: ignore[assignment]
+        self.proc.start()
+
+    def __init__(self,
+                 model: str,
+                 vllm_serve_args: list[str],
+                 child_process_fxn: Callable[
+                     [Optional[dict[str, str]], str, list[str]], None],
+                 *,
+                 env_dict: Optional[dict[str, str]] = None,
+                 seed: Optional[int] = 0,
+                 auto_port: bool = True,
+                 max_wait_seconds: Optional[float] = None) -> None:
+        """Store custom child process function then invoke superclass
+        constructor which will indirectly launch it."""
+        self.child_process_fxn = child_process_fxn
+        super().__init__(model=model,
+                         vllm_serve_args=vllm_serve_args,
+                         env_dict=env_dict,
+                         seed=seed,
+                         auto_port=auto_port,
+                         max_wait_seconds=max_wait_seconds)
+
+    def _poll(self) -> Optional[int]:
+        return self.proc.exitcode
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.proc.terminate()
+        self.proc.join(8)
+        if self.proc.is_alive():
+            # force kill if needed
+            self.proc.kill()
 
 
 def _test_completion(
@@ -623,9 +701,12 @@ def multi_process_parallel(
     os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
     ray.init(
         runtime_env={
-            "working_dir": VLLM_PATH,
-            "excludes":
-            ["build", ".git", "cmake-build-*", "shellcheck", "dist"]
+            "working_dir":
+            VLLM_PATH,
+            "excludes": [
+                "build", ".git", "cmake-build-*", "shellcheck", "dist",
+                "ep_kernels_workspace"
+            ]
         })
 
     distributed_init_port = get_open_port()
@@ -723,43 +804,106 @@ _P = ParamSpec("_P")
 
 
 def fork_new_process_for_each_test(
-        f: Callable[_P, None]) -> Callable[_P, None]:
+        func: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to fork a new process for each test function.
     See https://github.com/vllm-project/vllm/issues/7053 for more details.
     """
 
-    @functools.wraps(f)
+    @functools.wraps(func)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
         # Make the process the leader of its own process group
         # to avoid sending SIGTERM to the parent process
         os.setpgrp()
         from _pytest.outcomes import Skipped
-        pid = os.fork()
-        print(f"Fork a new process to run a test {pid}")
-        if pid == 0:
-            try:
-                f(*args, **kwargs)
-            except Skipped as e:
-                # convert Skipped to exit code 0
-                print(str(e))
-                os._exit(0)
-            except Exception:
-                import traceback
-                traceback.print_exc()
-                os._exit(1)
+
+        # Create a unique temporary file to store exception info from child
+        # process. Use test function name and process ID to avoid collisions.
+        with tempfile.NamedTemporaryFile(
+                delete=False,
+                mode='w+b',
+                prefix=f"vllm_test_{func.__name__}_{os.getpid()}_",
+                suffix=".exc") as exc_file, ExitStack() as delete_after:
+            exc_file_path = exc_file.name
+            delete_after.callback(os.remove, exc_file_path)
+
+            pid = os.fork()
+            print(f"Fork a new process to run a test {pid}")
+            if pid == 0:
+                # Parent process responsible for deleting, don't delete
+                # in child.
+                delete_after.pop_all()
+                try:
+                    func(*args, **kwargs)
+                except Skipped as e:
+                    # convert Skipped to exit code 0
+                    print(str(e))
+                    os._exit(0)
+                except Exception as e:
+                    import traceback
+                    tb_string = traceback.format_exc()
+
+                    # Try to serialize the exception object first
+                    exc_to_serialize: dict[str, Any]
+                    try:
+                        # First, try to pickle the actual exception with
+                        # its traceback.
+                        exc_to_serialize = {'pickled_exception': e}
+                        # Test if it can be pickled
+                        cloudpickle.dumps(exc_to_serialize)
+                    except (Exception, KeyboardInterrupt):
+                        # Fall back to string-based approach.
+                        exc_to_serialize = {
+                            'exception_type': type(e).__name__,
+                            'exception_msg': str(e),
+                            'traceback': tb_string,
+                        }
+                    try:
+                        with open(exc_file_path, 'wb') as f:
+                            cloudpickle.dump(exc_to_serialize, f)
+                    except Exception:
+                        # Fallback: just print the traceback.
+                        print(tb_string)
+                    os._exit(1)
+                else:
+                    os._exit(0)
             else:
-                os._exit(0)
-        else:
-            pgid = os.getpgid(pid)
-            _pid, _exitcode = os.waitpid(pid, 0)
-            # ignore SIGTERM signal itself
-            old_signal_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
-            # kill all child processes
-            os.killpg(pgid, signal.SIGTERM)
-            # restore the signal handler
-            signal.signal(signal.SIGTERM, old_signal_handler)
-            assert _exitcode == 0, (f"function {f} failed when called with"
-                                    f" args {args} and kwargs {kwargs}")
+                pgid = os.getpgid(pid)
+                _pid, _exitcode = os.waitpid(pid, 0)
+                # ignore SIGTERM signal itself
+                old_signal_handler = signal.signal(signal.SIGTERM,
+                                                   signal.SIG_IGN)
+                # kill all child processes
+                os.killpg(pgid, signal.SIGTERM)
+                # restore the signal handler
+                signal.signal(signal.SIGTERM, old_signal_handler)
+                if _exitcode != 0:
+                    # Try to read the exception from the child process
+                    exc_info = {}
+                    if os.path.exists(exc_file_path):
+                        with contextlib.suppress(Exception), \
+                            open(exc_file_path, 'rb') as f:
+                            exc_info = cloudpickle.load(f)
+
+                    if (original_exception :=
+                            exc_info.get('pickled_exception')) is not None:
+                        # Re-raise the actual exception object if it was
+                        # successfully pickled.
+                        assert isinstance(original_exception, Exception)
+                        raise original_exception
+
+                    if (original_tb := exc_info.get("traceback")) is not None:
+                        # Use string-based traceback for fallback case
+                        raise AssertionError(
+                            f"Test {func.__name__} failed when called with"
+                            f" args {args} and kwargs {kwargs}"
+                            f" (exit code: {_exitcode}):\n{original_tb}"
+                        ) from None
+
+                    # Fallback to the original generic error
+                    raise AssertionError(
+                        f"function {func.__name__} failed when called with"
+                        f" args {args} and kwargs {kwargs}"
+                        f" (exit code: {_exitcode})") from None
 
     return wrapper
 
@@ -974,3 +1118,84 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def has_module_attribute(module_name, attribute_name):
+    """
+    Helper function to check if a module has a specific attribute.
+    """
+    try:
+        module = importlib.import_module(module_name)
+        return hasattr(module, attribute_name)
+    except ImportError:
+        return False
+
+
+def get_attn_backend_list_based_on_platform() -> list[str]:
+    if current_platform.is_cuda():
+        return ["FLASH_ATTN", "TRITON_ATTN", "TREE_ATTN"]
+    elif current_platform.is_rocm():
+        attn_backend_list = ["TRITON_ATTN"]
+        try:
+            import aiter  # noqa: F401
+            attn_backend_list.append("FLASH_ATTN")
+        except Exception:
+            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
+
+        return attn_backend_list
+    else:
+        raise ValueError("Unsupported platform")
+
+
+@contextmanager
+def override_cutlass_fp8_supported(value: bool):
+    with patch(
+            "vllm.model_executor.layers.quantization.utils.w8a8_utils.cutlass_fp8_supported",
+            return_value=value):
+        yield
+
+
+def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
+    """
+    Generate prompts which a bunch of assignments,
+    then asking for the value of one of them.
+    The prompt is just under 10k tokens; sliding window is 4k
+    so the answer is outside sliding window, but should still be correct.
+    Args:
+        batch_size: number of prompts to generate
+        ln_range: an argument to control the length of the prompt
+    """
+    prompts: list[str] = []
+    answer: list[int] = []
+    indices: list[int] = []
+    random.seed(1)
+    for _ in range(batch_size):
+        idx = random.randint(30, 90)
+        indices.append(idx)
+        prompt = "```python\n# We set a number of variables, " + \
+                 f"x{idx} will be important later\n"
+        ln = random.randint(*ln_range)
+        for k in range(30, ln):
+            v = random.randint(10, 99)
+            if k == idx:
+                answer.append(v)
+            prompt += f"x{k} = {v}\n"
+        prompt += f"# Now, we check the value of x{idx}:\n"
+        prompt += f"assert x{idx} == "
+        prompts.append(prompt)
+    return prompts, answer, indices
+
+
+def check_answers(indices: list[int],
+                  answer: list[int],
+                  outputs: list[str],
+                  accept_rate: float = 0.7):
+    answer2 = [int(text[0:2].strip()) for text in outputs]
+    print(list(zip(indices, zip(answer, answer2))))
+    numok = 0
+    for a1, a2 in zip(answer, answer2):
+        if a1 == a2:
+            numok += 1
+    frac_ok = numok / len(answer)
+    print(f"Num OK: {numok}/{len(answer)} {frac_ok}")
+    assert frac_ok >= accept_rate

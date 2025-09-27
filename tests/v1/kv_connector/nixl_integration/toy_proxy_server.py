@@ -3,6 +3,7 @@
 
 import argparse
 import itertools
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -11,9 +12,8 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 @asynccontextmanager
@@ -162,6 +162,8 @@ async def send_request_to_service(client_info: dict, endpoint: str,
     }
     req_data["stream"] = False
     req_data["max_tokens"] = 1
+    if "max_completion_tokens" in req_data:
+        req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
     headers = {

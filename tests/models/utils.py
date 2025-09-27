@@ -3,14 +3,17 @@
 
 import warnings
 from collections.abc import Sequence
-from typing import Any, NamedTuple, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn.functional as F
+from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, TaskOption
-from vllm.inputs import InputContext
-from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
+from vllm.config import ModelConfig, ModelDType, RunnerOption
+from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
+from vllm.multimodal.processing import InputProcessingContext
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .registry import HF_EXAMPLE_MODELS
 
@@ -255,14 +258,14 @@ def check_logprobs_close(
 
 def build_model_context(
     model_id: str,
-    task: TaskOption = "auto",
-    dtype: Union[str, torch.dtype] = "auto",
+    runner: RunnerOption = "auto",
+    dtype: ModelDType = "auto",
     model_config_kwargs: Optional[dict[str, Any]] = None,
     mm_processor_kwargs: Optional[dict[str, Any]] = None,
     limit_mm_per_prompt: Optional[dict[str, int]] = None,
-    disable_mm_preprocessor_cache: bool = True,
+    mm_processor_cache_gb: int = 0,
 ):
-    """Creates an InputContext for a given model.
+    """Creates an InputProcessingContext for a given model.
 
     Args:
         model_id: ID of the model being considered.
@@ -271,28 +274,36 @@ def build_model_context(
         limit_mm_per_prompt: Multimodal limits.
 
     Returns:
-        InputContext for the model being considered.
+        InputProcessingContext for the model being considered.
     """
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
     model_config_kwargs = model_config_kwargs or {}
+    limit_mm_per_prompt = limit_mm_per_prompt or {}
     model_config = ModelConfig(
         model_id,
-        task=task,
+        runner=runner,
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         dtype=dtype,
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
-        disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+        mm_processor_cache_gb=mm_processor_cache_gb,
         hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )
-    return InputContext(model_config)
+
+    return InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
 
 
 def check_embeddings_close(
@@ -329,17 +340,144 @@ def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
     return tensor
 
 
-class EmbedModelInfo(NamedTuple):
+def softmax(data):
+    if data.shape[-1] == 1:
+        return F.sigmoid(data)
+    else:
+        return F.softmax(data, dim=-1)
+
+
+@dataclass
+class ModelInfo:
     name: str
+    architecture: str = ""
+    dtype: str = "auto"
+    hf_dtype: str = "float32"
+    hf_overrides: Optional[dict[str, Any]] = None
+    default_pooling_type: str = ""
+    enable_test: bool = True
+
+
+@dataclass
+class EmbedModelInfo(ModelInfo):
+    mteb_score: Optional[float] = None
     is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
-    architecture: str = ""
-    dtype: str = "auto"
-    enable_test: bool = True
 
 
-class RerankModelInfo(NamedTuple):
-    name: str
-    architecture: str = ""
-    dtype: str = "auto"
-    enable_test: bool = True
+@dataclass
+class CLSPoolingEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "CLS"
+
+
+@dataclass
+class LASTPoolingEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "LAST"
+
+
+@dataclass
+class RerankModelInfo(ModelInfo):
+    mteb_score: Optional[float] = None
+
+
+@dataclass
+class CLSPoolingRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "CLS"
+
+
+@dataclass
+class LASTPoolingRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "LAST"
+
+
+@dataclass
+class GenerateModelInfo(ModelInfo):
+    hf_dtype: str = "auto"
+    hf_ppl: Optional[float] = None
+
+
+def dummy_hf_overrides(
+    hf_config: PretrainedConfig,
+    *,
+    model_arch: str = "",
+    exist_overrides: Optional[dict[str, Any]] = None,
+    use_original_num_layers: bool = False,
+) -> PretrainedConfig:
+    """
+    Dummy HF overrides function used to create dummy model
+    with only minimum nums of layer.
+    """
+    hf_config.update(exist_overrides or {})
+
+    text_config = hf_config.get_text_config()
+
+    # Ensure at least 2 expert per group
+    # Since `grouped_topk` assumes top-2
+    n_group = getattr(text_config, 'n_group', None)
+    num_experts = n_group * 2 if n_group is not None else 2
+
+    # we use three layers for Gemma-3n to check
+    # both normal layer and kv_shared_layer
+    if use_original_num_layers:
+        # Use the original number of layers from the config
+        num_layers = getattr(text_config, 'num_layers', 1)
+        num_hidden_layers = getattr(text_config, 'num_hidden_layers', 1)
+    else:
+        # Use minimal layers for testing
+        num_layers = 1
+        num_hidden_layers = (3 if model_arch
+                             == "Gemma3nForConditionalGeneration" else 1)
+
+    update_dict = {
+        "num_layers": num_layers,
+        "num_experts": num_experts,
+        "num_experts_per_tok": 2,
+        "num_local_experts": num_experts,
+        # Otherwise there will not be any expert layers
+        "first_k_dense_replace": 0,
+        # To avoid OOM on DeepSeek-V3
+        "n_routed_experts": num_experts,
+        # For Gemma-3n
+        "num_kv_shared_layers": 1,
+    }
+
+    # Update num_hidden_layers for non-Longcat architectures
+    if model_arch != "LongcatFlashForCausalLM" \
+            and model_arch != "LongCatFlashMTPModel":
+        update_dict["num_hidden_layers"] = num_hidden_layers
+
+    text_config.update(update_dict)
+
+    if hasattr(hf_config, "vision_config"):
+        hf_config.vision_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+        })
+
+    # e.g.: ibm-granite/granite-speech-3.3-2b
+    if hasattr(hf_config, "encoder_config"):
+        hf_config.encoder_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+        })
+
+    # e.g.: Qwen/Qwen2-Audio-7B-Instruct
+    if hasattr(hf_config, "audio_config"):
+        hf_config.audio_config.update({
+            "num_layers": 1,
+            "num_hidden_layers": 1,
+            "encoder_layers": 1,
+        })
+
+    return hf_config
+
+
+def check_transformers_version(model: str,
+                               min_transformers_version: Optional[str] = None,
+                               max_transformers_version: Optional[str] = None):
+    from .registry import _HfExamplesInfo
+
+    return _HfExamplesInfo(model,
+                           min_transformers_version=min_transformers_version,
+                           max_transformers_version=max_transformers_version
+                           ).check_transformers_version(on_fail="skip")

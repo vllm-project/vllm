@@ -7,13 +7,15 @@ from fractions import Fraction
 from typing import Any, Optional, Union
 
 import torch
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_linear_quant_method)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
@@ -21,6 +23,8 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
+from vllm.transformers_utils.config import get_safetensors_params_metadata
+from vllm.utils import is_list_of
 
 
 class GPTQConfig(QuantizationConfig):
@@ -36,6 +40,8 @@ class GPTQConfig(QuantizationConfig):
         desc_act: bool,
         lm_head_quantized: bool,
         dynamic: dict[str, dict[str, Union[int, bool]]],
+        autoround_version: str = "",
+        modules_in_block_to_quantize: Optional[list[str]] = None,
     ) -> None:
         # GPTQModel use `dynamic` config property to allow per module
         # quantization config so each module can be individually optimized.
@@ -73,12 +79,20 @@ class GPTQConfig(QuantizationConfig):
                 "Currently, only 2/3/4/8-bit weight quantization is "
                 f"supported for GPTQ, but got {self.weight_bits} bits.")
 
+        self.modules_in_block_to_quantize = modules_in_block_to_quantize or []
+
+        # used to identify GPTQ model quantized by autoround
+        self.autoround_version = autoround_version
+
     def __repr__(self) -> str:
-        return (f"GPTQConfig(weight_bits={self.weight_bits}, "
-                f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act}), "
-                f"lm_head_quantized={self.lm_head_quantized}), "
-                f"dynamic={self.dynamic}")
+        return (
+            f"GPTQConfig(weight_bits={self.weight_bits}, "
+            f"group_size={self.group_size}, "
+            f"desc_act={self.desc_act}), "
+            f"lm_head_quantized={self.lm_head_quantized}, "
+            f"dynamic={self.dynamic}, "
+            f"modules_in_block_to_quantize={self.modules_in_block_to_quantize})"
+        )
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -107,12 +121,60 @@ class GPTQConfig(QuantizationConfig):
         desc_act = cls.get_from_keys(config, ["desc_act"])
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
+        autoround_version = cls.get_from_keys_or(config, ["autoround_version"],
+                                                 default="")
+        modules_in_block_to_quantize = cls.get_from_keys_or(
+            config, ["modules_in_block_to_quantize"], default=None)
         return cls(weight_bits, group_size, desc_act, lm_head_quantized,
-                   dynamic)
+                   dynamic, autoround_version, modules_in_block_to_quantize)
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["GPTQLinearMethod"]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional[Union["GPTQLinearMethod", "QuantizeMethodBase"]]:
+        if isinstance(layer, FusedMoE):
+            # GPTQ MoE support: fall back to MoeWNA16 for broad compatibility
+            from .moe_wna16 import MoeWNA16Config
+
+            config = {
+                "quant_method": "gptq",
+                "bits": self.weight_bits,
+                "group_size": self.group_size,
+                "sym": True,  # GPTQ typically uses symmetric quantization
+                "lm_head": False,
+            }
+            return MoeWNA16Config.from_config(config).get_quant_method(
+                layer, prefix)
+
         return get_linear_quant_method(self, layer, prefix, GPTQLinearMethod)
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper):
+        if self.modules_in_block_to_quantize is not None:
+            self.modules_in_block_to_quantize = hf_to_vllm_mapper.apply_list(
+                self.modules_in_block_to_quantize)
+
+    def maybe_update_config(self,
+                            model_name: str,
+                            revision: Optional[str] = None):
+        if self.modules_in_block_to_quantize:
+            if is_list_of(self.modules_in_block_to_quantize, list):
+                # original modules_in_block_to_quantize: list[list[str]]
+                # flatten original modules_in_block_to_quantize
+                self.modules_in_block_to_quantize = [
+                    item for sublist in self.modules_in_block_to_quantize
+                    for item in sublist
+                ]
+            return
+
+        unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+        metadata = get_safetensors_params_metadata(model_name,
+                                                   revision=revision)
+        quant_layers: set[str] = {
+            param_name.rsplit(".", 1)[0]
+            for param_name, info in metadata.items()
+            if (dtype := info.get('dtype', None))
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
+        }
+        self.modules_in_block_to_quantize = list(quant_layers)
 
 
 class ExllamaState(Enum):

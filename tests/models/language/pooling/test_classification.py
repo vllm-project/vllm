@@ -6,20 +6,15 @@ from transformers import AutoModelForSequenceClassification
 
 from vllm.platforms import current_platform
 
-# TODO: enable when float32 is supported by V1
-# @pytest.fixture(autouse=True)
-# def v1(run_with_both_engines):
-#     # Simple autouse wrapper to run both engines for each test
-#     # This can be promoted up to conftest.py to run for every
-#     # test in a package
-#     pass
-
 
 @pytest.mark.parametrize(
     "model",
     [
         pytest.param("jason9693/Qwen2.5-1.5B-apeach",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+                     marks=[
+                         pytest.mark.core_model, pytest.mark.cpu_model,
+                         pytest.mark.slow_test
+                     ]),
     ],
 )
 @pytest.mark.parametrize("dtype",

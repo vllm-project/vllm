@@ -24,16 +24,18 @@
 # limitations under the License.
 """Inference-only GraniteMoe model."""
 from collections.abc import Iterable
-from typing import Optional
+from itertools import islice
+from typing import Any, Optional
 
 import torch
 from torch import nn
-from transformers.models.granitemoe import GraniteMoeConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_pp_group,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -47,7 +49,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -71,9 +73,11 @@ class GraniteMoeMoE(nn.Module):
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  tp_size: Optional[int] = None,
+                 is_sequence_parallel=False,
                  prefix: str = ""):
         super().__init__()
         self.hidden_size = hidden_size
+        self.is_sequence_parallel = is_sequence_parallel
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(hidden_size,
@@ -92,15 +96,27 @@ class GraniteMoeMoE(nn.Module):
                                 renormalize=True,
                                 quant_config=quant_config,
                                 tp_size=tp_size,
-                                prefix=f"{prefix}.experts")
+                                prefix=f"{prefix}.experts",
+                                is_sequence_parallel=self.is_sequence_parallel)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
+
+        if self.is_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states, router_logits)
+
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0)
+            num_tokens = orig_shape[0]
+            final_hidden_states = final_hidden_states[:num_tokens]
+
         return final_hidden_states.view(orig_shape)
 
 
@@ -113,6 +129,7 @@ class GraniteMoeAttention(nn.Module):
         num_kv_heads: int,
         max_position: int = 4096 * 32,
         rope_theta: float = 10000,
+        rope_scaling: Optional[dict[str, Any]] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         attention_multiplier: Optional[float] = None,
@@ -163,6 +180,7 @@ class GraniteMoeAttention(nn.Module):
             max_position=max_position,
             base=int(self.rope_theta),
             is_neox_style=True,
+            rope_scaling=rope_scaling,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -189,21 +207,27 @@ class GraniteMoeDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: GraniteMoeConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
+
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
+        rope_scaling = getattr(config, "rope_scaling", None)
         self.self_attn = GraniteMoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -214,6 +238,7 @@ class GraniteMoeDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
+            is_sequence_parallel=parallel_config.use_sequence_parallel_moe,
             prefix=f"{prefix}.block_sparse_moe")
 
         self.input_layernorm = RMSNorm(config.hidden_size,
@@ -251,7 +276,6 @@ class GraniteMoeModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
@@ -271,9 +295,7 @@ class GraniteMoeModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: GraniteMoeDecoderLayer(
-                config, cache_config, quant_config=quant_config, prefix=prefix
-            ),
+            lambda prefix: GraniteMoeDecoderLayer(vllm_config, prefix=prefix),
             prefix=f"{prefix}.layers")
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -294,17 +316,14 @@ class GraniteMoeModel(nn.Module):
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
             hidden_states *= self.embedding_multiplier
-            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
-                "residual": residual
             })
         hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -482,6 +501,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
@@ -505,11 +525,9 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                    inputs_embeds)
         return hidden_states
 
-    def compute_logits(
-            self, hidden_states: torch.Tensor,
-            sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self,
+                       hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def make_empty_intermediate_tensors(
@@ -517,10 +535,6 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             device: torch.device) -> IntermediateTensors:
         return IntermediateTensors({
             "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-            "residual":
             torch.zeros((batch_size, self.config.hidden_size),
                         dtype=dtype,
                         device=device),

@@ -12,6 +12,7 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
@@ -38,6 +39,12 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if current_platform.is_cpu():
+            from vllm.model_executor.layers.utils import (
+                dispatch_cpu_unquantized_gemm)
+            dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
 
     def apply(self,
               layer: torch.nn.Module,
@@ -159,7 +166,8 @@ def get_masked_input_and_mask(
     return input_, ~vocab_mask
 
 
-class VocabParallelEmbedding(torch.nn.Module):
+@CustomOp.register("vocab_parallel_embedding")
+class VocabParallelEmbedding(CustomOp):
     """Embedding parallelized in the vocabulary dimension.
 
     Adapted from torch.nn.Embedding, note that we pad the vocabulary size to
@@ -250,7 +258,7 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
-        # Divide the weight matrix along the vocaburaly dimension.
+        # Divide the weight matrix along the vocabulary dimension.
         self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
         self.num_embeddings_per_partition = divide(self.num_embeddings_padded,
                                                    self.tp_size)
@@ -388,22 +396,10 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         # Copy the data. Select chunk corresponding to current shard.
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+        param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
+        param[loaded_weight.shape[0]:].data.fill_(0)
 
-        if current_platform.is_hpu():
-            # FIXME(kzawora): Weight copy with slicing bugs out on Gaudi here,
-            # so we're using a workaround. Remove this when fixed in
-            # HPU PT bridge.
-            padded_weight = torch.cat([
-                loaded_weight,
-                torch.zeros(param.shape[0] - loaded_weight.shape[0],
-                            *loaded_weight.shape[1:])
-            ])
-            param.data.copy_(padded_weight)
-        else:
-            param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
-            param[loaded_weight.shape[0]:].data.fill_(0)
-
-    def forward(self, input_):
+    def forward_native(self, input_):
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = get_masked_input_and_mask(
@@ -424,6 +420,9 @@ class VocabParallelEmbedding(torch.nn.Module):
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
 
+    def forward_cuda(self, input_):
+        return self.forward_native(input_)
+
     def extra_repr(self) -> str:
         s = f"num_embeddings={self.num_embeddings_per_partition}"
         s += f", embedding_dim={self.embedding_dim}"
@@ -433,6 +432,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         return s
 
 
+@CustomOp.register("parallel_lm_head")
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
 

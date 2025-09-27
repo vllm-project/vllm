@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import os
 import signal
-import sys
 from typing import Optional
 
 import uvloop
@@ -16,12 +14,11 @@ from vllm.entrypoints.openai.api_server import (run_server, run_server_worker,
                                                 setup_server)
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
-from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
-                                    show_filtered_argument_or_group_from_help)
-from vllm.executor.multiproc_worker_utils import _add_prefix
+from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_tcp_uri
+from vllm.utils import (FlexibleArgumentParser, decorate_logs, get_tcp_uri,
+                        set_process_title)
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor.abstract import Executor
@@ -30,6 +27,14 @@ from vllm.v1.utils import (APIServerProcessManager,
                            wait_for_completion_or_failure)
 
 logger = init_logger(__name__)
+
+DESCRIPTION = """Launch a local OpenAI-compatible API server to serve LLM
+completions via HTTP. Defaults to Qwen/Qwen3-0.6B if no model is specified.
+
+Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
+--help=ModelConfig, --help=Frontend)
+  Use `--help=all` to show all available flags at once.
+"""
 
 
 class ServeSubcommand(CLISubcommand):
@@ -45,11 +50,6 @@ class ServeSubcommand(CLISubcommand):
         if args.headless or args.api_server_count < 1:
             run_headless(args)
         else:
-            if args.data_parallel_start_rank:
-                raise ValueError(
-                    "data_parallel_start_rank is only applicable "
-                    "in headless mode. "
-                    "Add --headless flag to enable headless mode.")
             if args.api_server_count > 1:
                 run_multi_api_server(args)
             else:
@@ -63,45 +63,13 @@ class ServeSubcommand(CLISubcommand):
             self,
             subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
-            "serve",
-            help="Start the vLLM OpenAI Compatible API server.",
-            description="Start the vLLM OpenAI Compatible API server.",
+            self.name,
+            description=DESCRIPTION,
             usage="vllm serve [model_tag] [options]")
-        serve_parser.add_argument("model_tag",
-                                  type=str,
-                                  nargs='?',
-                                  help="The model tag to serve "
-                                  "(optional if specified in config)")
-        serve_parser.add_argument(
-            "--headless",
-            action='store_true',
-            default=False,
-            help="Run in headless mode. See multi-node data parallel "
-            "documentation for more details.")
-        serve_parser.add_argument(
-            '--data-parallel-start-rank',
-            '-dpr',
-            type=int,
-            default=0,
-            help="Starting data parallel rank for secondary nodes. "
-            "Requires --headless.")
-        serve_parser.add_argument('--api-server-count',
-                                  '-asc',
-                                  type=int,
-                                  default=1,
-                                  help='How many API server processes to run.')
-        serve_parser.add_argument(
-            "--config",
-            type=str,
-            default='',
-            required=False,
-            help="Read CLI options from a config file. "
-            "Must be a YAML with the following options: "
-            "https://docs.vllm.ai/en/latest/configuration/serve_args.html")
 
         serve_parser = make_arg_parser(serve_parser)
-        show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
-        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
+        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
+            subcmd=self.name)
         return serve_parser
 
 
@@ -117,13 +85,14 @@ def run_headless(args: argparse.Namespace):
     # Create the EngineConfig.
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
-    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context,
+                                                   headless=True)
 
     if not envs.VLLM_USE_V1:
         raise ValueError("Headless mode is only supported for V1")
 
-    if engine_args.data_parallel_rank is not None:
-        raise ValueError("data_parallel_rank is not applicable in "
+    if engine_args.data_parallel_hybrid_lb:
+        raise ValueError("data_parallel_hybrid_lb is not applicable in "
                          "headless mode")
 
     parallel_config = vllm_config.parallel_config
@@ -153,7 +122,7 @@ def run_headless(args: argparse.Namespace):
     engine_manager = CoreEngineProcManager(
         target_fn=EngineCoreProc.run_engine_core,
         local_engine_count=local_engine_count,
-        start_index=args.data_parallel_start_rank,
+        start_index=vllm_config.parallel_config.data_parallel_rank,
         local_start_index=0,
         vllm_config=vllm_config,
         local_client=False,
@@ -172,7 +141,7 @@ def run_headless(args: argparse.Namespace):
 def run_multi_api_server(args: argparse.Namespace):
 
     assert not args.headless
-    num_api_servers = args.api_server_count
+    num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
     if num_api_servers > 1:
@@ -181,9 +150,11 @@ def run_multi_api_server(args: argparse.Namespace):
     listen_address, sock = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    engine_args._api_process_count = num_api_servers
+    engine_args._api_process_rank = -1
+
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-    model_config = vllm_config.model_config
 
     if num_api_servers > 1:
         if not envs.VLLM_USE_V1:
@@ -193,20 +164,14 @@ def run_multi_api_server(args: argparse.Namespace):
             raise ValueError("VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
                              "with api_server_count > 1")
 
-        if model_config.is_multimodal_model and not (
-                model_config.disable_mm_preprocessor_cache):
-            logger.warning(
-                "Multi-model preprocessor cache will be disabled for"
-                " api_server_count > 1")
-            model_config.disable_mm_preprocessor_cache = True
-
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
 
     parallel_config = vllm_config.parallel_config
     dp_rank = parallel_config.data_parallel_rank
     external_dp_lb = parallel_config.data_parallel_external_lb
-    assert external_dp_lb or dp_rank == 0
+    hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
+    assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
 
     api_server_manager: Optional[APIServerProcessManager] = None
 
@@ -226,12 +191,12 @@ def run_multi_api_server(args: argparse.Namespace):
             stats_update_address=coordinator.get_stats_publish_address()
             if coordinator else None)
 
-        # For dp ranks > 0 in external DP LB mode, we must delay the
+        # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the
         # start of the API servers until the local engine is started
         # (after the launcher context manager exits),
         # since we get the front-end stats update address from the coordinator
         # via the handshake with the local engine.
-        if dp_rank == 0 or not external_dp_lb:
+        if dp_rank == 0 or not (external_dp_lb or hybrid_dp_lb):
             # Start API servers using the manager.
             api_server_manager = APIServerProcessManager(
                 **api_server_manager_kwargs)
@@ -255,13 +220,12 @@ def run_api_server_worker_proc(listen_address,
                                client_config=None,
                                **uvicorn_kwargs) -> None:
     """Entrypoint for individual API server worker processes."""
+    client_config = client_config or {}
+    server_index = client_config.get("client_index", 0)
 
-    # Add process-specific prefix to stdout and stderr.
-    from multiprocessing import current_process
-    process_name = current_process().name
-    pid = os.getpid()
-    _add_prefix(sys.stdout, process_name, pid)
-    _add_prefix(sys.stderr, process_name, pid)
+    # Set process title and add process-specific prefix to stdout and stderr.
+    set_process_title("APIServer", str(server_index))
+    decorate_logs()
 
     uvloop.run(
         run_server_worker(listen_address, sock, args, client_config,

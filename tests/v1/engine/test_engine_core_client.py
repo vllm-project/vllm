@@ -6,8 +6,9 @@ import os
 import signal
 import time
 import uuid
+from dataclasses import dataclass
 from threading import Thread
-from typing import Optional
+from typing import Any, Optional, Union
 from unittest.mock import MagicMock
 
 import pytest
@@ -51,9 +52,7 @@ def make_request(
     return EngineCoreRequest(
         request_id=str(uuid.uuid4()),
         prompt_token_ids=prompt_tokens_ids,
-        mm_inputs=None,
-        mm_hashes=None,
-        mm_placeholders=None,
+        mm_features=None,
         sampling_params=params,
         pooling_params=None,
         eos_token_id=None,
@@ -120,8 +119,13 @@ async def loop_until_fully_done_async(client: EngineCoreClient, outputs: dict):
 
 
 # Dummy utility function to monkey-patch into engine core.
-def echo(self, msg: str, err_msg: Optional[str] = None) -> str:
+def echo(self,
+         msg: str,
+         err_msg: Optional[str] = None,
+         sleep: Optional[float] = None) -> str:
     print(f"echo util function called: {msg}, {err_msg}")
+    if sleep is not None:
+        time.sleep(sleep)
     if err_msg is not None:
         raise ValueError(err_msg)
     return msg
@@ -288,6 +292,295 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
                 await core_client.call_utility_async("echo", None, "help!")
 
             assert str(e_info.value) == "Call to echo method failed: help!"
+
+            # Test that cancelling the utility call doesn't destabilize the
+            # engine.
+            util_task = asyncio.create_task(
+                core_client.call_utility_async("echo", "testarg2", None,
+                                               0.5))  # sleep for 0.5 sec
+            await asyncio.sleep(0.05)
+            cancelled = util_task.cancel()
+            assert cancelled
+
+            # Ensure client is still functional. The engine runs utility
+            # methods in a single thread so this request won't be processed
+            # until the cancelled sleeping one is complete.
+            result = await asyncio.wait_for(core_client.call_utility_async(
+                "echo", "testarg3"),
+                                            timeout=1.0)
+            assert result == "testarg3"
+        finally:
+            client.shutdown()
+
+
+@dataclass
+class MyDataclass:
+    message: str
+
+
+# Dummy utility function to monkey-patch into engine core.
+def echo_dc(
+    self,
+    msg: str,
+    return_list: bool = False,
+) -> Union[MyDataclass, list[MyDataclass]]:
+    print(f"echo dc util function called: {msg}")
+    val = None if msg is None else MyDataclass(msg)
+    # Return dataclass to verify support for returning custom types
+    # (for which there is special handling to make it work with msgspec).
+    return [val for _ in range(3)] if return_list else val
+
+
+# Dummy utility function to test dict serialization with custom types.
+def echo_dc_dict(
+    self,
+    msg: str,
+    return_dict: bool = False,
+) -> Union[MyDataclass, dict[str, MyDataclass]]:
+    print(f"echo dc dict util function called: {msg}")
+    val = None if msg is None else MyDataclass(msg)
+    # Return dict of dataclasses to verify support for returning dicts
+    # with custom value types.
+    if return_dict:
+        return {"key1": val, "key2": val, "key3": val}
+    else:
+        return val
+
+
+# Dummy utility function to test nested structures with custom types.
+def echo_dc_nested(
+    self,
+    msg: str,
+    structure_type: str = "list_of_dicts",
+) -> Any:
+    print(f"echo dc nested util function called: {msg}, "
+          f"structure: {structure_type}")
+    val = None if msg is None else MyDataclass(msg)
+
+    if structure_type == "list_of_dicts":  # noqa
+        # Return list of dicts: [{"a": val, "b": val}, {"c": val, "d": val}]
+        return [{"a": val, "b": val}, {"c": val, "d": val}]
+    elif structure_type == "dict_of_lists":
+        # Return dict of lists: {"list1": [val, val], "list2": [val, val]}
+        return {"list1": [val, val], "list2": [val, val]}
+    elif structure_type == "deep_nested":
+        # Return deeply nested: {"outer": [{"inner": [val, val]},
+        # {"inner": [val]}]}
+        return {"outer": [{"inner": [val, val]}, {"inner": [val]}]}
+    else:
+        return val
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_engine_core_client_util_method_custom_return(
+        monkeypatch: pytest.MonkeyPatch):
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        # Must set insecure serialization to allow returning custom types.
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+        # Monkey-patch core engine utility function to test.
+        m.setattr(EngineCore, "echo_dc", echo_dc, raising=False)
+
+        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT)
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            client = EngineCoreClient.make_client(
+                multiprocess_mode=True,
+                asyncio_mode=True,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=True,
+            )
+
+        try:
+            # Test utility method returning custom / non-native data type.
+            core_client: AsyncMPClient = client
+
+            result = await core_client.call_utility_async(
+                "echo_dc", "testarg2", False)
+            assert isinstance(result,
+                              MyDataclass) and result.message == "testarg2"
+            result = await core_client.call_utility_async(
+                "echo_dc", "testarg2", True)
+            assert isinstance(result, list) and all(
+                isinstance(r, MyDataclass) and r.message == "testarg2"
+                for r in result)
+
+            # Test returning None and list of Nones
+            result = await core_client.call_utility_async(
+                "echo_dc", None, False)
+            assert result is None
+            result = await core_client.call_utility_async(
+                "echo_dc", None, True)
+            assert isinstance(result, list) and all(r is None for r in result)
+
+        finally:
+            client.shutdown()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_engine_core_client_util_method_custom_dict_return(
+        monkeypatch: pytest.MonkeyPatch):
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        # Must set insecure serialization to allow returning custom types.
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+        # Monkey-patch core engine utility function to test.
+        m.setattr(EngineCore, "echo_dc_dict", echo_dc_dict, raising=False)
+
+        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT)
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            client = EngineCoreClient.make_client(
+                multiprocess_mode=True,
+                asyncio_mode=True,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=True,
+            )
+
+        try:
+            # Test utility method returning custom / non-native data type.
+            core_client: AsyncMPClient = client
+
+            # Test single object return
+            result = await core_client.call_utility_async(
+                "echo_dc_dict", "testarg3", False)
+            assert isinstance(result,
+                              MyDataclass) and result.message == "testarg3"
+
+            # Test dict return with custom value types
+            result = await core_client.call_utility_async(
+                "echo_dc_dict", "testarg3", True)
+            assert isinstance(result, dict) and len(result) == 3
+            for key, val in result.items():
+                assert key in ["key1", "key2", "key3"]
+                assert isinstance(val,
+                                  MyDataclass) and val.message == "testarg3"
+
+            # Test returning dict with None values
+            result = await core_client.call_utility_async(
+                "echo_dc_dict", None, True)
+            assert isinstance(result, dict) and len(result) == 3
+            for key, val in result.items():
+                assert key in ["key1", "key2", "key3"]
+                assert val is None
+
+        finally:
+            client.shutdown()
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_engine_core_client_util_method_nested_structures(
+        monkeypatch: pytest.MonkeyPatch):
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        # Must set insecure serialization to allow returning custom types.
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+        # Monkey-patch core engine utility function to test.
+        m.setattr(EngineCore, "echo_dc_nested", echo_dc_nested, raising=False)
+
+        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT)
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            client = EngineCoreClient.make_client(
+                multiprocess_mode=True,
+                asyncio_mode=True,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=True,
+            )
+
+        try:
+            core_client: AsyncMPClient = client
+
+            # Test list of dicts: [{"a": val, "b": val}, {"c": val, "d": val}]
+            result = await core_client.call_utility_async(
+                "echo_dc_nested", "nested1", "list_of_dicts")
+            assert isinstance(result, list) and len(result) == 2
+            for i, item in enumerate(result):
+                assert isinstance(item, dict)
+                if i == 0:
+                    assert "a" in item and "b" in item
+                    assert isinstance(
+                        item["a"],
+                        MyDataclass) and item["a"].message == "nested1"
+                    assert isinstance(
+                        item["b"],
+                        MyDataclass) and item["b"].message == "nested1"
+                else:
+                    assert "c" in item and "d" in item
+                    assert isinstance(
+                        item["c"],
+                        MyDataclass) and item["c"].message == "nested1"
+                    assert isinstance(
+                        item["d"],
+                        MyDataclass) and item["d"].message == "nested1"
+
+            # Test dict of lists: {"list1": [val, val], "list2": [val, val]}
+            result = await core_client.call_utility_async(
+                "echo_dc_nested", "nested2", "dict_of_lists")
+            assert isinstance(result, dict) and len(result) == 2
+            assert "list1" in result and "list2" in result
+            for key, lst in result.items():
+                assert isinstance(lst, list) and len(lst) == 2
+                for item in lst:
+                    assert isinstance(
+                        item, MyDataclass) and item.message == "nested2"
+
+            # Test deeply nested: {"outer": [{"inner": [val, val]},
+            # {"inner": [val]}]}
+            result = await core_client.call_utility_async(
+                "echo_dc_nested", "nested3", "deep_nested")
+            assert isinstance(result, dict) and "outer" in result
+            outer_list = result["outer"]
+            assert isinstance(outer_list, list) and len(outer_list) == 2
+
+            # First dict in outer list should have "inner" with 2 items
+            inner_dict1 = outer_list[0]
+            assert isinstance(inner_dict1, dict) and "inner" in inner_dict1
+            inner_list1 = inner_dict1["inner"]
+            assert isinstance(inner_list1, list) and len(inner_list1) == 2
+            for item in inner_list1:
+                assert isinstance(item,
+                                  MyDataclass) and item.message == "nested3"
+
+            # Second dict in outer list should have "inner" with 1 item
+            inner_dict2 = outer_list[1]
+            assert isinstance(inner_dict2, dict) and "inner" in inner_dict2
+            inner_list2 = inner_dict2["inner"]
+            assert isinstance(inner_list2, list) and len(inner_list2) == 1
+            assert isinstance(
+                inner_list2[0],
+                MyDataclass) and inner_list2[0].message == "nested3"
+
+            # Test with None values in nested structures
+            result = await core_client.call_utility_async(
+                "echo_dc_nested", None, "list_of_dicts")
+            assert isinstance(result, list) and len(result) == 2
+            for item in result:
+                assert isinstance(item, dict)
+                for val in item.values():
+                    assert val is None
+
         finally:
             client.shutdown()
 
@@ -565,8 +858,8 @@ def test_engine_core_proc_instantiation_cuda_empty(
 
         from vllm.v1.engine.utils import EngineZmqAddresses
 
-        def mock_startup_handshake(self, handshake_socket, on_head_node,
-                                   parallel_config):
+        def mock_startup_handshake(self, handshake_socket, local_client,
+                                   headless, parallel_config):
             return EngineZmqAddresses(inputs=["tcp://127.0.0.1:5555"],
                                       outputs=["tcp://127.0.0.1:5556"],
                                       coordinator_input=None,

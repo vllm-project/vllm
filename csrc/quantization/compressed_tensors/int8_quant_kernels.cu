@@ -1,18 +1,15 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
 
+#ifndef USE_ROCM
+  #include "../per_token_group_quant_8bit.h"
+#endif
+
 #include <cmath>
 
+#include "../../cub_helpers.h"
 #include "../../dispatch_utils.h"
 #include "../vectorization_utils.cuh"
-
-#ifndef USE_ROCM
-  #include <cub/cub.cuh>
-  #include <cub/util_type.cuh>
-#else
-  #include <hipcub/hipcub.hpp>
-  #include <hipcub/util_type.hpp>
-#endif
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
 #ifdef USE_ROCM
@@ -169,7 +166,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
       });
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
-  float block_max = BlockReduce(tmp).Reduce(thread_max, cub::Max{}, blockDim.x);
+  float block_max = BlockReduce(tmp).Reduce(thread_max, CubMaxOp{}, blockDim.x);
   __shared__ float absmax;
   if (tid == 0) {
     absmax = block_max;
@@ -336,3 +333,13 @@ void dynamic_scaled_int8_quant(
         }
       });
 }
+
+#ifndef USE_ROCM
+void per_token_group_quant_int8(const torch::Tensor& input,
+                                torch::Tensor& output_q,
+                                torch::Tensor& output_s, int64_t group_size,
+                                double eps, double int8_min, double int8_max) {
+  per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
+                             int8_min, int8_max);
+}
+#endif

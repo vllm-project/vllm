@@ -45,9 +45,10 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
+from pathlib import Path
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Tuple, TypeVar, Union, cast, overload)
+                    Optional, TextIO, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -58,6 +59,7 @@ import numpy as np
 import numpy.typing as npt
 import psutil
 import regex as re
+import setproctitle
 import torch
 import torch.types
 import yaml
@@ -71,11 +73,13 @@ from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
+from vllm.ray.lazy_utils import is_in_ray_actor
 
 if TYPE_CHECKING:
     from argparse import Namespace
 
     from vllm.config import ModelConfig, VllmConfig
+    from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
 
@@ -84,69 +88,6 @@ logger = init_logger(__name__)
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
-
-# Exception strings for non-implemented encoder/decoder scenarios
-
-# Reminder: Please update docs/features/compatibility_matrix.md
-# If the feature combo become valid
-
-STR_NOT_IMPL_ENC_DEC_SWA = \
-    "Sliding window attention for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
-    "Prefix caching for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
-    "Chunked prefill for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
-    "Models with logits_soft_cap "
-    "require FlashInfer backend, which is "
-    "currently not supported for encoder/decoder "
-    "models.")
-
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
-                             "supported with encoder/decoder "
-                             "models.")
-
-STR_NOT_IMPL_ENC_DEC_PP = ("Pipeline parallelism is not "
-                           "currently supported with "
-                           "encoder/decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_MM = ("Multimodal is not currently "
-                           "supported with encoder/decoder "
-                           "models.")
-
-STR_NOT_IMPL_ENC_DEC_SPEC_DEC = ("Speculative decoding is not "
-                                 "currently supported with encoder/"
-                                 "decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
-                                "backends currently supported with encoder/"
-                                "decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
-                                       "currently supported with encoder/"
-                                       "decoder models.")
-
-# Efficiently import all enc/dec error strings
-# rather than having to import all of the above
-STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
-    "STR_NOT_IMPL_ENC_DEC_SWA": STR_NOT_IMPL_ENC_DEC_SWA,
-    "STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE": STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
-    "STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL":
-    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
-    "STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP": STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP,
-    "STR_NOT_IMPL_ENC_DEC_LORA": STR_NOT_IMPL_ENC_DEC_LORA,
-    "STR_NOT_IMPL_ENC_DEC_PP": STR_NOT_IMPL_ENC_DEC_PP,
-    "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
-    "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
-    "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-    "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
-}
 
 # Constants related to forcing the attention backend selection
 
@@ -159,11 +100,15 @@ STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
 # register, corresponding to possible backends
 STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
 STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
-STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
-STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
+
+MB_bytes = 1_000_000
+"""The number of bytes in one megabyte (MB)."""
+
+MiB_bytes = 1 << 20
+"""The number of bytes in one mebibyte (MiB)."""
 
 GB_bytes = 1_000_000_000
 """The number of bytes in one gigabyte (GB)."""
@@ -171,7 +116,12 @@ GB_bytes = 1_000_000_000
 GiB_bytes = 1 << 30
 """The number of bytes in one gibibyte (GiB)."""
 
+# ANSI color codes
+CYAN = '\033[1;36m'
+RESET = '\033[0;0m'
+
 STR_DTYPE_TO_TORCH_DTYPE = {
+    "float32": torch.float32,
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
@@ -179,6 +129,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
+    "fp8_inc": torch.float8_e4m3fn,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -513,8 +464,8 @@ def random_uuid() -> str:
 class AsyncMicrobatchTokenizer:
     """Asynchronous tokenizer with micro-batching.
 
-    Pulls pending encode/decode requests from a queue and batches them 
-    up to reduce overhead. A single-thread ThreadPoolExecutor is used 
+    Pulls pending encode/decode requests from a queue and batches them
+    up to reduce overhead. A single-thread ThreadPoolExecutor is used
     so the event loop stays responsive.
     """
 
@@ -601,9 +552,10 @@ class AsyncMicrobatchTokenizer:
                 # If every request uses identical kwargs we can run a single
                 # batched tokenizer call for a big speed-up.
                 if can_batch and len(prompts) > 1:
-                    encode_fn = partial(self.tokenizer, prompts, **kwargs)
+                    batch_encode_fn = partial(self.tokenizer, prompts,
+                                              **kwargs)
                     results = await self._loop.run_in_executor(
-                        self._executor, encode_fn)
+                        self._executor, batch_encode_fn)
 
                     for i, fut in enumerate(result_futures):
                         if not fut.done():
@@ -661,18 +613,18 @@ class AsyncMicrobatchTokenizer:
     def _queue_key(self, op: str, kwargs: dict) -> tuple:
         """
         Return a normalized key describing operation + kwargs.
-        
+
         - `add_special_tokens`: {True/False}
         - `truncation`: {True/False}
-          - If `truncation` is False (`max_length` is None), 
+          - If `truncation` is False (`max_length` is None),
             returns a key for a can_batch queue.
           - If `truncation` is True and `max_length` is None or equals
             `tokenizer.model_max_length`, returns a key for a can_batch queue.
           - Otherwise, returns a key for a cannot_batch queue.
-        
+
         Examples:
           - Decode: ("decode",)
-          - Encode typical: 
+          - Encode typical:
             ("encode", add_special_tokens, bool_truncation, max_length_label)
           - Fallback: ("encode", "other")
         """
@@ -685,19 +637,50 @@ class AsyncMicrobatchTokenizer:
         max_length = kwargs.get("max_length")
 
         if not truncation:
-            return ("encode", add_special_tokens, False, None)
+            return "encode", add_special_tokens, False, None
 
         model_max = getattr(self.tokenizer, "model_max_length", None)
         if max_length is None or (model_max is not None
                                   and max_length == model_max):
-            return ("encode", add_special_tokens, True, "model_max")
+            return "encode", add_special_tokens, True, "model_max"
 
-        return ("encode", "other")
+        return "encode", "other"
 
     def __del__(self):
-        for task in self._batcher_tasks:
-            if not task.done():
-                task.cancel()
+        if ((tasks := getattr(self, "_batcher_tasks", None))
+                and (loop := getattr(self, "_loop", None))
+                and not loop.is_closed()):
+
+            def cancel_tasks():
+                for task in tasks:
+                    task.cancel()
+
+            loop.call_soon_threadsafe(cancel_tasks)
+
+
+def cancel_task_threadsafe(task: Task):
+    if task and not task.done():
+        run_in_loop(task.get_loop(), task.cancel)
+
+
+def close_sockets(sockets: Sequence[Union[zmq.Socket, zmq.asyncio.Socket]]):
+    for sock in sockets:
+        if sock is not None:
+            sock.close(linger=0)
+
+
+def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):
+    if in_loop(loop):
+        function(*args)
+    elif not loop.is_closed():
+        loop.call_soon_threadsafe(function, *args)
+
+
+def in_loop(event_loop: AbstractEventLoop) -> bool:
+    try:
+        return asyncio.get_running_loop() == event_loop
+    except RuntimeError:
+        return False
 
 
 def make_async(
@@ -813,6 +796,33 @@ def get_ip() -> str:
     return "0.0.0.0"
 
 
+def test_loopback_bind(address, family):
+    try:
+        s = socket.socket(family, socket.SOCK_DGRAM)
+        s.bind((address, 0))  # Port 0 = auto assign
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def get_loopback_ip() -> str:
+    loopback_ip = envs.VLLM_LOOPBACK_IP
+    if loopback_ip:
+        return loopback_ip
+
+    # VLLM_LOOPBACK_IP is not set, try to get it based on network interface
+
+    if test_loopback_bind("127.0.0.1", socket.AF_INET):
+        return "127.0.0.1"
+    elif test_loopback_bind("::1", socket.AF_INET6):
+        return "::1"
+    else:
+        raise RuntimeError(
+            "Neither 127.0.0.1 nor ::1 are bound to a local interface. "
+            "Set the VLLM_LOOPBACK_IP environment variable explicitly.")
+
+
 def is_valid_ipv6_address(address: str) -> bool:
     try:
         ipaddress.IPv6Address(address)
@@ -821,7 +831,7 @@ def is_valid_ipv6_address(address: str) -> bool:
         return False
 
 
-def split_host_port(host_port: str) -> Tuple[str, int]:
+def split_host_port(host_port: str) -> tuple[str, int]:
     # ipv6
     if host_port.startswith('['):
         host, port = host_port.rsplit(']', 1)
@@ -879,6 +889,14 @@ def get_open_port() -> int:
     return _get_open_port()
 
 
+def get_open_ports_list(count: int = 5) -> list[int]:
+    """Get a list of open ports."""
+    ports = set[int]()
+    while len(ports) < count:
+        ports.add(get_open_port())
+    return list(ports)
+
+
 def _get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
@@ -911,8 +929,10 @@ def find_process_using_port(port: int) -> Optional[psutil.Process]:
     if sys.platform.startswith("darwin"):
         return None
 
+    our_pid = os.getpid()
     for conn in psutil.net_connections():
-        if conn.laddr.port == port:
+        if conn.laddr.port == port and (conn.pid is not None
+                                        and conn.pid != our_pid):
             try:
                 return psutil.Process(conn.pid)
             except psutil.NoSuchProcess:
@@ -945,6 +965,13 @@ def next_power_of_2(n) -> int:
     if n < 1:
         return 1
     return 1 << (n - 1).bit_length()
+
+
+def prev_power_of_2(n: int) -> int:
+    """The previous power of 2 (inclusive)"""
+    if n <= 0:
+        return 0
+    return 1 << (n.bit_length() - 1)
 
 
 def round_up(x: int, y: int) -> int:
@@ -1247,6 +1274,17 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
     )
 
 
+def as_list(maybe_list: Iterable[T]) -> list[T]:
+    """Convert iterable to list, unless it's already a list."""
+    return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
+
+
+def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
+    if isinstance(obj, str) or not isinstance(obj, Iterable):
+        return [obj]  # type: ignore[list-item]
+    return obj
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1346,18 +1384,55 @@ def find_nccl_library() -> str:
     return so_file
 
 
+def find_nccl_include_paths() -> Optional[list[str]]:
+    """
+    We either use the nccl.h specified by the `VLLM_NCCL_INCLUDE_PATH`
+    environment variable, or we find the library file brought by 
+    nvidia-nccl-cuXX. load_inline by default uses 
+    torch.utils.cpp_extension.include_paths
+    """
+    paths: list[str] = []
+    inc = envs.VLLM_NCCL_INCLUDE_PATH
+    if inc and os.path.isdir(inc):
+        paths.append(inc)
+
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("nvidia.nccl")
+        if spec and getattr(spec, "submodule_search_locations", None):
+            for loc in spec.submodule_search_locations:
+                inc_dir = os.path.join(loc, "include")
+                if os.path.exists(os.path.join(inc_dir, "nccl.h")):
+                    paths.append(inc_dir)
+    except Exception:
+        pass
+
+    seen = set()
+    out: list[str] = []
+    for p in paths:
+        if p and p not in seen:
+            out.append(p)
+            seen.add(p)
+    return out or None
+
+
 prev_set_stream = torch.cuda.set_stream
 
-_current_stream = None
+_current_stream_tls = threading.local()
 
 
 def _patched_set_stream(stream: torch.cuda.Stream) -> None:
-    global _current_stream
-    _current_stream = stream
+    _current_stream_tls.value = stream
     prev_set_stream(stream)
 
 
 torch.cuda.set_stream = _patched_set_stream
+
+
+class _StreamPlaceholder:
+
+    def __init__(self):
+        self.synchronize = lambda: None
 
 
 def current_stream() -> torch.cuda.Stream:
@@ -1372,16 +1447,27 @@ def current_stream() -> torch.cuda.Stream:
     from C/C++ code.
     """
     from vllm.platforms import current_platform
-    global _current_stream
-    if _current_stream is None:
+    if not hasattr(_current_stream_tls,
+                   "value") or _current_stream_tls.value is None:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
         # is hurting performance. Therefore creating a dedicated stream
         # per process
-        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
-        ) else torch.cuda.current_stream()
-    return _current_stream
+        if current_platform.is_rocm():
+            # torch.cuda.set_stream here is the alias of _pathed_set_stream
+            torch.cuda.set_stream(torch.cuda.Stream())
+        elif current_platform.is_cpu():
+            _current_stream_tls.value = _StreamPlaceholder()
+        else:
+            current_stream = current_platform.current_stream
+            if current_stream is not None:
+                _current_stream_tls.value = current_stream()
+            else:
+                raise ValueError(
+                    "Fail to set current stream, current platform "
+                    "may not support current_stream with torch API")
+    return _current_stream_tls.value
 
 
 def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
@@ -1573,15 +1659,19 @@ def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     return weak_bound
 
 
-# From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
-        if not wrapper.has_run:  # type: ignore[attr-defined]
-            wrapper.has_run = True  # type: ignore[attr-defined]
-            return f(*args, **kwargs)
+        if wrapper.has_run:  # type: ignore[attr-defined]
+            return
+
+        with wrapper.lock:  # type: ignore[attr-defined]
+            if not wrapper.has_run:  # type: ignore[attr-defined]
+                wrapper.has_run = True  # type: ignore[attr-defined]
+                return f(*args, **kwargs)
 
     wrapper.has_run = False  # type: ignore[attr-defined]
+    wrapper.lock = threading.Lock()  # type: ignore[attr-defined]
     return wrapper
 
 
@@ -1623,17 +1713,35 @@ class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
     _deprecated: set[Action] = set()
+    _json_tip: str = (
+        "When passing JSON CLI arguments, the following sets of arguments "
+        "are equivalent:\n"
+        '   --json-arg \'{"key1": "value1", "key2": {"key3": "value2"}}\'\n'
+        "   --json-arg.key1 value1 --json-arg.key2.key3 value2\n\n"
+        "Additionally, list elements can be passed individually using +:\n"
+        '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
+        "   --json-arg.key4+ value3 --json-arg.key4+=\'value4,value5\'\n\n")
+    _search_keyword: Optional[str] = None
 
     def __init__(self, *args, **kwargs):
-        # Set the default 'formatter_class' to SortedHelpFormatter
-        if 'formatter_class' not in kwargs:
-            kwargs['formatter_class'] = SortedHelpFormatter
+        # Set the default "formatter_class" to SortedHelpFormatter
+        if "formatter_class" not in kwargs:
+            kwargs["formatter_class"] = SortedHelpFormatter
+        # Pop kwarg "add_json_tip" to control whether to add the JSON tip
+        self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
 
     if sys.version_info < (3, 13):
         # Enable the deprecated kwarg for Python 3.12 and below
 
         def parse_known_args(self, args=None, namespace=None):
+            if args is not None and "--disable-log-requests" in args:
+                # Special case warning because the warning below won't trigger
+                # if –-disable-log-requests because its value is default.
+                logger.warning_once(
+                    "argument '--disable-log-requests' is deprecated and "
+                    "replaced with '--enable-log-requests'. This will be "
+                    "removed in v0.12.0.")
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
                 if (hasattr(namespace, dest := action.dest)
@@ -1661,6 +1769,80 @@ class FlexibleArgumentParser(ArgumentParser):
             group = self._FlexibleArgumentGroup(self, *args, **kwargs)
             self._action_groups.append(group)
             return group
+
+    def format_help(self):
+        # Only use custom help formatting for bottom level parsers
+        if self._subparsers is not None:
+            return super().format_help()
+
+        formatter = self._get_formatter()
+
+        # Handle keyword search of the args
+        if (search_keyword := self._search_keyword) is not None:
+            # Normalise the search keyword
+            search_keyword = search_keyword.lower().replace("_", "-")
+            # Return full help if searching for 'all'
+            if search_keyword == 'all':
+                self.epilog = self._json_tip
+                return super().format_help()
+
+            # Return group help if searching for a group title
+            for group in self._action_groups:
+                if group.title and group.title.lower() == search_keyword:
+                    formatter.start_section(group.title)
+                    formatter.add_text(group.description)
+                    formatter.add_arguments(group._group_actions)
+                    formatter.end_section()
+                    formatter.add_text(self._json_tip)
+                    return formatter.format_help()
+
+            # Return matched args if searching for an arg name
+            matched_actions = []
+            for group in self._action_groups:
+                for action in group._group_actions:
+                    # search option name
+                    if any(search_keyword in opt.lower()
+                           for opt in action.option_strings):
+                        matched_actions.append(action)
+            if matched_actions:
+                formatter.start_section(
+                    f"Arguments matching '{search_keyword}'")
+                formatter.add_arguments(matched_actions)
+                formatter.end_section()
+                formatter.add_text(self._json_tip)
+                return formatter.format_help()
+
+            # No match found
+            formatter.add_text(
+                f"No group or arguments matching '{search_keyword}'.\n"
+                "Use '--help' to see available groups or "
+                "'--help=all' to see all available parameters.")
+            return formatter.format_help()
+
+        # usage
+        formatter.add_usage(self.usage, self._actions,
+                            self._mutually_exclusive_groups)
+
+        # description
+        formatter.add_text(self.description)
+
+        # positionals, optionals and user-defined groups
+        formatter.start_section("Config Groups")
+        config_groups = ""
+        for group in self._action_groups:
+            if not group._group_actions:
+                continue
+            title = group.title
+            description = group.description or ""
+            config_groups += f"{title: <24}{description}\n"
+        formatter.add_text(config_groups)
+        formatter.end_section()
+
+        # epilog
+        formatter.add_text(self.epilog)
+
+        # determine help from format above
+        return formatter.format_help()
 
     def parse_args(  # type: ignore[override]
         self,
@@ -1693,7 +1875,11 @@ class FlexibleArgumentParser(ArgumentParser):
         # Convert underscores to dashes and vice versa in argument names
         processed_args = list[str]()
         for i, arg in enumerate(args):
-            if arg.startswith('--'):
+            if arg.startswith("--help="):
+                FlexibleArgumentParser._search_keyword = arg.split(
+                    '=', 1)[-1].lower()
+                processed_args.append("--help")
+            elif arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
                     key = pattern.sub(repl, key, count=1)
@@ -1849,15 +2035,18 @@ class FlexibleArgumentParser(ArgumentParser):
 
         file_path = args[index + 1]
 
-        config_args = self._load_config_file(file_path)
+        config_args = self.load_config_file(file_path)
 
-        # 0th index is for {serve,chat,complete}
+        # 0th index might be the sub command {serve,chat,complete,...}
         # optionally followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        if args[0] == "serve":
+        if args[0].startswith('-'):
+            # No sub command (e.g., api_server entry point)
+            args = config_args + args[0:index] + args[index + 2:]
+        elif args[0] == "serve":
             model_in_cli = len(args) > 1 and not args[1].startswith('-')
             model_in_config = any(arg == '--model' for arg in config_args)
 
@@ -1880,7 +2069,7 @@ class FlexibleArgumentParser(ArgumentParser):
 
         return args
 
-    def _load_config_file(self, file_path: str) -> list[str]:
+    def load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
@@ -1921,6 +2110,11 @@ class FlexibleArgumentParser(ArgumentParser):
             if isinstance(value, bool) and key not in store_boolean_arguments:
                 if value:
                     processed_args.append('--' + key)
+            elif isinstance(value, list):
+                if value:
+                    processed_args.append('--' + key)
+                    for item in value:
+                        processed_args.append(str(item))
             else:
                 processed_args.append('--' + key)
                 processed_args.append(str(value))
@@ -1935,6 +2129,7 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
+@lru_cache
 def supports_kw(
     callable: Callable[..., object],
     kw_name: str,
@@ -1978,49 +2173,6 @@ def supports_kw(
                 and last_param.name != kw_name)
 
     return False
-
-
-def resolve_mm_processor_kwargs(
-    init_kwargs: Optional[Mapping[str, object]],
-    inference_kwargs: Optional[Mapping[str, object]],
-    callable: Callable[..., object],
-    *,
-    requires_kw_only: bool = True,
-    allow_var_kwargs: bool = False,
-) -> dict[str, Any]:
-    """Applies filtering to eliminate invalid mm_processor_kwargs, i.e.,
-    those who are not explicit keywords to the given callable (of one is
-    given; otherwise no filtering is done), then merges the kwarg dicts,
-    giving priority to inference_kwargs if there are any collisions.
-
-    In the case that no kwarg overrides are provided, returns an empty
-    dict so that it can still be kwarg expanded into the callable later on.
-
-    If allow_var_kwargs=True, allows for things that can be expanded into
-    kwargs as long as they aren't naming collision for var_kwargs or potential
-    positional arguments.
-    """
-    # Filter inference time multimodal processor kwargs provided
-    runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
-        callable,
-        overrides=inference_kwargs,
-        requires_kw_only=requires_kw_only,
-        allow_var_kwargs=allow_var_kwargs,
-    )
-
-    # Filter init time multimodal processor kwargs provided
-    init_mm_kwargs = get_allowed_kwarg_only_overrides(
-        callable,
-        overrides=init_kwargs,
-        requires_kw_only=requires_kw_only,
-        allow_var_kwargs=allow_var_kwargs,
-    )
-
-    # Merge the final processor kwargs, prioritizing inference
-    # time values over the initialization time values.
-    mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
-
-    return mm_processor_kwargs
 
 
 def get_allowed_kwarg_only_overrides(
@@ -2182,7 +2334,8 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor],
+                   IntermediateTensors]
 ) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
     """
     Convenience function to create weak references to tensors,
@@ -2194,6 +2347,15 @@ def weak_ref_tensors(
         return [weak_ref_tensor(t) for t in tensors]
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
+
+    # For IntermediateTensors used in pipeline parallelism
+    from vllm.sequence import IntermediateTensors
+    if isinstance(tensors, IntermediateTensors):
+        ret = IntermediateTensors({
+            key: weak_ref_tensor(val)
+            for key, val in tensors.tensors.items()
+        })
+        return ret
     raise ValueError("Invalid type for tensors")
 
 
@@ -2400,7 +2562,7 @@ class PlaceholderModule(_PlaceholderBase):
     A placeholder object to use when a module does not exist.
 
     This enables more informative errors when trying to access attributes
-    of a module that does not exists.
+    of a module that does not exist.
     """
 
     def __init__(self, name: str) -> None:
@@ -2456,10 +2618,10 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 def direct_register_custom_op(
         op_name: str,
         op_func: Callable,
-        mutates_args: list[str],
+        mutates_args: Optional[list[str]] = None,
         fake_impl: Optional[Callable] = None,
         target_lib: Optional[Library] = None,
-        dispatch_key: str = "CUDA",
+        dispatch_key: Optional[str] = None,
         tags: tuple[torch.Tag, ...] = (),
 ):
     """
@@ -2487,6 +2649,13 @@ def direct_register_custom_op(
             "the required dependencies.")
         return
 
+    if mutates_args is None:
+        mutates_args = []
+
+    if dispatch_key is None:
+        from vllm.platforms import current_platform
+        dispatch_key = current_platform.dispatch_key
+
     import torch.library
     if hasattr(torch.library, "infer_schema"):
         schema_str = torch.library.infer_schema(op_func,
@@ -2504,7 +2673,7 @@ def direct_register_custom_op(
 
 def resolve_obj_by_qualname(qualname: str) -> Any:
     """
-    Resolve an object by its fully qualified name.
+    Resolve an object by its fully-qualified class name.
     """
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
@@ -2683,7 +2852,10 @@ def memory_profiling(
     result.torch_peak_increase = diff_profile.torch_peak
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
-    result.non_kv_cache_memory = result.non_torch_increase + result.torch_peak_increase + result.weights_memory  # noqa
+
+    non_torch_memory = result.non_torch_increase
+    peak_activation_memory = result.torch_peak_increase
+    result.non_kv_cache_memory = non_torch_memory + peak_activation_memory + result.weights_memory  # noqa
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
@@ -2797,6 +2969,9 @@ def make_zmq_socket(
     if linger is not None:
         socket.setsockopt(zmq.LINGER, linger)
 
+    if socket_type == zmq.XPUB:
+        socket.setsockopt(zmq.XPUB_VERBOSE, True)
+
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
     scheme, host, _ = split_zmq_path(path)
@@ -2835,17 +3010,6 @@ def zmq_socket_ctx(
         ctx.destroy(linger=linger)
 
 
-def is_in_ray_actor():
-    """Check if we are in a Ray actor."""
-
-    try:
-        import ray
-        return (ray.is_initialized()
-                and ray.get_runtime_context().get_actor_id() is not None)
-    except ImportError:
-        return False
-
-
 def _maybe_force_spawn():
     """Check if we need to force the use of the `spawn` multiprocessing start
     method.
@@ -2853,26 +3017,27 @@ def _maybe_force_spawn():
     if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
         return
 
-    reason = None
-    if cuda_is_initialized():
-        reason = "CUDA is initialized"
-    elif xpu_is_initialized():
-        reason = "XPU is initialized"
-    elif is_in_ray_actor():
+    reasons = []
+    if is_in_ray_actor():
         # even if we choose to spawn, we need to pass the ray address
         # to the subprocess so that it knows how to connect to the ray cluster.
         # env vars are inherited by subprocesses, even if we use spawn.
         import ray
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
-        reason = "In a Ray actor and can only be spawned"
+        reasons.append("In a Ray actor and can only be spawned")
 
-    if reason is not None:
+    if cuda_is_initialized():
+        reasons.append("CUDA is initialized")
+    elif xpu_is_initialized():
+        reasons.append("XPU is initialized")
+
+    if reasons:
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
             "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
-            "for more information. Reason: %s", reason)
+            "for more information. Reasons: %s", "; ".join(reasons))
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
@@ -3034,7 +3199,7 @@ class LazyLoader(types.ModuleType):
     """
     LazyLoader module borrowed from Tensorflow
     https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
-    with a addition of "module caching".
+    with an addition of "module caching".
 
     Lazily import a module, mainly to avoid pulling in large dependencies.
     Modules such as `xgrammar` might do additional side effects, so we
@@ -3103,7 +3268,7 @@ def cprofile_context(save_file: Optional[str] = None):
 
     Args:
         save_file: path to save the profile result. "1" or
-          None will result in printing to stdout.
+            None will result in printing to stdout.
     """
     import cProfile
 
@@ -3160,7 +3325,7 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
                       and getattr(cfg.attn_config, "alibi", False)))))
 
 
-def sha256(input) -> int:
+def sha256(input: Any) -> bytes:
     """Hash any picklable Python object using SHA-256.
 
     The input is serialized using pickle before hashing, which allows
@@ -3171,16 +3336,15 @@ def sha256(input) -> int:
         input: Any picklable Python object.
 
     Returns:
-        An integer representing the SHA-256 hash of the serialized input.
+        Bytes representing the SHA-256 hash of the serialized input.
     """
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
-    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
-                          byteorder="big")
+    return hashlib.sha256(input_bytes).digest()
 
 
-def sha256_cbor_64bit(input) -> int:
+def sha256_cbor(input: Any) -> bytes:
     """
-    Hash objects using CBOR serialization and SHA-256, then truncate to 64bits.
+    Hash objects using CBOR serialization and SHA-256.
 
     This option is useful for non-Python-dependent serialization and hashing.
 
@@ -3191,14 +3355,26 @@ def sha256_cbor_64bit(input) -> int:
             Custom classes must implement CBOR serialization methods.
 
     Returns:
-        An integer in the range [0, 2^64-1] representing the lower 64 bits
-        of the SHA-256 hash of the CBOR serialized input.
+        Bytes representing the SHA-256 hash of the CBOR serialized input.
     """
     input_bytes = cbor2.dumps(input, canonical=True)
-    full_hash = int.from_bytes(hashlib.sha256(input_bytes).digest(),
-                               byteorder="big")
+    return hashlib.sha256(input_bytes).digest()
 
-    return full_hash & ((1 << 64) - 1)
+
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
+    """Get a hash function by name, or raise an error if
+    the function is not found.
+    Args:
+        hash_fn_name: Name of the hash function.
+    Returns:
+        A hash function.
+    """
+    if hash_fn_name == "sha256":
+        return sha256
+    if hash_fn_name == "sha256_cbor":
+        return sha256_cbor
+
+    raise ValueError(f"Unsupported hash function: {hash_fn_name}")
 
 
 def is_torch_equal_or_newer(target: str) -> bool:
@@ -3249,3 +3425,135 @@ def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
 
     return _has_module("deep_gemm")
+
+
+def has_triton_kernels() -> bool:
+    """Whether the optional `triton_kernels` package is available."""
+
+    return _has_module("triton_kernels")
+
+
+def set_process_title(name: str,
+                      suffix: str = "",
+                      prefix: str = envs.VLLM_PROCESS_NAME_PREFIX) -> None:
+    """
+    Set the current process title to a specific name with an
+    optional suffix.
+
+    Args:
+        name: The title to assign to the current process.
+        suffix: An optional suffix to append to the base name.
+        prefix: A prefix to prepend to the front separated by `::`.
+    """
+    if suffix:
+        name = f"{name}_{suffix}"
+    setproctitle.setproctitle(f"{prefix}::{name}")
+
+
+def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
+    """Prepend each output line with process-specific prefix"""
+
+    prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
+    file_write = file.write
+
+    def write_with_prefix(s: str):
+        if not s:
+            return
+        if file.start_new_line:  # type: ignore[attr-defined]
+            file_write(prefix)
+        idx = 0
+        while (next_idx := s.find('\n', idx)) != -1:
+            next_idx += 1
+            file_write(s[idx:next_idx])
+            if next_idx == len(s):
+                file.start_new_line = True  # type: ignore[attr-defined]
+                return
+            file_write(prefix)
+            idx = next_idx
+        file_write(s[idx:])
+        file.start_new_line = False  # type: ignore[attr-defined]
+
+    file.start_new_line = True  # type: ignore[attr-defined]
+    file.write = write_with_prefix  # type: ignore[method-assign]
+
+
+def decorate_logs(process_name: Optional[str] = None) -> None:
+    """
+    Adds a process-specific prefix to each line of output written to stdout and
+    stderr.
+
+    This function is intended to be called before initializing the api_server,
+    engine_core, or worker classes, so that all subsequent output from the
+    process is prefixed with the process name and PID. This helps distinguish
+    log output from different processes in multi-process environments.
+
+    Args:
+        process_name: Optional; the name of the process to use in the prefix.
+            If not provided, the current process name from the multiprocessing
+            context is used.
+    """
+    if process_name is None:
+        process_name = get_mp_context().current_process().name
+    pid = os.getpid()
+    _add_prefix(sys.stdout, process_name, pid)
+    _add_prefix(sys.stderr, process_name, pid)
+
+
+def length_from_prompt_token_ids_or_embeds(
+    prompt_token_ids: Optional[list[int]],
+    prompt_embeds: Optional[torch.Tensor],
+) -> int:
+    """Calculate the request length (in number of tokens) give either
+    prompt_token_ids or prompt_embeds.
+    """
+    prompt_token_len = None if prompt_token_ids is None else len(
+        prompt_token_ids)
+    prompt_embeds_len = \
+        None if prompt_embeds is None else len(prompt_embeds)
+
+    if prompt_token_len is None:
+        if prompt_embeds_len is None:
+            raise ValueError(
+                "Neither prompt_token_ids nor prompt_embeds were defined.")
+        return prompt_embeds_len
+    else:
+        if (prompt_embeds_len is not None
+                and prompt_embeds_len != prompt_token_len):
+            raise ValueError(
+                "Prompt token ids and prompt embeds had different lengths"
+                f" prompt_token_ids={prompt_token_len}"
+                f" prompt_embeds={prompt_embeds_len}")
+        return prompt_token_len
+
+
+@contextlib.contextmanager
+def set_env_var(key, value):
+    old = os.environ.get(key)
+    os.environ[key] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            del os.environ[key]
+        else:
+            os.environ[key] = old
+
+
+def unique_filepath(fn: Callable[[int], Path]) -> Path:
+    """
+    unique_filepath returns a unique path by trying
+    to include an integer in increasing order.
+
+    fn should be a callable that returns a path that
+    includes the passed int at a fixed location.
+
+    Note: This function has a TOCTOU race condition.
+    Caller should use atomic operations (e.g., open with 'x' mode)
+    when creating the file to ensure thread safety.
+    """
+    i = 0
+    while True:
+        p = fn(i)
+        if not p.exists():
+            return p
+        i += 1

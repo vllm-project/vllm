@@ -467,6 +467,12 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   if (GPU_LANGUAGE STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.
     add_dependencies(${GPU_MOD_NAME} hipify${GPU_MOD_NAME})
+    # Make sure we include the hipified versions of the headers, and avoid conflicts with the ones in the original source folder
+    target_include_directories(${GPU_MOD_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc
+      ${GPU_INCLUDE_DIRECTORIES})
+  else()
+    target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
+      ${GPU_INCLUDE_DIRECTORIES})
   endif()
 
   if (GPU_ARCHITECTURES)
@@ -474,7 +480,6 @@ function (define_gpu_extension_target GPU_MOD_NAME)
       ${GPU_LANGUAGE}_ARCHITECTURES "${GPU_ARCHITECTURES}")
   endif()
 
-  set_property(TARGET ${GPU_MOD_NAME} PROPERTY CXX_STANDARD 17)
 
   target_compile_options(${GPU_MOD_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:${GPU_LANGUAGE}>:${GPU_COMPILE_FLAGS}>)
@@ -482,8 +487,6 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   target_compile_definitions(${GPU_MOD_NAME} PRIVATE
     "-DTORCH_EXTENSION_NAME=${GPU_MOD_NAME}")
 
-  target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
-    ${GPU_INCLUDE_DIRECTORIES})
 
   target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${GPU_LIBRARIES})
 

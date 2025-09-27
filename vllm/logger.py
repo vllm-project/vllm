@@ -20,9 +20,10 @@ VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
 VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
+VLLM_LOGGING_STREAM = envs.VLLM_LOGGING_STREAM
 
 _FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
-           "[%(filename)s:%(lineno)d] %(message)s")
+           "[%(fileinfo)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 DEFAULT_LOGGING_CONFIG = {
@@ -38,7 +39,7 @@ DEFAULT_LOGGING_CONFIG = {
             "class": "logging.StreamHandler",
             "formatter": "vllm",
             "level": VLLM_LOGGING_LEVEL,
-            "stream": "ext://sys.stdout",
+            "stream": VLLM_LOGGING_STREAM,
         },
     },
     "loggers": {
@@ -102,6 +103,14 @@ class _VllmLogger(Logger):
         _print_warning_once(self, msg, *args)
 
 
+# Pre-defined methods mapping to avoid repeated dictionary creation
+_METHODS_TO_PATCH = {
+    "debug_once": _print_debug_once,
+    "info_once": _print_info_once,
+    "warning_once": _print_warning_once,
+}
+
+
 def _configure_vllm_root_logger() -> None:
     logging_config = dict[str, Any]()
 
@@ -144,13 +153,7 @@ def init_logger(name: str) -> _VllmLogger:
 
     logger = logging.getLogger(name)
 
-    methods_to_patch = {
-        "debug_once": _print_debug_once,
-        "info_once": _print_info_once,
-        "warning_once": _print_warning_once,
-    }
-
-    for method_name, method in methods_to_patch.items():
+    for method_name, method in _METHODS_TO_PATCH.items():
         setattr(logger, method_name, MethodType(method, logger))
 
     return cast(_VllmLogger, logger)

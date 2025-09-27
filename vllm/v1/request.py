@@ -3,12 +3,16 @@
 
 import enum
 import time
-from typing import TYPE_CHECKING, Any, Optional, Union
+from collections.abc import Mapping
+from functools import partial
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+import torch
+
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_list_of
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
@@ -16,6 +20,7 @@ from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
+    from vllm.v1.core.kv_cache_utils import BlockHash
 
 
 class Request:
@@ -23,19 +28,21 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt_token_ids: list[int],
-        multi_modal_inputs: Optional[list[MultiModalKwargs]],
-        multi_modal_hashes: Optional[list[str]],
-        multi_modal_placeholders: Optional[list[PlaceholderRange]],
+        prompt_token_ids: Optional[list[int]],
         sampling_params: Optional[SamplingParams],
         pooling_params: Optional[PoolingParams],
         eos_token_id: Optional[int],
         client_index: int = 0,
         arrival_time: Optional[float] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        mm_features: Optional[list[MultiModalFeatureSpec]] = None,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
         priority: int = 0,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        block_hasher: Optional[Callable[["Request"],
+                                        list["BlockHash"]]] = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -50,8 +57,7 @@ class Request:
             time.time()
 
         self.status = RequestStatus.WAITING
-        if sampling_params and sampling_params.guided_decoding is not None:
-            self.status = RequestStatus.WAITING_FOR_FSM
+        self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
 
@@ -59,12 +65,15 @@ class Request:
         self.kv_transfer_params: Optional[dict[str, Any]] = None
 
         if pooling_params is not None:
+            # Pooling models.
             self.max_tokens = 1
         elif sampling_params is not None:
+            # Generative models.
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
-            if sampling_params.guided_decoding is not None:
+            if sampling_params.structured_outputs is not None:
                 self.status = RequestStatus.WAITING_FOR_FSM
+                self.use_structured_output = True
 
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = \
@@ -74,31 +83,30 @@ class Request:
                 "sampling_params and pooling_params can't both be unset")
 
         self.prompt_token_ids = prompt_token_ids
-        self.num_prompt_tokens = len(self.prompt_token_ids)
+        self.prompt_embeds = prompt_embeds
+        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+            prompt_token_ids, prompt_embeds)
         self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = self.prompt_token_ids.copy()
+        self._all_token_ids: list[int] = self.prompt_token_ids.copy(
+        ) if self.prompt_token_ids is not None else [0
+                                                     ] * self.num_prompt_tokens
+        self.num_output_placeholders = 0  # Used in async scheduling.
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
 
         # Multi-modal related
-        self.mm_positions = multi_modal_placeholders or []
-        self.mm_inputs = multi_modal_inputs or []
-        self.mm_hashes: list[str] = multi_modal_hashes or []
-        self.num_encoder_inputs = len(self.mm_inputs)
+        self.mm_features = mm_features or []
+        self.num_encoder_inputs = len(self.mm_features)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
-
-        # Sanity check
-        assert len(self.mm_inputs) == len(self.mm_positions)
-        if self.mm_hashes:
-            assert len(self.mm_inputs) == len(self.mm_hashes)
 
         # Read-only views
         # Prevent directly appending to these lists since
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
-
+        # trace_headers
+        self.trace_headers = trace_headers
         # State
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
@@ -107,20 +115,27 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
-    @classmethod
-    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
-        if request.mm_inputs is not None:
-            assert isinstance(request.mm_inputs, list)
-            assert is_list_of(request.mm_inputs, MultiModalKwargs), (
-                "mm_inputs was not updated in EngineCore.add_request")
+        # The number of requests being preempted by the scheduler
+        self.num_preemptions = 0
 
+        self.block_hashes: list[BlockHash] = []
+        self.get_hash_new_full_blocks: Optional[Callable[
+            [], list[BlockHash]]] = None
+        if block_hasher is not None:
+            self.get_hash_new_full_blocks = partial(block_hasher, self)
+            self.block_hashes = self.get_hash_new_full_blocks()
+
+    @classmethod
+    def from_engine_core_request(
+        cls, request: EngineCoreRequest,
+        block_hasher: Optional[Callable[["Request"], list["BlockHash"]]]
+    ) -> "Request":
         return cls(
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
-            multi_modal_inputs=request.mm_inputs,
-            multi_modal_hashes=request.mm_hashes,
-            multi_modal_placeholders=request.mm_placeholders,
+            prompt_embeds=request.prompt_embeds,
+            mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             eos_token_id=request.eos_token_id,
@@ -131,6 +146,8 @@ class Request:
                     if request.sampling_params else None,
             cache_salt=request.cache_salt,
             priority=request.priority,
+            trace_headers=request.trace_headers,
+            block_hasher=block_hasher,
         )
 
     def append_output_token_ids(
@@ -143,6 +160,9 @@ class Request:
         else:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
+
+        if self.get_hash_new_full_blocks is not None:
+            self.block_hashes.extend(self.get_hash_new_full_blocks())
 
     @property
     def is_output_corrupted(self) -> bool:
@@ -167,14 +187,9 @@ class Request:
         return RequestStatus.get_finished_reason(self.status)
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
-        assert input_id < len(self.mm_positions)
-        num_tokens = self.mm_positions[input_id].length
+        assert input_id < len(self.mm_features)
+        num_tokens = self.mm_features[input_id].mm_position.length
         return num_tokens
-
-    @property
-    def use_structured_output(self) -> bool:
-        return self.sampling_params is not None and \
-            self.sampling_params.guided_decoding is not None
 
     def record_event(
         self,

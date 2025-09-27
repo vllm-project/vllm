@@ -9,8 +9,9 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MARLIN_SUPPORTED_GROUP_SIZES, apply_gptq_marlin_linear,
     check_marlin_supports_shape, marlin_is_k_full, marlin_make_empty_g_idx,
-    marlin_make_workspace_new, marlin_permute_scales, marlin_sort_g_idx,
-    marlin_zero_points, query_marlin_supported_quant_types, unpack_cols)
+    marlin_make_workspace_new, marlin_permute_bias, marlin_permute_scales,
+    marlin_sort_g_idx, marlin_zero_points, query_marlin_supported_quant_types,
+    unpack_cols)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
 from vllm.platforms import current_platform
@@ -110,6 +111,9 @@ class MarlinLinearKernel(MPLinearKernel):
             setattr(layer, self.w_zp_name, marlin_make_empty_g_idx(device))
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
+
+        if hasattr(layer, "bias") and layer.bias is not None:
+            layer.bias.data = marlin_permute_bias(layer.bias)
 
     def apply_weights(self,
                       layer: torch.nn.Module,

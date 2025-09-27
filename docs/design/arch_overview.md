@@ -200,7 +200,8 @@ vision-language model.
                 lora_config = vllm_config.lora_config
                 super().__init__(config, cache_config, quant_config, lora_config, prefix)
 
-        if __version__ >= "0.6.4":
+        from packaging import version
+        if version.parse(__version__) >= version.parse("0.6.4"):
             MyModel = MyNewModel
         else:
             MyModel = MyOldModel

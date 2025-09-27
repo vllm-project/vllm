@@ -8,9 +8,8 @@ import pytest
 from vllm.platforms import current_platform
 
 from ..conftest import HfRunner, VllmRunner
-from ..core.block.e2e.test_correctness_sliding_window import prep_prompts
-from ..utils import multi_gpu_test
-from .utils import check_logprobs_close
+from ..utils import multi_gpu_test, prep_prompts
+from .utils import check_embeddings_close, check_logprobs_close
 
 
 def check_implementation(
@@ -33,6 +32,9 @@ def check_implementation(
     args = (example_prompts, max_tokens, num_logprobs)
 
     with runner_test(model, **kwargs_test, **kwargs) as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
     with runner_ref(model, **kwargs_ref) as model_ref:
@@ -56,7 +58,7 @@ def check_implementation(
     "model,model_impl",
     [
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
-        ("ArthurZ/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
+        ("hmellor/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
     ])  # trust_remote_code=True by default
 def test_models(
     hf_runner: type[HfRunner],
@@ -98,10 +100,9 @@ def test_distributed(
                          kwargs_test=kwargs)
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="bitsandbytes quantization is currently not supported in rocm.")
 @pytest.mark.parametrize("model, quantization_kwargs", [
+    ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
+    ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {}),
     (
         "meta-llama/Llama-3.2-1B-Instruct",
         {
@@ -119,6 +120,11 @@ def test_quantization(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+    if (current_platform.is_rocm()
+            and quantization_kwargs.get("quantization", "") == "bitsandbytes"):
+        pytest.skip(
+            "bitsandbytes quantization is currently not supported in rocm.")
+
     with vllm_runner(
             model, model_impl="auto", enforce_eager=True,
             **quantization_kwargs) as vllm_model:  # type: ignore[arg-type]
@@ -130,11 +136,105 @@ def test_quantization(
             model_impl="transformers",
             enforce_eager=True,
             **quantization_kwargs) as vllm_model:  # type: ignore[arg-type]
+        model_config = vllm_model.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
         transformers_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs)
+
     check_logprobs_close(
         outputs_0_lst=transformers_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="transformers",
         name_1="vllm",
     )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Layers live in `layers`
+        "Qwen/Qwen3-Embedding-0.6B",
+        # Layers live in `model.layers`
+        "meta-llama/Llama-3.2-1B-Instruct"
+    ],
+)
+def test_embed_loading(vllm_runner, model):
+    with vllm_runner(model,
+                     max_model_len=1024,
+                     enforce_eager=True,
+                     runner="pooling",
+                     model_impl="transformers") as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Encoder model
+        "BAAI/bge-base-en-v1.5",
+    ])
+def test_embed_correctness(hf_runner, vllm_runner, example_prompts, model):
+    import transformers
+    from packaging.version import Version
+    installed = Version(transformers.__version__)
+    required = Version("4.57.0.dev0")
+    if installed < required:
+        pytest.skip("Encoder models with the Transformers backend require "
+                    f"transformers>={required}, but got {installed}")
+
+    with vllm_runner(model, max_model_len=512,
+                     model_impl="transformers") as vllm_model:
+        model_config = vllm_model.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
+        vllm_outputs = vllm_model.embed(example_prompts)
+
+    with hf_runner(model, is_sentence_transformer=True) as hf_model:
+        hf_outputs = hf_model.encode(example_prompts)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["jason9693/Qwen2.5-1.5B-apeach"],
+)
+@pytest.mark.parametrize("dtype", ["float"])
+def test_classify(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+) -> None:
+    import torch
+    from transformers import AutoModelForSequenceClassification
+
+    with vllm_runner(model,
+                     max_model_len=512,
+                     dtype=dtype,
+                     model_impl="transformers") as vllm_model:
+        model_config = vllm_model.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
+        vllm_outputs = vllm_model.classify(example_prompts)
+
+    with hf_runner(model,
+                   dtype=dtype,
+                   auto_cls=AutoModelForSequenceClassification) as hf_model:
+        hf_outputs = hf_model.classify(example_prompts)
+
+    for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
+        hf_output = torch.tensor(hf_output)
+        vllm_output = torch.tensor(vllm_output)
+
+        assert torch.allclose(hf_output, vllm_output,
+                              1e-3 if dtype == "float" else 1e-2)

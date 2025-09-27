@@ -10,8 +10,8 @@ from typing import Callable, Optional
 
 import torch
 
-import vllm.envs as envs
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import (CompilationLevel, CUDAGraphMode,
+                         get_current_vllm_config)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -46,11 +46,10 @@ class TorchCompileWrapperWithCustomDispatcher:
                 options = get_current_vllm_config(
                 ).compilation_config.inductor_compile_config
 
-            compiled_callable = torch.compile(
-                self.forward,
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend,
-                options=options)
+            compiled_callable = torch.compile(self.forward,
+                                              fullgraph=True,
+                                              backend=backend,
+                                              options=options)
 
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
@@ -93,27 +92,18 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
 
         self.compiled_codes.append(new_code)
-        local_cache_dir = self.vllm_config.compilation_config.local_cache_dir
-        if isinstance(local_cache_dir, str):
-            decompiled_file_name = ("transformed_code.py"
-                                    if envs.VLLM_COMPILE_DEPYF else
-                                    "transformed_code_README.txt")
 
-            decompiled_file = os.path.join(local_cache_dir,
-                                           decompiled_file_name)
-            if not os.path.exists(decompiled_file):
+        path = self.vllm_config.compile_debug_dump_path()
+        if path:
+            decompiled_file = path / "transformed_code.py"
+            if not decompiled_file.exists():
                 try:
                     # usually the decompilation will succeed for most models,
                     # as we guarantee a full-graph compilation in Dynamo.
                     # but there's no 100% guarantee, since decompliation is
                     # not a reversible process.
-                    if envs.VLLM_COMPILE_DEPYF:
-                        import depyf
-                        src = depyf.decompile(new_code)
-                    else:
-                        src = (
-                            "To get a transformed_code.py file, re-run with "
-                            "VLLM_COMPILE_DEPYF=1")
+                    import depyf
+                    src = depyf.decompile(new_code)
 
                     with open(decompiled_file, "w") as f:
                         f.write(src)
@@ -123,8 +113,8 @@ class TorchCompileWrapperWithCustomDispatcher:
                 except Exception:
                     pass
 
-        if self.vllm_config.compilation_config.use_cudagraph and \
-            "update" in new_code.co_names:
+        if self.vllm_config.compilation_config.cudagraph_mode != \
+            CUDAGraphMode.NONE and "update" in new_code.co_names:
             import depyf
             src = depyf.decompile(new_code)
             msg = "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n" + src  # noqa

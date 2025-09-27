@@ -33,10 +33,12 @@ def test_ragged_paged_attention():
     )
 
     class FakeAttentionLayer:
+        _q_scale_float: float
         _k_scale_float: float
         _v_scale_float: float
 
     layer = FakeAttentionLayer()
+    layer._q_scale_float = 1.0
     layer._k_scale_float = 1.0
     layer._v_scale_float = 1.0
 
@@ -95,4 +97,6 @@ def test_ragged_paged_attention():
             sm_scale=scale,
             sliding_window=sliding_window,
             soft_cap=logits_soft_cap,
+            k_scale=1.0,
+            v_scale=1.0,
         )

@@ -7,8 +7,8 @@ from typing import Optional
 import pytest
 from transformers import AutoModelForSpeechSeq2Seq
 
+from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SampleLogprobs
 
 from ....conftest import (AudioTestAssets, HfRunner, PromptAudioInput,
                           VllmRunner)
@@ -65,7 +65,7 @@ def run_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(
             model,
-            task="generate",
+            runner="generate",
             max_model_len=max_model_len,
             max_num_seqs=1,
             dtype=dtype,

@@ -213,7 +213,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
         # Save the compiled artifact to disk in the specified path
         assert key is not None
         path = os.path.join(self.cache_dir, key)
-        compiled_graph.save(path=path, format="unpacked")
+        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+            compiled_graph.save(path=path, format="unpacked")
+            compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)
 
     def load(self,
@@ -421,6 +423,12 @@ class InductorAdaptor(CompilerInterface):
             if is_torch_equal_or_newer("2.6"):
                 stack.enter_context(
                     torch._inductor.config.patch(fx_graph_remote_cache=False))
+                # InductorAdaptor (unfortunately) requires AOTAutogradCache
+                # to be turned off to run. It will fail to acquire the hash_str
+                # and error if not.
+                # StandaloneInductorAdaptor (PyTorch 2.8+) fixes this problem.
+                stack.enter_context(
+                    torch._functorch.config.patch(enable_autograd_cache=False))
                 stack.enter_context(
                     torch._functorch.config.patch(
                         enable_remote_autograd_cache=False))
@@ -543,8 +551,9 @@ def set_inductor_config(config, runtime_shape):
     if isinstance(runtime_shape, int):
         # for a specific batchsize, tuning triton kernel parameters
         # can be beneficial
-        config["max_autotune"] = True
-        config["coordinate_descent_tuning"] = True
+        config["max_autotune"] = envs.VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE
+        config["coordinate_descent_tuning"] = (
+            envs.VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING)
 
 
 class EagerAdaptor(CompilerInterface):

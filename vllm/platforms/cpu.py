@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
 import platform
+import subprocess
 import sys
+from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
 
@@ -31,23 +34,53 @@ def get_max_threads(pid=0):
         raise NotImplementedError("Unsupported OS")
 
 
+@dataclass
+class LogicalCPUInfo:
+    id: int = -1
+    physical_core: int = -1
+    numa_node: int = -1
+
+    @classmethod
+    def _int(cls, value: str) -> int:
+        try:
+            int_value = int(value)
+        except Exception:
+            int_value = -1
+        return int_value
+
+    @staticmethod
+    def json_decoder(obj_dict: dict):
+        id = obj_dict.get("cpu")
+        physical_core = obj_dict.get("core")
+        numa_node = obj_dict.get("node")
+
+        if not (id is None or physical_core is None or numa_node is None):
+            return LogicalCPUInfo(
+                id=LogicalCPUInfo._int(id),
+                physical_core=LogicalCPUInfo._int(physical_core),
+                numa_node=LogicalCPUInfo._int(numa_node))
+        else:
+            return obj_dict
+
+
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
+    device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
-        elif sys.platform.startswith(
-                "darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
-            # TODO: change this condition to check if the platform support bf16
-            # instead of checking the OS. For instance M2 shall supports bf16
-            # already. But we need to modify `cpu_extension.cmake` to activate
-            # the feature in the build.
+        elif (self.get_cpu_architecture() == CpuArchEnum.ARM
+              and sys.platform.startswith("darwin")):
+            if (subprocess.check_output(
+                ["sysctl -n hw.optional.arm.FEAT_BF16"],
+                    shell=True).strip() == b"1"):
+                return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
@@ -59,8 +92,8 @@ class CpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool) -> str:
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
@@ -72,8 +105,19 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        import psutil
-        return psutil.virtual_memory().total
+        import vllm.envs as envs
+        from vllm.utils import GiB_bytes
+
+        kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
+        if kv_cache_space is None:
+            kv_cache_space = 4 * GiB_bytes  # type: ignore
+            logger.warning_once(
+                "Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
+                "for CPU backend is not set, using 4 by default.")
+        else:
+            kv_cache_space *= GiB_bytes
+
+        return kv_cache_space
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -83,17 +127,11 @@ class CpuPlatform(Platform):
         torch.cpu.set_device(device)
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
-
-    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        import vllm.envs as envs
-        from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
 
         if model_config is not None:
@@ -130,20 +168,8 @@ class CpuPlatform(Platform):
                            " support fp16 for now, cast to bf16.")
             model_config.dtype = torch.bfloat16
 
-        kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
-
-        if kv_cache_space >= 0:
-            if kv_cache_space == 0:
-                cache_config.cpu_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
-                logger.warning(
-                    "Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
-                    "for CPU backend is not set, using 4 by default.")
-            else:
-                cache_config.cpu_kvcache_space_bytes = kv_cache_space * GiB_bytes  # type: ignore # noqa
-        else:
-            raise RuntimeError(
-                "Invalid environment variable VLLM_CPU_KVCACHE_SPACE"
-                f" {kv_cache_space}, expect a positive integer value.")
+        cache_config.cpu_kvcache_space_bytes = \
+            CpuPlatform.get_device_total_memory()
 
         parallel_config = vllm_config.parallel_config
         if (parallel_config.world_size > 1
@@ -155,6 +181,11 @@ class CpuPlatform(Platform):
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
+        # Disable DBO
+        if parallel_config.enable_dbo:
+            logger.warning(
+                "Dual-Batch Overlap is not supported on CPU, disabled.")
+            parallel_config.enable_dbo = False
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationLevel
@@ -184,8 +215,6 @@ class CpuPlatform(Platform):
                 False,
                 "nan_asserts":
                 False,
-                "memory_planning":
-                True,
                 "epilogue_fusion":
                 True,
             })
@@ -241,6 +270,45 @@ class CpuPlatform(Platform):
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
     @classmethod
+    def get_allowed_cpu_core_node_list(
+            cls) -> tuple[list[int], list[LogicalCPUInfo]]:
+        assert platform.system() == "Linux"
+
+        # Init LogicalCPUInfo from lscpu
+        lscpu_output = subprocess.check_output("lscpu -J -e=CPU,CORE,NODE",
+                                               shell=True,
+                                               text=True)
+        logical_cpu_list: list[LogicalCPUInfo] = json.loads(
+            lscpu_output, object_hook=LogicalCPUInfo.json_decoder)['cpus']
+
+        # Filter CPUs with invalid attributes
+        logical_cpu_list = [
+            x for x in logical_cpu_list
+            if -1 not in (x.id, x.physical_core, x.numa_node)
+        ]
+
+        # Filter allowed CPUs
+        allowed_cpu_id_list = os.sched_getaffinity(0)
+        logical_cpu_list = [
+            x for x in logical_cpu_list if x.id in allowed_cpu_id_list
+        ]
+
+        # Get allowed NUMA nodes
+        allowed_numa_nodes = set()
+        for x in logical_cpu_list:
+            allowed_numa_nodes.add(x.numa_node)  # type: ignore
+        allowed_numa_nodes_list = sorted(allowed_numa_nodes)
+
+        env_key = CpuPlatform.device_control_env_var
+        if (env_key in os.environ and os.environ[env_key] != ""):
+            visible_nodes = [int(s) for s in os.environ[env_key].split(',')]
+            allowed_numa_nodes_list = [
+                x for x in visible_nodes if x in allowed_cpu_id_list
+            ]
+
+        return allowed_numa_nodes_list, logical_cpu_list
+
+    @classmethod
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on CPU.")
         return False
@@ -261,17 +329,9 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_v1(cls, model_config) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
+    def opaque_attention_op(cls) -> bool:
         return True
 
     @classmethod
-    def default_v1(cls, model_config) -> bool:
-        """Returns whether the current platform can use v1 by default for the
-        supplied model configuration.
-        """
-        arch = cls.get_cpu_architecture()
-        return (cls.supports_v1(model_config) and arch
-                in (CpuArchEnum.X86, CpuArchEnum.POWERPC, CpuArchEnum.ARM))
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True

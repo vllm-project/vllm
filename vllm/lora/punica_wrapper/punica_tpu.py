@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.nn.functional as F
-import torch_xla.core.xla_model as xm
+import torch_xla
 
 from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from vllm.lora.punica_wrapper.utils import convert_mapping
@@ -14,7 +14,6 @@ from vllm.lora.punica_wrapper.utils import convert_mapping
 if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping
-    from vllm.lora.models import LongContextLoRAContext
 
 from .punica_base import PunicaWrapperBase
 
@@ -45,7 +44,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         torch.ops.xla.dynamo_set_buffer_donor_(self._sampler_indices_padded,
                                                True)
         torch.ops.xla.dynamo_set_buffer_donor_(self._embeddings_indices, True)
-        torch.ops.xla.dynamo_set_buffer_donor_(self._long_lora_indices, True)
         torch.ops.xla.dynamo_set_buffer_donor_(self._lora_indices_per_batch,
                                                True)
 
@@ -323,10 +321,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         max_loras: int,
         vocab_size: int,
         extra_vocab_size: int,
-        long_lora_context: Optional["LongContextLoRAContext"] = None,
     ):
         # Make sure we don't accidentally collect outside operations
-        xm.mark_step()
+        torch_xla.sync()
 
         # Pad the prompt mapping to avoid running into recompiles on the TPU
         # TODO: Should this happen inside mapping internally? If so how can we
@@ -339,7 +336,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             sampler_indices,
             sampler_indices_padded,
             embeddings_indices,
-            long_lora_offsets_tensor,
             indices_len,
         ) = convert_mapping(
             mapping,
@@ -348,7 +344,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             vocab_size,
             extra_vocab_size,
             "cpu",
-            long_lora_context,
         )
         self._token_lora_indices = self._pad_to_shape(
             base_indices, self._token_lora_indices.shape,
@@ -362,15 +357,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self._embeddings_indices = self._pad_to_shape(
             embeddings_indices, self._embeddings_indices.shape,
             dims=2).to(self.device)
-        if long_lora_offsets_tensor is not None:
-            self._long_lora_indices = self._pad_to_shape(
-                long_lora_offsets_tensor,
-                self._long_lora_indices.shape,
-                dims=1).to(self.device)
-        else:
-            zeroed = torch.zeros_like(self._long_lora_indices.cpu(),
-                                      dtype=torch.int32)
-            self._long_lora_indices = zeroed.to(self.device)
         self.indices_len[:] = indices_len
 
     def _update_prefill_metadata(self,

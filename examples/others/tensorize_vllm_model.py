@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import argparse
-import dataclasses
 import json
 import logging
 import os
@@ -84,18 +82,22 @@ Or for deserializing:
 Once a model is serialized, tensorizer can be invoked with the `LLM` class 
 directly to load models:
 
-    llm = LLM(model="facebook/opt-125m",
-              load_format="tensorizer",
-              model_loader_extra_config=TensorizerConfig(
-                    tensorizer_uri = path_to_tensors,
-                    num_readers=3,
-                    )
-              )
+```python
+from vllm import LLM
+llm = LLM(
+    "s3://my-bucket/vllm/facebook/opt-125m/v1", 
+    load_format="tensorizer"
+)
+```
+
             
 A serialized model can be used during model loading for the vLLM OpenAI
-inference server. `model_loader_extra_config` is exposed as the CLI arg
-`--model-loader-extra-config`, and accepts a JSON string literal of the
-TensorizerConfig arguments desired.
+inference server:
+
+```
+vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 \
+    --load-format tensorizer
+```
 
 In order to see all of the available arguments usable to configure 
 loading with tensorizer that are given to `TensorizerConfig`, run:
@@ -116,10 +118,9 @@ the LoRA artifacts are in your model artifacts directory and specifying
 `--enable-lora`. For instance:
 
 ```
-vllm serve <model_path> \
+vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 \
     --load-format tensorizer \
-    --model-loader-extra-config '{"tensorizer_uri": "<model_path>.tensors"}' \
-    --enable-lora
+    --enable-lora 
 ```
 """
 
@@ -324,12 +325,7 @@ def main():
 
 
     if args.command == "serialize":
-        eng_args_dict = {f.name: getattr(args, f.name) for f in
-                        dataclasses.fields(EngineArgs)}
-
-        engine_args = EngineArgs.from_cli_args(
-            argparse.Namespace(**eng_args_dict)
-        )
+        engine_args = EngineArgs.from_cli_args(args)
 
         input_dir = tensorizer_dir.rstrip('/')
         suffix = args.suffix if args.suffix else uuid.uuid4().hex

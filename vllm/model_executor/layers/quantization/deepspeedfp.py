@@ -6,6 +6,7 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from packaging import version
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -145,7 +146,7 @@ class DeepSpeedFPParameter(nn.Parameter):
                 quant_config: DeepSpeedFPConfig):
         try:
             import deepspeed
-            if deepspeed.__version__ < "0.14.2":
+            if version.parse(deepspeed.__version__) < version.parse("0.14.2"):
                 raise ImportError("deepspeed version is wrong. Please "
                                   "install deepspeed>=0.14.2.")
             from deepspeed.ops.fp_quantizer import FP_Quantize

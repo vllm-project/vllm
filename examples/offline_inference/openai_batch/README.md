@@ -19,9 +19,9 @@ We currently support `/v1/chat/completions`, `/v1/embeddings`, and `/v1/score` e
 ## Pre-requisites
 
 * The examples in this document use `meta-llama/Meta-Llama-3-8B-Instruct`.
-  - Create a [user access token](https://huggingface.co/docs/hub/en/security-tokens)
-  - Install the token on your machine (Run `huggingface-cli login`).
-  - Get access to the gated model by [visiting the model card](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and agreeing to the terms and conditions.
+    * Create a [user access token](https://huggingface.co/docs/hub/en/security-tokens)
+    * Install the token on your machine (Run `huggingface-cli login`).
+    * Get access to the gated model by [visiting the model card](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and agreeing to the terms and conditions.
 
 ## Example 1: Running with a local file
 
@@ -105,7 +105,7 @@ To integrate with cloud blob storage, we recommend using presigned urls.
 
 * [Create an S3 bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/creating-bucket.html).
 * The `awscli` package (Run `pip install awscli`) to configure your credentials and interactively use s3.
-  - [Configure your credentials](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-quickstart.html).
+    * [Configure your credentials](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-quickstart.html).
 * The `boto3` python package (Run `pip install boto3`) to generate presigned urls.
 
 ### Step 1: Upload your input script

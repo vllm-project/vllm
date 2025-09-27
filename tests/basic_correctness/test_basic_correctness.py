@@ -11,8 +11,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm import LLM, envs
-from vllm.platforms import current_platform
+from vllm import LLM
 from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 
 from ..conftest import HfRunner, VllmRunner
@@ -25,14 +24,6 @@ MODELS = [
 ]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def test_vllm_gc_ed():
@@ -63,6 +54,8 @@ def _fix_prompt_embed_outputs(
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize("async_scheduling", [True, False])
+@pytest.mark.parametrize("model_executor", ["uni", "mp"])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
 def test_models(
     monkeypatch: pytest.MonkeyPatch,
@@ -71,18 +64,11 @@ def test_models(
     backend: str,
     max_tokens: int,
     enforce_eager: bool,
+    async_scheduling: bool,
+    model_executor: str,
     enable_prompt_embeds: bool,
 ) -> None:
-
-    if enable_prompt_embeds and envs.is_set(
-            "VLLM_USE_V1") and envs.VLLM_USE_V1:
-        pytest.skip("enable_prompt_embeds is not supported in v1.")
-
-    if backend == "FLASHINFER" and current_platform.is_rocm():
-        pytest.skip("Flashinfer does not support ROCm/HIP.")
-
-    if backend in ("XFORMERS",
-                   "FLASHINFER") and model == "google/gemma-2-2b-it":
+    if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")
 
@@ -103,11 +89,15 @@ def test_models(
                     prompt_embeds = hf_model.get_prompt_embeddings(
                         example_prompts)
 
-        with VllmRunner(model,
-                        max_model_len=8192,
-                        enforce_eager=enforce_eager,
-                        enable_prompt_embeds=enable_prompt_embeds,
-                        gpu_memory_utilization=0.7) as vllm_model:
+        with VllmRunner(
+                model,
+                max_model_len=8192,
+                enforce_eager=enforce_eager,
+                enable_prompt_embeds=enable_prompt_embeds,
+                gpu_memory_utilization=0.7,
+                async_scheduling=async_scheduling,
+                distributed_executor_backend=model_executor,
+        ) as vllm_model:
             if enable_prompt_embeds:
                 vllm_outputs = vllm_model.generate_greedy(
                     prompt_embeds, max_tokens)
@@ -141,8 +131,6 @@ def test_models(
         ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
         ("distilbert/distilgpt2", "ray", "", "A100", {}),
         ("distilbert/distilgpt2", "mp", "", "A100", {}),
-        ("distilbert/distilgpt2", "mp", "FLASHINFER", "A100", {}),
-        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100", {}),
     ])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
 def test_models_distributed(
@@ -157,11 +145,6 @@ def test_models_distributed(
     extra_env: dict[str, str],
     enable_prompt_embeds: bool,
 ) -> None:
-
-    if enable_prompt_embeds and envs.is_set(
-            "VLLM_USE_V1") and envs.VLLM_USE_V1:
-        pytest.skip("enable_prompt_embeds is not supported in v1.")
-
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 
@@ -236,13 +219,13 @@ def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
     monkeypatch.setenv('VLLM_ENABLE_V1_MULTIPROCESSING', '0')
 
     with vllm_runner('facebook/opt-125m', enforce_eager=True) as vllm_model:
-        if isinstance(vllm_model.model.llm_engine, LLMEngineV1):
+        if isinstance(vllm_model.llm.llm_engine, LLMEngineV1):
             v1_test_failed_model_execution(vllm_model)
 
 
 def v1_test_failed_model_execution(vllm_model):
 
-    engine = vllm_model.model.llm_engine
+    engine = vllm_model.llm.llm_engine
     mocked_execute_model = Mock(
         side_effect=RuntimeError("Mocked Critical Error"))
     engine.engine_core.engine_core.model_executor.execute_model =\

@@ -70,7 +70,7 @@ def run_e5_v(query: Query) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="royokong/e5-v",
-        task="embed",
+        runner="pooling",
         max_model_len=4096,
         limit_mm_per_prompt={"image": 1},
     )
@@ -102,7 +102,7 @@ def run_vlm2vec(query: Query) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="TIGER-Lab/VLM2Vec-Full",
-        task="embed",
+        runner="pooling",
         max_model_len=4096,
         trust_remote_code=True,
         mm_processor_kwargs={"num_crops": 4},
@@ -122,7 +122,7 @@ def run_jinavl_reranker(query: Query) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model="jinaai/jina-reranker-m0",
-        task="score",
+        runner="pooling",
         max_model_len=32768,
         trust_remote_code=True,
         mm_processor_kwargs={

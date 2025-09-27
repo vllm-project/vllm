@@ -4,7 +4,10 @@
 from typing import Any, Callable, Optional, Union
 
 import torch
+from packaging import version
 
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -13,6 +16,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 
@@ -130,7 +134,7 @@ class BitsAndBytesConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            return BitsAndBytesMoEMethod(self)
+            return BitsAndBytesMoEMethod(self, layer.moe_config)
         return None
 
 
@@ -168,7 +172,8 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: BitsAndBytesConfig):
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.46.1":
+            if version.parse(
+                    bitsandbytes.__version__) < version.parse("0.46.1"):
                 raise ImportError("bitsandbytes version is wrong. Please "
                                   "install bitsandbytes>=0.46.1.")
         except ImportError as err:
@@ -390,12 +395,11 @@ def _apply_bnb_4bit_fake(
 
 
 try:
-    direct_register_custom_op(
-        op_name="apply_bnb_4bit",
-        op_func=_apply_bnb_4bit,
-        mutates_args=["out"],
-        fake_impl=_apply_bnb_4bit_fake,
-    )
+    direct_register_custom_op(op_name="apply_bnb_4bit",
+                              op_func=_apply_bnb_4bit,
+                              mutates_args=["out"],
+                              fake_impl=_apply_bnb_4bit_fake,
+                              dispatch_key=current_platform.dispatch_key)
     apply_bnb_4bit = torch.ops.vllm.apply_bnb_4bit
 
 except AttributeError as error:
@@ -409,17 +413,22 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
        quant_config: The BitsAndBytes quantization config.
     """
 
-    def __init__(self, quant_config: BitsAndBytesConfig):
+    def __init__(
+        self,
+        quant_config: BitsAndBytesConfig,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.45.3":
+            if version.parse(
+                    bitsandbytes.__version__) < version.parse("0.46.1"):
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.45.3.")
+                                  "install bitsandbytes>=0.46.1.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.45.3 via "
-                              "`pip install bitsandbytes>=0.45.3` to use "
+            raise ImportError("Please install bitsandbytes>=0.46.1 via "
+                              "`pip install bitsandbytes>=0.46.1` to use "
                               "bitsandbytes quantizer.") from err
-        self.topk_indices_dtype = None
         self.quant_config = quant_config
 
     def create_weights(
@@ -444,6 +453,10 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             **extra_weight_attrs,
         )
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -458,6 +471,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -465,13 +479,14 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         from vllm.model_executor.layers.fused_moe import fused_experts
+        assert self.fused_experts is None
 
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `BitsAndBytesMoEMethod` yet.")
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -481,6 +496,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
         if self.quant_config.load_in_8bit:
@@ -498,6 +514,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
+            quant_config=self.moe_quant_config,
         )
 
     def _create_weights_4bit(

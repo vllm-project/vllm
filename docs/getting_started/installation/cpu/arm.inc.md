@@ -33,7 +33,7 @@ Testing has been conducted on AWS Graviton3 instances for compatibility.
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 ```bash
-docker build -f docker/Dockerfile.arm \
+docker build -f docker/Dockerfile.cpu \
         --tag vllm-cpu-env .
 
 # Launching OpenAI server
@@ -48,6 +48,10 @@ docker run --rm \
             --dtype=bfloat16 \
             other vLLM OpenAI server arguments
 ```
+
+!!! tip
+    An alternative of `--privileged=true` is `--cap-add SYS_NICE --security-opt seccomp=unconfined`.
+
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:extra-information]
 # --8<-- [end:extra-information]

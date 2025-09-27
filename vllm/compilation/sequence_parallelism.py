@@ -14,7 +14,8 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-from .vllm_inductor_pass import VllmInductorPass
+from .inductor_pass import enable_fake_mode
+from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 
@@ -416,7 +417,7 @@ class LastAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
                                 pm.fwd_only, pm_pass)
 
 
-class SequenceParallelismPass(VllmInductorPass):
+class SequenceParallelismPass(VllmPatternMatcherPass):
     """
     This pass enables sequence parallelism for models.
     It identifies patterns where an AllReduce operation is followed by
@@ -436,6 +437,7 @@ class SequenceParallelismPass(VllmInductorPass):
     performance.
     """
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 
@@ -464,10 +466,7 @@ class SequenceParallelismPass(VllmInductorPass):
 
             LastAllReduceRMSNormPattern(epsilon, self.model_dtype,
                                         self.device).register(self.patterns)
-
-            # WARNING: This is a hack to clear the pattern matcher cache
-            # and allow multiple values of epsilon.
-            torch._inductor.pattern_matcher._seen_patterns.clear()
+        self.dump_patterns(config, self.patterns)
 
     # When sequence parallelism is enabled, the residual tensor from RMSNorm
     # needs to be split along the sequence dimension. However, this dimension
@@ -488,10 +487,7 @@ class SequenceParallelismPass(VllmInductorPass):
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
-        self.begin()
-        self.dump_graph(graph, "before_sequence_parallelism_pass")
-        count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", count)
-        self.dump_graph(graph, "after_sequence_parallelism_pass")
-        self.end_and_log()
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Replaced %s patterns", self.matched_count)

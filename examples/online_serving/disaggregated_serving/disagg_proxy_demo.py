@@ -293,6 +293,8 @@ class Proxy:
             # add params to request
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
+            if "max_completion_tokens" in kv_prepare_request:
+                kv_prepare_request["max_completion_tokens"] = 1
 
             # prefill stage
             prefill_instance = self.schedule(self.prefill_cycler)

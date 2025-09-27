@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.attention import AttentionType
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -16,15 +17,61 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
+from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import GiB_bytes, direct_register_custom_op
+
+logger = init_logger(__name__)
+USE_XFORMERS_OPS = None
+try:
+    tag_cudagraph_unsafe = (torch._C.Tag.cudagraph_unsafe, )
+except AttributeError:
+    tag_cudagraph_unsafe = ()  # type: ignore[assignment]
 
 
-class Attention(nn.Module):
+def check_xformers_availability():
+    global USE_XFORMERS_OPS
+    if USE_XFORMERS_OPS is not None:
+        return USE_XFORMERS_OPS
+
+    if current_platform.is_cuda() and current_platform.has_device_capability(
+            100):
+        # Xformers FA is not compatible with B200
+        USE_XFORMERS_OPS = False
+    else:
+        try:
+            from importlib.util import find_spec
+
+            find_spec("xformers.ops")
+            USE_XFORMERS_OPS = True
+        except ImportError:
+            USE_XFORMERS_OPS = False
+
+    # the warning only needs to be shown once
+    if not USE_XFORMERS_OPS:
+        logger.warning("Xformers is not available, falling back.")
+
+    return USE_XFORMERS_OPS
+
+
+def check_upstream_fa_availability(dtype: torch.dtype):
+    if dtype in (torch.float16, torch.bfloat16) and current_platform.is_cuda(
+    ) and current_platform.has_device_capability(80):
+        from transformers.utils import is_flash_attn_2_available
+        return is_flash_attn_2_available()
+    return False
+
+
+class Attention(nn.Module, AttentionLayerBase):
     """Attention layer.
 
     This class takes query, key, and value tensors as input. The input tensors
@@ -45,13 +92,13 @@ class Attention(nn.Module):
         alibi_slopes: Optional[List[float]] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
         use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
+        attn_backend: Optional[type[AttentionBackend]] = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -71,12 +118,10 @@ class Attention(nn.Module):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
-            is_attention_free = cache_config.is_attention_free
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
             block_size = 16
-            is_attention_free = False
             calculate_kv_scales = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
@@ -98,16 +143,23 @@ class Attention(nn.Module):
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
         self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
 
-        # We also keep the float32 versions of k/v_scale for attention
-        # backends that don't support tensors (Flashinfer)
+        # We also keep q/k/v_scale on host (cpu) memory for attention
+        # backends that require the scales to be on host instead of on device.
+        # e.g. Flashinfer
+        self._q_scale_float = 1.0
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
+
+        # The output scale on host memory. This should be the input scale of
+        # the quant op after this attention layer.
+        self._o_scale_float: Optional[float] = None
 
         self.use_mla = use_mla
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
+        self.has_sink = extra_impl_args.get("sinks") is not None
 
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
@@ -129,29 +181,31 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype,
-                                        block_size,
-                                        is_attention_free,
-                                        blocksparse_params is not None,
-                                        use_mla=use_mla)
-        impl_cls = attn_backend.get_impl_cls()
+        if attn_backend is None:
+            self.attn_backend = get_attn_backend(head_size,
+                                                 dtype,
+                                                 kv_cache_dtype,
+                                                 block_size,
+                                                 use_mla=use_mla,
+                                                 has_sink=self.has_sink)
+        else:
+            self.attn_backend = attn_backend
+
+        impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params, logits_soft_cap, attn_type,
+                             logits_soft_cap, attn_type,
                              kv_sharing_target_layer_name, **extra_impl_args)
-        self.backend = backend_name_to_enum(attn_backend.get_name())
+        self.backend = backend_name_to_enum(self.attn_backend.get_name())
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
         # opaque custom op. For other platforms, we directly call them
         # and let torch.compile handle them.
-        self.use_direct_call = not current_platform.is_cuda_alike(
-        ) and not current_platform.is_cpu()
+        self.use_direct_call = not current_platform.opaque_attention_op()
 
-        self.use_output = attn_backend.accept_output_buffer
+        self.use_output = self.attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -175,9 +229,33 @@ class Attention(nn.Module):
             ).parallel_config.pipeline_parallel_size)
         ]
 
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        try:
+            self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.k_range = torch.tensor(envs.K_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+            self.v_range = torch.tensor(envs.V_SCALE_CONSTANT,
+                                        dtype=torch.float32)
+        except torch.cuda.OutOfMemoryError as e:
+            logger.error(
+                "Failed to initialize attention q/k/v range constants: %s", e)
+            if torch.cuda.is_available():
+                logger.debug("CUDA device: %s", torch.cuda.current_device())
+                logger.debug("Allocated: %.2f GiB",
+                             torch.cuda.memory_allocated() / GiB_bytes)
+                logger.debug("Reserved: %.2f GiB",
+                             torch.cuda.memory_reserved() / GiB_bytes)
+            raise RuntimeError(
+                "Failed to initialize q/k/v range constants. "
+                "This may be caused by insufficient memory to allocate "
+                "kv cache.") from e
+
+        # for attn backends supporting query quantization
+        self.query_quant = None
+        if self.kv_cache_dtype.startswith(
+                "fp8") and self.attn_backend.supports_quant_query_input:
+            self.query_quant = QuantFP8(static=True,
+                                        group_shape=GroupShape.PER_TENSOR)
 
     def forward(
         self,
@@ -202,11 +280,22 @@ class Attention(nn.Module):
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
+
+        output_dtype = query.dtype
+        if self.query_quant is not None:
+            # quantizing with a simple torch operation enables
+            # torch.compile to fuse this into previous ops
+            # which reduces overheads during decoding.
+            # Otherwise queries are quantized using custom ops
+            # which causes decoding overheads
+            assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
+            query, _ = self.query_quant(query, self._q_scale)
+
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
             output = torch.zeros(output_shape,
-                                 dtype=query.dtype,
+                                 dtype=output_dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
             # We skip reshaping query, key and value tensors for the MLA
@@ -256,6 +345,7 @@ class Attention(nn.Module):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._q_scale_float = self._q_scale.item()
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
         # We only calculate the scales once
@@ -272,6 +362,18 @@ class Attention(nn.Module):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if hasattr(self.impl, "process_weights_after_loading"):
             self.impl.process_weights_after_loading(act_dtype)
+
+        # FlashInfer requires attention sinks to be float32
+        if (self.backend == _Backend.FLASHINFER
+                and hasattr(self.impl, 'sinks')):
+            from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+            assert isinstance(self.impl, FlashInferImpl)
+            if (self.impl.sinks is not None
+                    and self.impl.sinks.dtype != torch.float32):
+                self.impl.sinks = self.impl.sinks.to(torch.float32)
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return self.attn_backend
 
 
 class MultiHeadAttention(nn.Module):
@@ -295,24 +397,50 @@ class MultiHeadAttention(nn.Module):
             f"divisible by num_kv_heads ({self.num_kv_heads})"
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        # During model initialization, the default dtype is set as the model
+        # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype=None,
-                                        block_size=16,
-                                        is_attention_free=False)
-        backend = backend_name_to_enum(attn_backend.get_name())
-        if current_platform.is_rocm():
-            # currently, only torch_sdpa is supported on rocm
+
+        # Determine the attention backend
+        backend = get_vit_attn_backend(head_size=head_size, dtype=dtype)
+
+        # Some auto-selected backends can be upgraded
+        # to upstream flash attention if available.
+        # If vllm native fa is selected, we use it directly.
+        use_upstream_fa = False
+        if backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
+                dtype):
+            backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
+
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            # currently, only torch_sdpa is supported on rocm/xpu
             self.attn_backend = _Backend.TORCH_SDPA
         else:
-            if backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1,
-                           _Backend.FLEX_ATTENTION):
-                backend = _Backend.XFORMERS
 
             self.attn_backend = backend if backend in {
-                _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
+                _Backend.TORCH_SDPA,
+                _Backend.XFORMERS,
+                _Backend.PALLAS,
+                _Backend.ROCM_AITER_FA,
+                _Backend.FLASH_ATTN,
             } else _Backend.TORCH_SDPA
+
+        if (self.attn_backend == _Backend.XFORMERS
+                and not check_xformers_availability()):
+            self.attn_backend = _Backend.TORCH_SDPA
+
+        if self.attn_backend == _Backend.FLASH_ATTN:
+            if use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+                self._flash_attn_varlen_func = flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
+                self._flash_attn_varlen_func = flash_attn_varlen_func
+
+        logger.info_once(
+            f"MultiHeadAttention attn_backend: {self.attn_backend}, "
+            f"use_upstream_fa: {use_upstream_fa}")
 
     def forward(
         self,
@@ -320,9 +448,11 @@ class MultiHeadAttention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
     ) -> torch.Tensor:
-        """Input shape: batch_size x seq_len x hidden_size"""
-        # TODO(Isotr0py): Use existing backend implementations and support FA3
-        bsz, q_len, _ = query.size()
+        """Input shape: 
+        (batch_size x seq_len x hidden_size) or
+        (batch_size x seq_len x num_heads x head_size)
+        """
+        bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
 
         query = query.view(bsz, q_len, self.num_heads, self.head_size)
@@ -334,7 +464,27 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend == _Backend.XFORMERS:
+        if self.attn_backend == _Backend.FLASH_ATTN:
+            cu_seqlens_q = torch.arange(0, (bsz + 1) * q_len,
+                                        step=q_len,
+                                        dtype=torch.int32,
+                                        device=query.device)
+            cu_seqlens_k = torch.arange(0, (bsz + 1) * kv_len,
+                                        step=kv_len,
+                                        dtype=torch.int32,
+                                        device=key.device)
+
+            out = self._flash_attn_varlen_func(
+                query.flatten(0, 1),
+                key.flatten(0, 1),
+                value.flatten(0, 1),
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=q_len,
+                max_seqlen_k=kv_len,
+                softmax_scale=self.scale,
+            )
+        elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
             out = xops.memory_efficient_attention_forward(query,
@@ -349,12 +499,25 @@ class MultiHeadAttention(nn.Module):
                                                  value,
                                                  scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend == _Backend.PALLAS_VLLM_V1:
+        elif self.attn_backend == _Backend.PALLAS:
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
             from torch_xla.experimental.custom_kernel import flash_attention
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
+        elif self.attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+
+            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
+            out = flash_attn_varlen_func(query,
+                                         key,
+                                         value,
+                                         softmax_scale=self.scale)
+        else:
+            # ViT attention hasn't supported this backend yet
+            raise NotImplementedError(
+                f"ViT attention hasn't supported {self.attn_backend} "
+                f"backend yet.")
 
         return out.reshape(bsz, q_len, -1)
 
@@ -424,9 +587,8 @@ def unified_attention_fake(
 direct_register_custom_op(
     op_name="unified_attention",
     op_func=unified_attention,
-    mutates_args=[],
     fake_impl=unified_attention_fake,
-    dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
 )
 
 
@@ -437,6 +599,7 @@ def unified_attention_with_output(
     output: torch.Tensor,
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -452,7 +615,8 @@ def unified_attention_with_output(
                       kv_cache,
                       attn_metadata,
                       output=output,
-                      output_scale=output_scale)
+                      output_scale=output_scale,
+                      output_block_scale=output_block_scale)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -464,6 +628,7 @@ def unified_attention_with_output_fake(
     output: torch.Tensor,
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
 ) -> None:
     return
 
@@ -471,7 +636,7 @@ def unified_attention_with_output_fake(
 direct_register_custom_op(
     op_name="unified_attention_with_output",
     op_func=unified_attention_with_output,
-    mutates_args=["output"],
+    mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
-    dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
 )

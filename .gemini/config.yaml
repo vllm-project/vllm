@@ -1,0 +1,6 @@
+# https://developers.google.com/gemini-code-assist/docs/customize-gemini-behavior-github
+have_fun: false  # Just review the code
+code_review:
+  comment_severity_threshold: HIGH  # Reduce quantity of comments
+  pull_request_opened:
+    summary: false  # Don't summarize the PR in a separate comment

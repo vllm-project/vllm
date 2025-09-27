@@ -7,6 +7,7 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed import get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
@@ -40,12 +41,23 @@ class XPUWorker(Worker):
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
+            logger.debug(
+                "Profiler config: record_shapes=%s,"
+                "profile_memory=%s,with_stack=%s,with_flops=%s",
+                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
+            )
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.XPU,
                 ],
-                with_stack=True,
+                record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir, use_gzip=True))
         else:
@@ -72,7 +84,7 @@ class XPUWorker(Worker):
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
         The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
+        Then, it calculates the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
         .. tip::
             You may limit the usage of GPU memory
@@ -133,6 +145,7 @@ class XPUWorker(Worker):
         ):
             self.device = torch.device(f"xpu:{self.local_rank}")
             current_platform.set_device(self.device)
+            current_platform.check_if_supports_dtype(self.model_config.dtype)
             torch.xpu.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
                 self.local_rank).total_memory
@@ -140,7 +153,7 @@ class XPUWorker(Worker):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
 
-        ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE", "drmfd")
+        ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE", "pidfd")
         ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
         ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE",
                                          str(self.parallel_config.world_size))
@@ -155,7 +168,8 @@ class XPUWorker(Worker):
                                             current_platform.dist_backend)
 
         # global all_reduce needed for overall oneccl warm up
-        torch.distributed.all_reduce(torch.zeros(1).xpu())
+        torch.distributed.all_reduce(torch.zeros(1).xpu(),
+                                     group=get_world_group().device_group)
 
         # Set random seed.
         set_random_seed(self.model_config.seed)

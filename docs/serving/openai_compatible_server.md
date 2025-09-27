@@ -45,17 +45,17 @@ To call the server, in your preferred text editor, create a script that uses an 
 We currently support the following OpenAI APIs:
 
 - [Completions API][completions-api] (`/v1/completions`)
-    - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`).
+    - Only applicable to [text generation models](../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API][chat-api] (`/v1/chat/completions`)
-    - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`) with a [chat template][chat-template].
+    - Only applicable to [text generation models](../models/generative_models.md) with a [chat template][chat-template].
     - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API][embeddings-api] (`/v1/embeddings`)
-    - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
+    - Only applicable to [embedding models](../models/pooling_models.md).
 - [Transcriptions API][transcriptions-api] (`/v1/audio/transcriptions`)
-    - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 - [Translation API][translations-api] (`/v1/audio/translations`)
-    - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 
 In addition, we have the following custom APIs:
 
@@ -64,14 +64,14 @@ In addition, we have the following custom APIs:
 - [Pooling API][pooling-api] (`/pooling`)
     - Applicable to all [pooling models](../models/pooling_models.md).
 - [Classification API][classification-api] (`/classify`)
-    - Only applicable to [classification models](../models/pooling_models.md) (`--task classify`).
+    - Only applicable to [classification models](../models/pooling_models.md).
 - [Score API][score-api] (`/score`)
-    - Applicable to embedding models and [cross-encoder models](../models/pooling_models.md) (`--task score`).
+    - Applicable to [embedding models and cross-encoder models](../models/pooling_models.md).
 - [Re-rank API][rerank-api] (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
-    - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
+    - Only applicable to [cross-encoder models](../models/pooling_models.md).
 
 [](){ #chat-template }
 
@@ -133,7 +133,7 @@ completion = client.chat.completions.create(
         {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
     ],
     extra_body={
-        "guided_choice": ["positive", "negative"]
+        "structured_outputs": {"choice": ["positive", "negative"]}
     }
 )
 ```
@@ -206,6 +206,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
 see our [Multimodal Inputs](../features/multimodal_inputs.md) guide for more information.
+
 - *Note: `image_url.detail` parameter is not supported.*
 
 Code example: <gh-file:examples/online_serving/openai_chat_completion_client.py>
@@ -238,7 +239,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 If the model has a [chat template][chat-template], you can replace `inputs` with a list of `messages` (same schema as [Chat API][chat-api])
 which will be treated as a single prompt to the model.
 
-Code example: <gh-file:examples/online_serving/openai_embedding_client.py>
+Code example: <gh-file:examples/online_serving/pooling/openai_embedding_client.py>
 
 #### Multi-modal inputs
 
@@ -250,14 +251,14 @@ and passing a list of `messages` in the request. Refer to the examples below for
     To serve the model:
 
     ```bash
-    vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
+    vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
       --trust-remote-code \
       --max-model-len 4096 \
       --chat-template examples/template_vlm2vec.jinja
     ```
 
     !!! important
-        Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embed`
+        Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--runner pooling`
         to run this model in embedding mode instead of text generation mode.
 
         The custom chat template is completely different from the original one for this model,
@@ -296,14 +297,14 @@ and passing a list of `messages` in the request. Refer to the examples below for
     To serve the model:
 
     ```bash
-    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
+    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --runner pooling \
       --trust-remote-code \
       --max-model-len 8192 \
       --chat-template examples/template_dse_qwen2_vl.jinja
     ```
 
     !!! important
-        Like with VLM2Vec, we have to explicitly pass `--task embed`.
+        Like with VLM2Vec, we have to explicitly pass `--runner pooling`.
 
         Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
         by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
@@ -312,14 +313,15 @@ and passing a list of `messages` in the request. Refer to the examples below for
         `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
         example below for details.
 
-Full example: <gh-file:examples/online_serving/openai_chat_embedding_client_for_multimodal.py>
+Full example: <gh-file:examples/online_serving/pooling/openai_chat_embedding_client_for_multimodal.py>
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:embedding-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:embedding-pooling-params"
 ```
 
 The following extra parameters are supported by default:
@@ -349,7 +351,91 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
     To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
 
 Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
-<!-- TODO: api enforced limits + uploading audios -->
+
+#### API Enforced Limits
+
+Set the maximum audio file size (in MB) that VLLM will accept, via the
+`VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` environment variable. Default is 25 MB.
+
+#### Uploading Audio Files
+
+The Transcriptions API supports uploading audio files in various formats including FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, and WEBM.
+
+**Using OpenAI Python Client:**
+
+??? code
+
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url="http://localhost:8000/v1",
+        api_key="token-abc123",
+    )
+
+    # Upload audio file from disk
+    with open("audio.mp3", "rb") as audio_file:
+        transcription = client.audio.transcriptions.create(
+            model="openai/whisper-large-v3-turbo",
+            file=audio_file,
+            language="en",
+            response_format="verbose_json"
+        )
+
+    print(transcription.text)
+    ```
+
+**Using curl with multipart/form-data:**
+
+??? code
+
+    ```bash
+    curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
+      -H "Authorization: Bearer token-abc123" \
+      -F "file=@audio.mp3" \
+      -F "model=openai/whisper-large-v3-turbo" \
+      -F "language=en" \
+      -F "response_format=verbose_json"
+    ```
+
+**Supported Parameters:**
+
+- `file`: The audio file to transcribe (required)
+- `model`: The model to use for transcription (required)
+- `language`: The language code (e.g., "en", "zh") (optional)
+- `prompt`: Optional text to guide the transcription style (optional)
+- `response_format`: Format of the response ("json", "text") (optional)
+- `temperature`: Sampling temperature between 0 and 1 (optional)
+
+For the complete list of supported parameters including sampling parameters and vLLM extensions, see the [protocol definitions](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/protocol.py#L2182).
+
+**Response Format:**
+
+For `verbose_json` response format:
+
+??? code
+
+    ```json
+    {
+      "text": "Hello, this is a transcription of the audio file.",
+      "language": "en",
+      "duration": 5.42,
+      "segments": [
+        {
+          "id": 0,
+          "seek": 0,
+          "start": 0.0,
+          "end": 2.5,
+          "text": "Hello, this is a transcription",
+          "tokens": [50364, 938, 428, 307, 275, 28347],
+          "temperature": 0.0,
+          "avg_logprob": -0.245,
+          "compression_ratio": 1.235,
+          "no_speech_prob": 0.012
+        }
+      ]
+    }
+    ```
 
 #### Extra Parameters
 
@@ -368,7 +454,7 @@ The following extra parameters are supported:
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
     ```
-  
+
 [](){ #translations-api }
 
 ### Translations API
@@ -415,7 +501,7 @@ Our Pooling API encodes input prompts using a [pooling model](../models/pooling_
 
 The input format is the same as [Embeddings API][embeddings-api], but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
-Code example: <gh-file:examples/online_serving/openai_pooling_client.py>
+Code example: <gh-file:examples/online_serving/pooling/openai_pooling_client.py>
 
 [](){ #classification-api }
 
@@ -425,7 +511,7 @@ Our Classification API directly supports Hugging Face sequence-classification mo
 
 We automatically wrap any other transformer via `as_seq_cls_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
 
-Code example: <gh-file:examples/online_serving/openai_classification_client.py>
+Code example: <gh-file:examples/online_serving/pooling/openai_classification_client.py>
 
 #### Example Requests
 
@@ -521,10 +607,11 @@ curl -v "http://127.0.0.1:8000/classify" \
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:classification-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classification-pooling-params"
 ```
 
 The following extra parameters are supported:
@@ -727,10 +814,11 @@ Full example: <gh-file:examples/online_serving/openai_cross_encoder_score_for_mu
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:score-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classification-pooling-params"
 ```
 
 The following extra parameters are supported:
@@ -754,7 +842,7 @@ endpoints are compatible with both [Jina AI's re-rank API interface](https://jin
 [Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
 popular open-source tools.
 
-Code example: <gh-file:examples/online_serving/jinaai_rerank_client.py>
+Code example: <gh-file:examples/online_serving/pooling/jinaai_rerank_client.py>
 
 #### Example Request
 
@@ -809,10 +897,11 @@ Result documents will be sorted by relevance, and the `index` property can be us
 
 #### Extra parameters
 
-The following [pooling parameters][pooling-params] are supported.
+The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:rerank-pooling-params"
+--8<-- "vllm/pooling_params.py:common-pooling-params"
+--8<-- "vllm/pooling_params.py:classification-pooling-params"
 ```
 
 The following extra parameters are supported:
