@@ -183,23 +183,24 @@ class EplbState:
             return global_physical_to_logical_map
 
         elif expert_placement_strategy == "round_robin":
-            assert num_redundant_experts == 0, "Round-robin expert "\
-                " placement is not supported with redundant experts."
+            assert num_redundant_experts == 0, (
+                "Round-robin expert placement is not supported with "
+                "redundant experts.")
 
             ep_group = get_ep_group().device_group
             ep_size = ep_group.size()
 
+            base = num_routed_experts // ep_size
+            remainder = num_routed_experts % ep_size
             global_physical_to_logical_map = []
-            i = 0
-            num_local_experts = num_routed_experts // ep_size
-            while i < ep_size:
-                global_physical_to_logical_map.extend(
-                    range(i, i + ep_size * num_local_experts, ep_size))
-                i += 1
+            for i in range(ep_size):
+                cnt = base + (1 if i < remainder else 0)
+                for k in range(cnt):
+                    gid = i + k * ep_size
+                    if gid < num_routed_experts:
+                        global_physical_to_logical_map.append(gid)
 
-            return global_physical_to_logical_map if num_routed_experts % \
-                ep_size == 0 else \
-                    global_physical_to_logical_map[:num_routed_experts]
+            return global_physical_to_logical_map
         else:
             raise ValueError("Unsupported expert placement strategy "
                              f"'{expert_placement_strategy}', expected one of "
