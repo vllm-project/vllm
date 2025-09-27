@@ -101,7 +101,7 @@ class P2pNcclEngine:
         if proxy_ip == "" or proxy_port == "":
             self.proxy_address = ""
         else:
-            self.proxy_address = proxy_ip + ":" + proxy_port
+            self.proxy_address = proxy_ip + ":" + str(proxy_port)
 
         self.context = zmq.Context()
         self.router_socket = self.context.socket(zmq.ROUTER)
