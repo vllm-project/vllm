@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import pytest
 import torch
@@ -17,7 +17,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 # yapf: disable
 from vllm.v1.core.kv_cache_utils import (
     BlockHash, FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
-    estimate_max_model_len, generate_block_hash_extra_keys,
+    _tensor_bytes, estimate_max_model_len, generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config, get_kv_cache_configs,
     get_max_concurrency_for_kv_cache_config, get_request_block_hasher,
     hash_block_tokens, init_none_hash, is_kv_cache_spec_uniform,
@@ -44,12 +44,13 @@ def _auto_init_hash_fn(request):
 
 def make_request(
     request_id: str,
-    prompt_token_ids: list[int],
+    prompt_token_ids: Optional[list[int]],
     block_size: int = 3,
     hash_fn: Callable = hash,
     mm_positions: Optional[list[PlaceholderRange]] = None,
     mm_hashes: Optional[list[str]] = None,
     cache_salt: Optional[str] = None,
+    prompt_embeds: Optional[torch.Tensor] = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -69,6 +70,7 @@ def make_request(
                    pooling_params=None,
                    eos_token_id=100,
                    lora_request=None,
+                   prompt_embeds=prompt_embeds,
                    cache_salt=cache_salt,
                    block_hasher=get_request_block_hasher(block_size, hash_fn))
 
@@ -442,7 +444,8 @@ def test_hash_block_tokens(hash_fn):
 
     block_hash = hash_block_tokens(hash_fn, parent_block_hash,
                                    curr_block_token_ids, extra_keys)
-    expected = hash_fn((parent_block_hash, curr_block_token_ids, extra_keys))
+    expected = hash_fn(
+        (parent_block_hash, curr_block_token_ids, None, extra_keys))
     assert block_hash == expected
 
 
@@ -463,9 +466,9 @@ def test_request_block_hasher(hash_fn):
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
     assert block_hashes[0] == hash_fn(
-        (kv_cache_utils.NONE_HASH, (0, 1, 2), ("hash1", )))
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), None, ("hash1", )))
     assert block_hashes[1] == hash_fn(
-        (block_hashes[0], (3, 4, 5), ("hash2", )))
+        (block_hashes[0], (3, 4, 5), None, ("hash2", )))
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -511,8 +514,8 @@ def test_hash_request_tokens_no_mm_inputs(hash_fn):
 
     assert len(block_hashes) == 2
     assert block_hashes[0] == hash_fn(
-        (kv_cache_utils.NONE_HASH, (0, 1, 2), None))
-    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), None))
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), None, None))
+    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), None, None))
 
 
 def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:
@@ -1412,3 +1415,150 @@ def test_generate_scheduler_kv_cache_config():
             KVCacheGroupSpec(['layer_1', 'layer_2'], new_kv_cache_spec())
         ],
     )
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_hash_block_tokens_with_prompt_embeds(hash_fn: Callable[[Any], bytes]):
+    parent_block_hash = BlockHash(b"123")
+    curr_block_token_ids = (1, 2, 3)
+    extra_keys = ("key1", "key2")
+    prompt_embeds = torch.randn((2, 3))
+
+    block_hash_with_embeds = hash_block_tokens(hash_fn, parent_block_hash,
+                                               curr_block_token_ids,
+                                               extra_keys, prompt_embeds)
+
+    prompt_embeds_bytes = _tensor_bytes(prompt_embeds)
+    expected = hash_fn((parent_block_hash, curr_block_token_ids,
+                        prompt_embeds_bytes, extra_keys))
+    assert block_hash_with_embeds == expected
+
+    block_hash_without_embeds = hash_block_tokens(hash_fn, parent_block_hash,
+                                                  curr_block_token_ids,
+                                                  extra_keys, None)
+    expected_without = hash_fn(
+        (parent_block_hash, curr_block_token_ids, None, extra_keys))
+    assert block_hash_without_embeds == expected_without
+    assert block_hash_with_embeds != block_hash_without_embeds
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_hash_different_prompt_embeds(hash_fn: Callable[[Any], bytes]):
+    parent_block_hash = BlockHash(b"123")
+    curr_block_token_ids = (1, 2, 3)
+    prompt_embeds1 = torch.randn((2, 3))
+    prompt_embeds2 = torch.randn((2, 3))
+
+    hash1 = hash_block_tokens(hash_fn, parent_block_hash, curr_block_token_ids,
+                              None, prompt_embeds1)
+    hash2 = hash_block_tokens(hash_fn, parent_block_hash, curr_block_token_ids,
+                              None, prompt_embeds2)
+
+    assert hash1 != hash2
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any],
+                                                                   bytes]):
+    block_size = 3
+    num_tokens = 2 * block_size
+    prompt_token_ids = [_ for _ in range(num_tokens)]
+    hidden_size = 5
+    prompt_embeds = torch.randn((num_tokens, hidden_size))
+
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=prompt_token_ids,
+        block_size=block_size,
+        hash_fn=hash_fn,
+        prompt_embeds=prompt_embeds,
+    )
+
+    block_hashes = request.block_hashes
+    assert len(block_hashes) == 2
+
+    block1_embeds_bytes = _tensor_bytes(prompt_embeds[:block_size])
+    expected_hash1 = hash_fn(
+        (kv_cache_utils.NONE_HASH, tuple(prompt_token_ids[:block_size]),
+         block1_embeds_bytes, None))
+    assert block_hashes[0] == expected_hash1
+
+    block2_embeds_bytes = _tensor_bytes(prompt_embeds[block_size:num_tokens])
+    expected_hash2 = hash_fn(
+        (block_hashes[0], tuple(prompt_token_ids[block_size:num_tokens]),
+         block2_embeds_bytes, None))
+    assert block_hashes[1] == expected_hash2
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any],
+                                                                    bytes]):
+    block_size = 3
+    num_tokens = 2 * block_size
+    prompt_token_ids = [_ for _ in range(num_tokens)]
+    hidden_size = 5
+    prompt_embeds = torch.randn((num_tokens, hidden_size))
+
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=prompt_token_ids,
+        block_size=block_size,
+        hash_fn=hash_fn,
+        mm_positions=[
+            PlaceholderRange(offset=0, length=3),
+            PlaceholderRange(offset=3, length=3),
+        ],
+        mm_hashes=["hash1", "hash2"],
+        prompt_embeds=prompt_embeds,
+    )
+
+    block_hashes = request.block_hashes
+    assert len(block_hashes) == 2
+
+    block1_embeds_bytes = _tensor_bytes(prompt_embeds[:block_size])
+    expected_hash1 = hash_fn(
+        (kv_cache_utils.NONE_HASH, tuple(prompt_token_ids[:block_size]),
+         block1_embeds_bytes, ("hash1", )))
+    assert block_hashes[0] == expected_hash1
+
+    block2_embeds_bytes = _tensor_bytes(prompt_embeds[block_size:num_tokens])
+    expected_hash2 = hash_fn(
+        (block_hashes[0], tuple(prompt_token_ids[block_size:num_tokens]),
+         block2_embeds_bytes, ("hash2", )))
+    assert block_hashes[1] == expected_hash2
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_with_prompt_embeds_no_mm(hash_fn: Callable[[Any], bytes]):
+    """Test request with prompt embeddings but no multimodal inputs"""
+    block_size = 3
+    num_tokens = 2 * block_size
+    prompt_token_ids = [_ for _ in range(num_tokens)]
+    hidden_size = 5
+    prompt_embeds = torch.randn((num_tokens, hidden_size))
+
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=prompt_token_ids,
+        block_size=block_size,
+        hash_fn=hash_fn,
+        mm_positions=None,
+        mm_hashes=None,
+        prompt_embeds=prompt_embeds,
+    )
+
+    block_hashes = request.block_hashes
+    assert len(block_hashes) == 2
+
+    # Verify hashes include prompt embeddings but no mm keys
+    block1_embeds_bytes = _tensor_bytes(prompt_embeds[:block_size])
+    expected_hash1 = hash_fn(
+        (kv_cache_utils.NONE_HASH, tuple(prompt_token_ids[:block_size]),
+         block1_embeds_bytes, None))
+    assert block_hashes[0] == expected_hash1
+
+    block2_embeds_bytes = _tensor_bytes(prompt_embeds[block_size:num_tokens])
+    expected_hash2 = hash_fn(
+        (block_hashes[0], tuple(prompt_token_ids[block_size:num_tokens]),
+         block2_embeds_bytes, None))
+    assert block_hashes[1] == expected_hash2
