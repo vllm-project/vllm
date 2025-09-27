@@ -465,7 +465,7 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
-- label: Model Executor Test # ???
+- label: Model Executor Test # 23min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
