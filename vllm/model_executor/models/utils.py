@@ -210,7 +210,6 @@ class AutoWeightsLoader:
         base_prefix: str,
         module: nn.Module,
         weights: Iterable[tuple[str, torch.Tensor]],
-        expert_mapping: Optional[list[tuple[str, str, int, str]]],
     ) -> Iterable[str]:
         if isinstance(module, PPMissingLayer):
             return
@@ -247,33 +246,9 @@ class AutoWeightsLoader:
 
                     continue
 
-                if expert_mapping is not None and child_prefix == "experts":
-                    for expert_name, loaded_weight in child_weights:
-                        for e_m in expert_mapping:
-                            param_name, weight_name, expert_id, shard_id = e_m
-                            experts_name = f"experts.{expert_name}"
-                            if weight_name not in experts_name:
-                                continue
-                            fused_moe = child_modules[child_prefix]
-                            mapped_name = experts_name.replace(
-                                weight_name,
-                                param_name).removeprefix("experts.")
-                            param = getattr(fused_moe, mapped_name)
-                            weight_name = maybe_prefix(prefix, mapped_name)
-                            fused_moe.weight_loader(
-                                param=param,
-                                loaded_weight=loaded_weight,
-                                weight_name=weight_name,
-                                shard_id=shard_id,
-                                expert_id=expert_id,
-                            )
-                            logger.debug("Loaded %s for expert %d into %s",
-                                         mapped_name, expert_id, prefix)
-                            yield weight_name
-
                 yield from self._load_module(prefix,
                                              child_modules[child_prefix],
-                                             child_weights, expert_mapping)
+                                             child_weights)
             elif child_prefix in child_params:
                 if self._can_skip(prefix):
                     logger.debug("Skipping param %s", prefix)
@@ -306,7 +281,6 @@ class AutoWeightsLoader:
         weights: Iterable[tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
-        expert_mapping: Optional[list[tuple[str, str, int, str]]] = None,
     ) -> set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
@@ -314,8 +288,7 @@ class AutoWeightsLoader:
         weights = ((name, weight) for name, weight in weights
                    if not self._can_skip(name))
 
-        autoloaded_weights = set(
-            self._load_module("", self.module, weights, expert_mapping))
+        autoloaded_weights = set(self._load_module("", self.module, weights))
         return autoloaded_weights
 
 

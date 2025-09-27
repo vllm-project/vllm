@@ -15,7 +15,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Wrapper around `transformers` MoE models."""
-from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -33,7 +32,7 @@ from .transformers import (TransformersBase, TransformersForCausalLM,
                            TransformersForMultimodalLM, TransformersModel,
                            can_enable_torch_compile, log_replacement,
                            replace_linear_class)
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import maybe_prefix
 
 
 @CustomOp.register("transformers_fused_moe")
@@ -188,6 +187,9 @@ class TransformersMoEBase(TransformersBase):
         elif "grok1" in wrapped_arch:
             activation = "gelu"
 
+        # Expert mapping for `AutoWeightsLoader`
+        expert_mapping = self.get_expert_mapping()
+
         # Configs
         quant_config = self.quant_config
         parallel_config = self.parallel_config
@@ -198,7 +200,7 @@ class TransformersMoEBase(TransformersBase):
         num_redundant_experts = eplb_config.num_redundant_experts
 
         # Recursively fuse MoE layers
-        def _fused_moe(module: nn.Module, prefix: str = ""):
+        def _fused_moe(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
                 if (child_name == "experts"
@@ -244,6 +246,7 @@ class TransformersMoEBase(TransformersBase):
                         enable_eplb=enable_eplb,
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
+                        expert_mapping=expert_mapping,
                     )
                     mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
@@ -255,18 +258,7 @@ class TransformersMoEBase(TransformersBase):
                 else:
                     _fused_moe(child_module, prefix=qual_name)
 
-        _fused_moe(self.model)
-
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=self.skip_prefixes)
-        return loader.load_weights(
-            weights,
-            mapper=self.hf_to_vllm_mapper,
-            expert_mapping=self.get_expert_mapping(),
-        )
+        _fused_moe(self.model, prefix="model")
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
