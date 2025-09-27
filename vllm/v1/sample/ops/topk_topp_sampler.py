@@ -235,36 +235,45 @@ def apply_top_k_top_p_triton(
 ) -> torch.Tensor:
 
     batch_size, vocab_size = logits.shape
-    BLOCK_SIZE = 8192
-    NUM_PROGRAMS = 128
-    NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
-    SIGMA = 2.5
+    device_prop = torch.cuda.get_device_properties(logits.device)
+    NUM_PROGRAMS = device_prop.multi_processor_count
+    SIGMA = 2.15  # Top 0.03 outliers
 
     if k is not None and p is None:
         probs = torch.full((NUM_PROGRAMS, vocab_size),
                            -float('inf'),
                            device=logits.device)
         _topk_kernel[(NUM_PROGRAMS, )](logits, probs, k, batch_size, SIGMA,
-                                       vocab_size, BLOCK_SIZE, NUM_TILES)
+                                       vocab_size)
     elif k is None and p is not None:
         probs = torch.full_like(logits, -float('inf'), device=logits.device)
         probs_2 = torch.full_like(logits, -float('inf'), device=logits.device)
         _topp_kernel[(NUM_PROGRAMS, )](logits, probs, probs_2, p, batch_size,
-                                       SIGMA, vocab_size, BLOCK_SIZE,
-                                       NUM_TILES)
+                                       SIGMA, vocab_size)
     elif k is not None and p is not None:
         probs = torch.full_like(logits, -float('inf'), device=logits.device)
         _topk_topp_kernel[(NUM_PROGRAMS, )](logits, probs, k, p, batch_size,
-                                            SIGMA, vocab_size, BLOCK_SIZE,
-                                            NUM_TILES)
+                                            SIGMA, vocab_size)
     return logits
 
 
+def triton_get_configs():
+    return [
+        triton.Config({'BLOCK_SIZE': B}, num_stages=s, num_warps=w)
+        for B in [4096, 8192, 16384] for s in [1, 2, 3, 4] for w in [4, 8, 16]
+    ]
+
+
+@triton.autotune(
+    configs=triton_get_configs(),
+    key=['N'],
+)
 @triton.jit
 def _topk_kernel(LOGITS, PROBS, K, B, SIGMA: tl.constexpr, N: tl.constexpr,
-                 BLOCK_SIZE: tl.constexpr, NUM_TILES: tl.constexpr):
+                 BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
+    NUM_TILES: tl.constexpr = (N + BLOCK_SIZE - 1) // BLOCK_SIZE
     for row_id in tl.range(pid, B, num_programs):
         k = tl.load(K + row_id)
         if k != N:  # All tokens are valid
@@ -385,10 +394,14 @@ def _topk_kernel(LOGITS, PROBS, K, B, SIGMA: tl.constexpr, N: tl.constexpr,
                     tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
 
 
+@triton.autotune(
+    configs=triton_get_configs(),
+    key=['N'],
+)
 @triton.jit
 def _topp_kernel(LOGITS, PROBS, PROBS_2, P, B, SIGMA: tl.constexpr,
-                 N: tl.constexpr, BLOCK_SIZE: tl.constexpr,
-                 NUM_TILES: tl.constexpr):
+                 N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    NUM_TILES: tl.constexpr = (N + BLOCK_SIZE - 1) // BLOCK_SIZE
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
     for row_id in tl.range(pid, B, num_programs):
@@ -576,10 +589,14 @@ def _topp_kernel(LOGITS, PROBS, PROBS_2, P, B, SIGMA: tl.constexpr,
                     tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
 
 
+@triton.autotune(
+    configs=triton_get_configs(),
+    key=['N'],
+)
 @triton.jit
 def _topk_topp_kernel(LOGITS, PROBS, K, P, B, SIGMA: tl.constexpr,
-                      N: tl.constexpr, BLOCK_SIZE: tl.constexpr,
-                      NUM_TILES: tl.constexpr):
+                      N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+    NUM_TILES: tl.constexpr = (N + BLOCK_SIZE - 1) // BLOCK_SIZE
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
     for row_id in tl.range(pid, B, num_programs):

@@ -67,10 +67,15 @@ def test_accuracy(logits, k, p):
     return is_correct
 
 
-def test_time(logits, k, p, num_runs=256):
+def test_time(logits, k, p, num_runs=30, num_warmup=5):
     # We must clone the logits for each run to avoid modifying the original
+    warmup_tensor = logits.clone()
+    for _ in range(num_warmup):
+        apply_top_k_top_p(warmup_tensor, k, p)
+        apply_top_k_top_p_triton(warmup_tensor, k, p)
+    torch.cuda.synchronize()
+
     input_logits_torch = [logits.clone() for _ in range(num_runs)]
-    input_logits_triton = [logits.clone() for _ in range(num_runs)]
 
     torch.cuda.synchronize()
     start_time = time.time()
@@ -78,6 +83,8 @@ def test_time(logits, k, p, num_runs=256):
         input_logits_torch[_] = apply_top_k_top_p(input_logits_torch[_], k, p)
     torch.cuda.synchronize()
     torch_time_taken = (time.time() - start_time) / num_runs
+
+    input_logits_triton = [logits.clone() for _ in range(num_runs)]
 
     torch.cuda.synchronize()
     start_time = time.time()
@@ -92,12 +99,18 @@ def test_time(logits, k, p, num_runs=256):
 
 if __name__ == "__main__":
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # batch_size_list = [2**i for i in range(0, 11)]  # 1 to 1024
+    # vocab_size_list = [2**i for i in range(12, 18)] + [102400, 128256]
+    # p_list = [None, "RAND"] + [0.2 * i
+    #                            for i in range(1, 6)] + [0.9, 0.95, 0.99]
+    # k_list = [None, "RAND"] + [i for i in range(1, 11, 3)
+    #                            ] + [i for i in range(20, 230, 50)]
+
     batch_size_list = [2**i for i in range(0, 11)]  # 1 to 1024
-    vocab_size_list = [2**i for i in range(10, 19, 2)]  # 1024 to 131072
-    p_list = [None, "RAND"] + [0.2 * i
-                               for i in range(1, 6)] + [0.9, 0.95, 0.99]
-    k_list = [None, "RAND"] + [i for i in range(1, 10, 2)
-                               ] + [i for i in range(20, 210, 40)]
+    vocab_size_list = [4096, 32768, 131072, 102400, 128256]
+    p_list = [None, "RAND", 0.4, 0.7, 0.9, 0.95, 0.99]
+    k_list = [None, "RAND", 5, 10, 50, 100, 200]
+
     log_file = f"triton_topk_topp_test_{date_str}.log"
     csv_file = f"triton_topk_topp_test_{date_str}.csv"
 
@@ -119,21 +132,18 @@ if __name__ == "__main__":
         if p == "RAND" and k == "RAND":
             continue
 
-        logits_rand = torch.rand(batch_size, vocab_size, device="cuda")
-        logits_randn = torch.randn(batch_size, vocab_size, device="cuda")
-        logits_list = [("RAND", logits_rand), ("RANDN", logits_randn)]
+        logits_randn = torch.randn(batch_size, vocab_size, device="cuda") * 10
+        logits_list = [("RANDN", logits_randn)]
 
         if p == "RAND":
-            p_tensor = torch.rand((batch_size, ), device="cuda") * 0.95 + 0.05
+            p_tensor = torch.rand((batch_size, ), device="cuda") * 0.9 + 0.05
         elif p is not None:
             p_tensor = torch.full((batch_size, ), p, device="cuda")
         else:
             p_tensor = None
 
         if k == "RAND":
-            k_tensor = torch.randint(1,
-                                     vocab_size, (batch_size, ),
-                                     device="cuda")
+            k_tensor = torch.randint(1, 300, (batch_size, ), device="cuda")
         elif k is not None:
             k_tensor = torch.full((batch_size, ), k, device="cuda")
         else:
