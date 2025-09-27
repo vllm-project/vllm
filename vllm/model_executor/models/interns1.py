@@ -516,6 +516,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         image_size = config.vision_config.image_size[0]
         patch_size = config.vision_config.patch_size[0]
@@ -529,6 +530,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             config,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
+            use_data_parallel=self.use_data_parallel,
         )
 
         self.language_model = init_vllm_registered_model(
@@ -552,6 +554,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         quant_config: Optional[QuantizationConfig],
         *,
         prefix: str,
+        use_data_parallel: bool = False,
     ):
         num_hidden_layers = config.vision_config.num_hidden_layers
         return InternS1VisionModel(
@@ -559,6 +562,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers,
             prefix=prefix,
+            use_data_parallel=use_data_parallel,
         )
 
     def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
