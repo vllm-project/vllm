@@ -86,6 +86,8 @@ class LLM:
             or videos from directories specified by the server file system.
             This is a security risk. Should only be enabled in trusted
             environments.
+        allowed_media_domains: If set, only media URLs that belong to this 
+            domain can be used for multi-modal inputs.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
@@ -169,6 +171,7 @@ class LLM:
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
+        allowed_media_domains: Optional[list[str]] = None,
         tensor_parallel_size: int = 1,
         dtype: ModelDType = "auto",
         quantization: Optional[QuantizationMethods] = None,
@@ -264,6 +267,7 @@ class LLM:
             skip_tokenizer_init=skip_tokenizer_init,
             trust_remote_code=trust_remote_code,
             allowed_local_media_path=allowed_local_media_path,
+            allowed_media_domains=allowed_media_domains,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             quantization=quantization,
