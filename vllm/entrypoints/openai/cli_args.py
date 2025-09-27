@@ -103,9 +103,13 @@ class FrontendArgs:
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     """The format to render message content within a chat template.
 
-* "string" will render the content as a string. Example: `"Hello World"`
-* "openai" will render the content as a list of dictionaries, similar to OpenAI
-schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
+    * "string" will render the content as a string. Example: `"Hello World"`
+    * "openai" will render the content as a list of dictionaries, similar to
+      OpenAI schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
+    trust_request_chat_template: bool = False
+    """Whether to trust the chat template provided in the request. If False,
+    the server will always use the chat template specified by `--chat-template`
+    or the ones from tokenizer."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
     ssl_keyfile: Optional[str] = None
