@@ -8,11 +8,11 @@ from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy)
 from torch.nn import Parameter
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_fp8_block_linear, check_aiter_fp8_linear_support,
-    create_fp8_input_scale, create_fp8_scale_parameter,
+    apply_fp8_block_linear, create_fp8_input_scale, create_fp8_scale_parameter,
     create_fp8_weight_parameter, maybe_post_process_fp8_weight_block,
     process_fp8_weight_block_strategy, process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy, validate_fp8_block_shape)
@@ -49,7 +49,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         self.weight_block_size = self.weight_quant.block_structure
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-        self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
+        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enaled()
 
     @classmethod
     def get_min_capability(cls) -> int:

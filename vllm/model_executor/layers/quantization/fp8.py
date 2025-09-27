@@ -10,6 +10,7 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -33,8 +34,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_fp8_block_linear, check_aiter_fp8_linear_support,
-    create_fp8_input_scale, create_fp8_scale_parameter,
+    apply_fp8_block_linear, create_fp8_input_scale, create_fp8_scale_parameter,
     create_fp8_weight_parameter, expert_weight_is_col_major,
     maybe_post_process_fp8_weight_block, process_fp8_weight_block_strategy,
     process_fp8_weight_tensor_strategy, requant_weight_ue8m0_inplace,
@@ -237,7 +237,9 @@ class Fp8LinearMethod(LinearMethodBase):
         if current_platform.is_rocm():
             self.use_marlin = False
 
-        self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
+        # AITER is only supported on ROCm and only for FP8_FNUZ
+        # and at the moment are MI300 series
+        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enaled()
 
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
@@ -612,9 +614,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            is_rocm_aiter_moe_enabled, shuffle_weights)
+            shuffle_weights)
 
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:

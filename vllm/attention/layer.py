@@ -413,7 +413,7 @@ class MultiHeadAttention(nn.Module):
             backend = _Backend.FLASH_ATTN
             use_upstream_fa = True
 
-        if current_platform.is_rocm() or current_platform.is_xpu():
+        if current_platform.is_xpu():
             # currently, only torch_sdpa is supported on rocm/xpu
             self.attn_backend = _Backend.TORCH_SDPA
         else:
@@ -429,6 +429,10 @@ class MultiHeadAttention(nn.Module):
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
             self.attn_backend = _Backend.TORCH_SDPA
+
+        if self.attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+            self._flash_attn_varlen_func = flash_attn_varlen_func
 
         if self.attn_backend == _Backend.FLASH_ATTN:
             if use_upstream_fa:
@@ -464,7 +468,8 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if self.attn_backend == _Backend.FLASH_ATTN or \
+            self.attn_backend == _Backend.ROCM_AITER_FA:
             cu_seqlens_q = torch.arange(0, (bsz + 1) * q_len,
                                         step=q_len,
                                         dtype=torch.int32,
