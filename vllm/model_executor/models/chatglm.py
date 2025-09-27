@@ -433,6 +433,9 @@ class ChatGLMBaseModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids)
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,

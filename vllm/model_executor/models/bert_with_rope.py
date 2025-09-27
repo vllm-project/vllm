@@ -426,6 +426,9 @@ class BertWithRope(nn.Module, SupportsQuant):
             prefix=f"{prefix}.encoder")
         self.pooler = BertPooler(self.config) if add_pooling_layer else None
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -672,6 +675,9 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights)
         return loaded_params
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.new.get_input_embeddings(input_ids)
 
     def forward(
         self,

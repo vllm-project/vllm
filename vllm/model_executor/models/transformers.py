@@ -52,8 +52,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
-from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
-                         SupportsQuant)
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP, SupportsQuant)
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     flatten_bn, make_empty_intermediate_tensors_factory,
                     maybe_prefix)
@@ -797,6 +797,9 @@ class TransformersForCausalLM(TransformersBase):
         else:
             self.lm_head = PPMissingLayer()
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings()(input_ids)
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -873,12 +876,18 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             multimodal_embeds = self.get_multimodal_embeddings(**kwargs)
             if multimodal_embeds is not None:
                 inputs_embeds = self.get_input_embeddings(
-                    input_ids, multimodal_embeds)
+                    input_ids,
+                    multimodal_embeds,
+                    is_multimodal=input_ids == self.config.image_token_id,
+                )
                 input_ids = None
 
         model_output = super().forward(input_ids, positions,
                                        intermediate_tensors, inputs_embeds)
         return model_output
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model
 
     def get_multimodal_embeddings(self, **kwargs):
         pixel_values = kwargs.pop("pixel_values", None)
@@ -934,15 +943,42 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings=None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self.model.get_input_embeddings()(input_ids)
-        if (multimodal_embeddings is not None
-                and len(multimodal_embeddings) != 0):
-            mask = (input_ids == self.config.image_token_id)
-            mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
-            multimodal_embeddings = torch.cat(multimodal_embeddings)
+        """
+        Apply token embeddings to `input_ids`.
 
-            inputs_embeds = inputs_embeds.masked_scatter(
-                mask, multimodal_embeddings)
-        return inputs_embeds
+        If `multimodal_embeddings` is passed, scatter them into
+        `input_ids` according to the mask `is_multimodal`.
+
+        In case the multi-modal token IDs exceed the vocabulary size of
+        the language model, you can set `handle_oov_mm_token=False`
+        to avoid calling the language model's `get_input_embeddings` method
+        on those tokens.
+        """
+        from .utils import _merge_multimodal_embeddings
+
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.model.get_input_embeddings(),
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229.")
+
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )

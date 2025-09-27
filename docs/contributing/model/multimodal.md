@@ -66,35 +66,12 @@ Further update the model as follows:
 !!! important
     The returned `multimodal_embeddings` must be either a **3D [torch.Tensor][]** of shape `(num_items, feature_size, hidden_size)`, or a **list / tuple of 2D [torch.Tensor][]'s** of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
 
-- Implement [get_input_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings] to merge `multimodal_embeddings` with text embeddings from the `input_ids`. If input processing for the model is implemented correctly (see sections below), then you can leverage the utility function we provide to easily merge the embeddings.
+!!! note
+    By default, vLLM merges the multimodal embeddings into text embeddings depending on the information of their locations defined in
+    [PlaceholderRange][vllm.multimodal.inputs.PlaceholderRange] from input processing.
+    This logic can be found at [get_input_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings].
 
-    ??? code
-
-        ```python
-        from .utils import merge_multimodal_embeddings
-
-        class YourModelForImage2Seq(nn.Module):
-            ...
-
-            def get_input_embeddings(
-                self,
-                input_ids: torch.Tensor,
-                multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-            ) -> torch.Tensor:
-
-                # `get_input_embeddings` should already be implemented for the language 
-                # model as one of the requirements of basic vLLM model implementation.
-                inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-
-                if multimodal_embeddings is not None:
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids=input_ids, 
-                        inputs_embeds=inputs_embeds, 
-                        multimodal_embeddings=multimodal_embeddings,
-                        placeholder_token_id=self.config.image_token_index)
-
-                return inputs_embeds
-        ```
+    You may override this method if additional logic is required for your model when merging embeddings. 
 
 - Implement [get_language_model][vllm.model_executor.models.interfaces.SupportsMultiModal.get_language_model] getter to provide stable access to the underlying language model.
 
