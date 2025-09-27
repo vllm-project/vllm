@@ -45,18 +45,23 @@ def test_accuracy(logits, k, p):
 
     if not is_correct:
         print_to_log(r_str("Error: logits are not close"), log_file)
-        error_rows = torch.where(logits != original_logits)[0]
+        error_mask = torch.abs(logits - original_logits) > 1e-5
+        error_rows = torch.where(error_mask)[0]
         error_rows = torch.unique(error_rows)
         num_error_rows = error_rows.shape[0]
+        error_cols = torch.where(error_mask)[1]
+        error_cols = torch.unique(error_cols)
+        num_error_cols = error_cols.shape[0]
         print_to_log(f"num_error_rows: {num_error_rows} - {error_rows}",
                      log_file)
-        row_to_show = 12 if num_error_rows > 12 else num_error_rows
+        print_to_log(f"num_error_cols: {num_error_cols}", log_file)
+        row_to_show = 5 if num_error_rows > 5 else num_error_rows
         logits_to_show = torch.sort(logits[error_rows], descending=True).values
-        logits_to_show = logits_to_show[:row_to_show, :50]
+        logits_to_show = logits_to_show[:row_to_show, :20]
         print_to_log(f"logits: {logits_to_show}", log_file)
         original_logits_to_show = \
             torch.sort(original_logits[error_rows], descending=True).values
-        original_logits_to_show = original_logits_to_show[:row_to_show, :50]
+        original_logits_to_show = original_logits_to_show[:row_to_show, :20]
         print_to_log(f"original_logits: {original_logits_to_show}", log_file)
 
     return is_correct
@@ -88,10 +93,11 @@ def test_time(logits, k, p, num_runs=256):
 if __name__ == "__main__":
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     batch_size_list = [2**i for i in range(0, 11)]  # 1 to 1024
-    vocab_size_list = [2**i for i in range(8, 19)]  # 256 to 262144
-    p_list = [None, "RAND"] + [0.1 * i for i in range(1, 10)]
-    k_list = [None, "RAND"] + [i for i in range(1, 10)
-                               ] + [i for i in range(20, 210, 30)]
+    vocab_size_list = [2**i for i in range(10, 19, 2)]  # 1024 to 131072
+    p_list = [None, "RAND"] + [0.2 * i
+                               for i in range(1, 6)] + [0.9, 0.95, 0.99]
+    k_list = [None, "RAND"] + [i for i in range(1, 10, 2)
+                               ] + [i for i in range(20, 210, 40)]
     log_file = f"triton_topk_topp_test_{date_str}.log"
     csv_file = f"triton_topk_topp_test_{date_str}.csv"
 

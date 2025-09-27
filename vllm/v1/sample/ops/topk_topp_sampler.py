@@ -235,7 +235,7 @@ def apply_top_k_top_p_triton(
 ) -> torch.Tensor:
 
     batch_size, vocab_size = logits.shape
-    BLOCK_SIZE = 4096
+    BLOCK_SIZE = 8192
     NUM_PROGRAMS = 128
     NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
     SIGMA = 2.5
