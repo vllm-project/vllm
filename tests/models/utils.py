@@ -11,8 +11,9 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ModelDType, RunnerOption
-from vllm.inputs import InputContext
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
+from vllm.multimodal.processing import InputProcessingContext
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .registry import HF_EXAMPLE_MODELS
 
@@ -264,7 +265,7 @@ def build_model_context(
     limit_mm_per_prompt: Optional[dict[str, int]] = None,
     mm_processor_cache_gb: int = 0,
 ):
-    """Creates an InputContext for a given model.
+    """Creates an InputProcessingContext for a given model.
 
     Args:
         model_id: ID of the model being considered.
@@ -273,7 +274,7 @@ def build_model_context(
         limit_mm_per_prompt: Multimodal limits.
 
     Returns:
-        InputContext for the model being considered.
+        InputProcessingContext for the model being considered.
     """
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
@@ -298,7 +299,11 @@ def build_model_context(
         enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )
-    return InputContext(model_config)
+
+    return InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
 
 
 def check_embeddings_close(
@@ -423,9 +428,8 @@ def dummy_hf_overrides(
         num_hidden_layers = (3 if model_arch
                              == "Gemma3nForConditionalGeneration" else 1)
 
-    text_config.update({
+    update_dict = {
         "num_layers": num_layers,
-        "num_hidden_layers": num_hidden_layers,
         "num_experts": num_experts,
         "num_experts_per_tok": 2,
         "num_local_experts": num_experts,
@@ -435,7 +439,14 @@ def dummy_hf_overrides(
         "n_routed_experts": num_experts,
         # For Gemma-3n
         "num_kv_shared_layers": 1,
-    })
+    }
+
+    # Update num_hidden_layers for non-Longcat architectures
+    if model_arch != "LongcatFlashForCausalLM" \
+            and model_arch != "LongCatFlashMTPModel":
+        update_dict["num_hidden_layers"] = num_hidden_layers
+
+    text_config.update(update_dict)
 
     if hasattr(hf_config, "vision_config"):
         hf_config.vision_config.update({

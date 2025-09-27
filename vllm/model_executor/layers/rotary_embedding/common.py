@@ -147,5 +147,4 @@ direct_register_custom_op(
     op_func=_flashinfer_rotary_embedding,
     mutates_args=["query", "key"],  # These tensors are modified in-place
     fake_impl=_flashinfer_rotary_embedding_fake,
-    dispatch_key=current_platform.dispatch_key,
 )

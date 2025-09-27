@@ -22,6 +22,7 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
+                                           ModelWeightParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
@@ -34,6 +35,7 @@ from vllm.utils import GiB_bytes
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
+    "UnquantizedLinearMethod",
     "CompressedTensorsLinearMethod",
     "CompressedTensorsLinearTransformMethod",
     "BitBLASLinearMethod",
@@ -196,10 +198,14 @@ class UnquantizedLinearMethod(LinearMethodBase):
         # The amount of memory allocated for the weights is
         # sum(output_partition_sizes) * input_size_per_partition.
         try:
-            weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                           input_size_per_partition,
-                                           dtype=params_dtype),
-                               requires_grad=False)
+            weight_loader = extra_weight_attrs.pop("weight_loader")
+            weight = ModelWeightParameter(data=torch.empty(
+                sum(output_partition_sizes),
+                input_size_per_partition,
+                dtype=params_dtype),
+                                          input_dim=1,
+                                          output_dim=0,
+                                          weight_loader=weight_loader)
         except torch.cuda.OutOfMemoryError as e:
             logger.error("Failed to create unquantized linear weights: %s", e)
             if torch.cuda.is_available():
@@ -212,7 +218,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 "Failed to create unquantized linear weights. "
                 "This may be caused by insufficient memory to allocate "
                 "the weight.") from e
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
@@ -317,6 +323,12 @@ class ReplicatedLinear(LinearBase):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
+        # If MergedReplicatedLinear, use output size of each partition.
+        if hasattr(self, "output_sizes"):
+            self.output_partition_sizes = self.output_sizes
+        else:
+            self.output_partition_sizes = [output_size]
+
         super().__init__(input_size,
                          output_size,
                          skip_bias_add,
@@ -329,7 +341,8 @@ class ReplicatedLinear(LinearBase):
         # All the linear layer supports quant method.
         assert self.quant_method is not None
         self.quant_method.create_weights(self,
-                                         self.input_size, [self.output_size],
+                                         self.input_size,
+                                         self.output_partition_sizes,
                                          self.input_size,
                                          self.output_size,
                                          self.params_dtype,
@@ -368,12 +381,15 @@ class ReplicatedLinear(LinearBase):
         param.data.copy_(loaded_weight)
 
     def forward(
-        self, x: torch.Tensor
+        self,
+        x: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
+
         output = self.quant_method.apply(self, x, bias)
         output_bias = self.bias if self.skip_bias_add else None
+
         if not self.return_bias:
             return output
         return output, output_bias
@@ -407,7 +423,7 @@ class ColumnParallelLinear(LinearBase):
         output_sizes: list of output sizes packed into one output, like for QKV
                        the list would be size 3.
         prefix: The name of the layer in the state dict, including all parents
-                        (e.g. model.layers.0.qkv_proj)
+                        (e.g. model.layers.0.qkv_proj) 
         return_bias: If true, return bias together with outputs in forward pass.
         disable_tp: If true, weights matrix won't be sharded through tp rank.
     """
@@ -529,13 +545,15 @@ class ColumnParallelLinear(LinearBase):
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
-        self, input_
+        self,
+        input_,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
         assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self, input_, bias)
+
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(output_parallel)
@@ -1320,7 +1338,8 @@ class RowParallelLinear(LinearBase):
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
-        self, input_
+        self,
+        input_,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.input_is_parallel:
             input_parallel = input_
@@ -1334,9 +1353,8 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self,
-                                                  input_parallel,
-                                                  bias=bias_)
+        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:

@@ -33,7 +33,7 @@ class AiterMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ROCM_AITER_MLA_VLLM_V1"
+        return "ROCM_AITER_MLA"
 
     @staticmethod
     def get_impl_cls() -> type["AiterMLAImpl"]:

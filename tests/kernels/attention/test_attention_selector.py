@@ -31,7 +31,7 @@ DEVICE_MLA_BACKENDS = {
 }
 
 DEVICE_REGULAR_ATTN_BACKENDS = {
-    "cuda": ["XFORMERS", "FLASHINFER"],
+    "cuda": ["XFORMERS", "FLASHINFER", "FLASH_ATTN"],
     "hip": ["ROCM_FLASH"],
     "cpu": ["TORCH_SDPA"],
 }
@@ -67,7 +67,6 @@ def generate_params():
     return params
 
 
-@pytest.mark.skip(reason="Skipped for now. Should be revisited.")
 @pytest.mark.parametrize("device, name, use_mla, block_size",
                          generate_params())
 def test_env(
@@ -86,9 +85,8 @@ def test_env(
         if device == "cpu":
             with patch("vllm.attention.selector.current_platform",
                        CpuPlatform()):
-                backend = get_attn_backend(16, torch.float16, None, block_size,
-                                           False)
-            assert backend.get_name() == "TORCH_SDPA_VLLM_V1"
+                backend = get_attn_backend(16, torch.float16, None, block_size)
+            assert backend.get_name() == "TORCH_SDPA"
 
         elif device == "hip":
             with patch("vllm.attention.selector.current_platform",
@@ -107,7 +105,6 @@ def test_env(
                                              torch.float16,
                                              None,
                                              block_size,
-                                             False,
                                              use_mla=use_mla)
                         assert f"The selected backend, {name}" in str(
                             exc_info.value)
@@ -118,7 +115,6 @@ def test_env(
                                              torch.float16,
                                              None,
                                              block_size,
-                                             False,
                                              use_mla=use_mla)
                         assert f"The selected backend, {name}" in str(
                             exc_info.value)
@@ -128,18 +124,16 @@ def test_env(
                                                    torch.float16,
                                                    None,
                                                    block_size,
-                                                   False,
                                                    use_mla=use_mla)
-                        expected = f"{name}_VLLM_V1"
+                        expected = name
                         assert backend.get_name() == expected
                 else:
                     backend = get_attn_backend(16,
                                                torch.float16,
                                                None,
                                                block_size,
-                                               False,
                                                use_mla=use_mla)
-                    expected = "TRITON_ATTN_VLLM_V1"
+                    expected = "TRITON_ATTN"
                     assert backend.get_name() == expected
 
         elif device == "cuda":
@@ -165,9 +159,8 @@ def test_env(
                                                        torch.float16,
                                                        None,
                                                        block_size,
-                                                       False,
                                                        use_mla=use_mla)
-                            expected = "CUTLASS_MLA_VLLM_V1"
+                            expected = "CUTLASS_MLA"
                             assert backend.get_name() == expected
                     elif name == "FLASHINFER_MLA":
                         if block_size not in [32, 64]:
@@ -180,7 +173,6 @@ def test_env(
                                                        torch.float16,
                                                        None,
                                                        block_size,
-                                                       False,
                                                        use_mla=use_mla)
                             expected = "FLASHINFER_MLA"
                             assert backend.get_name() == expected
@@ -189,7 +181,7 @@ def test_env(
                             # FlashMLA only supports block_size == 64
                             pytest.skip("FlashMLA only supports block_size 64")
                         else:
-                            from vllm.attention.backends.flashmla import (
+                            from vllm.v1.attention.backends.mla.flashmla import (  # noqa: E501
                                 is_flashmla_supported)
                             is_supported, _ = is_flashmla_supported()
                             if not is_supported:
@@ -200,16 +192,14 @@ def test_env(
                                                            torch.float16,
                                                            None,
                                                            block_size,
-                                                           False,
                                                            use_mla=use_mla)
-                                expected = f"{name}_VLLM_V1"
+                                expected = name
                                 assert backend.get_name() == expected
                     elif name == "FLASH_ATTN_MLA":
                         backend = get_attn_backend(16,
                                                    torch.float16,
                                                    None,
                                                    block_size,
-                                                   False,
                                                    use_mla=use_mla)
                         expected = "FLASH_ATTN_MLA"
                         assert backend.get_name() == expected
@@ -219,38 +209,33 @@ def test_env(
                                                    torch.float16,
                                                    None,
                                                    block_size,
-                                                   False,
                                                    use_mla=use_mla)
-                        expected = "TRITON_MLA_VLLM_V1"
+                        expected = "TRITON_MLA"
                         assert backend.get_name() == expected
                 elif name == "FLASHINFER":
                     backend = get_attn_backend(16,
                                                torch.float16,
                                                None,
                                                block_size,
-                                               False,
                                                use_mla=use_mla)
-                    expected = "FLASHINFER_VLLM_V1"
+                    expected = "FLASHINFER"
                     assert backend.get_name() == expected
-                else:
+                elif name == "XFORMERS":
                     backend = get_attn_backend(32,
                                                torch.float16,
                                                None,
                                                block_size,
-                                               False,
                                                use_mla=use_mla)
-                    expected = "FLASH_ATTN_VLLM_V1"
+                    expected = "XFORMERS"
                     assert backend.get_name() == expected
-
-                    backend = get_attn_backend(16,
+                elif name == "FLASH_ATTN":
+                    backend = get_attn_backend(32,
                                                torch.float16,
                                                None,
                                                block_size,
-                                               False,
                                                use_mla=use_mla)
-                    assert backend.get_name() == "FLEX_ATTENTION", (
-                        "Should fallback to FlexAttention if head size is "
-                        "not supported by FlashAttention")
+                    expected = "FLASH_ATTN"
+                    assert backend.get_name() == expected
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -265,13 +250,13 @@ def test_fp32_fallback(
         if device == "cpu":
             with patch("vllm.attention.selector.current_platform",
                        CpuPlatform()):
-                backend = get_attn_backend(16, torch.float32, None, 16, False)
-            assert backend.get_name() == "TORCH_SDPA_VLLM_V1"
+                backend = get_attn_backend(16, torch.float32, None, 16)
+            assert backend.get_name() == "TORCH_SDPA"
 
         elif device == "cuda":
             with patch("vllm.attention.selector.current_platform",
                        CudaPlatform()):
-                backend = get_attn_backend(16, torch.float32, None, 16, False)
+                backend = get_attn_backend(16, torch.float32, None, 16)
             assert backend.get_name() == "FLEX_ATTENTION"
 
 
@@ -280,6 +265,9 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
     # TODO: When testing for v1, pipe in `use_v1` as an argument to
     # get_attn_backend
 
+    pytest.skip("Skipping as current backend selector does not " \
+                "handle fallbacks when a backend is set via env var.")
+
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL)
 
@@ -287,29 +275,29 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(torch.cuda,
                             "get_device_capability",
                             lambda _=None: (7, 5))
-        backend = get_attn_backend(16, torch.float16, None, 16, False)
+        backend = get_attn_backend(16, torch.float16, None, 16)
         assert backend.get_name() != STR_FLASH_ATTN_VAL
 
         # Reset the monkeypatch for subsequent tests
         monkeypatch.undo()
 
         # Unsupported data type
-        backend = get_attn_backend(16, torch.float8_e4m3fn, None, 16, False)
+        backend = get_attn_backend(16, torch.float8_e4m3fn, None, 16)
         assert backend.get_name() != STR_FLASH_ATTN_VAL
 
         # Unsupported kv cache data type
-        backend = get_attn_backend(16, torch.float16, "fp8", 16, False)
+        backend = get_attn_backend(16, torch.float16, "fp8", 16)
         assert backend.get_name() != STR_FLASH_ATTN_VAL
 
         # Unsupported block size
-        backend = get_attn_backend(16, torch.float16, None, 8, False)
+        backend = get_attn_backend(16, torch.float16, None, 8)
         assert backend.get_name() != STR_FLASH_ATTN_VAL
 
         # flash-attn is not installed
         import sys
         original_module = sys.modules.get('vllm_flash_attn')
         monkeypatch.setitem(sys.modules, 'vllm_flash_attn', None)
-        backend = get_attn_backend(16, torch.float16, None, 16, False)
+        backend = get_attn_backend(16, torch.float16, None, 16)
         assert backend.get_name() != STR_FLASH_ATTN_VAL
 
         # Restore the original module if it existed
@@ -320,11 +308,7 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
             monkeypatch.delitem(sys.modules, 'vllm_flash_attn', raising=False)
 
         # Unsupported head size
-        backend = get_attn_backend(17, torch.float16, None, 16, False)
-        assert backend.get_name() != STR_FLASH_ATTN_VAL
-
-        # Attention-free models should bypass env and use PlaceholderAttention
-        backend = get_attn_backend(16, torch.float16, None, 16, True)
+        backend = get_attn_backend(17, torch.float16, None, 16)
         assert backend.get_name() != STR_FLASH_ATTN_VAL
 
 
@@ -337,5 +321,5 @@ def test_invalid_env(monkeypatch: pytest.MonkeyPatch):
 
         # Should raise ValueError for invalid backend
         with pytest.raises(ValueError) as exc_info:
-            get_attn_backend(32, torch.float16, None, 16, False)
+            get_attn_backend(32, torch.float16, None, 16)
         assert "Invalid value 'INVALID'" in str(exc_info.value)

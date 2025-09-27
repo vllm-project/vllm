@@ -100,7 +100,7 @@ def rocm_unquantized_gemm_impl(
     k = weight.shape[1]
     use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
                     x.dtype in [torch.float16, torch.bfloat16] \
-                    and k % 8 == 0 and bias is None)
+                    and k % 8 == 0)
 
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
@@ -111,9 +111,9 @@ def rocm_unquantized_gemm_impl(
     cu_count = current_platform.get_cu_count()
 
     if m > 8 and 0 < n <= 4:
-        out = ops.wvSplitK(weight, x_view, cu_count)
+        out = ops.wvSplitK(weight, x_view, cu_count, bias)
         return out.view(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192:
+    elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
         out = ops.LLMM1(weight, x_view, 4)
         return out.view(*x.shape[:-1], weight.shape[0])
     return torch.nn.functional.linear(x, weight, bias)
@@ -136,9 +136,7 @@ def rocm_unquantized_gemm(layer: torch.nn.Module,
 direct_register_custom_op(
     op_name="rocm_unquantized_gemm_impl",
     op_func=rocm_unquantized_gemm_impl,
-    mutates_args=[],
     fake_impl=rocm_unquantized_gemm_impl_fake,
-    dispatch_key=current_platform.dispatch_key,
 )
 
 

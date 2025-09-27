@@ -91,8 +91,7 @@ def _run_generate(input_dir, queue: mp.Queue, **kwargs):
 @pytest.mark.parametrize("enable_lora", [False, True])
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
-                              llama_3p2_1b_files,
-                              monkeypatch: pytest.MonkeyPatch):
+                              llama_3p2_1b_files):
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 

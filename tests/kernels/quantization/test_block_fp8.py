@@ -11,11 +11,12 @@ from tests.kernels.quant_utils import (native_per_token_group_quant_fp8,
                                        native_w8a8_block_matmul)
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    cutlass_scaled_mm, get_col_major_tma_aligned_tensor,
-    per_token_group_quant_fp8, w8a8_block_fp8_matmul)
+    cutlass_scaled_mm, per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import fp8_gemm_nt, per_block_cast_to_fp8
+from vllm.utils.deep_gemm import (fp8_gemm_nt,
+                                  get_col_major_tma_aligned_tensor,
+                                  per_block_cast_to_fp8)
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
