@@ -355,7 +355,7 @@ def batched_triton_kernel(
 
 def invoke_moe_batched_triton_kernel(
         A: torch.Tensor,  # [E, max_tokens, K]
-        B: torch.Tensor,  # [E, K, N]
+        B: torch.Tensor,  # [E, N, K]
         C: torch.Tensor,  # [E, max_tokens, N]
         expert_num_tokens: torch.Tensor,  # [E]
         compute_type: tl.dtype,
