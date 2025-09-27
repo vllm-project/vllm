@@ -14,10 +14,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+MIN_GPT_OSS_VERSION = "0.0.7"
+
 
 def validate_gpt_oss_install():
     """
-    Check if the gpt-oss is installed and its version is at least 0.0.3.
+    Check if the gpt-oss is installed and its version is at least 0.0.7.
     If not, raise an ImportError.
     """
     from importlib.metadata import PackageNotFoundError, version
@@ -25,7 +27,7 @@ def validate_gpt_oss_install():
     from packaging.version import InvalidVersion, Version
 
     try:
-        pkg_version_str = version("gpt_oss")  # e.g., "0.0.5"
+        pkg_version_str = version("gpt_oss")
         pkg_version = Version(pkg_version_str)
     except PackageNotFoundError:
         raise ImportError("Package 'gpt_oss' is not installed.") from None
@@ -33,10 +35,9 @@ def validate_gpt_oss_install():
         raise ImportError(
             f"Invalid version string for 'gpt_oss': {e}") from None
 
-    if pkg_version < Version("0.0.3"):
-        raise ImportError(
-            f"gpt_oss >= 0.0.3 is required, but {pkg_version} is installed."
-        ) from None
+    if pkg_version < Version(MIN_GPT_OSS_VERSION):
+        raise ImportError(f"gpt_oss >= {MIN_GPT_OSS_VERSION} is required, "
+                          f"but {pkg_version} is installed.") from None
 
 
 class Tool(ABC):
