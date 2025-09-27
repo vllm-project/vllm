@@ -52,8 +52,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .blip2 import Blip2QFormerModel
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import (AutoWeightsLoader, embed_multimodal,
-                    init_vllm_registered_model, maybe_prefix)
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
 ### Audio Input
@@ -720,6 +719,9 @@ class GraniteSpeechForConditionalGeneration(
         # Split variable length features into a tuple
         return torch.split(masked_embeds, audio_input["audio_embed_sizes"])
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
         self,
         **kwargs: object,
@@ -728,7 +730,7 @@ class GraniteSpeechForConditionalGeneration(
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return []
-            return None
+
         audio_features = self._process_audio_input(audio_input)
         return audio_features
 
@@ -736,19 +738,21 @@ class GraniteSpeechForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        # Multi-modal token ID may exceed vocab size
+        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
-        """Compute the merged LLM / audio embeddings."""
-        if multimodal_embeddings is None \
-            or len(multimodal_embeddings) == 0:
-            return self.language_model.get_input_embeddings(input_ids)
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
 
-        inputs_embeds = embed_multimodal(
+        return super().get_input_embeddings(
             input_ids,
-            self.config.audio_token_index,
-            self.language_model.model.get_input_embeddings,
-            multimodal_embeddings,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
-        return inputs_embeds
 
     def forward(
         self,
@@ -765,7 +769,11 @@ class GraniteSpeechForConditionalGeneration(
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             audio_embeds = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids, audio_embeds)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                audio_embeds,
+                is_multimodal=input_ids == self.config.audio_token_index,
+            )
             input_ids = None
 
         model_output = self.language_model(input_ids, positions,
