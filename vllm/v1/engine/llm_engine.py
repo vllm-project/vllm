@@ -265,7 +265,8 @@ class LLMEngine:
         outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
-        iteration_stats = IterationStats() if self.log_stats else None
+        iteration_stats = IterationStats(
+            mfu_info=outputs.mfu_info) if self.log_stats else None
         processed_outputs = self.output_processor.process_outputs(
             outputs.outputs,
             engine_core_timestamp=outputs.timestamp,

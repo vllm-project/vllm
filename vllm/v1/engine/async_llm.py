@@ -45,6 +45,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.outputs import MFUInfo
 
 logger = init_logger(__name__)
 
@@ -439,7 +440,17 @@ class AsyncLLM(EngineClient):
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
 
-                    iteration_stats = IterationStats() if (
+                    if outputs.mfu_output:
+                        mfu_info = MFUInfo(
+                            flops=outputs.mfu_output.flops,
+                            read_bytes=outputs.mfu_output.read_bytes,
+                            write_bytes=outputs.mfu_output.write_bytes,
+                            latency_s=outputs.mfu_output.latency_sec,
+                        )
+                    else:
+                        mfu_info = None
+
+                    iteration_stats = IterationStats(mfu_info=mfu_info) if (
                         log_stats and num_outputs) else None
 
                     # Split outputs into chunks of at most
