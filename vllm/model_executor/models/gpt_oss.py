@@ -707,7 +707,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_local_experts, # FIXME: we aggregate over experts at layer level self.config.n_routed_experts
+            num_experts=self.config.num_local_experts, # FIXME: self.config.n_routed_experts if in config
             num_redundant_experts=0)
 
     def load_weights(self, weights: Iterable[tuple[str,
