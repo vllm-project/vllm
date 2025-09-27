@@ -122,14 +122,12 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         *,
         length: int,
         num_audios: int,
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
+        overrides: Optional[AudioDummyOptions] = None,
     ) -> list[npt.NDArray]:
         if num_audios == 0:
             return []
-        if mm_options and isinstance(
-                mm_options["audio"],
-                AudioDummyOptions) and mm_options["audio"].length:
-            length = min(length, mm_options["audio"].length)
+        if overrides and overrides.length:
+            length = min(length, overrides.length)
         audio = np.zeros((length, ))
         return [audio] * num_audios
 
@@ -139,15 +137,15 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         width: int,
         height: int,
         num_images: int,
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
+        overrides: Optional[ImageDummyOptions] = None,
     ) -> list[Image.Image]:
         if num_images == 0:
             return []
-        if mm_options and isinstance(mm_options["image"], ImageDummyOptions):
-            if mm_options["image"].width:
-                width = min(width, mm_options["image"].width)
-            if mm_options["image"].height:
-                height = min(height, mm_options["image"].height)
+        if overrides:
+            if overrides.width:
+                width = min(width, overrides.width)
+            if overrides.height:
+                height = min(height, overrides.height)
         image = Image.new("RGB", (width, height), color=255)
         return [image] * num_images
 
@@ -158,17 +156,17 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         height: int,
         num_frames: int,
         num_videos: int,
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
+        overrides: Optional[VideoDummyOptions] = None,
     ) -> list[npt.NDArray]:
         if num_videos == 0:
             return []
-        if mm_options and isinstance(mm_options["video"], VideoDummyOptions):
-            if mm_options["video"].num_frames:
-                num_frames = min(num_frames, mm_options["video"].num_frames)
-            if mm_options["video"].width:
-                width = min(width, mm_options["video"].width)
-            if mm_options["video"].height:
-                height = min(height, mm_options["video"].height)
+        if overrides:
+            if overrides.num_frames:
+                num_frames = min(num_frames, overrides.num_frames)
+            if overrides.width:
+                width = min(width, overrides.width)
+            if overrides.height:
+                height = min(height, overrides.height)
         video = np.full((num_frames, width, height, 3), 255)
         return [video] * num_videos
 

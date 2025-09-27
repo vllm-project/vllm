@@ -154,11 +154,13 @@ class Qwen2AudioDummyInputsBuilder(
         audio_len = feature_extractor.chunk_length * sampling_rate
         num_audios = mm_counts.get("audio", 0)
 
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         return {
             "audio":
             self._get_dummy_audios(length=audio_len,
                                    num_audios=num_audios,
-                                   mm_options=mm_options)
+                                   overrides=audio_overrides)
         }
 
 
