@@ -592,7 +592,7 @@ class RandomDataset(BenchmarkDataset):
         input_len: int,
         offset: int,
         index: int,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, int]:
         """
         Returns (prompt, total_input_len).
 
