@@ -10,7 +10,7 @@ from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -339,46 +339,30 @@ class KVCacheManager:
 
     def get_num_common_prefix_blocks(
         self,
-        request: Request,
-        num_running_requests: int,
+        running_request_id: str,
+        running_request_ids: list[str],
+        transfering_request_ids: list[str],
     ) -> list[int]:
         """Calculate the number of common prefix blocks shared by all requests
-        in the RUNNING state for each kv cache group.
+        in the RUNNING state for each kv cache group. A block is considered a
+        common prefix block if it is referenced by ALL currently running
+        requests.
 
-        The function determines this by selecting any request and iterating
-        through its blocks.  A block is considered a common prefix block if its
-        `ref_cnt` equals the total number of requests in the RUNNING state.
-
-        NOTE(woosuk): The number of requests in the RUNNING state is **greater
-        than or equal to** the number of requests scheduled in the current step.
-        This is because the RUNNING state only indicates that:
-        1. The request has not yet finished, and
-        2. The request holds its blocks unfreed.
-
-        While all scheduled requests must be in the RUNNING state, the inverse
-        is not necessarily true. There may be RUNNING requests that are not
-        scheduled in the current step.
-
-        This can result in an edge case where the number of common prefix blocks
-        is 0, even though all scheduled requests share a common prefix. This
-        occurs because there may be unscheduled RUNNING requests that do not
-        share the common prefix. Currently, this case cannot be easily detected,
-        so the function returns 0 in such cases.
+        This approach correctly handles async KV offloading scenarios where
+        completed requests may still hold block references while no longer
+        being in the RUNNING state.
 
         Args:
-            request: Any request in the RUNNING state, used to identify the
-                common prefix blocks.
-            num_running_requests: The total number of requests in the RUNNING
-                state. This can be different from the number of scheduled
-                requests in the current step.
+            running_request_id: The request ID of the running request.
+            running_request_ids: List of all request IDs in the RUNNING state.
+            transfering_request_ids: List of request IDs in transfer state.
 
         Returns:
             list[int]: The number of common prefix blocks for each kv cache
             group.
         """
-        assert request.status == RequestStatus.RUNNING
         return self.coordinator.get_num_common_prefix_blocks(
-            request.request_id, num_running_requests)
+            running_request_id, running_request_ids, transfering_request_ids)
 
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
