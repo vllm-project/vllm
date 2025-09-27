@@ -13,6 +13,16 @@ from vllm.config.utils import config
 
 
 @standard_dataclass
+class BaseDummyOptions:
+    """Base options for generating dummy data during profiling."""
+    count: int = 999
+
+    def __post_init__(self):
+        if self.count < 0:
+            raise ValueError("count must be non-negative")
+
+
+@standard_dataclass
 class VideoDummyOptions:
     """Options for generating dummy video data during profiling."""
     count: int = 999
@@ -61,8 +71,8 @@ class AudioDummyOptions:
 
 
 # Union type for all supported option types
-ModalityDummyOptions = Union[VideoDummyOptions, ImageDummyOptions,
-                             AudioDummyOptions]
+ModalityDummyOptions = Union[BaseDummyOptions, VideoDummyOptions,
+                             ImageDummyOptions, AudioDummyOptions]
 
 # Configuration type - all values normalized to ModalityDummyOptions
 # at initialization

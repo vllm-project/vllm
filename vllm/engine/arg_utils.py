@@ -102,8 +102,8 @@ def parse_limit_mm_per_prompt(val: str):
     """Parse limit-mm-per-prompt with support for configurable options."""
     import json
 
-    from vllm.config.multimodal import (AudioDummyOptions, ImageDummyOptions,
-                                        VideoDummyOptions)
+    from vllm.config.multimodal import (AudioDummyOptions, BaseDummyOptions,
+                                        ImageDummyOptions, VideoDummyOptions)
 
     try:
         parsed = json.loads(val)
@@ -133,10 +133,8 @@ def parse_limit_mm_per_prompt(val: str):
             elif modality == "audio":
                 result[modality] = AudioDummyOptions(**options)
             else:
-                # Unknown modality, raise error
-                raise ValueError(
-                    f"Unknown modality '{modality}'. "
-                    "Supported modalities are: image, video, audio")
+                # Unknown modality - use BaseDummyOptions for OOT models
+                result[modality] = BaseDummyOptions(**options)
         except TypeError as e:
             raise ValueError(f"Invalid options for {modality}: {e}") from e
 

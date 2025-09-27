@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
 
-from vllm.config.multimodal import (AudioDummyOptions, ImageDummyOptions,
-                                    ModalityDummyOptions, VideoDummyOptions)
+from vllm.config.multimodal import (AudioDummyOptions, BaseDummyOptions,
+                                    ImageDummyOptions, ModalityDummyOptions,
+                                    VideoDummyOptions)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
@@ -54,7 +55,7 @@ class DummyInputsBuilderFactory(Protocol[_I]):  # type: ignore[misc]
         ...
 
 
-class MultiModalProcessorFactory(Protocol[_I]):
+class MultiModalProcessorFactory(Protocol[_I]):  # type: ignore[misc]
     """
     Constructs a
     [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor]
@@ -111,14 +112,15 @@ class MultiModalRegistry:
             return None
 
         mm_options = {}
-        for modality in ["image", "video", "audio"]:
-            if hasattr(model_config.multimodal_config, 'get_dummy_options'):
-                options = model_config.multimodal_config.get_dummy_options(
-                    modality)
-                if isinstance(
-                        options,
-                    (ImageDummyOptions, VideoDummyOptions, AudioDummyOptions)):
-                    mm_options[modality] = options
+        # Extract options for ALL modalities in the config,
+        # not just hardcoded ones
+        # This supports OOT models with custom modalities
+        for modality in model_config.multimodal_config.limit_per_prompt:
+            options = model_config.multimodal_config.get_dummy_options(
+                modality)
+            if isinstance(options, (BaseDummyOptions, ImageDummyOptions,
+                                    VideoDummyOptions, AudioDummyOptions)):
+                mm_options[modality] = options
 
         return mm_options if len(mm_options) > 0 else None
 
