@@ -108,6 +108,9 @@ class Executor(ExecutorBase):
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch")
 
+    def skip_dummy_batch(self) -> None:
+        self.collective_rpc("skip_dummy_batch")
+
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         output = self.collective_rpc("take_draft_token_ids")
         return output[0]

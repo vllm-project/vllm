@@ -490,6 +490,9 @@ class Worker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
 
+    def skip_dummy_batch(self) -> None:
+        self.model_runner._dummy_run(1, skip_run=True)
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
