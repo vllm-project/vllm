@@ -422,7 +422,7 @@ class Scheduler(SchedulerInterface):
                 # after async KV recvs are completed.
                 else:
                     new_computed_blocks = (
-                        self.kv_cache_manager.create_empty_block_list()
+                        self.kv_cache_manager.empty_block_list
                     )
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
