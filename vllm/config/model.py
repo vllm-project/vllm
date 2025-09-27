@@ -19,7 +19,7 @@ import vllm.envs as envs
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.pooler import PoolerConfig
-from vllm.config.utils import assert_hashable, config
+from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
@@ -668,13 +668,17 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
+        prefix = "Transformers"
+        prefix += "MoE" if self.get_num_experts() > 1 else ""
+        # Resolve Transformers backend pooling class
         if getattr(self, "runner_type", self.runner) == "pooling":
-            return "TransformersModel"
+            return prefix + "Model"
+        # Resolve Transformers backend generate classes
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
-            return "TransformersForMultimodalLM"
-        return "TransformersForCausalLM"
+            return prefix + "ForMultimodalLM"
+        return prefix + "ForCausalLM"
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers backend class."""
@@ -1004,17 +1008,7 @@ class ModelConfig:
             self.enforce_eager = True
 
     def _verify_with_expert_parallelism(self) -> None:
-        num_expert_names = [
-            "moe_num_experts",  # Dbrx
-            "num_experts",  # Jamba
-            "n_routed_experts",  # DeepSeek
-            "num_local_experts",  # Mixtral
-        ]
-        num_experts = 0
-        for name in num_expert_names:
-            num_experts = getattr(self.hf_text_config, name, 0)
-            if num_experts > 0:
-                break
+        num_experts = self.get_num_experts()
         if num_experts < 1:
             raise ValueError(
                 "Number of experts in the model must be greater than 0 "
@@ -1198,6 +1192,16 @@ class ModelConfig:
     def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
+
+    def get_num_experts(self) -> int:
+        """Returns the number of experts in the model."""
+        num_expert_names = [
+            "num_experts",  # Jamba
+            "moe_num_experts",  # Dbrx
+            "n_routed_experts",  # DeepSeek
+            "num_local_experts",  # Mixtral
+        ]
+        return getattr_iter(self.hf_text_config, num_expert_names, 0)
 
     def get_layers_start_end_indices(
             self, parallel_config: ParallelConfig) -> tuple[int, int]:

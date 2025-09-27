@@ -17,12 +17,12 @@ These models are what we list in [supported-text-models][supported-text-models] 
 
 ### Transformers
 
-vLLM also supports model implementations that are available in Transformers. You should expect the performance of a Transformers model implementation used in vLLM to be within <1% of the performance of a dedicated vLLM model implementation. We call this feature the "Transformers backend".
+vLLM also supports model implementations that are available in Transformers. You should expect the performance of a Transformers model implementation used in vLLM to be within <5% of the performance of a dedicated vLLM model implementation. We call this feature the "Transformers backend".
 
 Currently, the Transformers backend works for the following:
 
 - Modalities: embedding models, language models and vision-language models*
-- Architectures: encoder-only, decoder-only
+- Architectures: encoder-only, decoder-only, mixture-of-experts
 - Attention types: full attention and/or sliding attention
 
 _*Vision-language models currently accept only image inputs. Support for video inputs will be added in a future release._
@@ -31,6 +31,7 @@ If the Transformers model implementation follows all the steps in [writing a cus
 
 - All the features listed in the [compatibility matrix](../features/README.md#feature-x-feature)
 - Any combination of the following vLLM parallelisation schemes:
+    - Data parallel
     - Pipeline parallel
     - Tensor parallel
 

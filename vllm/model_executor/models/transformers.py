@@ -22,6 +22,8 @@ from typing import Literal, Optional, Union
 
 import regex as re
 import torch
+import transformers
+from packaging.version import Version
 from torch import nn
 from transformers import (AutoModel, BatchFeature, PretrainedConfig,
                           PreTrainedModel)
@@ -123,8 +125,8 @@ def can_enable_torch_compile(vllm_config: VllmConfig) -> bool:
 
 def replace_linear_class(
     linear: nn.Linear,
-    style: Literal["colwise", "rowwise"],
-    quant_config: QuantizationConfig,
+    style: Literal["colwise", "rowwise"] = "replicate",
+    quant_config: Optional[QuantizationConfig] = None,
     *,
     prefix: str = "",
 ) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
@@ -132,16 +134,20 @@ def replace_linear_class(
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
     Args:
-        linear (nn.Linear): `nn.Linear` to be replaced.
-        style (str): Tensor parallel style of the new linear, e.g. "colwise".
-        quant_config (QuantConfig): Quantization config for the new linear.
+        linear: `nn.Linear` to be replaced.
+        style: Tensor parallel style of the new linear, e.g. "colwise".
+        quant_config: Quantization config for the new linear.
     Returns:
-        Union[ColumnParallelLinear, RowParallelLinear]: The new linear.
+        The new linear.
     """
 
     if not isinstance(style, str):
         raise ValueError(
             f"Unsupported parallel style type {type(style)}, expected str")
+
+    # MXFP4 linear layer is not implemented
+    if quant_config and quant_config.get_name() == "mxfp4":
+        quant_config = None
 
     vllm_linear_cls, vllm_linear_kwargs = {
         "colwise": (ColumnParallelLinear, {}),
@@ -466,9 +472,15 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.ignore_unexpected_suffixes: list[str] = []
         """Ignore unexpected weights whose qualname ends with these suffixes."""
 
-        # Skip loading extra bias for GPTQ models.
-        if self.quant_config and "gptq" in self.quant_config.get_name():
-            self.ignore_unexpected_suffixes.append(".bias")
+        if self.quant_config:
+            quant_method_name = self.quant_config.get_name()
+            # Check for unsupported quantization methods.
+            if quant_method_name == "mxfp4":
+                raise NotImplementedError("Transformers backend does not "
+                                          "support MXFP4 quantization yet.")
+            # Skip loading extra bias for GPTQ models.
+            if "gptq" in quant_method_name:
+                self.ignore_unexpected_suffixes.append(".bias")
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         # TODO: @raushan, use the public `model.set_attn_implementation()`
@@ -482,6 +494,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             )
 
         self.pipeline_parallel()
+        self.init_hook()
         self.tensor_parallel()
 
         # Input embeddings
@@ -558,6 +571,12 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             if not self.pp_group.is_last_rank:
                 setattr(self.model, name, PPMissingLayer())
 
+    def init_hook(self):
+        """Method to be overridden by child classes if necessary.
+
+        Called after `pipeline_parallel()` but before `tensor_parallel()`."""
+        pass
+
     def tensor_parallel(self):
         """
         Apply the model's tensor parallelization plan.
@@ -623,6 +642,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         start, end = get_pp_indices(self.text_config.num_hidden_layers,
                                     self.pp_rank, self.pp_size)
 
+        # MXFP4 attention layer is not implemented
+        quant_config = self.quant_config
+        if quant_config and quant_config.get_name() == "mxfp4":
+            quant_config = None
+
         attention_instances = {}
         for i in range(start, end):
             # Handle interleaved sliding window attention
@@ -639,7 +663,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 scale=head_size**-0.5,
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
-                quant_config=self.quant_config,
+                quant_config=quant_config,
                 per_layer_sliding_window=per_layer_sliding_window,
                 prefix=f"{i}.attn",
                 attn_type=attn_type)
@@ -700,8 +724,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=self.skip_prefixes,
@@ -710,6 +736,14 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def check_version(self, min_version: str, feature: str):
+        installed = Version(transformers.__version__)
+        required = Version(min_version)
+        if installed < required:
+            raise ImportError(
+                f"Transformers backend requires transformers>={required} "
+                f"for {feature}, but got {installed}")
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
@@ -767,14 +801,7 @@ class TransformersModel(TransformersBase):
 
         # Check minimum transformers version for encoder models support
         if attn_type == AttentionType.ENCODER_ONLY:
-            import transformers
-            from packaging.version import Version
-            installed = Version(transformers.__version__)
-            required = Version("4.57.0.dev0")
-            if installed < required:
-                raise ValueError(
-                    "Encoder models with the Transformers backend require "
-                    f"transformers>={required}, but got {installed}")
+            self.check_version("4.57.0.dev0", "encoder models support")
 
         return super().create_attention_instances(attn_type)
 
