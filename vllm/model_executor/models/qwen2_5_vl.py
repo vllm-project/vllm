@@ -68,7 +68,7 @@ from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+from .interfaces import (MultiModalEmbeddings, SupportsEagle3, SupportsLoRA,
                          SupportsMultiModal, SupportsMultiModalPruning,
                          SupportsPP, SupportsQuant)
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
@@ -965,7 +965,7 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     dummy_inputs=Qwen2_5_VLDummyInputsBuilder)
 class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsLoRA, SupportsPP,
-                                         SupportsQuant,
+                                         SupportsQuant, SupportsEagle3,
                                          SupportsMultiModalPruning):
 
     packed_modules_mapping = {
@@ -1027,6 +1027,13 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.language_model.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
