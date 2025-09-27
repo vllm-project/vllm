@@ -26,20 +26,6 @@ try:
 except ImportError:
     is_flashinfer_available = False
     
-def g_str(s):
-    return "\033[32m" + s + "\033[0m"
-def r_str(s):
-    return "\033[31m" + s + "\033[0m"
-def b_str(s):
-    return "\033[34m" + s + "\033[0m"
-def y_str(s):
-    return "\033[33m" + s + "\033[0m"
-def c_str(s):
-    return "\033[36m" + s + "\033[0m"
-def m_str(s):
-    return "\033[35m" + s + "\033[0m"
-
-
 class TopKTopPSampler(nn.Module):
     """
     Module that performs optional top-k and top-p filtering followed by
@@ -74,6 +60,10 @@ class TopKTopPSampler(nn.Module):
                     logger.info_once(
                         "Using FlashInfer for top-p & top-k sampling.")
                     self.forward = self.forward_cuda
+                elif envs.VLLM_USE_TRITON_SAMPLER is not False:
+                    logger.info_once(
+                        "Using Triton for top-p & top-k sampling.")
+                    self.forward = self.forward_triton
                 else:
                     logger.warning_once(
                         "FlashInfer is available, but it is not enabled. "
@@ -82,15 +72,21 @@ class TopKTopPSampler(nn.Module):
                         "please set VLLM_USE_FLASHINFER_SAMPLER=1.")
                     self.forward = self.forward_native
             else:
-                logger.warning_once(
-                    "FlashInfer is not available. Falling back to the PyTorch-"
-                    "native implementation of top-p & top-k sampling. For the "
-                    "best performance, please install FlashInfer.")
-                self.forward = self.forward_native
+                if envs.VLLM_USE_TRITON_SAMPLER is not False:
+                    logger.info_once(
+                        "Using Triton for top-p & top-k sampling.")
+                    self.forward = self.forward_triton
+                else:
+                    logger.warning_once(
+                        "FlashInfer is not available. Falling back to the PyTorch-"
+                        "native implementation of top-p & top-k sampling. For the "
+                        "best performance, please install FlashInfer.")
+                    self.forward = self.forward_native
         else:
             self.forward = self.forward_native
 
         self.apply_top_k_top_p = apply_top_k_top_p
+        self.apply_top_k_top_p_triton = apply_top_k_top_p_triton
 
     def forward_native(
         self,
@@ -105,6 +101,22 @@ class TopKTopPSampler(nn.Module):
         The logits tensor may be updated in-place.
         """
         logits = self.apply_top_k_top_p(logits, k, p)
+        logits_to_return = None
+        if self.logprobs_mode == "processed_logits":
+            logits_to_return = logits
+        elif self.logprobs_mode == "processed_logprobs":
+            logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
+        probs = logits.softmax(dim=-1, dtype=torch.float32)
+        return random_sample(probs, generators), logits_to_return
+
+    def forward_triton(
+        self,
+        logits: torch.Tensor,
+        generators: dict[int, torch.Generator],
+        k: Optional[torch.Tensor],
+        p: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        logits = self.apply_top_k_top_p_triton(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -139,7 +151,7 @@ class TopKTopPSampler(nn.Module):
         return flashinfer_sample(logits.contiguous(), k, p, generators), None
 
 
-def original_apply_top_k_top_p(
+def apply_top_k_top_p(
     logits: torch.Tensor,
     k: Optional[torch.Tensor],
     p: Optional[torch.Tensor],
@@ -176,6 +188,34 @@ def original_apply_top_k_top_p(
         logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
     return logits
 
+
+def apply_top_k_top_p_triton(
+    logits: torch.Tensor,
+    k: Optional[torch.Tensor],
+    p: Optional[torch.Tensor],
+) -> torch.Tensor:
+
+    batch_size, vocab_size = logits.shape
+    BLOCK_SIZE = 4096
+    NUM_PROGRAMS = 128
+    NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
+    SIGMA = 2.5
+    
+    if k is not None and p is None:
+        probs = torch.full((NUM_PROGRAMS, vocab_size), -float('inf'), device=logits.device)
+        _topk_kernel[(NUM_PROGRAMS,)](logits, probs, k, batch_size, 
+                                      SIGMA, vocab_size, BLOCK_SIZE, NUM_TILES)
+    elif k is None and p is not None:
+        probs = torch.full_like(logits, -float('inf'), device=logits.device)
+        probs_2 = torch.full_like(logits, -float('inf'), device=logits.device)
+        _topp_kernel[(NUM_PROGRAMS,)](logits, probs, probs_2, p, batch_size, 
+                                      SIGMA, vocab_size, BLOCK_SIZE, NUM_TILES)
+    elif k is not None and p is not None:
+        probs = torch.full_like(logits, -float('inf'), device=logits.device)
+        _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
+                                           SIGMA, vocab_size, BLOCK_SIZE, NUM_TILES)
+    return logits
+
 @triton.jit
 def _topk_kernel(LOGITS, PROBS, K, B, 
                  SIGMA: tl.constexpr,
@@ -193,7 +233,7 @@ def _topk_kernel(LOGITS, PROBS, K, B,
             # FOLLOWING THE CURRENT PYTHON BASED IMPLEMENTATION in apply_top_k_only(), WHICH ALSO
             # INCLUDES ALL DUPLICATE LOGITS.
             # IF YOU NEED EXACTLY K LOGITS, PLEASE REFER TO THE TOP-P IMPLEMENTATION
-            # AND IMPLEMENT THE DUPLICATE LOGIT MANAGEMENT USING THE FORCE_REMOVE_LOGIT VARIABLE
+            # AND IMPLEMENT THE DUPLICATE LOGIT MANAGEMENT USING THE FORCE_REMOVE_LOGIT VARIABLE.
 
             k_pivot = -float('inf')
 
@@ -268,7 +308,7 @@ def _topk_kernel(LOGITS, PROBS, K, B,
                     k_pivot = k_pivot_1
                 elif k_pivots_num_2 == k:
                     k_pivot = k_pivot_2
-                # If none of the pivots are equal to k, we updatae the range
+                # If none of the pivots are equal to k, we update the range
                 elif k_pivots_num_2 > k:
                     min_range = k_pivot_2
                 elif k_pivots_num_1 > k:
@@ -461,7 +501,7 @@ def _topp_kernel(LOGITS, PROBS, PROBS_2, P, B,
 
                     logits_blk = tl.where(logits_blk > p_pivot, logits_blk, -float('inf'))
                     tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
-                
+
 
 @triton.jit
 def _topk_topp_kernel(LOGITS, PROBS, K, P, B, 
@@ -525,7 +565,7 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
             # FOLLOWING THE CURRENT PYTHON BASED IMPLEMENTATION in apply_top_k_only(), WHICH ALSO
             # INCLUDES ALL DUPLICATE LOGITS.
             # IF YOU NEED EXACTLY K LOGITS, PLEASE REFER TO THE TOP-P IMPLEMENTATION
-            # AND IMPLEMENT THE DUPLICATE LOGIT MANAGEMENT USING THE FORCE_REMOVE_LOGIT VARIABLE
+            # AND IMPLEMENT THE DUPLICATE LOGIT MANAGEMENT USING THE FORCE_REMOVE_LOGIT VARIABLE.
 
             max_range = max_logit
             min_range = min_logit
@@ -697,90 +737,6 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
 
                 logits_blk = tl.where(logits_blk > pivot, logits_blk, -float('inf'))
                 tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
-                
-
-def triton_apply_top_k_top_p(
-    logits: torch.Tensor,
-    k: Optional[torch.Tensor],
-    p: Optional[torch.Tensor],
-) -> torch.Tensor:
-
-    batch_size, vocab_size = logits.shape
-    BLOCK_SIZE = 4096
-    NUM_PROGRAMS = 128
-    NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
-    SIGMA = 2.5
-  
-    if k is not None and p is None:
-        probs = torch.full((NUM_PROGRAMS, vocab_size), -float('inf'), device=logits.device)
-        _topk_kernel[(NUM_PROGRAMS,)](logits, probs, k, batch_size, 
-                                      SIGMA, vocab_size, BLOCK_SIZE, NUM_TILES)
-    elif k is None and p is not None:
-        probs = torch.full_like(logits, -float('inf'), device=logits.device)
-        probs_2 = torch.full_like(logits, -float('inf'), device=logits.device)
-        _topp_kernel[(NUM_PROGRAMS,)](logits, probs, probs_2, p, batch_size, 
-                                      SIGMA, vocab_size, BLOCK_SIZE, NUM_TILES)
-    elif k is not None and p is not None:
-        probs = torch.full_like(logits, -float('inf'), device=logits.device)
-        _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
-                                           SIGMA, vocab_size, BLOCK_SIZE, NUM_TILES)
-
-    return logits
-
-@torch.compile
-def compiled_apply_top_k_top_p(
-    logits: torch.Tensor,
-    k: Optional[torch.Tensor],
-    p: Optional[torch.Tensor],
-) -> torch.Tensor:
-    return original_apply_top_k_top_p(logits, k, p)
-
-def apply_top_k_top_p(
-    logits: torch.Tensor,
-    k: Optional[torch.Tensor],
-    p: Optional[torch.Tensor],
-) -> torch.Tensor:
-    """Apply top-k and top-p masks to the logits.
-
-    If a top-p is used, this function will sort the logits tensor,
-    which can be slow for large batches.
-
-    The logits tensor may be updated in-place.
-    """
-
-    input_logits = logits.clone()
-    original_logits = original_apply_top_k_top_p(input_logits, k, p)
-
-    batch_size, vocab_size = logits.shape
-    print(g_str("apply_top_k_top_p") + f" logits.shape: {batch_size} x {vocab_size}, p is None: {p is None}, k is None: {k is None}")
-    
-    torch.cuda.synchronize()
-    start_time = time.time()
-    
-    # logits = original_apply_top_k_top_p(logits, k, p)
-    # logits = compiled_apply_top_k_top_p(logits, k, p)
-    logits = triton_apply_top_k_top_p(logits, k, p)
-        
-    torch.cuda.synchronize()
-    time_taken = time.time() - start_time
-    print(y_str(f"apply_top_k_top_p done in {time_taken} seconds"))
-
-    if not torch.allclose(logits, original_logits):
-        print(r_str("Error: logits are not close"))
-        error_rows = torch.where(logits != original_logits)[0]
-        error_rows = torch.unique(error_rows)
-        num_error_rows = error_rows.shape[0]
-        print(f"num_error_rows: {num_error_rows} - {error_rows}")
-        row_to_show = 4 if num_error_rows > 4 else num_error_rows
-        print(f"logits: {torch.sort(logits[error_rows], descending=True).values[:row_to_show, :50]}")
-        print(f"original_logits: {torch.sort(original_logits[error_rows], descending=True).values[:row_to_show, :50]}")
-
-    # start_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(start_time))
-    # out_dir = "./sampler_input_output"
-    # os.makedirs(out_dir, exist_ok=True)
-    # out_path = f"{out_dir}/llama8b_{start_time_str}.pt"
-    # torch.save({"input_logits": input_logits, "p": p, "k": k, "output_logits": logits}, out_path)
-    return logits
 
 
 def apply_top_k_only(

@@ -3,6 +3,7 @@ from vllm import LLM, SamplingParams
 
 # For V1: Turn off multiprocessing to make scheduling deterministic
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+os.environ["VLLM_USE_TRITON_SAMPLER"] = "1"
 
 # Set a fixed seed for reproducibility
 SEED = 42
