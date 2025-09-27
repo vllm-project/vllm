@@ -297,6 +297,8 @@ class EngineArgs:
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
+    allowed_media_domains: Optional[
+        list[str]] = ModelConfig.allowed_media_domains
     download_dir: Optional[str] = LoadConfig.download_dir
     safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
     load_format: Union[str, LoadFormats] = LoadConfig.load_format
@@ -531,6 +533,8 @@ class EngineArgs:
                                  **model_kwargs["hf_config_path"])
         model_group.add_argument("--allowed-local-media-path",
                                  **model_kwargs["allowed_local_media_path"])
+        model_group.add_argument("--allowed-media-domains",
+                                 **model_kwargs["allowed_media_domains"])
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision",
                                  **model_kwargs["code_revision"])
@@ -997,6 +1001,7 @@ class EngineArgs:
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
+            allowed_media_domains=self.allowed_media_domains,
             dtype=self.dtype,
             seed=self.seed,
             revision=self.revision,
