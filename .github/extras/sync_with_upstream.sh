@@ -27,9 +27,18 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! git rev-parse --verify "${REMOTE}/${BRANCH}" >/dev/null 2>&1; then
-  echo "[sync-extras] Fetching ${REMOTE}/${BRANCH}"; git fetch "$REMOTE" "$BRANCH" || true
+if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+  echo "[sync-extras] Detected an in-progress rebase; aborting. Finish the rebase (git rebase --continue|--abort) and re-run." >&2
+  exit 1
 fi
+
+if git rev-parse --verify MERGE_HEAD >/dev/null 2>&1; then
+  echo "[sync-extras] Detected an in-progress merge; aborting. Resolve or cancel the merge before re-running." >&2
+  exit 1
+fi
+
+echo "[sync-extras] Fetching ${REMOTE}/${BRANCH}"
+git fetch "$REMOTE" "$BRANCH" || true
 
 echo "[sync-extras] Updating from ${REMOTE}/${BRANCH}"
 TMPDIR=""
@@ -59,8 +68,8 @@ MERGE_STATUS=$?
 set -e
 if [ $MERGE_STATUS -ne 0 ]; then
   echo "$MERGE_OUTPUT"
-  echo "[sync-extras] --ff-only merge failed; attempting a regular merge"
-  git merge "${REMOTE}/${BRANCH}"
+  echo "[sync-extras] --ff-only merge failed; attempting a regular merge without editor"
+  git merge --no-edit "${REMOTE}/${BRANCH}"
 fi
 
 if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then

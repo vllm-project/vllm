@@ -1,6 +1,8 @@
 name: Fork Sync
 
 on:
+  schedule:
+    - cron: "15 6 * * *"
   workflow_dispatch:
     inputs:
       upstream-remote:
