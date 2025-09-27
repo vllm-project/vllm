@@ -651,6 +651,9 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                     trust_remote_code=True,
                                     speculative_model="XiaomiMiMo/MiMo-7B-RL"),
+    "Eagle3Qwen2_5vlForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen2.5-VL-7B-Instruct",
+        speculative_model="Rayzl/qwen2.5-vl-7b-eagle3-sgl"),
     "Qwen3NextMTP": _HfExamplesInfo("Qwen/Qwen3-Next-80B-A3B-Instruct",
                                      min_transformers_version="4.56.3"),
 }

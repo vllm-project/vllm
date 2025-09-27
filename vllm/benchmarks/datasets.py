@@ -1450,6 +1450,13 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
         ):
             dataset_class = MLPerfDataset
             args.hf_split = "train"
+        elif (
+            args.dataset_path in MMStarDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MMStarDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = MMStarDataset
+            args.hf_split = "val"
+            args.hf_subset = None
         else:
             supported_datasets = set([
                 dataset_name for cls in HuggingFaceDataset.__subclasses__()
@@ -2721,3 +2728,76 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
 
         random.shuffle(requests)
         return requests
+
+
+# -----------------------------------------------------------------------------
+# MMStar Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MMStarDataset(HuggingFaceDataset):
+    """
+    Lin-Chen/MMStar: https://huggingface.co/datasets/Lin-Chen/MMStar
+    refer to: https://github.com/sgl-project/SpecForge/pull/106
+    """
+    DEFAULT_OUTPUT_LEN = 128
+    SUPPORTED_DATASET_PATHS = {"Lin-Chen/MMStar"}
+    IS_MULTIMODAL = True
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # If --hf-output-len is not set, use the default output length.
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        sampled_requests: list[SampleRequest] = []
+
+        for ind, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            # Split the question text from options
+            # (keep only the part before "Options:").
+            full_q: str = item.get("question", "")
+            question_text = full_q.split("Options:", 1)[0].strip()
+
+            # Multimodal image content.
+            mm_content = process_image(item["image"])
+
+            # Compute prompt token length (note: this is plain text length
+            # if enable_multimodal_chat is False).
+            prompt_len = len(tokenizer(question_text).input_ids)
+
+            if enable_multimodal_chat:
+                # If multimodal content should be embedded in the chat message,
+                # convert to [{"role":"user","content":[...]}]
+                prompt = self.apply_multimodal_chat_transformation(
+                    question_text, mm_content
+                )
+                mm_for_request = None  # Already embedded in chat content.
+            else:
+                # Default: prompt is plain text,
+                # image is in mm_content for the bench to assemble.
+                prompt = question_text
+                mm_for_request = mm_content
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_for_request,
+                    request_id=request_id_prefix + str(ind),
+                )
+            )
+
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
