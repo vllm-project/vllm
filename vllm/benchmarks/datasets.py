@@ -612,14 +612,14 @@ class RandomDataset(BenchmarkDataset):
 
         # Decode, then re-encode and truncate to preserve token count invariants
         total_input_len = prefix_len + int(input_len)
-        prompt, adjusted_token_sequence = gen_prompt_decode_to_target_len(
+        prompt, adjusted_token_sequence, token_mismatch = gen_prompt_decode_to_target_len( # noqa: E501
             tokenizer=tokenizer,
             token_sequence=token_sequence,
             target_token_len=total_input_len,
             add_special_tokens=False,
         )
         total_input_len = len(adjusted_token_sequence)
-        return prompt, total_input_len
+        return prompt, total_input_len, token_mismatch
 
 
 # -----------------------------------------------------------------------------
@@ -935,8 +935,9 @@ class RandomMultiModalDataset(RandomDataset):
         vocab_size = tokenizer.vocab_size
         # Add synthetic multimodal items to each request
         mm_requests = []
+        token_mismatch_total = 0
         for i in range(num_requests):
-            prompt, total_input_len = self.generate_token_sequence(
+            prompt, total_input_len, token_mismatch = self.generate_token_sequence( # noqa: E501
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
                 prefix_len=prefix_len,
@@ -945,6 +946,7 @@ class RandomMultiModalDataset(RandomDataset):
                 offset=int(offsets[i]),
                 index=i,
             )
+            token_mismatch_total += token_mismatch
             # Get multimodal item iterator for a given request
             mm_item_iterator = self.get_mm_item_iterator(
                 min_num_mm_items,
@@ -980,6 +982,18 @@ class RandomMultiModalDataset(RandomDataset):
                     request_id=request_id_prefix + str(i),
                 )
             mm_requests.append(sample_request)
+
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
+
         return mm_requests
 
 # -----------------------------------------------------------------------------
