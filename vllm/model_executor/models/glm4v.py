@@ -43,7 +43,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .chatglm import ChatGLMBaseModel, ChatGLMModel
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import flatten_bn, merge_multimodal_embeddings
+from .utils import flatten_bn, isin_list
 
 
 class GLMVImagePixelInputs(TensorSchema):
@@ -607,28 +607,6 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.transformer.get_input_embeddings(input_ids)
-
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                multimodal_embeddings=multimodal_embeddings,
-                placeholder_token_id=[
-                    self.config.boi_token_id,
-                    self.config.pad_token_id,
-                    self.config.eoi_token_id,
-                ],
-            )
-
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -644,8 +622,15 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=isin_list(input_ids, [
+                    self.config.boi_token_id,
+                    self.config.pad_token_id,
+                    self.config.eoi_token_id,
+                ]),
+            )
             input_ids = None
 
         hidden_states = self.transformer(input_ids, positions,

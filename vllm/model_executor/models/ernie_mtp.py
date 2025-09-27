@@ -116,6 +116,9 @@ class ErnieMultiTokenPredictor(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -159,6 +162,9 @@ class ErnieMTP(nn.Module, SupportsPP):
 
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,

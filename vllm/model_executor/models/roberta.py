@@ -218,6 +218,9 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.jina_to_vllm_mapper)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.roberta.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor],

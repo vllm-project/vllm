@@ -41,8 +41,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
@@ -346,7 +345,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         model_config = vllm_config.model_config
         tokenizer = cached_tokenizer_from_config(model_config)
-        self.image_token_id = tokenizer.vocab[_IMAGE_TOKEN]
+        self.image_token_id: int = tokenizer.vocab[_IMAGE_TOKEN]
 
         self.vision = self._init_vision_module(self.vision_config,
                                                quant_config,
@@ -605,19 +604,6 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.image_token_id)
-        return inputs_embeds
-
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
@@ -632,8 +618,11 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # condition is for v0 compatibility
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=input_ids == self.image_token_id,
+            )
             input_ids = None
 
         hidden_states = self.language_model(input_ids,

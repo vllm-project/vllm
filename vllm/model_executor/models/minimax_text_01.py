@@ -592,10 +592,7 @@ class MiniMaxText01Model(nn.Module):
                                         dtype=torch.long)
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(self,
@@ -687,10 +684,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(
             batch_size)
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
     def forward(self,
