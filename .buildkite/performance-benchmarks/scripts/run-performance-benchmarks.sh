@@ -475,7 +475,7 @@ main() {
   ensure_sharegpt_downloaded
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
-  QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
+  QUICK_BENCHMARK_ROOT=../.buildkite/performance-benchmarks/
 
   # benchmarking
   run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests$ARCH.json}"
