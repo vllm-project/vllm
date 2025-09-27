@@ -1183,7 +1183,7 @@ class DeepseekV2Model(nn.Module):
         ) and "attn_index" in config.attn_module_list_cfg[0]
         if self.is_v32:
             # TODO(Chen): remove this hardcode
-            topk_indices_buffer = torch.empty(1000,
+            topk_indices_buffer = torch.empty(vllm_config.scheduler_config.max_num_batched_tokens,
                                               2048,
                                               dtype=torch.int32,
                                               device="cuda")
