@@ -242,10 +242,10 @@ class CudaPlatformBase(Platform):
 
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None and cls.is_device_capability(100)
-                and block_size == 128)
+                and block_size % 128 == 0)
             use_flashinfermla = selected_backend == _Backend.FLASHINFER_MLA or (
-                selected_backend is None and cls.is_device_capability(100)
-                and block_size in [32, 64])
+                selected_backend is None and cls.is_device_capability(100) and
+                (block_size == 32 or block_size % 64 == 0))
             use_flashmla = selected_backend == _Backend.FLASHMLA or (
                 selected_backend is None and is_flashmla_supported()[0])
             use_flashattn = selected_backend == _Backend.FLASH_ATTN_MLA or (
@@ -265,7 +265,7 @@ class CudaPlatformBase(Platform):
                 return ("vllm.v1.attention.backends.mla."
                         "flashinfer_mla.FlashInferMLABackend")
             if use_flashmla:
-                if block_size != 64:
+                if block_size % 64 != 0:
                     logger.warning(
                         "FlashMLA backend is not supported for block size %d"
                         " (currently only supports block size 64).",
