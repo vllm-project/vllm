@@ -575,9 +575,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             raise ValueError(
                 f"{type(self.model)} does not support tensor parallel. {tip}")
 
-        def _tensor_parallel(module: nn.Module,
-                             prefix: str = "",
-                             tp_plan=None):
+        def _tensor_parallel(module: nn.Module, prefix: str, tp_plan=None):
             tp_plan = tp_plan or {}
 
             # If the current module is a PreTrainedModel, set the tp_plan for
@@ -609,7 +607,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                                      prefix=qual_name,
                                      tp_plan=tp_plan)
 
-        _tensor_parallel(self.model)
+        _tensor_parallel(self.model, prefix="model")
 
     def create_attention_instances(
         self,
