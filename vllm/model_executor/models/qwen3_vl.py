@@ -317,21 +317,27 @@ class Qwen3_VisionTransformer(nn.Module):
 
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim, dtype=torch.get_default_dtype())
+        self.use_upstream_fa = False
         if self.attn_backend != _Backend.FLASH_ATTN and \
             check_upstream_fa_availability(
                 torch.get_default_dtype()):
             self.attn_backend = _Backend.FLASH_ATTN
-            logger.debug_once("Upstream Flash Attention is available, "
-                              "set attn_backend to FLASH_ATTN.")
+            self.use_upstream_fa = True
+
+        if self.attn_backend not in {
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
+                _Backend.ROCM_AITER_FA
+        }:
+            raise RuntimeError(
+                f"Qwen3-VL does not support {self.attn_backend} backend now.")
         if current_platform.is_device_capability(
                 100) and self.attn_backend != _Backend.TORCH_SDPA:
             # TODO(Roger/Wentao): remove this after FA
             # or XFORMERS's issue fixed on Blackwell
-            logger.warning_once(
-                f"Qwen3-VL does not support {self.attn_backend} backend "
-                "on Blackwell now. Set attn_backend to TORCH_SDPA.")
+            logger.info_once("Qwen3-VL vision attention does not support "
+                             f"{self.attn_backend} backend on Blackwell now. "
+                             "Vision attention backend is set to TORCH_SDPA.")
             self.attn_backend = _Backend.TORCH_SDPA
-        logger.info_once(f"Qwen3-VL attn_backend: {self.attn_backend}")
 
         self.blocks = nn.ModuleList([
             Qwen3_VisionBlock(
@@ -343,7 +349,8 @@ class Qwen3_VisionTransformer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.blocks.{layer_idx}",
                 use_data_parallel=use_data_parallel,
-                forced_attn_backend=self.attn_backend)
+                attn_backend=self.attn_backend,
+                use_upstream_fa=self.use_upstream_fa)
             for layer_idx in range(vision_config.depth)
         ])
 
