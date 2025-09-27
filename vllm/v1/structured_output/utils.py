@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from vllm.transformers_utils.tokenizer import AnyTokenizer
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.structured_output import GrammarBitmaskPlaceholder
     from vllm.v1.worker.gpu_input_batch import InputBatch
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
@@ -57,9 +58,9 @@ def apply_grammar_bitmask(
         logits (torch.Tensor): The output logits of model forward.
         device (torch.device): The device that model runner running on.
     """
-    grammar_bitmask = scheduler_output.grammar_bitmask
-    if grammar_bitmask is None:
-        return
+    grammar_bitmask_placeholder: GrammarBitmaskPlaceholder = \
+        scheduler_output.grammar_bitmask
+    grammar_bitmask: np.ndarray = grammar_bitmask_placeholder.result()
 
     # We receive the structured output bitmask from the scheduler,
     # compacted to contain bitmasks only for structured output requests.
