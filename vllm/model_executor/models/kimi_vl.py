@@ -66,7 +66,6 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    SupportsPP)
 from vllm.model_executor.models.moonvit import MoonVitPretrainedModel
-from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -424,26 +423,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
-    ) -> torch.Tensor:
-
-        # `get_input_embeddings` should already be implemented for the language
-        # model as one of the requirements of basic vLLM model implementation.
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-
-        if multimodal_embeddings is not None and len(
-                multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                multimodal_embeddings=multimodal_embeddings,
-                placeholder_token_id=self.config.media_placeholder_token_id)
-
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -462,14 +441,12 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
             if image_input is None:
                 inputs_embeds = None
             else:
-                inputs_embeds = self.get_input_embeddings(input_ids)
                 image_embeds = self._process_image_input(image_input)
-                inputs_embeds = merge_multimodal_embeddings(
+                inputs_embeds = self.get_input_embeddings(
                     input_ids,
-                    inputs_embeds,
                     image_embeds,
-                    placeholder_token_id=self.config.
-                    media_placeholder_token_id,
+                    is_multimodal=input_ids ==
+                    self.config.media_placeholder_token_id,
                 )
                 input_ids = None
 

@@ -68,7 +68,7 @@ from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+from .interfaces import (MultiModalEmbeddings, SupportsEagle3, SupportsLoRA,
                          SupportsMultiModal, SupportsMultiModalPruning,
                          SupportsPP, SupportsQuant)
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
@@ -274,6 +274,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend: _Backend = _Backend.TORCH_SDPA,
+        use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -300,25 +302,8 @@ class Qwen2_5_VisionAttention(nn.Module):
                                       quant_config=quant_config,
                                       prefix=f"{prefix}.proj",
                                       disable_tp=use_data_parallel)
-
-        # Detect attention implementation.
-        self.attn_backend = get_vit_attn_backend(
-            head_size=self.hidden_size_per_attention_head,
-            dtype=torch.get_default_dtype())
-        self.use_upstream_fa = False
-        if self.attn_backend != _Backend.FLASH_ATTN and \
-            check_upstream_fa_availability(
-                torch.get_default_dtype()):
-            self.attn_backend = _Backend.FLASH_ATTN
-            self.use_upstream_fa = True
-
-        if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
-                _Backend.ROCM_AITER_FA
-        }:
-            raise RuntimeError(
-                f"Qwen2.5-VL does not support {self.attn_backend} backend now."
-            )
+        self.attn_backend = attn_backend
+        self.use_upstream_fa = use_upstream_fa
         self.is_flash_attn_backend = self.attn_backend in {
             _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
         }
@@ -443,6 +428,8 @@ class Qwen2_5_VisionBlock(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend: _Backend = _Backend.TORCH_SDPA,
+        use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -455,7 +442,9 @@ class Qwen2_5_VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            use_data_parallel=use_data_parallel)
+            use_data_parallel=use_data_parallel,
+            attn_backend=attn_backend,
+            use_upstream_fa=use_upstream_fa)
         self.mlp = Qwen2_5_VisionMLP(dim,
                                      mlp_hidden_dim,
                                      act_fn=act_fn,
@@ -627,17 +616,35 @@ class Qwen2_5_VisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
+        use_upstream_fa = False
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_dim, dtype=torch.get_default_dtype())
+        if self.attn_backend != _Backend.FLASH_ATTN and \
+            check_upstream_fa_availability(
+                torch.get_default_dtype()):
+            self.attn_backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
+
+        if self.attn_backend not in {
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
+                _Backend.ROCM_AITER_FA
+        }:
+            raise RuntimeError(
+                f"Qwen2.5-VL does not support {self.attn_backend} backend now."
+            )
+
         self.blocks = nn.ModuleList([
-            Qwen2_5_VisionBlock(dim=self.hidden_size,
-                                num_heads=self.num_heads,
-                                mlp_hidden_dim=vision_config.intermediate_size,
-                                act_fn=get_act_and_mul_fn(
-                                    vision_config.hidden_act),
-                                norm_layer=norm_layer,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.blocks.{layer_idx}",
-                                use_data_parallel=use_data_parallel)
-            for layer_idx in range(depth)
+            Qwen2_5_VisionBlock(
+                dim=self.hidden_size,
+                num_heads=self.num_heads,
+                mlp_hidden_dim=vision_config.intermediate_size,
+                act_fn=get_act_and_mul_fn(vision_config.hidden_act),
+                norm_layer=norm_layer,
+                quant_config=quant_config,
+                prefix=f"{prefix}.blocks.{layer_idx}",
+                use_data_parallel=use_data_parallel,
+                attn_backend=self.attn_backend,
+                use_upstream_fa=use_upstream_fa) for layer_idx in range(depth)
         ])
         self.merger = Qwen2_5_VisionPatchMerger(
             d_model=vision_config.out_hidden_size,
@@ -648,12 +655,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             prefix=f"{prefix}.merger",
             use_data_parallel=use_data_parallel,
         )
-        self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype())
-        if self.attn_backend != _Backend.FLASH_ATTN and \
-            check_upstream_fa_availability(
-                torch.get_default_dtype()):
-            self.attn_backend = _Backend.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
@@ -965,7 +966,7 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     dummy_inputs=Qwen2_5_VLDummyInputsBuilder)
 class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsLoRA, SupportsPP,
-                                         SupportsQuant,
+                                         SupportsQuant, SupportsEagle3,
                                          SupportsMultiModalPruning):
 
     packed_modules_mapping = {
@@ -1027,6 +1028,13 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.language_model.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
@@ -1356,19 +1364,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                     )
                 multimodal_embeddings += video_embeddings
         return multimodal_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                [self.config.image_token_id, self.config.video_token_id])
-        return inputs_embeds
 
     def get_input_embeddings_v0(
         self,
