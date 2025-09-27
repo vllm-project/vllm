@@ -1108,6 +1108,11 @@ class CompletionRequest(OpenAIBaseModel):
             "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
             "Please pass `grammar` to `structured_outputs` instead."),
     )
+    structural_tag: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the output will follow the structural tag schema."),
+    )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
         description=(
@@ -1252,10 +1257,26 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
+        guided_json_object = None
+        if self.response_format is not None:
+            if self.response_format.type == "json_object":
+                guided_json_object = True
+            elif self.response_format.type == "json_schema":
+                json_schema = self.response_format.json_schema
+                assert json_schema is not None
+                self.guided_json = json_schema.json_schema
+            elif self.response_format.type == "structural_tag":
+                structural_tag = self.response_format
+                assert structural_tag is not None and isinstance(
+                    structural_tag, StructuralTagResponseFormat)
+                s_tag_obj = structural_tag.model_dump(by_alias=True)
+                self.structural_tag = json.dumps(s_tag_obj)
+
         # Forward deprecated guided_* parameters to structured_outputs
         if self.structured_outputs is None:
             kwargs = dict[str, Any](
                 json=self.guided_json,
+                json_object=guided_json_object,
                 regex=self.guided_regex,
                 choice=self.guided_choice,
                 grammar=self.guided_grammar,
