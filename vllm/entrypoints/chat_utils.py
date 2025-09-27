@@ -12,8 +12,11 @@ from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
                     cast)
 
 import jinja2
+import jinja2.ext
 import jinja2.meta
 import jinja2.nodes
+import jinja2.parser
+import jinja2.sandbox
 import transformers.utils.chat_template_utils as hf_chat_utils
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -1550,6 +1553,19 @@ def parse_chat_messages_futures(
     return conversation, mm_tracker.all_mm_data(), mm_tracker.all_mm_uuids()
 
 
+# adapted from https://github.com/huggingface/transformers/blob/v4.56.2/src/transformers/utils/chat_template_utils.py#L398-L412
+# only preserve the parse function used to resolve chat template kwargs
+class AssistantTracker(jinja2.ext.Extension):
+    tags = {"generation"}
+
+    def parse(self, parser: jinja2.parser.Parser) -> jinja2.nodes.CallBlock:
+        lineno = next(parser.stream).lineno
+        body = parser.parse_statements(["name:endgeneration"], drop_needle=True)
+        call = self.call_method("_generation_support")
+        call_block = jinja2.nodes.CallBlock(call, [], [], body)
+        return call_block.set_lineno(lineno)
+
+
 def resolve_chat_template_kwargs(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: str,
@@ -1560,7 +1576,11 @@ def resolve_chat_template_kwargs(
         if supports_kw(tokenizer.apply_chat_template, k, allow_var_kwargs=False)
     }
 
-    env = jinja2.Environment()
+    env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+        trim_blocks=True,
+        lstrip_blocks=True,
+        extensions=[AssistantTracker, jinja2.ext.loopcontrols],
+    )
     parsed_content = env.parse(chat_template)
     template_vars = jinja2.meta.find_undeclared_variables(parsed_content)
 
