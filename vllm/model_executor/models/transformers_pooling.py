@@ -58,7 +58,7 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
 
         # Skip unsupported/unwanted output embeddings layers
         self.skip_prefixes.extend([
-            "model.lm_head.", "model.predictions.",
+            "model.lm_head.", "model.predictions.", "model.qa_outputs.",
             "model.embeddings_project.", "model.discriminator_predictions."
         ])
 
