@@ -61,9 +61,12 @@ def rocm_aiter_gemm_w8a8_blockscale_impl(
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    import aiter as rocm_aiter
-
-    return rocm_aiter.gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
+    # MI300's fp8nuz should be enough to detect if we call ck vs triton
+    if current_platform.is_fp8_fnuz():
+        from aiter import gemm_a8w8_blockscale
+    else:
+        from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+    return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
 
 def rocm_aiter_gemm_w8a8_blockscale_fake(
@@ -87,8 +90,7 @@ if current_platform.is_rocm():
         op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
         fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
     )
-    if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
-            and current_platform.is_fp8_fnuz()):
+    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
 
         import aiter as rocm_aiter
         from aiter import get_hip_quant
@@ -730,8 +732,7 @@ def check_aiter_fp8_linear_support() -> bool:
     """AITER is only supported on ROCm and only for FP8_FNUZ
     and at the moment are MI300 series"""
     return (current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
-            and envs.VLLM_ROCM_USE_AITER_LINEAR
-            and current_platform.is_fp8_fnuz())
+            and envs.VLLM_ROCM_USE_AITER_LINEAR)
 
 
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:

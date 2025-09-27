@@ -9,6 +9,7 @@ from torch._inductor.pattern_matcher import (PatternMatcherPass, fwd_only,
                                              register_replacement)
 from torch._ops import OpOverload
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -34,6 +35,102 @@ silu_and_mul_nvfp4_quant_supported = (current_platform.is_cuda() and hasattr(
 if silu_and_mul_nvfp4_quant_supported:
     FUSED_OPS[
         kNvfp4Quant] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
+
+
+def is_rocm_aiter_linear_enabled() -> bool:
+    return current_platform.is_rocm(
+    ) and envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
+
+
+if is_rocm_aiter_linear_enabled():
+    import aiter as rocm_aiter
+    from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
+
+    from vllm.utils import direct_register_custom_op
+    rocm_aiter_fp8_dtype = rocm_aiter.dtypes.fp8
+    rocm_aiter_fp8_quant_group_size = 128
+
+    def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
+        x: torch.Tensor, ) -> tuple[torch.Tensor, torch.Tensor]:
+        return act_mul_and_fp8_group_quant(
+            x,
+            activation="silu",
+            group_size=rocm_aiter_fp8_quant_group_size,
+            dtype_quant=rocm_aiter_fp8_dtype)
+
+    def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
+        x: torch.Tensor, ) -> tuple[torch.Tensor, torch.Tensor]:
+        M, N = x.shape
+        assert N % 2 == 0
+        N_half = N // 2
+        x_fp8 = torch.empty((M, N_half),
+                            dtype=rocm_aiter_fp8_dtype,
+                            device=x.device)
+        out_bs = torch.empty(
+            (M, (N_half + rocm_aiter_fp8_quant_group_size - 1) //
+             rocm_aiter_fp8_quant_group_size),
+            dtype=torch.float32,
+            device=x.device)
+        return x_fp8, out_bs
+
+    direct_register_custom_op(
+        op_name="rocm_aiter_act_mul_and_fp8_group_quant",
+        op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
+        mutates_args=[],
+        fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+    BLOCK_LINEAR_OP = torch.ops.vllm.apply_w8a8_block_fp8_linear.default
+    FUSED_SILU_MUL_QUANT_OP = \
+        torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+    AITER_BLOCK_LINEAR_OP = \
+        torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale.default
+
+    class AiterSiluMulFp8BlockQuantPattern:
+
+        def __init__(self):
+            pass
+
+        def register(self, pm_pass: PatternMatcherPass):
+
+            def pattern(input: torch.Tensor, result_silu_mul: torch.Tensor,
+                        linear_weight: torch.Tensor,
+                        linear_weight_scale: torch.Tensor):
+                at1 = auto_functionalized(SILU_MUL_OP,
+                                          result=result_silu_mul,
+                                          input=input)
+                at2 = BLOCK_LINEAR_OP(input=at1[1],
+                                      weight=linear_weight,
+                                      block_size=[128, 128],
+                                      weight_scale=linear_weight_scale,
+                                      input_scale=None,
+                                      bias=None,
+                                      cutlass_block_fp8_supported=False,
+                                      use_aiter_and_is_supported=True)
+                return at2
+
+            def replacement(input: torch.Tensor, result_silu_mul: torch.Tensor,
+                            linear_weight: torch.Tensor,
+                            linear_weight_scale: torch.Tensor):
+                at1 = FUSED_SILU_MUL_QUANT_OP(x=input)
+                at2 = AITER_BLOCK_LINEAR_OP(A=at1[0],
+                                            B=linear_weight,
+                                            As=at1[1],
+                                            Bs=linear_weight_scale,
+                                            block_size=[128, 128],
+                                            output_dtype=input.dtype)
+                return at2
+
+            inputs = [
+                empty_bf16(5, 4),  # input
+                empty_bf16(5, 4),  # result_silu_mul
+                # linear_weight
+                torch.empty((2, 5), device="cuda", dtype=FP8_DTYPE),
+                empty_fp32(1, 1)  # linear_weight_scale
+            ]
+
+            register_replacement(pattern, replacement, inputs, fwd_only,
+                                 pm_pass)
 
 
 class ActivationQuantPattern(ABC):
@@ -176,6 +273,11 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
+        if is_rocm_aiter_linear_enabled():
+            pattern_silu_mul_aiter_block_fp8 = AiterSiluMulFp8BlockQuantPattern(
+            )
+            pattern_silu_mul_aiter_block_fp8.register(self.patterns)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -186,4 +288,5 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
     def uuid(self):
         return VllmInductorPass.hash_source(self, ActivationQuantPattern,
                                             SiluMulFp8StaticQuantPattern,
-                                            SiluMulNvfp4QuantPattern)
+                                            SiluMulNvfp4QuantPattern,
+                                            AiterSiluMulFp8BlockQuantPattern)
