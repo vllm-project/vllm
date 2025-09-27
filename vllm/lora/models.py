@@ -217,7 +217,7 @@ class LoRAModel(AdapterModel):
             for lora_module in modules.keys():  # noqa
                 module_name, _, _ = parse_fine_tuned_lora_name(
                     lora_module, weights_mapper)
-                if "base_layer" in lora_module: # FIXME: Determine where we need the experts.base_layer terms
+                if "base_layer" in lora_module:
                     continue
                 part_name = module_name.split(".")[-1]
                 if part_name not in expected_lora_modules:
