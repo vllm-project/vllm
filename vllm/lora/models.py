@@ -14,10 +14,12 @@ from torch import nn
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
-from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.lora_weights import (ClassifierLoRALayerWeights,
+                                    LoRALayerWeights, PackedLoRALayerWeights)
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
-from vllm.lora.utils import (from_layer, from_layer_logits_processor,
+from vllm.lora.utils import (from_layer, from_layer_classifier,
+                             from_layer_logits_processor,
                              get_supported_lora_modules,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
@@ -127,11 +129,29 @@ class LoRAModel:
         embedding_modules: Optional[dict[str, str]] = None,
         embedding_padding_modules: Optional[list[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
+        classifier_lora_name: Optional[str] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
+            # Case for classify head
+            module_name = "score"
+            if classifier_lora_name and tensor_name.endswith(
+                    classifier_lora_name):
+                loras[module_name] = ClassifierLoRALayerWeights.from_config(
+                    tensor_name,
+                    tensor.shape[0],
+                    peft_helper.lora_alpha,
+                    peft_helper.vllm_lora_scaling_factor,
+                )
+                loras[module_name].lora_a = tensor.to(device=device,
+                                                      dtype=dtype)
+                if pin_memory:
+                    loras[module_name].lora_a = loras[
+                        module_name].lora_a.pin_memory()
+                continue
+
             module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper)
             if module_name not in loras:
@@ -198,7 +218,8 @@ class LoRAModel:
             embedding_modules: Optional[dict[str, str]] = None,
             embedding_padding_modules: Optional[list[str]] = None,
             weights_mapper: Optional[WeightsMapper] = None,
-            tensorizer_config_dict: Optional[dict] = None) -> "LoRAModel":
+            tensorizer_config_dict: Optional[dict] = None,
+            classifier_lora_name: Optional[str] = None) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
 
         Args:
@@ -226,6 +247,10 @@ class LoRAModel:
 
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
+
+                if classifier_lora_name and lora_module.endswith(
+                        classifier_lora_name):
+                    continue
                 module_name, _, _ = parse_fine_tuned_lora_name(
                     lora_module, weights_mapper)
                 part_name = module_name.split(".")[-1]
@@ -274,6 +299,9 @@ class LoRAModel:
             if not isinstance(target_modules, list):
                 target_modules = [target_modules]
             for module in target_modules:
+                if classifier_lora_name and module.endswith(
+                        classifier_lora_name):
+                    continue
                 # Compatible with more modules,
                 # such as:layers.11.self_attn.k_proj
                 part_name = module.split(".")[-1]
@@ -319,7 +347,8 @@ class LoRAModel:
             target_embedding_padding=target_embedding_padding,
             embedding_modules=embedding_modules,
             embedding_padding_modules=embedding_padding_modules,
-            weights_mapper=weights_mapper)
+            weights_mapper=weights_mapper,
+            classifier_lora_name=classifier_lora_name)
 
 
 class LoRAModelManager:
@@ -418,6 +447,8 @@ class LoRAModelManager:
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
+            if "score" in module_name:
+                pass
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
                 module_lora.optimize()
@@ -497,10 +528,17 @@ class LoRAModelManager:
                 continue
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
-            new_module = replace_submodule(
-                self.model, module_name,
-                from_layer(module, self.lora_slots, self.lora_config,
-                           packed_moduled_lst, self.model.config))
+            if "score" in module_name and self.is_pooling_model:
+                new_module = replace_submodule(
+                    self.model, module_name,
+                    from_layer_classifier(module, self.lora_slots,
+                                          self.lora_config, self.model.config))
+            else:
+
+                new_module = replace_submodule(
+                    self.model, module_name,
+                    from_layer(module, self.lora_slots, self.lora_config,
+                               packed_moduled_lst, self.model.config))
 
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
@@ -574,6 +612,14 @@ class LoRAModelManager:
                         "cpu",
                         embeddings_tensor_dim=embeddings_tensor_dim,
                         bias_enabled=bias_enabled)
+                elif self.is_pooling_model and parts[-1] == "score":
+                    lora = ClassifierLoRALayerWeights.create_dummy_lora_weights(
+                        module_name,
+                        module.lora_a_stacked[0].shape[-1],
+                        module.lora_a_stacked[0].shape[-2],
+                        module.lora_a_stacked[0].dtype,
+                        "cpu",
+                    )
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
