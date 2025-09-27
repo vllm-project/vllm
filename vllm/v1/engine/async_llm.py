@@ -396,7 +396,8 @@ class AsyncLLM(EngineClient):
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
             await self.abort(request_id)
-            logger.info("============= Request %s aborted.", request_id)
+            if self.log_requests:
+                logger.info("Request %s aborted.", request_id)
             raise
 
         # Engine is dead. Do not abort since we shut down.
