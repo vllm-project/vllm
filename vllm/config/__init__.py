@@ -544,7 +544,7 @@ class VllmConfig:
 
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = \
-                self.compilation_config.debug_dump_path.absolute()
+                self.compilation_config.debug_dump_path.absolute().expanduser()
         if envs.VLLM_DEBUG_DUMP_PATH is not None:
             self.compilation_config.debug_dump_path = Path(
                 envs.VLLM_DEBUG_DUMP_PATH).absolute()
