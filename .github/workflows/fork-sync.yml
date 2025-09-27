@@ -1,0 +1,51 @@
+name: Fork Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream-remote:
+        description: "Remote name that points at the upstream repository"
+        default: upstream
+      upstream-branch:
+        description: "Branch to sync from upstream"
+        default: main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git user
+        run: |
+          git config --global user.name "Zhuul"
+          git config --global user.email "40538530+Zhuul@users.noreply.github.com"
+
+      - name: Ensure upstream remote
+        run: |
+          git remote add upstream https://github.com/vllm-project/vllm.git 2>/dev/null || true
+          git fetch upstream
+
+      - name: Sync while protecting extras
+        env:
+          UPSTREAM_REMOTE: ${{ github.event.inputs.upstream-remote || 'upstream' }}
+          UPSTREAM_BRANCH: ${{ github.event.inputs.upstream-branch || 'main' }}
+        run: |
+          chmod +x .github/extras/sync_with_upstream.sh
+          ./.github/extras/sync_with_upstream.sh "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git status --porcelain | grep -q .; then
+            echo "changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push updates
+        if: steps.diff.outputs.changes == 'true'
+        run: git push origin HEAD
