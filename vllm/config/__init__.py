@@ -684,8 +684,8 @@ class VllmConfig:
                                  f"Model: {self.model_config.model}")
 
     def compile_debug_dump_path(self) -> Optional[Path]:
-        """returns the path to dump the torch.compile 
-            debug information for the given rank.
+        """Returns a rank-aware path for dumping 
+        torch.compile debug information.
         """
         if self.compilation_config.debug_dump_path is None:
             return None
