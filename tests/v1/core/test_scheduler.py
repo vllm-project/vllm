@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 from typing import Optional
 from unittest.mock import Mock
 
@@ -1921,8 +1922,12 @@ def test_chunked_prefill_disabled_for_encoder_decoder(
         is_encoder_decoder=is_encoder_decoder,
     )
 
-    # `is_encoder_decoder` should only be used during construction of the config
-    assert not hasattr(scheduler_config, "is_encoder_decoder")
+    # `is_encoder_decoder` should only be used during construction
+    # of the config, and otherwise stored in the model config.
+    assert "is_encoder_decoder" not in vars(scheduler_config)
+    assert "is_encoder_decoder" not in [
+        f.name for f in dataclasses.fields(scheduler_config)
+    ]
     _validate_chunked_prefill_settings_for_encoder_decoder(
         scheduler_config, is_encoder_decoder, expect_enabled)
 
