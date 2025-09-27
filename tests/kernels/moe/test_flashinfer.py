@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 import torch
 
+from tests.kernels.moe.utils import make_test_weights
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config)
@@ -45,23 +46,6 @@ vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
 
 
-def quant_fp8_per_tensor_batches(a):
-    num_batches = a.size(0)
-    a_quant = []
-    a_scales = []
-
-    for i in range(num_batches):
-        a_fp8, a_global_sf = input_to_float8(a[i])
-        a_global_sf = 1.0 / a_global_sf
-        a_quant.append(a_fp8)
-        a_scales.append(a_global_sf)
-
-    result_a_quant = torch.stack(a_quant)
-    result_a_scales = torch.stack(a_scales)
-
-    return result_a_quant, result_a_scales
-
-
 @dataclass
 class TestData:
     hidden_states: torch.Tensor
@@ -78,24 +62,27 @@ class TestData:
                               reorder: bool) -> "TestData":
         hidden_states = torch.randn(
             (m, k), device="cuda", dtype=torch.bfloat16) / 10
-        w13 = torch.randn((e, 2 * n, k), device="cuda", dtype=torch.bfloat16)
-        w2 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16)
 
         # Scale to fp8
         _, a1_scale = input_to_float8(hidden_states)
         a1_scale = 1.0 / a1_scale
         a2_scale = torch.scalar_tensor(1.0).to(device="cuda").to(
             dtype=torch.float32)
-        w13_quantized, w13_weight_scale = quant_fp8_per_tensor_batches(w13)
-        w2_quantized, w2_weight_scale = quant_fp8_per_tensor_batches(w2)
+        ((_, w13_quantized, w13_weight_scale, _),
+         (_, w2_quantized, w2_weight_scale,
+          _)) = make_test_weights(e, n, k, quant_dtype=torch.float8_e4m3fn)
+
+        assert w13_weight_scale is not None, \
+            "w13_weight_scale must be not None"
+        assert w2_weight_scale is not None, "w2_weight_scale must be not None"
 
         layer = torch.nn.Module()
         layer.w13_weight = w13_quantized.clone()
         layer.w2_weight = w2_quantized.clone()
         layer.w13_input_scale = a1_scale
         layer.w2_input_scale = a2_scale
-        layer.w13_weight_scale = w13_weight_scale
-        layer.w2_weight_scale = w2_weight_scale
+        layer.w13_weight_scale = w13_weight_scale.flatten()
+        layer.w2_weight_scale = w2_weight_scale.flatten()
 
         register_moe_scaling_factors(layer)
 
@@ -115,8 +102,8 @@ class TestData:
             w2_quantized=w2_quantized,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
-            w13_weight_scale=w13_weight_scale,
-            w2_weight_scale=w2_weight_scale,
+            w13_weight_scale=layer.w13_weight_scale,
+            w2_weight_scale=layer.w2_weight_scale,
             layer=layer,
         )
 
@@ -186,9 +173,6 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
                                    rtol=1e-2)
 
 
-@pytest.mark.skip(
-    "Requires flashinfer version that contains https://github.com/flashinfer-ai/flashinfer/pull/1472"
-)
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
