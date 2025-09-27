@@ -5,6 +5,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
@@ -306,6 +307,15 @@ class Worker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+
+        # Init kv cache connector here, because it requires
+        # `kv_cache_config`.
+        # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
+        # because `initialize_kv_cache` will inject kv cache groups not
+        # related to kv cache connector (e.g. kv cache sharing layers).
+        connector_vllm_config = deepcopy(self.vllm_config)
+        connector_vllm_config.kv_cache_config = kv_cache_config
+        ensure_kv_transfer_initialized(connector_vllm_config)
 
         if self.vllm_config.model_config.enable_sleep_mode:
             from vllm.device_allocator.cumem import CuMemAllocator
@@ -706,5 +716,3 @@ def init_worker_distributed_environment(
         parallel_config.tensor_parallel_size,
         parallel_config.pipeline_parallel_size,
         parallel_config.decode_context_parallel_size)
-
-    ensure_kv_transfer_initialized(vllm_config)

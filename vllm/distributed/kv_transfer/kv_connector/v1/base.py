@@ -37,7 +37,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
 
 import torch
 
@@ -62,6 +62,19 @@ CopyBlocksOp = Callable[[
 ], None]
 
 logger = init_logger(__name__)
+
+
+class SupportsHMA:
+    """
+    Inherent this interface if the connector supports hybrid memory 
+    allocator (HMA). This is required to use the connector together
+    with hybrid memory allocator.
+    """
+    pass
+
+
+def supports_hma(cls: type) -> bool:
+    return isinstance(cls, SupportsHMA)
 
 
 class KVConnectorRole(enum.Enum):
@@ -323,7 +336,7 @@ class KVConnectorBase_V1(ABC):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        block_ids: Union[list[int], tuple[list[int], ...]],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
