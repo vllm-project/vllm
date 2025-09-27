@@ -13,7 +13,7 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.activation_quant_fusion import (
     FUSED_OPS, SILU_MUL_OP, ActivationQuantFusionPass)
 # yapf: enable
-from vllm.compilation.fusion import QUANT_OPS
+from vllm.compilation.fusion_rmsnorm_quant import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import CompilationConfig, PassConfig, VllmConfig

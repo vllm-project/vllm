@@ -5,8 +5,9 @@ import pytest
 import torch
 
 import vllm.plugins
-from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, FusedRMSQuantKey,
-                                     RMSNormQuantFusionPass)
+from vllm.compilation.fusion_rmsnorm_quant import (FUSED_OPS, QUANT_OPS,
+                                                   FusedRMSQuantKey,
+                                                   RMSNormQuantFusionPass)
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (CompilationConfig, CompilationLevel, PassConfig,

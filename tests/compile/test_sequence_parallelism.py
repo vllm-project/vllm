@@ -6,7 +6,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.compilation.fusion import RMSNormQuantFusionPass
+from vllm.compilation.fusion_rmsnorm_quant import RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass

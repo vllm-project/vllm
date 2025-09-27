@@ -8,7 +8,8 @@ import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.compilation.fusion import FUSED_OPS, RMSNormQuantFusionPass
+from vllm.compilation.fusion_rmsnorm_quant import (FUSED_OPS,
+                                                   RMSNormQuantFusionPass)
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
