@@ -18,7 +18,7 @@ class GCDebugConfig:
     Config for GC Debugger.
     - 0: disable GC debugger
     - 1: enable GC debugger with gc.collect elpased times
-    - {\"top_objects\":5}: enable GC debugger with top 5 collected objects
+    - '{"top_objects":5}': enable GC debugger with top 5 collected objects
     """
 
     def __init__(self, gc_debug_conf: Optional[str] = None) -> None:
