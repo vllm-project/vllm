@@ -13,7 +13,7 @@ import pytest_asyncio
 import requests
 
 from tests.utils import RemoteOpenAIServer
-from tests.v1.test_utils import check_request_balancing
+from tests.v1.utils import check_request_balancing
 from vllm.platforms import current_platform
 
 MODEL_NAME = "ibm-research/PowerMoE-3b"

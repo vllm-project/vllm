@@ -137,6 +137,9 @@ class ModelConfig:
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
+    allowed_media_domains: Optional[list[str]] = None
+    """If set, only media URLs that belong to this domain can be used for 
+    multi-modal inputs. """
     revision: Optional[str] = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
