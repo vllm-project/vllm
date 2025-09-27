@@ -87,6 +87,7 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
+        kernel_block_sizes: list[int],
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
@@ -143,8 +144,8 @@ class InputBatch:
             pin_memory=pin_memory,
             device=device,
             block_sizes=block_sizes,
-            num_speculative_tokens=num_speculative_tokens,
-        )
+            kernel_block_sizes=kernel_block_sizes,
+            num_speculative_tokens=num_speculative_tokens)
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ),

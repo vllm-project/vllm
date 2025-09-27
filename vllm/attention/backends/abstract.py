@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Generic, List, Optional, Protocol, Tuple, Type, TypeVar
+from typing import (Generic, List, Optional, Protocol, Tuple, Type, TypeVar,
+                    Union)
 
 import torch
 
@@ -22,6 +23,13 @@ class AttentionType:
     """Encoder attention between previous layer Q/K/V."""
     ENCODER_DECODER = "encoder_decoder"
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
+
+
+class MultipleOf:
+    base: int
+
+    def __init__(self, base: int):
+        self.base = base
 
 
 class AttentionBackend(ABC):
@@ -53,6 +61,10 @@ class AttentionBackend(ABC):
     @abstractmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         raise NotImplementedError
+
+    @classmethod
+    def get_supported_block_size(cls) -> list[Union[int, MultipleOf]]:
+        return cls.get_impl_cls().get_supported_block_size()
 
     @classmethod
     def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
@@ -153,6 +165,11 @@ class AttentionImpl(ABC, Generic[T]):
         kv_sharing_target_layer_name: Optional[str] = None,
     ) -> None:
         raise NotImplementedError
+
+    @staticmethod
+    def get_supported_block_size() -> list[Union[int, MultipleOf]]:
+        # TODO: implement this function for all backends.
+        return [MultipleOf(1)]
 
     @abstractmethod
     def forward(
