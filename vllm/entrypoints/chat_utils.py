@@ -1557,13 +1557,17 @@ def resolve_chat_template_kwargs(
 ) -> dict[str, Any]:
     fn_kw = {
         k for k in chat_template_kwargs
-        if supports_kw(tokenizer.apply_chat_template, k)
+        if supports_kw(tokenizer.apply_chat_template, k, allow_var_kwargs=False)
     }
 
     env = jinja2.Environment()
     parsed_content = env.parse(chat_template)
     template_vars = jinja2.meta.find_undeclared_variables(parsed_content)
-    accept_vars = fn_kw.intersection(template_vars)
+
+    # We exclude chat_template from kwargs here, because
+    # chat template has been already resolved at this stage
+    unexpected_vars = {"chat_template"}
+    accept_vars = (fn_kw | template_vars) - unexpected_vars
     return {
         k: v for k, v in chat_template_kwargs.items() if k in accept_vars
     }

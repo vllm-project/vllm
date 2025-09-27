@@ -2262,11 +2262,17 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
     [
         (
             QWEN2VL_MODEL_ID,
-            {"add_vision_id", "add_generation_prompt"},
+            {
+                "add_vision_id", "add_generation_prompt",
+                "continue_final_message", "tools"
+            },
         ),
         (
             QWEN3_MODEL_ID,
-            {"tools", "enable_thinking", "add_generation_prompt"},
+            {
+                "enable_thinking", "add_generation_prompt",
+                "continue_final_message", "tools"
+            },
         ),
     ],
 )
@@ -2291,13 +2297,15 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model,
         "unsed_kwargs_2": "abc",
         # should not appear
         "chat_template": "{% Hello world! %}",
+        # used by tokenizer
+        "continue_final_message": True,
+        "tools": tools,
         # both used by Qwen2-VL and Qwen3
         "add_generation_prompt": True,
         # only used by Qwen2-VL
         "add_vision_id": True,
         # only used by Qwen3
         "enable_thinking": True,
-        "tools": tools,
     }
 
     model_config = ModelConfig(
