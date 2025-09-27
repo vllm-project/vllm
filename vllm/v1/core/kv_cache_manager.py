@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.metrics.stats import KVCacheLifetimeStats, PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
@@ -150,6 +150,18 @@ class KVCacheManager:
         stats = self.prefix_cache_stats
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
+
+    def get_kv_cache_lifetime_stats(self) -> KVCacheLifetimeStats:
+        """Get the current KV cache lifetime statistics.
+
+        Returns:
+            The current lifetime statistics from the block pool.
+        """
+        return self.block_pool.get_lifetime_stats()
+
+    def reset_kv_cache_lifetime_stats(self) -> None:
+        """Reset the KV cache lifetime statistics."""
+        self.block_pool.reset_lifetime_stats()
 
     def get_computed_blocks(self,
                             request: Request) -> tuple[KVCacheBlocks, int]:
