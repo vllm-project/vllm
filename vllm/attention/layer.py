@@ -266,6 +266,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: Optional[torch.Size] = None,
+        positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -323,10 +324,16 @@ class Attention(nn.Module, AttentionLayerBase):
                                   value,
                                   self_kv_cache,
                                   attn_metadata,
-                                  output=output)
+                                  output=output,
+                                  positions=positions)
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    positions=positions)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -335,11 +342,19 @@ class Attention(nn.Module, AttentionLayerBase):
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                return self.impl.forward(self, query, key, value,
-                                         self_kv_cache, attn_metadata)
+                return self.impl.forward(self,
+                                         query,
+                                         key,
+                                         value,
+                                         self_kv_cache,
+                                         attn_metadata,
+                                         positions=positions)
             else:
-                return torch.ops.vllm.unified_attention(
-                    query, key, value, self.layer_name)
+                return torch.ops.vllm.unified_attention(query,
+                                                        key,
+                                                        value,
+                                                        self.layer_name,
+                                                        positions=positions)
 
     def calc_kv_scales(self, query, key, value):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
@@ -559,6 +574,7 @@ def unified_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
+    positions: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     wait_for_kv_layer_from_connector(layer_name)
 
@@ -568,8 +584,13 @@ def unified_attention(
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    output = self.impl.forward(self, query, key, value, kv_cache,
-                               attn_metadata)
+    output = self.impl.forward(self,
+                               query,
+                               key,
+                               value,
+                               kv_cache,
+                               attn_metadata,
+                               positions=positions)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return output
@@ -580,6 +601,7 @@ def unified_attention_fake(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
+    positions: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
 
@@ -600,6 +622,7 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
     output_block_scale: Optional[torch.Tensor] = None,
+    positions: Optional[torch.Tensor] = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -616,7 +639,8 @@ def unified_attention_with_output(
                       attn_metadata,
                       output=output,
                       output_scale=output_scale,
-                      output_block_scale=output_block_scale)
+                      output_block_scale=output_block_scale,
+                      positions=positions)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -629,6 +653,7 @@ def unified_attention_with_output_fake(
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
     output_block_scale: Optional[torch.Tensor] = None,
+    positions: Optional[torch.Tensor] = None,
 ) -> None:
     return
 
