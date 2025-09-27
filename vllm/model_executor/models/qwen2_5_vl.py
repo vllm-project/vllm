@@ -431,7 +431,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        attn_backend: Optional[_Backend] = None,
+        attn_backend: _Backend = _Backend.TORCH_SDPA,
         use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
