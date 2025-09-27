@@ -21,6 +21,9 @@ try:
 except ImportError:
     is_flashinfer_available = False
 
+_aiter_ops = None
+_triton_topk = None
+
 
 class TopKTopPSampler(nn.Module):
     """
