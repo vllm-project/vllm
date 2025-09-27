@@ -466,7 +466,7 @@ steps:
     - pytest -v -s kernels/mamba
 
 - label: Model Executor Test # 23min
-  timeout_in_minutes: 60
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/model_executor
