@@ -396,7 +396,6 @@ class EngineArgs:
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
-    enable_lora_bias: bool = LoRAConfig.bias_enabled
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: int = LoRAConfig.max_lora_rank
     default_mm_loras: Optional[Dict[str, str]] = \
@@ -831,8 +830,6 @@ class EngineArgs:
             "--enable-lora",
             action=argparse.BooleanOptionalAction,
             help="If True, enable handling of LoRA adapters.")
-        lora_group.add_argument("--enable-lora-bias",
-                                **lora_kwargs["bias_enabled"])
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank",
                                 **lora_kwargs["max_lora_rank"])
@@ -1385,7 +1382,6 @@ class EngineArgs:
                 "non multimodal model")
 
         lora_config = LoRAConfig(
-            bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
             default_mm_loras=self.default_mm_loras,
