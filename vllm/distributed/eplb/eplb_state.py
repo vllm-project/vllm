@@ -41,7 +41,8 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
-from .rebalance_algo import rebalance_experts
+from .eplb_policy.abstract_policy import EplbPolicy
+from .eplb_policy.policy_factory import PolicyFactory
 from .rebalance_execute import rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
@@ -156,6 +157,10 @@ class EplbState:
     Interval for expert rearrangement steps.
     This is a constant and is taken from the config.
     """
+    policy: Optional[EplbPolicy] = None
+    """
+    Selected instance of the EPLB algorithm class
+    """
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -257,6 +262,11 @@ class EplbState:
         expert_rearrangement_step = max(
             0, eplb_step_interval - eplb_step_interval // 4)
 
+        # Construct the algorithm instance based
+        # on the selected eplb algorithm type.
+        policy_type = parallel_config.eplb_config.eplb_policy_type
+        policy = PolicyFactory.generate_policy(policy_type)
+        assert policy is not None, "EplbPolicy must be initialized"
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
             assert global_expert_load.shape == (model.num_moe_layers,
@@ -280,13 +290,9 @@ class EplbState:
                 new_physical_to_logical_map,
                 new_logical_to_physical_map,
                 new_logical_replica_count,
-            ) = (rebalance_experts(
-                global_expert_load,
-                num_replicas,
-                num_groups,
-                num_nodes,
-                num_gpus,
-            ))
+            ) = (policy.rebalance_experts(global_expert_load, num_replicas,
+                                          num_groups, num_nodes, num_gpus,
+                                          old_global_expert_indices))
 
             max_physical_slots = new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= logical_to_physical_map.shape[-1]
@@ -315,16 +321,15 @@ class EplbState:
             )
             expert_rearrangement_step = 0
 
-        return cls(
-            physical_to_logical_map,
-            logical_to_physical_map,
-            logical_replica_count,
-            expert_load_pass,
-            expert_load_window,
-            expert_load_window_size=expert_load_window_size,
-            expert_rearrangement_step=expert_rearrangement_step,
-            expert_rearrangement_step_interval=eplb_step_interval,
-        )
+        return cls(physical_to_logical_map,
+                   logical_to_physical_map,
+                   logical_replica_count,
+                   expert_load_pass,
+                   expert_load_window,
+                   expert_load_window_size=expert_load_window_size,
+                   expert_rearrangement_step=expert_rearrangement_step,
+                   expert_rearrangement_step_interval=eplb_step_interval,
+                   policy=policy)
 
     def step(self,
              model: MixtureOfExperts,
@@ -501,18 +506,16 @@ class EplbState:
                 "not using hierarchical rearrangement algorithm.\n"
                 f"{num_gpus=}, {num_nodes=}")
 
+        assert self.policy is not None, "EplbPolicy must be initialized"
         # Get new expert mappings
         (
             new_physical_to_logical_map,
             new_logical_to_physical_map,
             new_logical_replica_count,
-        ) = (rebalance_experts(
-            global_expert_load_window,
-            num_replicas,
-            num_groups,
-            num_nodes,
-            num_gpus,
-        ))
+        ) = (self.policy.rebalance_experts(global_expert_load_window,
+                                           num_replicas, num_groups, num_nodes,
+                                           num_gpus,
+                                           self.physical_to_logical_map))
 
         # Update expert weights
         rearrange_expert_weights_inplace(
