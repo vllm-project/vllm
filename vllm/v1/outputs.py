@@ -14,11 +14,11 @@ if TYPE_CHECKING:
 
 class LogprobsLists(NamedTuple):
 
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs or num_tokens, max_num_logprobs + 1]
     logprob_token_ids: list[list[int]]
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs or num_tokens, max_num_logprobs + 1]
     logprobs: list[list[float]]
-    # [num_reqs]
+    # [num_reqs or num_tokens]
     sampled_token_ranks: list[int]
 
     def slice(self, start: int, end: int):
@@ -31,11 +31,11 @@ class LogprobsLists(NamedTuple):
 
 class LogprobsTensors(NamedTuple):
 
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs or num_tokens, max_num_logprobs + 1]
     logprob_token_ids: torch.Tensor
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs or num_tokens, max_num_logprobs + 1]
     logprobs: torch.Tensor
-    # [num_reqs]
+    # [num_reqs or num_tokens]
     selected_token_ranks: torch.Tensor
 
     def tolists(self):
