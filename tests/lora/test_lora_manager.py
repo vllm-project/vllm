@@ -42,19 +42,13 @@ DEFAULT_DTYPE = torch.get_default_dtype()
 def test_from_lora_tensors(sql_lora_files, device):
     tensors = load_file(
         os.path.join(sql_lora_files, "adapter_model.safetensors"))
-    new_embeddings = load_file(
-        os.path.join(sql_lora_files, "new_embeddings.safetensors"))
 
     peft_helper = PEFTHelper.from_local_dir(sql_lora_files,
                                             max_position_embeddings=4096)
-    lora_model = LoRAModel.from_lora_tensors(
-        1,
-        tensors,
-        peft_helper=peft_helper,
-        device=device,
-        embeddings=new_embeddings,
-        embedding_modules=EMBEDDING_MODULES,
-        embedding_padding_modules=EMBEDDING_PADDING_MODULES)
+    lora_model = LoRAModel.from_lora_tensors(1,
+                                             tensors,
+                                             peft_helper=peft_helper,
+                                             device=device)
     for module_name, lora in lora_model.loras.items():
         assert lora.module_name == module_name
         assert lora.rank == 8
@@ -65,16 +59,8 @@ def test_from_lora_tensors(sql_lora_files, device):
         assert lora.lora_b.device == torch.device(device)
         assert (lora.lora_a.shape[0] == lora.lora_b.shape[1]
                 ), f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
-        assert lora.lora_a.shape[0] == 8
-        embeddings_module = next(
-            (k for k in EMBEDDING_MODULES if k in module_name), None)
-        if embeddings_module:
-            assert torch.equal(
-                lora.embeddings_tensor,
-                new_embeddings[EMBEDDING_MODULES[embeddings_module]].to(
-                    device=lora.embeddings_tensor.device))
-        else:
-            assert lora.embeddings_tensor is None
+        assert lora.lora_a.shape[1] == 8
+        assert lora.embeddings_tensor is None
 
 
 def create_lora(lora_id: int, model: nn.Module, sub_modules: list[str],

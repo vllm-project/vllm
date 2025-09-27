@@ -401,12 +401,9 @@ class FalconH1Model(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = ((lora_config.lora_extra_vocab_size *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
         if get_pp_group().is_first_rank:
 
@@ -555,8 +552,7 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                                    prefix=maybe_prefix(prefix, "model"))
         self.tie_word_embeddings = config.tie_word_embeddings
         self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        self.mamba_cache: Optional[MambaCacheManager] = None
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
@@ -567,7 +563,7 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     # We need bigger padding if using lora for kernel
                     # compatibility
                     if not lora_config else
-                    lora_config.lora_vocab_padding_size),
+                    current_platform.get_lora_vocab_padding_size()),
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.lm_head_multiplier = config.lm_head_multiplier
