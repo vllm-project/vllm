@@ -353,6 +353,11 @@ class CompilationConfig:
     """files that are traced for compilation"""
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
+    
+    # User-specified splitting_ops when use_inductor_graph_partition=True
+    _user_specified_splitting_ops: list[str] = field(
+        default_factory=list, init=False)
+    """User-specified splitting_ops when use_inductor_graph_partition=True"""
 
     static_forward_context: dict[str, Any] = field(default_factory=dict,
                                                    init=False)
@@ -628,9 +633,23 @@ class CompilationConfig:
             "are ignored and set to an empty list. Instead, "
             "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
             "used to annotate custom ops for graph partition.")
-        if self.splitting_ops is not None and \
-            len(self.splitting_ops) > 0:
+        
+        logger.info("[VLLM DEBUG] Setting up inductor graph partition...")
+        logger.info("[VLLM DEBUG] Original splitting_ops: %s", self.splitting_ops)
+        
+        # If user explicitly specified splitting_ops, respect user config
+        if self.splitting_ops is not None and len(self.splitting_ops) > 0:
+            logger.info(
+                "[VLLM DEBUG] Preserving user-specified splitting_ops: %s", 
+                self.splitting_ops)
+            # Store user configuration for potential future use
+            self._user_specified_splitting_ops = list(self.splitting_ops)
             logger.warning_once(use_inductor_graph_partition_msg)
+        else:
+            self._user_specified_splitting_ops = []
+            
+        logger.info("[VLLM DEBUG] Preserved _user_specified_splitting_ops: %s", 
+                   self._user_specified_splitting_ops)
         self.splitting_ops = []
 
     def set_splitting_ops_for_attn_fusion(self):
