@@ -1,4 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+
 from vllm import LLM, SamplingParams
 
 # For V1: Turn off multiprocessing to make scheduling deterministic
@@ -31,4 +34,3 @@ for i, output in enumerate(outputs):
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    
