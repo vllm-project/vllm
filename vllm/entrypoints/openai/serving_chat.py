@@ -222,14 +222,16 @@ class OpenAIServingChat(OpenAIServing):
 
             if not self.use_harmony:
                 # Common case.
-                request_chat_template = (request.chat_template
-                                         if self.trust_request_chat_template
-                                         else None)
+                request_chat_template = request.chat_template
                 chat_template_kwargs = request.chat_template_kwargs
                 if not self.trust_request_chat_template and (
-                        chat_template_kwargs and
-                        chat_template_kwargs.get("chat_template") is not None):
-                    chat_template_kwargs.pop("chat_template")
+                        request_chat_template is not None or
+                    (chat_template_kwargs and
+                     chat_template_kwargs.get("chat_template") is not None)):
+                    return self.create_error_response(
+                        "Chat template is passed with request, but "
+                        "--trust-request-chat-template is not set. "
+                        "Refused request with untrusted chat template.")
                 (
                     conversation,
                     request_prompts,
