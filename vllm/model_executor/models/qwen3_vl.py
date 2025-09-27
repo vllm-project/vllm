@@ -161,7 +161,8 @@ class Qwen3_VisionBlock(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        forced_attn_backend: Optional[_Backend] = None,
+        attn_backend: _Backend = _Backend.TORCH_SDPA,
+        use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -175,7 +176,8 @@ class Qwen3_VisionBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
-            forced_attn_backend=forced_attn_backend)
+            attn_backend=attn_backend,
+            use_upstream_fa=use_upstream_fa)
         self.mlp = Qwen3_VisionMLP(dim,
                                    mlp_hidden_dim,
                                    act_fn=act_fn,
