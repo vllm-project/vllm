@@ -189,7 +189,9 @@ def _topk_kernel(LOGITS, PROBS, K, B,
         if not (k == N): # All tokens are valid
 
             # THERE IS NO DUPLICATE LOGIT MANAGEMENT FOR THIS TOP-K IMPLEMENTATION 
-            # CURRENT IMPLEMENTATION INCLUDES ALL DUPLICATE LOGITS, WHICH MAY RETURN MORE THAN K LOGITS
+            # CURRENT IMPLEMENTATION INCLUDES ALL DUPLICATE LOGITS, WHICH MAY RETURN MORE THAN K LOGITS,
+            # FOLLOWING THE CURRENT PYTHON BASED IMPLEMENTATION in apply_top_k_only(), WHICH ALSO
+            # INCLUDES ALL DUPLICATE LOGITS.
             # IF YOU NEED EXACTLY K LOGITS, PLEASE REFER TO THE TOP-P IMPLEMENTATION
             # AND IMPLEMENT THE DUPLICATE LOGIT MANAGEMENT USING THE FORCE_REMOVE_LOGIT VARIABLE
 
@@ -519,7 +521,9 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B,
         if not (k == N): # All tokens are valid
 
             # THERE IS NO DUPLICATE LOGIT MANAGEMENT FOR THIS TOP-K IMPLEMENTATION 
-            # CURRENT IMPLEMENTATION INCLUDES ALL DUPLICATE LOGITS, WHICH MAY RETURN MORE THAN K LOGITS
+            # CURRENT IMPLEMENTATION INCLUDES ALL DUPLICATE LOGITS, WHICH MAY RETURN MORE THAN K LOGITS,
+            # FOLLOWING THE CURRENT PYTHON BASED IMPLEMENTATION in apply_top_k_only(), WHICH ALSO
+            # INCLUDES ALL DUPLICATE LOGITS.
             # IF YOU NEED EXACTLY K LOGITS, PLEASE REFER TO THE TOP-P IMPLEMENTATION
             # AND IMPLEMENT THE DUPLICATE LOGIT MANAGEMENT USING THE FORCE_REMOVE_LOGIT VARIABLE
 
@@ -700,18 +704,13 @@ def triton_apply_top_k_top_p(
     k: Optional[torch.Tensor],
     p: Optional[torch.Tensor],
 ) -> torch.Tensor:
+
     batch_size, vocab_size = logits.shape
     BLOCK_SIZE = 4096
     NUM_PROGRAMS = 128
     NUM_TILES = (vocab_size + BLOCK_SIZE - 1) // BLOCK_SIZE
     SIGMA = 2.5
-    debug = torch.full((4, 20), -float('inf'), device=logits.device)
-    # print(b_str("Launch params:") + f"logits.shape: {logits.shape}, probs.shape: {probs.shape}, "
-    #       f"k.shape: {k.shape if k is not None else None}, p.shape: {p.shape if p is not None else None}, "
-    #       f"batch_size: {batch_size}, vocab_size: {vocab_size}, BLOCK_SIZE: {BLOCK_SIZE}, NUM_TILES: {NUM_TILES}")
-    # print(f"Input logits: {logits}")
   
-    
     if k is not None and p is None:
         probs = torch.full((NUM_PROGRAMS, vocab_size), -float('inf'), device=logits.device)
         _topk_kernel[(NUM_PROGRAMS,)](logits, probs, k, batch_size, 
@@ -725,9 +724,7 @@ def triton_apply_top_k_top_p(
         probs = torch.full_like(logits, -float('inf'), device=logits.device)
         _topk_topp_kernel[(NUM_PROGRAMS,)](logits, probs, k, p, batch_size, 
                                            SIGMA, vocab_size, BLOCK_SIZE, NUM_TILES)
-    # print(f"debug: {debug}")
-    # print(f"Output logits: {logits}")
-    # print(f"Output probs: {probs[:, :12]}")
+
     return logits
 
 @torch.compile
@@ -751,14 +748,8 @@ def apply_top_k_top_p(
     The logits tensor may be updated in-place.
     """
 
-    # logits = torch.full_like(logits, -1.0, device=logits.device)
-    # logits[:12 ,:10] = torch.tensor([10, 9, 8, 7, 6, 5, 4, 3, 2, 1], device=logits.device)
-    # print(f"logits: {logits[:12, :12]}")
-
     input_logits = logits.clone()
     original_logits = original_apply_top_k_top_p(input_logits, k, p)
-    original_probs = torch.softmax(input_logits, dim=-1)
-    # print(f"original_probs: {original_probs[:12, :12]}")
 
     batch_size, vocab_size = logits.shape
     print(g_str("apply_top_k_top_p") + f" logits.shape: {batch_size} x {vocab_size}, p is None: {p is None}, k is None: {k is None}")
@@ -784,12 +775,11 @@ def apply_top_k_top_p(
         print(f"logits: {torch.sort(logits[error_rows], descending=True).values[:row_to_show, :50]}")
         print(f"original_logits: {torch.sort(original_logits[error_rows], descending=True).values[:row_to_show, :50]}")
 
-    print ("/////////////////////////////////////////")
-    start_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(start_time))
-    out_dir = "./sampler_input_output"
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = f"{out_dir}/llama8b_{start_time_str}.pt"
-    torch.save({"input_logits": input_logits, "p": p, "k": k, "output_logits": logits}, out_path)
+    # start_time_str = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(start_time))
+    # out_dir = "./sampler_input_output"
+    # os.makedirs(out_dir, exist_ok=True)
+    # out_path = f"{out_dir}/llama8b_{start_time_str}.pt"
+    # torch.save({"input_logits": input_logits, "p": p, "k": k, "output_logits": logits}, out_path)
     return logits
 
 

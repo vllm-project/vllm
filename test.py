@@ -19,8 +19,8 @@ prompts = prompts * 64
 sampling_params = SamplingParams(temperature=0.8, top_p=0.7, seed=SEED)
 
 # Add seed to LLM initialization for global reproducibility
-llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct", seed=SEED)
-# llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite")
+# llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct", seed=SEED)
+llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite")
 
 outputs = llm.generate(prompts, sampling_params)
 
