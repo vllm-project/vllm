@@ -281,8 +281,8 @@ class RequestRunner:
 
             model_runner_output = create_model_runner_output(
                 reqs=self.scheduler.running,
-                finished_sending=list(finished_sending),
-                finished_recving=list(finished_recving),
+                finished_sending=finished_sending,
+                finished_recving=finished_recving,
                 token_id=token_id)
 
             if self.scheduler.running:
