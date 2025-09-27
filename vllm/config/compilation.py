@@ -5,6 +5,7 @@ import enum
 import hashlib
 from collections import Counter
 from dataclasses import asdict, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
 
 from pydantic import TypeAdapter, field_validator
@@ -169,7 +170,7 @@ class CompilationConfig:
     - 1: dynamo as is.
     - 2: dynamo once.
     - 3: piecewise compilation."""
-    debug_dump_path: str = ""
+    debug_dump_path: Optional[Path] = None
     """The path to dump the debug information."""
     cache_dir: str = ""
     """The directory to store the compiled graph, to accelerate Inductor
