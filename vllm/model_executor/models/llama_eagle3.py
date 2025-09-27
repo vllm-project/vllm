@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -102,7 +101,6 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         return hidden_states, residual
 
 
-@support_torch_compile
 class LlamaModel(nn.Module):
 
     def __init__(
@@ -145,13 +143,18 @@ class LlamaModel(nn.Module):
             eps=self.config.rms_norm_eps,
         )
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        input_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_embeds = self.embed_tokens(input_ids)
+        if input_embeds is None:
+            input_embeds = self.get_input_embeddings(input_ids)
         assert hidden_states.shape[-1] == input_embeds.shape[-1]
 
         residual = None
@@ -232,6 +235,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             requires_grad=False,
         )
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -239,11 +245,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if inputs_embeds is not None:
-            raise NotImplementedError(
-                f"{type(self).__name__} does not support multimodal inputs yet."
-            )
-        return self.model(input_ids, positions, hidden_states)
+        return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
     def compute_logits(
         self,

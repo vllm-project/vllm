@@ -271,6 +271,7 @@ class VllmConfig:
                     f"{model_config.dtype} is not supported for quantization "
                     f"method {model_config.quantization}. Supported dtypes: "
                     f"{supported_dtypes}")
+            quant_config.maybe_update_config(model_config.model)
             return quant_config
         return None
 
@@ -365,9 +366,11 @@ class VllmConfig:
                     self.compilation_config.cudagraph_mode = \
                         CUDAGraphMode.FULL_AND_PIECEWISE
 
-                    # pooling model does not support full cudagraphs
+                    # pooling models and encoder-decoder models
+                    # do not support full cudagraphs
                     if self.model_config is not None and \
-                        self.model_config.pooler_config is not None:
+                        (self.model_config.pooler_config is not None
+                         or self.model_config.is_encoder_decoder):
                         self.compilation_config.cudagraph_mode = \
                             CUDAGraphMode.PIECEWISE
                 else:
@@ -385,19 +388,7 @@ class VllmConfig:
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        if self.cache_config.cpu_offload_gb > 0 and \
-            self.compilation_config.level != CompilationLevel.NO_COMPILATION \
-                and not envs.VLLM_USE_V1:
-            logger.warning(
-                "CPU offload is not supported with `torch.compile` in v0 yet."
-                " Disabling `torch.compile`.")
-            self.compilation_config.level = CompilationLevel.NO_COMPILATION
-
         if self.cache_config.kv_sharing_fast_prefill:
-            if not envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Fast prefill optimization for KV sharing is not supported "
-                    "in V0 currently.")
 
             if self.speculative_config is not None and \
                 self.speculative_config.use_eagle():
@@ -410,14 +401,6 @@ class VllmConfig:
             logger.warning_once(
                 "--kv-sharing-fast-prefill requires changes on model side for "
                 "correctness and to realize prefill savings. ")
-
-        if ((not envs.VLLM_USE_V1) and self.lora_config is not None
-                and self.compilation_config.level
-                != CompilationLevel.NO_COMPILATION):
-            logger.warning(
-                "LoRA for V0 is not supported with `torch.compile` yet. "
-                "Disabling `torch.compile`.")
-            self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         disable_chunked_prefill_reasons: list[str] = []
 
@@ -477,15 +460,22 @@ class VllmConfig:
                            "to True to enable.")
         current_platform.check_and_update_config(self)
 
-        # final check of cudagraph mode after platform-specific update
+        # Do this after all the updates to compilation_config.level
+        if envs.VLLM_USE_V1 and \
+            self.compilation_config.level == CompilationLevel.PIECEWISE:
+            self.compilation_config.set_splitting_ops_for_v1()
+
+        # final check of cudagraph mode after all possible updates
         if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
-            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
+            if self.compilation_config.cudagraph_mode.has_full_cudagraphs()\
                 and self.model_config is not None and \
-                not self.model_config.disable_cascade_attn:
-                logger.info("CUDAGraphMode.FULL is not supported with "
-                            "cascade attention currently. Disabling cascade"
-                            "attention.")
-                self.model_config.disable_cascade_attn = True
+                not self.model_config.disable_cascade_attn and\
+                not self.compilation_config.cudagraph_mode.\
+                has_piecewise_cudagraphs():
+                logger.warning_once(
+                    "No piecewise cudagraph for executing cascade attention."
+                    " Will fall back to eager execution if a batch runs "
+                    "into cascade attentions")
 
             if self.compilation_config.cudagraph_mode\
                 .requires_piecewise_compilation():
@@ -494,6 +484,12 @@ class VllmConfig:
                     "Compilation level should be CompilationLevel.PIECEWISE "\
                     "when cudagraph_mode piecewise cudagraphs is used, "\
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
+
+            # final migrate the deprecated flags
+            self.compilation_config.use_cudagraph = self.compilation_config.\
+                cudagraph_mode!= CUDAGraphMode.NONE
+            self.compilation_config.full_cuda_graph = self.compilation_config.\
+                cudagraph_mode.has_full_cudagraphs()
 
         if self.parallel_config.enable_dbo:
             a2a_backend = envs.VLLM_ALL2ALL_BACKEND
@@ -505,13 +501,13 @@ class VllmConfig:
             "variable to deepep_low_latency or deepep_high_throughput and "\
             "install the DeepEP kernels."
 
+            if not self.model_config.disable_cascade_attn:
+                self.model_config.disable_cascade_attn = True
+                logger.warning_once(
+                    "Disabling cascade attention when DBO is enabled.")
+
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
-
-        # Do this after all the updates to compilation_config.level
-        if envs.VLLM_USE_V1 and \
-            self.compilation_config.level == CompilationLevel.PIECEWISE:
-            self.compilation_config.set_splitting_ops_for_v1()
 
         if (envs.VLLM_USE_V1
                 and not self.scheduler_config.disable_hybrid_kv_cache_manager):
@@ -614,57 +610,27 @@ class VllmConfig:
         """
 
         # calculate the default `batch_size_capture_list`
-        if not envs.VLLM_USE_V1:
-            batch_size_capture_list = []
-            if self.scheduler_config is not None and \
-                self.model_config is not None and \
-                    not self.model_config.enforce_eager:
-
-                possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
-                if self.parallel_config.tensor_parallel_size > 1 and \
-                    self.compilation_config.pass_config.enable_sequence_parallelism:
-                    possible_sizes = self.update_sizes_for_sequence_parallelism(
-                        possible_sizes)
-
-                # find the minimum size that is larger than max_num_seqs,
-                # which then becomes the max_batchsize_to_capture
-                larger_sizes = [
-                    x for x in possible_sizes
-                    if x >= self.scheduler_config.max_num_seqs
+        batch_size_capture_list = []
+        if self.model_config is not None and \
+            not self.model_config.enforce_eager:
+            cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
+            if len(cuda_graph_sizes) == 1:
+                batch_size_capture_list = [1, 2, 4] + [
+                    i for i in range(8, cuda_graph_sizes[0] + 1, 8)
                 ]
-                if larger_sizes:
-                    max_batchsize_to_capture = larger_sizes[0]
-                else:
-                    max_batchsize_to_capture = possible_sizes[-1]
-
-                # filter out the sizes that are
-                # larger than max_batchsize_to_capture
-                batch_size_capture_list = [
-                    size for size in possible_sizes
-                    if size <= max_batchsize_to_capture
-                ]
-        else:
-            batch_size_capture_list = []
-            if self.model_config is not None and \
-                not self.model_config.enforce_eager:
-                cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
-                if len(cuda_graph_sizes) == 1:
-                    batch_size_capture_list = [1, 2, 4] + [
-                        i for i in range(8, cuda_graph_sizes[0] + 1, 8)
-                    ]
-                elif len(cuda_graph_sizes) > 1:
-                    batch_size_capture_list = sorted(cuda_graph_sizes)
-                else:
-                    raise TypeError(f"Invalid value for {cuda_graph_sizes=}.")
-                if self.parallel_config.tensor_parallel_size > 1 and \
-                    self.compilation_config.pass_config.enable_sequence_parallelism:
-                    batch_size_capture_list = \
-                        self.update_sizes_for_sequence_parallelism(batch_size_capture_list)
-                max_num_tokens = self.scheduler_config.max_num_batched_tokens
-                batch_size_capture_list = [
-                    size for size in batch_size_capture_list
-                    if size <= max_num_tokens
-                ]
+            elif len(cuda_graph_sizes) > 1:
+                batch_size_capture_list = sorted(cuda_graph_sizes)
+            else:
+                raise TypeError(f"Invalid value for {cuda_graph_sizes=}.")
+            if self.parallel_config.tensor_parallel_size > 1 and \
+                self.compilation_config.pass_config.enable_sequence_parallelism:
+                batch_size_capture_list = \
+                    self.update_sizes_for_sequence_parallelism(batch_size_capture_list)
+            max_num_tokens = self.scheduler_config.max_num_batched_tokens
+            batch_size_capture_list = [
+                size for size in batch_size_capture_list
+                if size <= max_num_tokens
+            ]
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)

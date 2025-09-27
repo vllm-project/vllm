@@ -42,7 +42,7 @@ def kernel_warmup(worker: "Worker"):
     # and is not a pooling model
     def _is_flashinfer_backend(backend):
         try:
-            return backend.get_name() == "FLASHINFER_VLLM_V1"
+            return backend.get_name() == "FLASHINFER"
         except NotImplementedError:
             return False
 

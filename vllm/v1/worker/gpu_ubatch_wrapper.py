@@ -330,6 +330,18 @@ class UBatchWrapper:
 
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
+
+            # This is to account for the case where ubatching was aborted.
+            # When we capture full graphs we only capture one graph per shape,
+            # meaning that if we have a ubatched  cudagraph for the current
+            # num_tokens, we don't have a non-ubatched one. Without this
+            # check, the cudagraph wrapper will try to capture a cudagraph
+            # for this shape during a normal run.
+            if cudagraph_runtime_mode is CUDAGraphMode.FULL:
+                assert batch_descriptor is not None
+                if batch_descriptor.num_tokens in self.cudagraphs:
+                    cudagraph_runtime_mode = CUDAGraphMode.NONE
+
             if cudagraph_runtime_mode in (CUDAGraphMode.NONE,
                                           CUDAGraphMode.PIECEWISE):
                 return self.runnable(*args, **kwargs)
@@ -366,7 +378,8 @@ class UBatchWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
             with self.sm_control:
                 return self._capture_ubatches(ubatch_metadata, self.model)
-        elif num_tokens in self.cudagraphs:
+        elif num_tokens in self.cudagraphs \
+            and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             cudagraph_metadata = self.cudagraphs[num_tokens]
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs

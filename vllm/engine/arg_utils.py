@@ -297,6 +297,8 @@ class EngineArgs:
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
+    allowed_media_domains: Optional[
+        list[str]] = ModelConfig.allowed_media_domains
     download_dir: Optional[str] = LoadConfig.download_dir
     safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
     load_format: Union[str, LoadFormats] = LoadConfig.load_format
@@ -391,6 +393,7 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
+    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -530,6 +533,8 @@ class EngineArgs:
                                  **model_kwargs["hf_config_path"])
         model_group.add_argument("--allowed-local-media-path",
                                  **model_kwargs["allowed_local_media_path"])
+        model_group.add_argument("--allowed-media-domains",
+                                 **model_kwargs["allowed_media_domains"])
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision",
                                  **model_kwargs["code_revision"])
@@ -813,6 +818,9 @@ class EngineArgs:
         multimodal_group.add_argument("--skip-mm-profiling",
                                       **multimodal_kwargs["skip_mm_profiling"])
 
+        multimodal_group.add_argument(
+            "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"])
+
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
         lora_group = parser.add_argument_group(
@@ -993,6 +1001,7 @@ class EngineArgs:
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
+            allowed_media_domains=self.allowed_media_domains,
             dtype=self.dtype,
             seed=self.seed,
             revision=self.revision,
@@ -1032,6 +1041,7 @@ class EngineArgs:
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
+            video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
         )
 
@@ -1465,33 +1475,35 @@ class EngineArgs:
             return False
 
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        if (self.speculative_config is not None
-                and self.speculative_config.get("method") == "draft_model"):
-            raise NotImplementedError(
-                "Speculative decoding with draft model is not supported yet. "
-                "Please consider using other speculative decoding methods "
-                "such as ngram, medusa, eagle, or deepseek_mtp.")
+        if self.speculative_config is not None:
+            # speculative_config could still be a dict at this point
+            if isinstance(self.speculative_config, dict):
+                method = self.speculative_config.get("method", None)
+            else:
+                method = self.speculative_config.method
+
+            if method == "draft_model":
+                raise NotImplementedError(
+                    "Draft model speculative decoding is not supported yet. "
+                    "Please consider using other speculative decoding methods "
+                    "such as ngram, medusa, eagle, or mtp.")
 
         V1_BACKENDS = [
-            "FLASH_ATTN_VLLM_V1",
             "FLASH_ATTN",
             "PALLAS",
-            "PALLAS_VLLM_V1",
-            "TRITON_ATTN_VLLM_V1",
+            "TRITON_ATTN",
             "TRITON_MLA",
             "CUTLASS_MLA",
             "FLASHMLA",
-            "FLASHMLA_VLLM_V1",
             "FLASH_ATTN_MLA",
             "FLASHINFER",
-            "FLASHINFER_VLLM_V1",
             "FLASHINFER_MLA",
             "ROCM_AITER_MLA",
-            "TORCH_SDPA_VLLM_V1",
+            "TORCH_SDPA",
             "FLEX_ATTENTION",
             "TREE_ATTN",
-            "XFORMERS_VLLM_V1",
-            "ROCM_ATTN_VLLM_V1",
+            "XFORMERS",
+            "ROCM_ATTN",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
