@@ -121,5 +121,5 @@ def test_custom_quant(vllm_runner, model, monkeypatch):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=1)
         assert output

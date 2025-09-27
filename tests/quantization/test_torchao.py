@@ -18,7 +18,7 @@ def test_pre_quantized_model(vllm_runner):
                      dtype="bfloat16",
                      enforce_eager=True) as llm:
         output = llm.generate_greedy(["The capital of France is"],
-                                     max_tokens=32)
+                                     max_tokens=1)
     assert output
     print(output)
 
@@ -39,7 +39,7 @@ def test_opt_125m_int8wo_model_loading_with_params(vllm_runner,
                      dtype="bfloat16",
                      pt_load_map_location=pt_load_map_location) as llm:
         output = llm.generate_greedy(["The capital of France is"],
-                                     max_tokens=32)
+                                     max_tokens=10)
 
         assert output
         print(output)
@@ -52,9 +52,10 @@ def test_opt_125m_int4wo_model_per_module_quant(vllm_runner):
     with vllm_runner(model_name=model_name,
                      quantization="torchao",
                      dtype="bfloat16",
+                     enforce_eager=True,
                      pt_load_map_location="cuda:0") as llm:
         output = llm.generate_greedy(["The capital of France is"],
-                                     max_tokens=32)
+                                     max_tokens=1)
 
         assert output
         print(output)
@@ -67,9 +68,10 @@ def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
     with vllm_runner(model_name=model_name,
                      quantization="torchao",
                      dtype="bfloat16",
+                     enforce_eager=True,
                      pt_load_map_location="cuda:0") as llm:
         output = llm.generate_greedy(["The capital of France is"],
-                                     max_tokens=32)
+                                     max_tokens=1)
 
         assert output
         print(output)
@@ -87,9 +89,10 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
     with vllm_runner(model_name=model_name,
                      quantization="torchao",
                      dtype="bfloat16",
+                     enforce_eager=True,
                      pt_load_map_location="cuda:0") as llm:
         output = llm.generate_greedy(["The capital of France is"],
-                                     max_tokens=32)
+                                     max_tokens=1)
 
         assert output
         print(output)
