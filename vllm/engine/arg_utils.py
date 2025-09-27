@@ -485,6 +485,9 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
 
+    global_cache_hit_threshold: float = \
+        SchedulerConfig.global_cache_hit_threshold
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -914,6 +917,9 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+        scheduler_group.add_argument(
+            "--global-cache-hit-threshold",
+            **scheduler_kwargs["global_cache_hit_threshold"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1377,7 +1383,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
-        )
+            global_cache_hit_threshold=self.global_cache_hit_threshold)
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
             raise ValueError(
