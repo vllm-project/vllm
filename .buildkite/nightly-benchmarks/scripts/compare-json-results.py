@@ -198,6 +198,49 @@ def split_json_by_tp_pp(
 
     return saved_paths
 
+def _add_limit_line(fig, y_value, label):
+    # Visible dashed line + annotation
+    fig.add_hline(
+        y=y_value,
+        line_dash="dash",
+        line_color="red" if "ttft" in label.lower() else "blue",
+        annotation_text=f"{label}: {y_value} ms",
+        annotation_position="top left",
+    )
+    # Optional: add a legend item (as a transparent helper trace)
+    if plot and plotly_found:
+        import plotly.graph_objects as go
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None],
+            mode="lines",
+            line=dict(dash="dash",
+                  color="red" if "ttft" in label.lower() else "blue"),
+            name=f"{label}"
+        ))
+
+
+def _find_concurrency_col(df: pd.DataFrame) -> str:
+    for c in ["# of max concurrency.", "# of max concurrency", "Max Concurrency",
+              "max_concurrency", "Concurrency"]:
+        if c in df.columns:
+            return c
+    # Fallback: guess an integer-like column (harmless if unused)
+    for c in df.columns:
+        if df[c].dtype.kind in "iu" and df[c].nunique() > 1 and df[c].min() >= 1:
+            return c
+    return "# of max concurrency."
+
+def _highlight_threshold(df: pd.DataFrame, threshold: float) -> "pd.io.formats.style.Styler":
+    """Highlight numeric per-configuration columns with value <= threshold."""
+    conc_col = _find_concurrency_col(df)
+    key_cols = [c for c in ["Model", "Dataset Name", "Input Len", "Output Len", conc_col] if c in df.columns]
+    conf_cols = [c for c in df.columns if c not in key_cols and not str(c).startswith("Ratio")]
+    conf_cols = [c for c in conf_cols if pd.api.types.is_numeric_dtype(df[c])]
+    return df.style.map(
+        lambda v: "background-color:#e6ffe6;font-weight:bold;" if pd.notna(v) and v <= threshold else "",
+        subset=conf_cols
+    )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -220,6 +263,19 @@ if __name__ == "__main__":
         default="# of max concurrency.",
         help="column name to use as X Axis in comparison graph",
     )
+    parser.add_argument(
+        "-l",
+        "--latency",
+        type=str,
+        default="p99",
+        help="take median|p99 for latency like TTFT/TPOT",
+    )
+    parser.add_argument("--ttft-max-ms", type=float, default=3000.0,
+                    help="Reference limit for TTFT plots (ms)")
+    parser.add_argument("--tpot-max-ms", type=float, default=150.0,
+                    help="Reference limit for TPOT plots (ms)")
+
+
     args = parser.parse_args()
 
     drop_column = "P99"
@@ -234,12 +290,22 @@ if __name__ == "__main__":
         "# of max concurrency.",
         "qps",
     ]
-    data_cols_to_compare = ["Output Tput (tok/s)", "Median TTFT (ms)", "Median"]
-    html_msgs_for_data_cols = [
-        "Compare Output Tokens /n",
-        "Median TTFT /n",
-        "Median TPOT /n",
-    ]
+
+    if "median" in args.latency:
+        data_cols_to_compare = ["Output Tput (tok/s)", "Median TTFT (ms)", "Median"]
+        html_msgs_for_data_cols = [
+            "Compare Output Tokens /n",
+            "Median TTFT /n",
+            "Median TPOT /n",
+        ]
+        drop_column = "P99"
+    elif "p99" in args.latency:
+        data_cols_to_compare = ["Output Tput (tok/s)", "P99 TTFT (ms)", "P99"]
+        html_msgs_for_data_cols = [
+            "Compare Output Tokens /n",
+            "P99 TTFT /n",
+            "P99 TPOT /n",
+        ]
 
     if len(args.file) == 1:
         files = split_json_by_tp_pp(args.file[0], output_root="splits")
@@ -251,7 +317,7 @@ if __name__ == "__main__":
     plot = args.plot
     # For Plot feature, assign y axis from one of info_cols
     y_axis_index = info_cols.index(args.xaxis) if args.xaxis in info_cols else 6
-    with open("perf_comparison.html", "w") as text_file:
+    with open("perf_comparison.html", "a") as text_file:
         for i in range(len(data_cols_to_compare)):
             output_df, raw_data_cols = compare_data_columns(
                 files,
@@ -276,32 +342,57 @@ if __name__ == "__main__":
                     f"but DataFrame has: {list(output_df.columns)}"
                 )
             output_df_sorted = output_df.sort_values(by=existing_group_cols)
+            output_df_sorted = output_df.sort_values(by=args.xaxis)
             output_groups = output_df_sorted.groupby(existing_group_cols, dropna=False)
             for name, group in output_groups:
-                html = group.to_html()
+                group_name = ",".join(map(str, name)).replace(",", "_").replace("/","-")
+                group_html_name = "perf_comparison_" + group_name + ".html"
+
+
+                metric_name = str(data_cols_to_compare[i]).lower()
+                if "tok/s" in metric_name:
+                    html = group.to_html()
+                elif "ttft" in metric_name:
+                    styler = _highlight_threshold(group, args.ttft_max_ms)
+                    html = styler.to_html(table_attributes='border="1" class="dataframe"')
+                elif "tpot" in metric_name or "median" in metric_name or "p99" in metric_name:
+                    styler = _highlight_threshold(group, args.tpot_max_ms)
+                    html = styler.to_html(table_attributes='border="1" class="dataframe"')
+                
                 text_file.write(html_msgs_for_data_cols[i])
                 text_file.write(html)
+                with open(group_html_name, "a") as sub_text_file:
+                    sub_text_file.write(html_msgs_for_data_cols[i])
+                    sub_text_file.write(html)
 
-                if plot and plotly_found:
-                    import plotly.express as px
+                    if plot and plotly_found:
+                        import plotly.express as px
 
-                    df = group[raw_data_cols]
-                    df_sorted = df.sort_values(by=info_cols[y_axis_index])
-                    # Melt DataFrame for plotting
-                    df_melted = df_sorted.melt(
-                        id_vars=info_cols[y_axis_index],
-                        var_name="Configuration",
-                        value_name=data_cols_to_compare[i],
-                    )
-                    title = data_cols_to_compare[i] + " vs " + info_cols[y_axis_index]
-                    # Create Plotly line chart
-                    fig = px.line(
-                        df_melted,
-                        x=info_cols[y_axis_index],
-                        y=data_cols_to_compare[i],
-                        color="Configuration",
-                        title=title,
-                        markers=True,
-                    )
-                    # Export to HTML
-                    text_file.write(fig.to_html(full_html=True, include_plotlyjs="cdn"))
+                        df = group[raw_data_cols]
+                        df_sorted = df.sort_values(by=info_cols[y_axis_index])
+                        # Melt DataFrame for plotting
+                        df_melted = df_sorted.melt(
+                            id_vars=info_cols[y_axis_index],
+                            var_name="Configuration",
+                            value_name=data_cols_to_compare[i],
+                        )
+                        title = data_cols_to_compare[i] + " vs " + info_cols[y_axis_index]
+                        # Create Plotly line chart
+                        fig = px.line(
+                            df_melted,
+                            x=info_cols[y_axis_index],
+                            y=data_cols_to_compare[i],
+                            color="Configuration",
+                            title=title,
+                            markers=True,
+                        )
+
+                        # ---- Add threshold lines based on metric name ----
+                        if "ttft" in metric_name:
+                            _add_limit_line(fig, args.ttft_max_ms, "TTFT limit")
+                        elif "tpot" in metric_name or "median" in metric_name or "p99" in metric_name :
+                            _add_limit_line(fig, args.tpot_max_ms, "TPOT limit")
+
+                        # Export to HTML
+                        text_file.write(fig.to_html(full_html=True, include_plotlyjs="cdn"))
+                        sub_text_file.write(fig.to_html(full_html=True, include_plotlyjs="cdn"))
