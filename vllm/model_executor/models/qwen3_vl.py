@@ -319,12 +319,12 @@ class Qwen3_VisionTransformer(nn.Module):
 
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim, dtype=torch.get_default_dtype())
-        self.use_upstream_fa = False
+        use_upstream_fa = False
         if self.attn_backend != _Backend.FLASH_ATTN and \
             check_upstream_fa_availability(
                 torch.get_default_dtype()):
             self.attn_backend = _Backend.FLASH_ATTN
-            self.use_upstream_fa = True
+            use_upstream_fa = True
 
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
@@ -352,7 +352,7 @@ class Qwen3_VisionTransformer(nn.Module):
                 prefix=f"{prefix}.blocks.{layer_idx}",
                 use_data_parallel=use_data_parallel,
                 attn_backend=self.attn_backend,
-                use_upstream_fa=self.use_upstream_fa)
+                use_upstream_fa=use_upstream_fa)
             for layer_idx in range(vision_config.depth)
         ])
 

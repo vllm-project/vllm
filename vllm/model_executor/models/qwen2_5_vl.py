@@ -619,14 +619,14 @@ class Qwen2_5_VisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
-        self.use_upstream_fa = False
+        use_upstream_fa = False
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim, dtype=torch.get_default_dtype())
         if self.attn_backend != _Backend.FLASH_ATTN and \
             check_upstream_fa_availability(
                 torch.get_default_dtype()):
             self.attn_backend = _Backend.FLASH_ATTN
-            self.use_upstream_fa = True
+            use_upstream_fa = True
 
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
@@ -637,18 +637,17 @@ class Qwen2_5_VisionTransformer(nn.Module):
             )
 
         self.blocks = nn.ModuleList([
-            Qwen2_5_VisionBlock(dim=self.hidden_size,
-                                num_heads=self.num_heads,
-                                mlp_hidden_dim=vision_config.intermediate_size,
-                                act_fn=get_act_and_mul_fn(
-                                    vision_config.hidden_act),
-                                norm_layer=norm_layer,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.blocks.{layer_idx}",
-                                use_data_parallel=use_data_parallel,
-                                attn_backend=self.attn_backend,
-                                use_upstream_fa=self.use_upstream_fa)
-            for layer_idx in range(depth)
+            Qwen2_5_VisionBlock(
+                dim=self.hidden_size,
+                num_heads=self.num_heads,
+                mlp_hidden_dim=vision_config.intermediate_size,
+                act_fn=get_act_and_mul_fn(vision_config.hidden_act),
+                norm_layer=norm_layer,
+                quant_config=quant_config,
+                prefix=f"{prefix}.blocks.{layer_idx}",
+                use_data_parallel=use_data_parallel,
+                attn_backend=self.attn_backend,
+                use_upstream_fa=use_upstream_fa) for layer_idx in range(depth)
         ])
         self.merger = Qwen2_5_VisionPatchMerger(
             d_model=vision_config.out_hidden_size,
