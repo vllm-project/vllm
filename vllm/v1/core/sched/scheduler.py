@@ -672,6 +672,7 @@ class Scheduler(SchedulerInterface):
         new_token_ids: list[list[int]] = []
         new_block_ids: list[Optional[tuple[list[int], ...]]] = []
         num_computed_tokens: list[int] = []
+        num_output_tokens: list[int] = []
 
         use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
@@ -696,6 +697,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True))
             num_computed_tokens.append(req.num_computed_tokens)
+            num_output_tokens.append(len(req.output_token_ids))
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
@@ -707,6 +709,7 @@ class Scheduler(SchedulerInterface):
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
+            num_output_tokens=num_output_tokens,
         )
 
     def _try_schedule_encoder_inputs(
