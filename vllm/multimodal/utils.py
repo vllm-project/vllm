@@ -19,6 +19,7 @@ from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.utils.jsontree import json_map_leaves
 
 from .audio import AudioMediaIO
 from .base import MediaIO
@@ -49,6 +50,7 @@ class MediaConnector:
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
+        allowed_media_domains: Optional[list[str]] = None,
     ) -> None:
         """
         Args:
@@ -81,6 +83,9 @@ class MediaConnector:
             allowed_local_media_path_ = None
 
         self.allowed_local_media_path = allowed_local_media_path_
+        if allowed_media_domains is None:
+            allowed_media_domains = []
+        self.allowed_media_domains = allowed_media_domains
 
     def _load_data_url(
         self,
@@ -114,6 +119,14 @@ class MediaConnector:
 
         return media_io.load_file(filepath)
 
+    def _assert_url_in_allowed_media_domains(self, url_spec) -> None:
+        if self.allowed_media_domains and url_spec.hostname not in \
+            self.allowed_media_domains:
+            raise ValueError(
+                f"The URL must be from one of the allowed domains: "
+                f"{self.allowed_media_domains}. Input URL domain: "
+                f"{url_spec.hostname}")
+
     def load_from_url(
         self,
         url: str,
@@ -124,6 +137,8 @@ class MediaConnector:
         url_spec = urlparse(url)
 
         if url_spec.scheme.startswith("http"):
+            self._assert_url_in_allowed_media_domains(url_spec)
+
             connection = self.connection
             data = connection.get_bytes(url, timeout=fetch_timeout)
 
@@ -149,6 +164,8 @@ class MediaConnector:
         loop = asyncio.get_running_loop()
 
         if url_spec.scheme.startswith("http"):
+            self._assert_url_in_allowed_media_domains(url_spec)
+
             connection = self.connection
             data = await connection.async_get_bytes(url, timeout=fetch_timeout)
             future = loop.run_in_executor(global_thread_pool,
@@ -383,6 +400,7 @@ def group_mm_kwargs_by_modality(
     *,
     device: torch.types.Device = None,
     pin_memory: bool = False,
+    merge_by_field_config: bool = False,
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
     modality together into the same `MultiModalKwargs` instance.
@@ -400,29 +418,31 @@ def group_mm_kwargs_by_modality(
     for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):
         items_lst = list(items)
 
-        # mm_kwargs_group = MultiModalKwargsItems.from_items(items_lst) \
-        #    .get_data(pin_memory=pin_memory)
-
-        # if device is not None:
-        #     mm_kwargs_group = json_map_leaves(
-        #         lambda x: x.to(device=device),
-        #         mm_kwargs_group,
-        #     )
-
-        # TODO: Once V0 is removed, we can use the merging logic above
+        # TODO: Enable `merge_by_field_config` for all models
         # to avoid creating an extra batch dimension (except for fields
         # that are meant to be stacked anyway).
         # We will also need to update each model to remove `flatten_bn`.
-        mm_kwargs_group = MultiModalKwargs.as_kwargs(
-            MultiModalKwargs.batch(
-                [
-                    MultiModalKwargsItems.from_seq([item]).get_data()
-                    for item in items_lst
-                ],
-                pin_memory=pin_memory,
-            ),
-            device=device,
-        )
+        if merge_by_field_config:
+            mm_kwargs_group: BatchedTensorInputs = dict(
+                MultiModalKwargsItems.from_seq(items_lst).get_data(
+                    pin_memory=pin_memory))
+
+            if device is not None:
+                mm_kwargs_group = json_map_leaves(
+                    lambda x: x.to(device=device),
+                    mm_kwargs_group,
+                )
+        else:
+            mm_kwargs_group = MultiModalKwargs.as_kwargs(
+                MultiModalKwargs.batch(
+                    [
+                        MultiModalKwargsItems.from_seq([item]).get_data()
+                        for item in items_lst
+                    ],
+                    pin_memory=pin_memory,
+                ),
+                device=device,
+            )
 
         yield modality, len(items_lst), mm_kwargs_group
 
