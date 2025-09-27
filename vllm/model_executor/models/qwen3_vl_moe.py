@@ -122,9 +122,10 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
 
     def load_fused_expert_weights(self, name: str, params_dict: dict,
                                   loaded_weight: torch.Tensor, shard_id: str,
-                                  num_experts: int):
+                                  num_experts: int) -> bool:
         param = params_dict[name]
         weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+        loaded_local_expert = False
         for expert_id in range(num_experts):
             curr_expert_weight = loaded_weight[expert_id]
             success = weight_loader(param,
@@ -133,9 +134,10 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                                     shard_id,
                                     expert_id,
                                     return_success=True)
-            if not success:
-                return False
-        return True
+            if success:
+                loaded_local_expert = True
+
+        return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -315,12 +317,14 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         self.config = config
         self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         self.visual = Qwen3_VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
+            use_data_parallel=self.use_data_parallel,
         )
 
         self.language_model = Qwen3MoeLLMForCausalLM(vllm_config=vllm_config,
@@ -342,3 +346,5 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                         config.text_config.hidden_size)
             for _ in range(self.deepstack_num_level)
         ] if self.use_deepstack else None
+        self.visual_dim = config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level

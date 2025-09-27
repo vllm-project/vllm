@@ -9,7 +9,6 @@ import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
@@ -39,7 +38,7 @@ def _create_random_top_logprob_test_vector(
     upper: float,
 ) -> torch.Tensor:
     """Create a random vector of top logprob float values.
-    
+
     Use to create fake sample logprobs for testing.
 
     Note that a real production scenario would require
@@ -63,7 +62,7 @@ def _create_random_top_logprob_test_matrix(
     upper: float,
 ) -> torch.Tensor:
     """Create a random matrix of top logprob float values.
-    
+
     Use to create fake prompt logprobs for testing.
 
     Note that a real production scenario would require
@@ -296,7 +295,6 @@ def generate_dummy_prompt_logprobs_tensors(
 class DummyOutputProcessorTestVectors:
     """Dummy test vectors for output processor tests"""
     tokenizer: GeneralTokenizerType
-    tokenizer_group: TokenizerGroup
     vllm_config: EngineArgs
     full_tokens: list[list[int]]  # Prompt + generated tokens
     prompt_tokens: list[list[int]]

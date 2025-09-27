@@ -79,9 +79,9 @@ def make_rand_lora_weight_tensor(
 
 
 def make_rand_tensors(
-    a_shape: tuple[int],
-    b_shape: tuple[int],
-    c_shape: tuple[int],
+    a_shape: tuple[int, ...],
+    b_shape: tuple[int, ...],
+    c_shape: tuple[int, ...],
     a_dtype: torch.dtype,
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
@@ -243,7 +243,7 @@ class OpType(Enum):
         lora_rank: int,
         num_loras: int,
         num_slices: int,
-    ) -> tuple[tuple[int], tuple[int], tuple[int]]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Given num_slices, return the shapes of the A, B, and C matrices
         in A x B = C, for the op_type
@@ -464,7 +464,11 @@ class BenchmarkTensors:
         for field_name in LoRAKernelMeta.__dataclass_fields__:
             field = getattr(self.lora_kernel_meta, field_name)
             assert isinstance(field, torch.Tensor)
-            setattr(self.lora_kernel_meta, field_name, to_device(field))
+            setattr(
+                self.lora_kernel_meta,
+                field_name,
+                to_device(field) if field_name != "no_lora_flag_cpu" else field,
+            )
 
     def metadata(self) -> tuple[int, int, int]:
         """
@@ -512,6 +516,7 @@ class BenchmarkTensors:
             "lora_token_start_loc": self.lora_kernel_meta.lora_token_start_loc,
             "lora_ids": self.lora_kernel_meta.active_lora_ids,
             "scaling": 1.0,
+            "no_lora_flag_cpu": self.lora_kernel_meta.no_lora_flag_cpu,
         }
 
     def as_lora_expand_kwargs(self, add_inputs: bool) -> dict[str, Any]:
@@ -552,6 +557,7 @@ class BenchmarkTensors:
             "lora_ids": self.lora_kernel_meta.active_lora_ids,
             "offset_start": 0,
             "add_inputs": add_inputs,
+            "no_lora_flag_cpu": self.lora_kernel_meta.no_lora_flag_cpu,
         }
 
     def bench_fn_kwargs(
