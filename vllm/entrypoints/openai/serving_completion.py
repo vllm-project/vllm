@@ -220,13 +220,26 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
+                    await self._initialize_processor()
+                    prompt_str, engine_request, tokenization_kwargs = (
+                        self._process_inputs(
+                            request_id_item,
+                            engine_prompt,
+                            sampling_params,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                        ))
+
                     generator = self.engine_client.generate(
-                        engine_prompt,
+                        engine_request,
                         sampling_params,
                         request_id_item,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        prompt_str=prompt_str,
+                        tokenization_kwargs=tokenization_kwargs,
                     )
 
                 generators.append(generator)

@@ -15,6 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
+from vllm.entrypoints.utils import _validate_truncation_size
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
+from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.processor import Processor
+
 if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
@@ -238,6 +243,18 @@ class OpenAIServing:
         self._async_tokenizer_pool: dict[AnyTokenizer,
                                          AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
+
+        self.processor: Optional[Processor] = None
+
+    async def _initialize_processor(self) -> None:
+        if self.processor is not None:
+            return
+        vllm_config = await self.engine_client.get_vllm_config()
+        if vllm_config.model_config.skip_tokenizer_init:
+            tokenizer = None
+        else:
+            tokenizer = init_tokenizer_from_configs(vllm_config.model_config)
+        self.processor = Processor(vllm_config, tokenizer)
 
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
         """
@@ -850,6 +867,36 @@ class OpenAIServing:
 
         return conversation, [request_prompt], [engine_prompt]
 
+    def _process_inputs(
+        self,
+        request_id: str,
+        engine_prompt: PromptType,
+        sampling_params: SamplingParams,
+        *,
+        lora_request: Optional[LoRARequest],
+        trace_headers: Optional[Mapping[str, str]],
+        priority: int,
+    ) -> tuple[Optional[str], EngineCoreRequest, dict]:
+        """
+        using the Processor to process inputs for AsyncLLM
+        """
+        assert self.processor is not None
+        tokenization_kwargs: dict[str, Any] = {}
+        _validate_truncation_size(self.max_model_len,
+                                  sampling_params.truncate_prompt_tokens,
+                                  tokenization_kwargs)
+
+        prompt_str, engine_request = self.processor.process_inputs(
+            request_id,
+            engine_prompt,
+            sampling_params,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            trace_headers=trace_headers,
+            priority=priority,
+        )
+        return prompt_str, engine_request, tokenization_kwargs
+
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
@@ -869,14 +916,29 @@ class OpenAIServing:
                 params=sampling_params,
                 lora_request=lora_request,
             )
+            await self._initialize_processor()
+            trace_headers = kwargs.get("trace_headers")
+            prompt_str, engine_request, tokenization_kwargs = (
+                self._process_inputs(
+                    request_id,
+                    engine_prompt,
+                    sampling_params,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                ))
+
             generator = self.engine_client.generate(
-                engine_prompt,
+                engine_request,
                 sampling_params,
                 request_id,
                 lora_request=lora_request,
                 priority=priority,
+                prompt_str=prompt_str,
+                tokenization_kwargs=tokenization_kwargs,
                 **kwargs,
             )
+
             async for res in generator:
                 context.append_output(res)
                 # NOTE(woosuk): The stop condition is handled by the engine.
