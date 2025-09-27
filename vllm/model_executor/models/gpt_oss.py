@@ -614,12 +614,7 @@ class GptOssModel(nn.Module):
 
 
 class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
-    packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"],
-                              "fused_qkv_a_proj": [ # Add LoRA Projection
-                                "q_a_proj",
-                                "kv_a_proj_with_mqa"
-                                ],
-                            }
+    packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
