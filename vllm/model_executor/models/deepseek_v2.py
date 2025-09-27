@@ -587,10 +587,12 @@ class Indexer(nn.Module):
         # no tensor parallel, just replicated
         self.wq_b = ReplicatedLinear(self.q_lora_rank,
                                      self.head_dim * self.n_head,
+                                     bias=False,
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.wq_b")
         self.wk = ReplicatedLinear(hidden_size,
                                    self.head_dim,
+                                   bias=False,
                                    quant_config=quant_config,
                                    prefix=f"{prefix}.wk")
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
