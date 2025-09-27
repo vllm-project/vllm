@@ -17,7 +17,7 @@ In this document we will discuss the:
     In this document, we refer to pure decode (`max_query_len=1`) or speculative decode (`max_query_len =1+num_spec_tokens`) as **uniform decode** batches, and the opposite would be **non-uniform** batches (i.e., prefill or mixed prefill-decode batches).
 
 !!! note
-    The following contents are based on the last commit of <gh-pr:20059>.
+    The following contents are mostly based on the last commit of <gh-pr:20059>.
 
 ## Motivation
 
@@ -37,17 +37,19 @@ We also found that when a batch cannot hit a full CUDA Graph, the host-side eage
 [CUDAGraphMode][vllm.config.compilation.CUDAGraphMode] is the single knob you tune in `CompilationConfig.cudagraph_mode`:
 
 * `NONE` — turn CUDA Graphs off. Good for debugging.
-* `PIECEWISE` — default in v1. It is the most flexible: attention or other CUDA Graphs-incompatible operations stay eager, everything else goes into CUDA Graphs.
+* `PIECEWISE` —  a single-mode strategy (and past default). It is the most flexible: attention or other CUDA Graphs-incompatible operations stay eager, everything else goes into CUDA Graphs.
 * `FULL` — a single-mode strategy, which only captures full CUDA Graphs for non-uniform batches, then uniform-decode batches reuse the CUDA Graph of non-uniform batch of the same batch_size, since they are compatible; can be good for small models or workloads with small prompts.
 * `FULL_DECODE_ONLY` — full CUDA Graph for uniform decode, eager run for prefill/mixed etc; suitable for decode instances in a P/D setup where prefill is not as important, so we can save some memory.
-* `FULL_AND_PIECEWISE` — full CUDA Graph for uniform decode, piecewise CUDA Graphs for others; generally the most performant setting for most models.
+* `FULL_AND_PIECEWISE` — (default mode) full CUDA Graph for uniform decode, piecewise CUDA Graphs for others; generally the most performant setting for most models.
 
-Defaults: If you’re on v1 with piecewise compilation, we default to `PIECEWISE` for safety reasons (for mamba mixer models, it's `FULL_AND_PIECEWISE`). Otherwise, we default to `NONE`.
+Defaults: If you’re on v1 with piecewise compilation, we default to `FULL_AND_PIECEWISE` for better performance, (for pooling models, it's still `PIECEWISE`). Otherwise, e.g. if piecewise compilation unavailable, we default to `NONE`.
 
 While `NONE` , `PIECEWISE`, and `FULL` are single-mode configurations and simply equivalent to past implementations of eager execution, piecewise CUDA Graphs, and full CUDA Graphs respectively, `FULL_DECODE_ONLY` and `FULL_AND_PIECEWISE` are newly appended dual-mode configurations, which require dispatching to switch between concrete runtime modes according to runtime batches dynamically.
 
 !!! note
     We also fuse the subset `NONE`, `PIECEWISE`, and `FULL` modes as the concrete runtime modes for CUDA Graphs dispatching, which means they are treated as one of the modes for prefill/mixed or uniform-decode phase at runtime.
+
+With the new feature, cascade attention is supported by all Cudagraph modes now (if the attention backend supports it), though cascade attention itself is not cudagraph compatible.  Batches that use cascade attention will be dispatched to `PIECEWISE` runtime mode if we have a corresponding piecewise cudagraph at runtime; otherwise, they will be dispatched to `NONE` runtime mode.
 
 !!! note
     Not all CUDA Graphs modes are compatible with every attention backend. For convenience, we alias `FULL` mode to `FULL_AND_PIECEWISE` (`-O 3`) or `FULL_DECODE_ONLY` (`-O 0`) for attention backends that support CUDA Graphs for only pure decode or uniform decode.
@@ -219,7 +221,7 @@ As they are deprecated and will be removed in the next major or minor release, i
 
 ### NOTE for attention ops fusion
 
-Attention ops fusion is compatiable with piecewise cudagraph only when using inductor graph partition, i.e., passing `--compilation_config '{"use_inductor_graph_partition":true}'` (Note: this is an experimental and will be avaliable after Pytorch version>=2.9). Otherwise, piecewise cudagraph do not support attention fusion by vllm custom graph partition. In the later case (which is also current state), one should manually pass `splitting_ops=[]` to compilation_config to retain an complete FX graph for custom pass, and use cudagraph_mode = "FULL" or "FULL_DECODE_ONLY" when enabling attention fusion, since the default behavior of cudagraph_mode != `NONE` is always keeping the attention ops in the splitting_ops to get a piecewise FX graph.
+Attention ops fusion is compatible with piecewise cudagraph only when using inductor graph partition, i.e., passing `--compilation_config '{"use_inductor_graph_partition":true}'` (Note: this is an experimental and will be available after Pytorch version>=2.9). Otherwise, piecewise cudagraph does not support attention fusion by vllm custom graph partition. In the later case (which is also current state), we should set `splitting_ops=[]` in compilation_config to retain an complete FX graph for custom pass, and use cudagraph_mode = "FULL" or "FULL_DECODE_ONLY" when enabling attention fusion, since the default behavior of cudagraph_mode != `NONE` is always keeping the attention ops in the splitting_ops to get a piecewise FX graph. The good news is that the above tuning is automatically settled when `pass_config.enable_attn_fusion==True` and no users' explicit configs.
 
 ## About the Performance
 
