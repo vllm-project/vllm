@@ -383,7 +383,8 @@ def kernel_unified_attention_2d(
         if pid0 < -1 and pid1 < 1 and j == 0:
            tl.device_print("S-S2 ",S - S2)
 
-        S = S2
+        if use_native_fp4:
+           S = S2
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -453,8 +454,8 @@ def kernel_unified_attention_2d(
            # K_RHS, N = rhs.type.shape[-2:]
            acc_fp4 = tl.dot_scaled(p_fp4, scale_p, "e2m1", v_fp4_t, scale_v_t, "e2m1", acc*6.0, lhs_k_pack=PACK_ALONG_K,
                                    rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32) / 6.0
-        elif use_native_fp4 >= 1:
-           acc += tl.dot(P.to(tl.float8e5), V.to(tl.float8e5))
+        #elif use_native_fp4 >= 1:
+        #   acc += tl.dot(P.to(tl.float8e5), V.to(tl.float8e5))
         else:           
            acc += tl.dot(P.to(V.dtype), V)
 
@@ -858,6 +859,7 @@ def unified_attention(
     qq_bias=None,
     # Optional tensor for sinks
     sinks=None,
+    use_native_fp4=2,
 ):
 
     assert causal, "Only causal attention is supported"
@@ -879,10 +881,10 @@ def unified_attention(
 
     BLOCK_M = 16 if num_queries_per_kv <= 16 else triton.next_power_of_2(
         num_queries_per_kv)
-
-    print("--------BLOK_M: ", num_queries_per_kv, BLOCK_M, "qkv dtype: ", q.dtype, k.dtype, v.dtype,
+    if use_native_fp4 > 2:
+       BLOCK_M = 32
+    print("num_queries_per_kv, BLOK_M, block_size: ", num_queries_per_kv, BLOCK_M, block_size, "qkv dtype: ", q.dtype, k.dtype, v.dtype,
             "max seqlen q: ", max_seqlen_q, "seqused k, max seqlen k : ", seqused_k.data[0], max_seqlen_k,"num_kv_heads: ", num_kv_heads)
-    BLOCK_M = 32
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Ideally we would launch with kernel with:
@@ -952,6 +954,7 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
+            use_native_fp4=use_native_fp4,
         )
     else:
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
