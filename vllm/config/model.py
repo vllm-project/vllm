@@ -691,7 +691,7 @@ class ModelConfig:
                         "Pass the value explicitly to silence this message.")
             self.convert = "none"
         # Resolve Transformers backend pooling classes
-        if runner == "pooling":
+        if self.runner == "pooling":
             if convert == "embed":
                 return "TransformersEmbeddingModel"
             if convert == "classify":
