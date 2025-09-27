@@ -50,7 +50,7 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.3 AND FLASH_MLA_ARCHS)
         SRCS "${FlashMLA_SOURCES}"
         CUDA_ARCHS "${FLASH_MLA_ARCHS}")
 
-    define_gpu_extension_target(
+    define_extension_target(
         _flashmla_C
         DESTINATION vllm
         LANGUAGE ${VLLM_GPU_LANG}
