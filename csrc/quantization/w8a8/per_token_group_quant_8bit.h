@@ -1,7 +1,6 @@
 #pragma once
 #include <torch/all.h>
 
-// TODO(wentao): refactor the folder to 8bit, then includes fp8 and int8 folders
 // 8-bit per-token-group quantization helper used by both FP8 and INT8
 void per_token_group_quant_8bit(const torch::Tensor& input,
                                 torch::Tensor& output_q,

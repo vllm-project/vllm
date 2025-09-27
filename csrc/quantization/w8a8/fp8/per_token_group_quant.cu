@@ -1,6 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
 
-#include "../per_token_group_quant_8bit.h"
+#include "quantization/w8a8/per_token_group_quant_8bit.h"
 
 #include <cmath>
 
@@ -8,9 +8,9 @@
 
 #include <torch/all.h>
 
-#include "../vectorization.cuh"
-#include "../vectorization_utils.cuh"
-#include "../../dispatch_utils.h"
+#include "quantization/vectorization.cuh"
+#include "quantization/vectorization_utils.cuh"
+#include "dispatch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val) {
   unsigned mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
