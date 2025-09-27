@@ -43,6 +43,9 @@ class ModernBertEmbeddings(nn.Module):
                                  eps=config.layer_norm_eps,
                                  bias=config.norm_bias)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.tok_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -220,6 +223,9 @@ class ModernBertModel(nn.Module):
                                        eps=config.norm_eps,
                                        bias=config.norm_bias)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embeddings.get_input_embeddings(input_ids)
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
@@ -332,6 +338,9 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
                     vllm_config.model_config),
             ),
         })
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 

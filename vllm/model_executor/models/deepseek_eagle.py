@@ -66,6 +66,9 @@ class DeepseekV2Model(nn.Module):
         self.norm = RMSNorm(self.config.hidden_size,
                             eps=self.config.rms_norm_eps)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -204,6 +207,9 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 scale=logit_scale)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,

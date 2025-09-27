@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -64,8 +65,10 @@ class EagleProposer:
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
 
-        self.is_multimodal_model = vllm_config.model_config \
-            .is_multimodal_model
+        # Multi-modal data support
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+            vllm_config.model_config)
 
         self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
 
@@ -175,7 +178,8 @@ class EagleProposer:
         last_token_indices: Optional[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embeds: Optional[list[torch.Tensor]] = None,
+        mm_embed_inputs: Optional[tuple[list[torch.Tensor],
+                                        torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -219,18 +223,21 @@ class EagleProposer:
         # copy inputs to buffer for cudagraph
         self._set_positions(num_tokens, target_positions)
         self.hidden_states[:num_tokens] = target_hidden_states
-        if self.is_multimodal_model:
-            input_ids = self.input_ids[:num_tokens]
-            inputs_embeds = self.model.get_input_embeddings(
-                input_ids,
-                multimodal_embeddings=mm_embeds or None,
+
+        if self.supports_mm_inputs:
+            mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
+
+            self.inputs_embeds[:num_tokens] = self.model.get_input_embeddings(
+                self.input_ids[:num_tokens],
+                multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
             )
-            self.inputs_embeds[:num_tokens] = inputs_embeds
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+
             input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
-            inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
+            inputs_embeds = None
 
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
@@ -372,14 +379,15 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self._set_positions(batch_size, clamped_positions)
             self.hidden_states[:batch_size] = hidden_states
-            if self.is_multimodal_model:
-                inputs_embeds = self.model.get_input_embeddings(input_ids)
-                self.inputs_embeds[:batch_size] = inputs_embeds
-                inputs_embeds = self.inputs_embeds[:input_batch_size]
+            if self.supports_mm_inputs:
+                self.inputs_embeds[:batch_size] = \
+                    self.model.get_input_embeddings(input_ids)
+
                 input_ids = None
+                inputs_embeds = self.inputs_embeds[:input_batch_size]
             else:
-                inputs_embeds = None
                 input_ids = self.input_ids[:input_batch_size]
+                inputs_embeds = None
 
             # Run the model.
             with set_forward_context(per_layer_attn_metadata,
@@ -849,7 +857,7 @@ class EagleProposer:
 
         self.attn_layer_names = list(draft_attn_layer_names)
 
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
             # Even if the target model is multimodal, we can also use
             # text-only draft models
             try:
@@ -861,7 +869,7 @@ class EagleProposer:
                 logger.warning(
                     "Draft model does not support multimodal inputs, "
                     "falling back to text-only mode")
-                self.is_multimodal_model = False
+                self.supports_mm_inputs = False
 
         if supports_multimodal(target_model):
             # handle multimodality
@@ -933,7 +941,7 @@ class EagleProposer:
     ) -> None:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
-            if self.is_multimodal_model:
+            if self.supports_mm_inputs:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
             else:

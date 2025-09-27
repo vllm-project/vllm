@@ -60,8 +60,7 @@ from vllm.sequence import IntermediateTensors
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import (AutoWeightsLoader, WeightsMapper, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
@@ -1467,18 +1466,24 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
+        if multimodal_embeddings is not None and len(
+                multimodal_embeddings) > 0:
+            self._set_visual_token_mask(input_ids)
 
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
 
-        if multimodal_embeddings is None:
-            return inputs_embeds
-
-        self._set_visual_token_mask(input_ids)
-        inputs_embeds = merge_multimodal_embeddings(input_ids, inputs_embeds,
-                                                    multimodal_embeddings,
-                                                    [self.config.im_patch_id])
-        return inputs_embeds
+        return super().get_input_embeddings(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
 
     def forward(
         self,
