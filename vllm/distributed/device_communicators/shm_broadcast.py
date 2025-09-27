@@ -15,7 +15,8 @@ import torch.distributed as dist
 import zmq
 from torch.distributed import ProcessGroup
 from zmq import IPV6  # type: ignore
-from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
+from zmq import XPUB_VERBOSE  # type: ignore
+from zmq import PUB, SUB, SUBSCRIBE, XPUB, Context
 
 import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
@@ -26,43 +27,6 @@ from vllm.utils import (get_ip, get_open_port, get_open_zmq_ipc_path,
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
 logger = init_logger(__name__)
-
-
-class SpinTimer:
-
-    def record_activity(self):
-        pass
-
-    def spin(self):
-        sched_yield()
-
-
-class SpinSleepTimer(SpinTimer):
-    """
-    In setups which have long inactivity periods it is desirable to reduce
-    system power consumption when vllm does nothing. This would lead to more
-    CPU thermal headroom when a request eventually comes, especially when
-    multiple GPUs are connected as each GPU would otherwise pin one thread at
-    100% CPU usage.
-
-    The simplest solution is to reduce polling frequency when there is no
-    activity for a certain period of time.
-    """
-
-    def __init__(self, busy_loop_s: float = 3.0, wait_sleep_s: float = 0.1):
-        self.last_activity = time.monotonic()
-        self.busy_loop_s = busy_loop_s
-        self.wait_sleep_s = wait_sleep_s
-
-    def record_activity(self):
-        self.last_activity = time.monotonic()
-
-    def spin(self):
-        curr_time = time.monotonic()
-        if curr_time >= self.last_activity + self.busy_loop_s:
-            time.sleep(self.wait_sleep_s)
-        else:
-            sched_yield()
 
 
 class ShmRingBuffer:
@@ -199,6 +163,7 @@ class Handle:
 
     buffer_handle: Optional[tuple[int, int, int, str]] = None
     local_subscribe_addr: Optional[str] = None
+    local_tick_addr: Optional[str] = None
     remote_subscribe_addr: Optional[str] = None
     remote_addr_ipv6: bool = False
 
@@ -243,11 +208,20 @@ class MessageQueue:
             logger.debug("Binding to %s", local_subscribe_addr)
             self.local_socket.bind(local_subscribe_addr)
 
+            self.local_tick_socket = context.socket(PUB)
+            local_tick_addr = get_open_zmq_ipc_path()
+            self.local_tick_socket.bind(local_tick_addr)
+            logger.debug("Binding to %s", local_tick_addr)
+            self.last_activity = 0.0
+
             self.current_idx = 0
         else:
             self.buffer = None  # type: ignore
             local_subscribe_addr = None
             self.local_socket = None
+            local_tick_addr = None
+            self.local_tick_socket = None
+            self.last_activity = 0.0
             self.current_idx = -1
 
         remote_addr_ipv6 = False
@@ -275,13 +249,13 @@ class MessageQueue:
         self.local_reader_rank = -1
         # rank does not matter for remote readers
         self._is_remote_reader = False
-        self._read_spin_timer = SpinTimer()
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
             buffer_handle=self.buffer.handle()
             if self.buffer is not None else None,
             local_subscribe_addr=local_subscribe_addr,
+            local_tick_addr=local_tick_addr,
             remote_subscribe_addr=remote_subscribe_addr,
             remote_addr_ipv6=remote_addr_ipv6,
         )
@@ -313,10 +287,15 @@ class MessageQueue:
             logger.debug("Connecting to %s", socket_addr)
             self.local_socket.connect(socket_addr)
 
+            self.local_tick_socket = context.socket(SUB)
+            self.local_tick_socket.setsockopt_string(SUBSCRIBE, "")
+            socket_addr = handle.local_tick_addr
+            logger.debug("Connecting to %s", socket_addr)
+            self.local_tick_socket.connect(socket_addr)
+            self.last_activity = 0.0
+
             self.remote_socket = None
 
-            self._read_spin_timer = SpinSleepTimer(
-            ) if envs.VLLM_SLEEP_WHEN_IDLE else SpinTimer()
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -325,6 +304,8 @@ class MessageQueue:
             self._is_remote_reader = True
 
             self.local_socket = None
+            self.local_tick_socket = None
+            self.last_activity = 0.0
 
             self.remote_socket = context.socket(SUB)
             self.remote_socket.setsockopt_string(SUBSCRIBE, "")
@@ -448,8 +429,24 @@ class MessageQueue:
                     # if this block is not ready,
                     # we need to wait until it is written
 
-                    # Release the processor to other threads
-                    self._read_spin_timer.spin()
+                    if time.monotonic() - self.last_activity > 0.1:
+                        poll_timeout_ms = 50
+                        if timeout is not None:
+                            remaining = start_time + timeout - time.monotonic()
+                            poll_timeout_ms = min(int(remaining * 1000),
+                                                  poll_timeout_ms)
+                        if poll_timeout_ms > 0:
+                            ev = self.local_tick_socket.poll(
+                                timeout=poll_timeout_ms)
+                            if ev > 0:
+                                while True:
+                                    try:
+                                        self.local_tick_socket.recv(
+                                            flags=zmq.NOBLOCK, copy=False)
+                                    except zmq.Again:
+                                        break
+                    else:
+                        sched_yield()
 
                     if cancel is not None and cancel.is_set():
                         raise RuntimeError("cancelled")
@@ -483,7 +480,7 @@ class MessageQueue:
                 self.current_idx = (self.current_idx +
                                     1) % self.buffer.max_chunks
 
-                self._read_spin_timer.record_activity()
+                self.last_activity = time.monotonic()
                 break
 
     def enqueue(self, obj, timeout: Optional[float] = None):
@@ -499,6 +496,7 @@ class MessageQueue:
                 with self.acquire_write(timeout) as buf:
                     buf[0] = 0  # not overflow
                     buf[1:len(serialized_obj) + 1] = serialized_obj
+            self.local_tick_socket.send(b"\x00")
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
