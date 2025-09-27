@@ -7,8 +7,8 @@ from collections.abc import Callable
 from typing import Any, Union
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 
 def _matmul_launch_metadata(grid: Callable[..., Any], kernel: Any,
