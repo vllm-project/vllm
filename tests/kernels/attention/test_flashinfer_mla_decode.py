@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import pytest
 import torch
 import torch.nn.functional as F
@@ -8,7 +9,8 @@ from torch import Tensor
 
 from vllm.platforms import current_platform
 
-FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+FLASHINFER_WORKSPACE_BUFFER_SIZE = int(
+    os.environ.get("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", 128 * 1024 * 1024))
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
