@@ -184,22 +184,34 @@ def test_embed_correctness(hf_runner, vllm_runner, example_prompts, model):
         pytest.skip("Encoder models with the Transformers backend require "
                     f"transformers>={required}, but got {installed}")
 
-    with vllm_runner(model, max_model_len=512,
-                     model_impl="transformers") as vllm_model:
+    vllm_kwargs = dict(
+        max_model_len=512,
+        model_impl="transformers",
+        compilation_config=dict(cudagraph_capture_sizes=[8]),
+    )
+
+    # The example_prompts has ending "\n", for example:
+    # "Write a short story about a robot that dreams for the first time.\n"
+    # sentence_transformers will strip the input texts, see:
+    # https://github.com/UKPLab/sentence-transformers/blob/v3.1.1/sentence_transformers/models/Transformer.py#L159
+    # This makes the input_ids different between hf_model and vllm_model.
+    # So we need to strip the input texts to avoid test failing.
+    example_prompts = [str(s).strip() for s in example_prompts]
+
+    with hf_runner(model, is_sentence_transformer=True) as hf_model:
+        hf_outputs = hf_model.encode(example_prompts)
+
+    with vllm_runner(model, **vllm_kwargs) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
 
         vllm_outputs = vllm_model.embed(example_prompts)
-
-    with hf_runner(model, is_sentence_transformer=True) as hf_model:
-        hf_outputs = hf_model.encode(example_prompts)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
         embeddings_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
-        tol=1e-2,
     )
 
 
