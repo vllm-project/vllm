@@ -34,10 +34,15 @@ class CPUWorker(Worker):
                          is_driver_worker=is_driver_worker)
 
         self.parallel_config.disable_custom_all_reduce = True
+        self.use_ray = (
+            self.parallel_config.distributed_executor_backend == "ray")
 
     def init_device(self):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        if self.use_ray:
+            # Ray sets OMP_NUM_THREADS=<num_cpus> by default
+            self.omp_cpuids = "auto"
         if omp_cpuids == "auto" and platform.system() == "Linux":
             cpu_arch = current_platform.get_cpu_architecture()
             if cpu_arch in (CpuArchEnum.POWERPC, CpuArchEnum.S390X):
@@ -102,21 +107,26 @@ class CPUWorker(Worker):
                                      list[LogicalCPUInfo]]
     ) -> str:
         """
-        Return CPU ids to bind based on NUMA nodes. 
-        Currently for rank N, only CPU ids on the N-th node in available NUMA 
+        Return CPU ids to bind based on NUMA nodes.
+        Currently for rank N, only CPU ids on the N-th node in available NUMA
         node list will be selected.
         Args:
-            cpu_selector: a callable object to select CPUs from a CPU list 
+            cpu_selector: a callable object to select CPUs from a CPU list
             of a physical core. The input is a LogicalCPUInfo list, sorted by
-            the LogicalCPUInfo.id. A selected LogicalCPUInfo list should be 
+            the LogicalCPUInfo.id. A selected LogicalCPUInfo list should be
             returned.
         """
+        local_world_size = self.parallel_config.world_size
+
+        if self.use_ray:
+            from vllm.executor.ray_utils import get_local_world_size
+            local_world_size = get_local_world_size()
 
         allowed_numa_nodes, logical_cpu_list = \
             CpuPlatform.get_allowed_cpu_core_node_list()
-        assert len(allowed_numa_nodes) >= self.parallel_config.world_size, (
+        assert len(allowed_numa_nodes) >= local_world_size, (
             f"No enough allowed NUMA nodes to bind threads of "
-            f"{self.parallel_config.world_size} CPUWorkers. "
+            f"{local_world_size} CPUWorkers. "
             f"Allowed NUMA nodes are {allowed_numa_nodes}. "
             "Please try to bind threads manually.")
 
@@ -150,6 +160,19 @@ class CPUWorker(Worker):
             f"should less than {len(logical_cpu_list)}.")
         if reserve_cpu_num != 0:
             logical_cpu_list = logical_cpu_list[:-reserve_cpu_num]
+
+        # Ray: Limit CPUs list to respect VLLM_RAY_PER_WORKER_CPUS
+        if self.use_ray:
+            max_cpus = int(envs.VLLM_RAY_PER_WORKER_CPUS)
+            if max_cpus is not None:
+                if max_cpus <= 0:
+                    raise ValueError(f"VLLM_RAY_PER_WORKER_CPUS"
+                                     f"must be positive, got {max_cpus}")
+                if max_cpus < len(logical_cpu_list):
+                    logical_cpu_list = logical_cpu_list[:max_cpus]
+                    logger.info(
+                        "Limited CPU list to %s CPUs due to"
+                        "VLLM_RAY_PER_WORKER_CPUS constraint", max_cpus)
 
         logger.info("auto thread-binding list (id, physical core): %s",
                     [(x.id, x.physical_core) for x in logical_cpu_list])

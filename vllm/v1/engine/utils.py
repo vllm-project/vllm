@@ -15,6 +15,7 @@ from unittest.mock import patch
 import msgspec
 import zmq
 
+from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -281,10 +282,16 @@ class CoreEngineActorManager:
                 actor_env_vars[device_evar] = device_indices
                 runtime_env = RuntimeEnv(env_vars=actor_env_vars)
 
+            # On CPU platform, don't request an extra bundle {CPU:1.0}
+            # for the engine, so the requested number of
+            # cores = world_size * VLLM_RAY_PER_WORKER_CPUS
+            dp_engine_bundle_index = 0 if current_platform.is_cpu(
+            ) else world_size
+
             actor = ray.remote(DPEngineCoreActor).options(
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
-                    placement_group_bundle_index=world_size,
+                    placement_group_bundle_index=dp_engine_bundle_index,
                 ),
                 runtime_env=runtime_env).remote(vllm_config=dp_vllm_config,
                                                 executor_class=executor_class,
@@ -343,6 +350,9 @@ class CoreEngineActorManager:
             # to multiple nodes
             available_engine_count = int(
                 node_resources[device_str]) // world_size
+            if device_str == "CPU":
+                available_engine_count //= int(envs.VLLM_RAY_PER_WORKER_CPUS)
+
             if dp_master_ip_key in node_resources:
                 assert available_engine_count >= local_engine_count, (
                     "Not enough resources to allocate DP ranks "
@@ -354,6 +364,14 @@ class CoreEngineActorManager:
                     }] * world_size + [{
                         "CPU": 1.0
                     }]
+                    if device_str == "CPU":
+                        bundles = [{
+                            device_str:
+                            int(envs.VLLM_RAY_PER_WORKER_CPUS),
+                            "node:" + dp_master_ip:
+                            0.001
+                        }] * world_size
+
                     pg = ray.util.placement_group(
                         name=f"dp_rank_{len(placement_groups)}",
                         strategy="STRICT_PACK",
@@ -366,6 +384,11 @@ class CoreEngineActorManager:
                     if len(placement_groups) == num_pg_to_create:
                         break
                     bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
+                    if device_str == "CPU":
+                        bundles = [{
+                            device_str:
+                            int(envs.VLLM_RAY_PER_WORKER_CPUS)
+                        }] * world_size
                     pg = ray.util.placement_group(
                         name=f"dp_rank_{len(placement_groups)}",
                         strategy="STRICT_PACK",
@@ -424,18 +447,21 @@ class CoreEngineActorManager:
 
             node_ip = node.node_ip
             node_id = node.node_id
-            available_gpus = int(available_resources[node_id][device_str])
+            available_devices = int(available_resources[node_id][device_str])
 
-            # Get total GPUs on this node from the node's resources
+            # Get total devices on this node from the node's resources
             # Ray stores node resources with node ID as key
-            total_gpus = int(total_resources[node_id][device_str])
+            total_devices = int(total_resources[node_id][device_str])
 
-            # Calculate used GPUs and used engines on this node
-            used_gpus = max(0, total_gpus - available_gpus)
-            used_engines_on_node = used_gpus // world_size
+            # Calculate used devices and used engines on this node
+            used_devices = max(0, total_devices - available_devices)
+            used_engines_on_node = used_devices // world_size
 
             # Calculate how many new engines this node can accommodate
-            available_engine_count = available_gpus // world_size
+            available_engine_count = available_devices // world_size
+            if device_str == "CPU":
+                used_engines_on_node //= int(envs.VLLM_RAY_PER_WORKER_CPUS)
+                available_engine_count //= int(envs.VLLM_RAY_PER_WORKER_CPUS)
 
             # Create placement groups for new engines on this node
             for i in range(available_engine_count):
@@ -443,17 +469,26 @@ class CoreEngineActorManager:
                     break
 
                 rank = old_dp_size + num_pg_created
-
+                devices_per_bundle = 1.0 if device_str != "CPU" else int(
+                    envs.VLLM_RAY_PER_WORKER_CPUS)
                 # Create bundles with node constraint for master node
                 if node_ip == dp_master_ip:
                     bundles = [{
-                        device_str: 1.0,
+                        device_str: devices_per_bundle,
                         "node:" + dp_master_ip: 0.001
                     }] * world_size + [{
                         "CPU": 1.0
                     }]
+
                 else:
-                    bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
+                    bundles = [{
+                        device_str: devices_per_bundle
+                    }] * world_size + [{
+                        "CPU": 1.0
+                    }]
+
+                if device_str == "CPU":
+                    bundles.pop()
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{rank}",
@@ -520,10 +555,16 @@ class CoreEngineActorManager:
                     cur_vllm_config.parallel_config.data_parallel_size_local +
                     new_local_engines)
 
+            # On CPU platform, don't request an extra bundle {CPU:1.0}
+            # for the engine, so the requested number of
+            # cores = world_size * VLLM_RAY_PER_WORKER_CPUS
+            dp_engine_bundle_index = 0 if current_platform.is_cpu(
+            ) else world_size
+
             actor = ray.remote(DPEngineCoreActor).options(
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
-                    placement_group_bundle_index=world_size,
+                    placement_group_bundle_index=dp_engine_bundle_index,
                 ),
                 runtime_env=runtime_env).remote(
                     vllm_config=dp_vllm_config,
