@@ -39,10 +39,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
 
-        # ep does not use pynccl
-        use_pynccl = "ep" not in unique_name
-
-        self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
 
@@ -57,7 +53,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             SymmMemCommunicator)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
-        if use_pynccl and self.world_size > 1:
+        if self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group,
                 device=self.device,
@@ -308,14 +304,20 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return output_list
 
     def dispatch(
-            self, hidden_states: torch.Tensor,
-            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.all2all_manager is not None
         hidden_states, router_logits = self.all2all_manager.dispatch(
-            hidden_states, router_logits)
+            hidden_states, router_logits, is_sequence_parallel)
         return hidden_states, router_logits
 
-    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def combine(self,
+                hidden_states: torch.Tensor,
+                is_sequence_parallel: bool = False) -> torch.Tensor:
         assert self.all2all_manager is not None
-        hidden_states = self.all2all_manager.combine(hidden_states)
+        hidden_states = self.all2all_manager.combine(hidden_states,
+                                                     is_sequence_parallel)
         return hidden_states

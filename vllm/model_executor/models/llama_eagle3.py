@@ -8,13 +8,11 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -28,17 +26,14 @@ logger = init_logger(__name__)
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
 
-    def __init__(
-        self,
-        config: LlamaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config,
-                         cache_config=cache_config,
-                         quant_config=quant_config,
-                         prefix=prefix)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 config: Optional[LlamaConfig] = None) -> None:
+        super().__init__(vllm_config, prefix=prefix, config=config)
+
+        config = config or vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
 
         # override qkv
         self.self_attn.qkv_proj = QKVParallelLinear(
@@ -125,9 +120,9 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
-                config=self.config,
-                cache_config=current_vllm_config.cache_config,
+                current_vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
+                config=self.config,
             )
         ])
         if hasattr(self.config, "target_hidden_size"):
