@@ -418,13 +418,33 @@ class LoRAModelManager(AdapterModelManager):
                         " without --enable-lora-bias.")
                 # Note (gnovack) - If MOE lora weights are not split into num_experts chunks, we split them here
                 if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(module_lora.lora_a):
+                    # TODO: Handle FSDP file format where experts.base_layer is the gate_up_proj and experts is the down_proj
+                    gate_up_proj_lora = self._get_lora_layer_weights(lora_model, module_name + ".base_layer")
+                    down_proj_lora = module_lora
                     num_experts = module_lora.lora_a.shape[-1] // module_lora.rank
-                    module_lora.lora_a = module_lora.lora_a.chunk(
-                        num_experts, dim=-1
-                    )
-                    module_lora.lora_b = module_lora.lora_b.chunk(
-                        num_experts, dim=0
-                    )
+                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=1)
+                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=-1)
+
+                    gate_proj_b = gate_up_proj_lora.lora_b[..., ::2].chunk(num_experts, dim=0)
+                    up_proj_b = gate_up_proj_lora.lora_b[..., 1::2].chunk(num_experts, dim=0)
+
+                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=-1)
+                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=0)
+
+                    lora_a = []
+                    lora_b = []
+                    for i in range(num_experts):
+                        lora_a.append(gate_proj_a[i])
+                        lora_a.append(down_proj_a[i])
+                        lora_a.append(up_proj_a[i])
+
+                        lora_b.append(gate_proj_b[i])
+                        lora_b.append(down_proj_b[i])
+                        lora_b.append(up_proj_b[i])
+
+                    module_lora.lora_a = lora_a
+                    module_lora.lora_b = lora_b
+
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
                                 module_lora.embeddings_tensor,
                                 module_lora.bias)
