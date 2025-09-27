@@ -157,7 +157,7 @@ class MLPBlock(torch.nn.Module):
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.experts",
                                 apply_router_weight_on_input=False,
-                                has_bias=False, # FIXME: Turn back to True and drop bias terms
+                                has_bias=True, # FIXME: Turn back to True and drop bias terms
                                 activation="swigluoai")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -639,9 +639,9 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             ".gate_up_proj": ".w13_weight",
             ".down_proj": ".w2_weight",
 
-            # #MoE Bias # FIXME: Lora doesn't finetune bias term and drop bias terms
-            # ".gate_up_proj_bias": ".w13_bias",
-            # ".down_proj_bias": ".w2_bias",
+            #MoE Bias
+            ".gate_up_proj_bias": ".w13_bias",
+            ".down_proj_bias": ".w2_bias",
         },
     )
 
@@ -657,15 +657,6 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         packed_modules_mapping = self.packed_modules_mapping.copy()
         packed_modules_mapping["experts"] = []
 
-        # FIXME: Updated to match lora adapter syntax but may not be necessary
-        # for _, weight_name, _, _ in expert_params_mapping:
-        #     weight_str = weight_name.split('.')
-        #     print("weight-str", weight_str)
-        #     weight_name = "model.layers." + weight_str[1] + ".mlp." + weight_str[0] + "." + weight_str[2] # + ".weight" 
-        #     print("weight", weight_name)
-        #     packed_modules_mapping["experts"].append(weight_name)
-
-        # print(packed_modules_mapping)
         packed_modules_mapping["experts"] = [
             weight_name.rstrip(".")
             for _, weight_name, _, _ in expert_params_mapping
@@ -714,7 +705,6 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        # FIXME: LoRA adapter format is 'model.layers.4.mlp.experts without proj
         return FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="base_layer", #gate_up_proj", #"lora_A", #"gate_proj",
             ckpt_down_proj_name="", #"down_proj",#"down_proj",
