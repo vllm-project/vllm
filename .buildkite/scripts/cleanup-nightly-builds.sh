@@ -8,9 +8,26 @@ set -ex
 # DockerHub API endpoint for vllm/vllm-openai repository
 REPO_API_URL="https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags"
 
-# Get DockerHub token from environment
+# Get DockerHub credentials from environment
 if [ -z "$DOCKERHUB_TOKEN" ]; then
     echo "Error: DOCKERHUB_TOKEN environment variable is not set"
+    exit 1
+fi
+
+if [ -z "$DOCKERHUB_USERNAME" ]; then
+    echo "Error: DOCKERHUB_USERNAME environment variable is not set"
+    exit 1
+fi
+
+# Get DockerHub bearer token
+echo "Getting DockerHub bearer token..."
+BEARER_TOKEN=$(curl -s -X POST \
+    -H "Content-Type: application/json" \
+    -d "{\"username\": \"$DOCKERHUB_USERNAME\", \"password\": \"$DOCKERHUB_TOKEN\"}" \
+    "https://hub.docker.com/v2/users/login" | jq -r '.token')
+
+if [ -z "$BEARER_TOKEN" ] || [ "$BEARER_TOKEN" = "null" ]; then
+    echo "Error: Failed to get DockerHub bearer token"
     exit 1
 fi
 
@@ -20,7 +37,7 @@ get_all_tags() {
     local all_tags=""
     
     while true; do
-        local response=$(curl -s -H "Authorization: Bearer $DOCKERHUB_TOKEN" \
+        local response=$(curl -s -H "Authorization: Bearer $BEARER_TOKEN" \
             "$REPO_API_URL?page=$page&page_size=100")
         
         # Get both last_updated timestamp and tag name, separated by |
@@ -43,7 +60,7 @@ delete_tag() {
     echo "Deleting tag: $tag_name"
     
     local delete_url="https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/$tag_name"
-    local response=$(curl -s -X DELETE -H "Authorization: Bearer $DOCKERHUB_TOKEN" "$delete_url")
+    local response=$(curl -s -X DELETE -H "Authorization: Bearer $BEARER_TOKEN" "$delete_url")
     
     if echo "$response" | jq -e '.detail' > /dev/null 2>&1; then
         echo "Warning: Failed to delete tag $tag_name: $(echo "$response" | jq -r '.detail')"
