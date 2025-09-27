@@ -319,7 +319,7 @@ class BlockPool:
                              medium=MEDIUM_GPU))
         return True
 
-    def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
+    def touch(self, blocks: tuple[tuple[KVCacheBlock, ...], ...]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.

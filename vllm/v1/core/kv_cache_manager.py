@@ -199,7 +199,8 @@ class KVCacheManager:
                 self.prefix_cache_stats.queries += request.num_tokens
                 self.prefix_cache_stats.hits += num_new_computed_tokens
 
-        return KVCacheBlocks(computed_blocks), num_new_computed_tokens
+        return (self.create_kv_cache_blocks(computed_blocks),
+                num_new_computed_tokens)
 
     def allocate_slots(
         self,
@@ -407,6 +408,7 @@ class KVCacheManager:
     def create_kv_cache_blocks(
             self, blocks: tuple[list[KVCacheBlock], ...]) -> KVCacheBlocks:
         if any(blocks):
+            # Only create new KVCacheBlocks for non-empty blocks
             return KVCacheBlocks(
                 tuple(tuple(block_per_group) for block_per_group in blocks))
         else:

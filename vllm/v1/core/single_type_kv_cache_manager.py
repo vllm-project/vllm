@@ -58,7 +58,7 @@ class SingleTypeKVCacheManager(ABC):
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
-            new_computed_blocks: list[KVCacheBlock]) -> int:
+            new_computed_blocks: tuple[KVCacheBlock, ...]) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -86,8 +86,8 @@ class SingleTypeKVCacheManager(ABC):
         return num_new_blocks + num_evictable_computed_blocks
 
     def save_new_computed_blocks(
-            self, request_id: str,
-            new_computed_blocks: list[KVCacheBlock]) -> None:
+            self, request_id: str, new_computed_blocks: tuple[KVCacheBlock,
+                                                              ...]) -> None:
         """
         Add the new computed blocks to the request.
 
@@ -564,9 +564,22 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
-            new_computed_blocks: list[KVCacheBlock]) -> int:
+            new_computed_blocks: tuple[KVCacheBlock, ...]) -> int:
         # Allocate extra `num_speculative_blocks` blocks for
         # speculative decoding (MTP/EAGLE) with linear attention.
+        """
+        Get the number of blocks needed to be allocated for the request.
+
+        Args:
+            request_id: The request ID.
+            num_tokens: The total number of tokens that need a slot (including
+                tokens that are already allocated).
+            new_computed_blocks: The new computed blocks just hitting the
+                prefix caching.
+
+        Returns:
+            The number of blocks
+        """
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.kv_cache_spec.num_speculative_blocks > 0:
             num_tokens += (self.kv_cache_spec.block_size *
@@ -589,8 +602,8 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
     def save_new_computed_blocks(
-            self, request_id: str,
-            new_computed_blocks: list[KVCacheBlock]) -> None:
+            self, request_id: str, new_computed_blocks: tuple[KVCacheBlock,
+                                                              ...]) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so  `new_computed_blocks` should always be empty.
         assert len(new_computed_blocks) == 0
