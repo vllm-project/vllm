@@ -222,8 +222,7 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
-            if self.method in ("deepseek_mtp", "ernie_mtp", "qwen3_next_mtp",
-                               "longcat_flash_mtp"):
+            if self.method == "mtp":
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
@@ -352,8 +351,7 @@ class EagleProposer:
                     hidden_states=self.hidden_states[:input_batch_size],
                     inputs_embeds=inputs_embeds,
                 )
-                if self.method in ("deepseek_mtp", "ernie_mtp",
-                                   "qwen3_next_mtp", "longcat_flash_mtp"):
+                if self.method == "mtp":
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states
                 else:
@@ -806,6 +804,20 @@ class EagleProposer:
 
         self.attn_layer_names = list(draft_attn_layer_names)
 
+        if self.is_multimodal_model:
+            # Even if the target model is multimodal, we can also use
+            # text-only draft models
+            try:
+                dummy_input_ids = torch.tensor([[1]],
+                                               device=self.input_ids.device)
+                self.model.get_input_embeddings(dummy_input_ids,
+                                                multimodal_embeddings=None)
+            except (NotImplementedError, AttributeError, TypeError):
+                logger.warning(
+                    "Draft model does not support multimodal inputs, "
+                    "falling back to text-only mode")
+                self.is_multimodal_model = False
+
         if supports_multimodal(target_model):
             # handle multimodality
             self.model.config.image_token_index = (
@@ -888,10 +900,10 @@ class EagleProposer:
     def _get_attention_metadata_builder(
             self) -> list[AttentionMetadataBuilder]:
         """Find and return the attention metadata builders for EAGLE layers.
-        
+
         Returns:
             The metadata builders for EAGLE layers.
-            
+
         Raises:
             AssertionError: If no metadata builders are found for EAGLE layers.
         """
