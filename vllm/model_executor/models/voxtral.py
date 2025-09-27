@@ -45,10 +45,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (MistralTokenizer,
                                                cached_tokenizer_from_config)
 
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
-                         SupportsMultiModal, SupportsTranscription)
-from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
+from .utils import flatten_bn, init_vllm_registered_model, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -376,9 +374,14 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
+            audio_encoder = self.tokenizer.instruct.audio_encoder
+            audio_tok_id = audio_encoder.audio_token
             audio_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      audio_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                audio_embeddings,
+                is_multimodal=input_ids == audio_tok_id,
+            )
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -420,20 +423,6 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        dim=0)
 
         return audio_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        audio_encoder = self.tokenizer.instruct.audio_encoder
-        audio_tok_id = audio_encoder.audio_token
-
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings, audio_tok_id)
-        return inputs_embeds
 
     def _parse_and_validate_audio_arrays(
             self, **kwargs: object) -> Union[list[torch.Tensor], None]:
