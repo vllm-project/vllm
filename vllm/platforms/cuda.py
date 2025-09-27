@@ -278,6 +278,12 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using Triton MLA backend on V1 engine.")
                 return ("vllm.v1.attention.backends.mla."
                         "triton_mla.TritonMLABackend")
+            # If this point is reached, no valid backend has been selected or found
+            if selected_backend is None:
+                raise ValueError("No valid MLA backend could be found for this configuration.")  # noqa: E501
+            else:
+                raise ValueError(f"{selected_backend.name} is not a valid backend for this configuration.")  # noqa: E501
+
         if use_v1:
             FLASHINFER_V1 = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"  # noqa: E501
             FLEX_ATTENTION_V1 = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
