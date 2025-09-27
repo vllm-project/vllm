@@ -92,12 +92,11 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
 
         self.compiled_codes.append(new_code)
-        debug_dump_dir = self.vllm_config.compilation_config.debug_dump_path
-        if isinstance(debug_dump_dir, str) and debug_dump_dir != "":
-            rank = self.vllm_config.parallel_config.rank
-            decompiled_file = os.path.join(debug_dump_dir, f"rank_{rank}",
-                                           "transformed_code.py")
-            if not os.path.exists(decompiled_file):
+
+        path = self.vllm_config.compile_debug_dump_path()
+        if path:
+            decompiled_file = path / "transformed_code.py"
+            if not decompiled_file.exists():
                 try:
                     # usually the decompilation will succeed for most models,
                     # as we guarantee a full-graph compilation in Dynamo.
