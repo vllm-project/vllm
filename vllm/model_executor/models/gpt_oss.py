@@ -619,7 +619,6 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
                                 "q_a_proj",
                                 "kv_a_proj_with_mqa"
                                 ],
-                                # "gate_up_proj": ["gate_proj", "up_proj"],
                             }
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -639,7 +638,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
             ".gate_up_proj": ".w13_weight",
             ".down_proj": ".w2_weight",
 
-            #MoE Bias
+            # MoE Bias
             ".gate_up_proj_bias": ".w13_bias",
             ".down_proj_bias": ".w2_bias",
         },
@@ -655,13 +654,11 @@ class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
         expert_params_mapping = self.get_expert_mapping()
 
         packed_modules_mapping = self.packed_modules_mapping.copy()
-        packed_modules_mapping["experts"] = []
 
         packed_modules_mapping["experts"] = [
             weight_name.rstrip(".")
             for _, weight_name, _, _ in expert_params_mapping
         ]
-        print(packed_modules_mapping)
         return packed_modules_mapping
 
     def __init__(
