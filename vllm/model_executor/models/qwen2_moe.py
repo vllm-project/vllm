@@ -304,9 +304,13 @@ class Qwen2MoeDecoderLayer(nn.Module):
                                    quant_config=quant_config,
                                    prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+                                       eps=config.rms_norm_eps,
+                                       prefix=maybe_prefix(
+                                           prefix, "input_layernorm"))
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+                                                eps=config.rms_norm_eps,
+                                                prefix=maybe_prefix(
+                                                    prefix, "post_layernorm"))
 
     def forward(
         self,
