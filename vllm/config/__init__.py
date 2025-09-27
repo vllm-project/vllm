@@ -548,8 +548,9 @@ class VllmConfig:
         if envs.VLLM_DEBUG_DUMP_PATH is not None:
             env_path = Path(envs.VLLM_DEBUG_DUMP_PATH).absolute().expanduser()
             if self.compilation_config.debug_dump_path:
-                logger.warning("Config-specified debug dump path is overridden"
-                               " by VLLM_DEBUG_DUMP_PATH to %s", env_path)
+                logger.warning(
+                    "Config-specified debug dump path is overridden"
+                    " by VLLM_DEBUG_DUMP_PATH to %s", env_path)
             self.compilation_config.debug_dump_path = env_path
 
     def update_sizes_for_sequence_parallelism(self,
