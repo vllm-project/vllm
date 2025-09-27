@@ -465,29 +465,18 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
-- label: Tensorizer Test # 14min
-  timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental]
-  source_file_dependencies:
-  - vllm/model_executor/model_loader
-  - tests/tensorizer_loader
-  - tests/entrypoints/openai/test_tensorizer_entrypoint.py
-  commands:
-    - apt-get update && apt-get install -y curl libsodium23
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s tensorizer_loader
-    - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
-
-- label: Model Executor Test # 7min
-  timeout_in_minutes: 20
+- label: Model Executor Test # ???
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/model_executor
   - tests/model_executor
+  - tests/entrypoints/openai/test_tensorizer_entrypoint.py
   commands:
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s model_executor
+    - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
 
 - label: Benchmarks # 11min
   timeout_in_minutes: 20
