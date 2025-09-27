@@ -274,7 +274,7 @@ pull_request_rules:
       - files~=^vllm/model_executor/model_loader/tensorizer.py
       - files~=^vllm/model_executor/model_loader/tensorizer_loader.py
       - files~=^tests/entrypoints/openai/test_tensorizer_entrypoint.py
-      - files~=^tests/tensorizer_loader/
+      - files~=^tests/model_executor/model_loader/tensorizer_loader/
   actions:
     assign:
       users:
