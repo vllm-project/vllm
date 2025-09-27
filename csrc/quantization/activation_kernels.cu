@@ -15,13 +15,10 @@
   #include <cuda_bf16.h>
   #include <cuda_fp16.h>
   #include <cuda_fp8.h>
-  #include <cub/cub.cuh>
-
 #else
   #include <hip/hip_bf16.h>
   #include <hip/hip_fp16.h>
   #include <hip/hip_fp8.h>
-  #include <hipcub/hipcub.hpp>
 
 typedef __hip_bfloat162 __nv_bfloat162;
 typedef __hip_bfloat16 __nv_bfloat16;
