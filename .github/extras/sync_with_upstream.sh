@@ -1,14 +1,26 @@
 #!/usr/bin/env bash
-# Sync this fork with upstream while preserving the extras/ directory.
+# Sync this fork with upstream while preserving fork-specific paths like extras/.
 #
 # Usage:
 #   ./github/extras/sync_with_upstream.sh [upstream_remote] [branch]
 # Defaults: upstream remote "upstream", branch "main".
+# Override protected paths via PROTECTED_PATHS="path1 path2".
 set -euo pipefail
 
 REMOTE=${1:-${UPSTREAM_REMOTE:-upstream}}
 BRANCH=${2:-${UPSTREAM_BRANCH:-main}}
-EXTRAS_DIR=${EXTRAS_DIR:-extras}
+DEFAULT_PROTECTED=("extras" ".github/extras" ".github/workflows/fork-sync.yml")
+if [ -n "${PROTECTED_PATHS:-}" ]; then
+  # Allow caller to override via space-separated list
+  read -r -a PROTECTED <<< "$PROTECTED_PATHS"
+else
+  PROTECTED=(${DEFAULT_PROTECTED[@]})
+fi
+
+if [ ${#PROTECTED[@]} -eq 0 ]; then
+  echo "[sync-extras] No protected paths configured; falling back to 'extras'"
+  PROTECTED=("extras")
+fi
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "[sync-extras] This script must be run inside a git repository." >&2
@@ -21,11 +33,25 @@ fi
 
 echo "[sync-extras] Updating from ${REMOTE}/${BRANCH}"
 TMPDIR=""
-if [ -d "$EXTRAS_DIR" ]; then
-  TMPDIR=$(mktemp -d -t extras-backup-XXXXXX)
-  echo "[sync-extras] Backing up ${EXTRAS_DIR}/ to ${TMPDIR}"
-  cp -a "$EXTRAS_DIR/." "$TMPDIR"/
-fi
+BACKED_UP=()
+for path in "${PROTECTED[@]}"; do
+  if [ -e "$path" ]; then
+    if [ -z "$TMPDIR" ]; then
+      TMPDIR=$(mktemp -d -t extras-backup-XXXXXX)
+    fi
+    dest="$TMPDIR/$path"
+    mkdir -p "$(dirname "$dest")"
+    if [ -d "$path" ]; then
+      mkdir -p "$dest"
+      cp -a "$path/." "$dest/"
+      echo "[sync-extras] Backed up directory $path -> $dest"
+    else
+      cp -a "$path" "$dest"
+      echo "[sync-extras] Backed up file $path -> $dest"
+    fi
+    BACKED_UP+=("$path")
+  fi
+done
 
 set +e
 MERGE_OUTPUT=$(git merge --ff-only "${REMOTE}/${BRANCH}" 2>&1)
@@ -38,13 +64,21 @@ if [ $MERGE_STATUS -ne 0 ]; then
 fi
 
 if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then
-  echo "[sync-extras] Restoring ${EXTRAS_DIR}/ from backup"
-  mkdir -p "$EXTRAS_DIR"
-  cp -a "$TMPDIR/." "$EXTRAS_DIR"/
+  for path in "${BACKED_UP[@]}"; do
+    src="$TMPDIR/$path"
+    if [ -d "$src" ]; then
+      mkdir -p "$path"
+      cp -a "$src/." "$path/"
+    else
+      mkdir -p "$(dirname "$path")"
+      cp -a "$src" "$path"
+    fi
+    git add "$path"
+    echo "[sync-extras] Restored $path"
+  done
   rm -rf "$TMPDIR"
-  git add "$EXTRAS_DIR"
   if ! git diff --cached --quiet; then
-    git commit -m "Restore ${EXTRAS_DIR} after upstream sync" || true
+    git commit -m "Restore protected paths after upstream sync" || true
   fi
 fi
 
