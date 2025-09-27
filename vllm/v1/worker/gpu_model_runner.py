@@ -442,6 +442,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory)
 
+    def _get_positions(self, num_tokens: Any):
+        if isinstance(num_tokens, int):
+            if self.uses_mrope:
+                return self.mrope_positions.gpu[:, :num_tokens]
+            return self.positions.gpu[:num_tokens]
+        else:
+            if self.uses_mrope:
+                return self.mrope_positions.gpu[:, num_tokens]
+            return self.positions.gpu[num_tokens]
+
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
                      dtype: torch.dtype,
@@ -2544,8 +2554,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 token_indices_to_sample = None
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
-                # TODO(woosuk): Support M-RoPE.
-                target_positions = self.positions.gpu[:num_scheduled_tokens]
+                target_positions = self._get_positions(num_scheduled_tokens)
                 if self.use_aux_hidden_state_outputs:
                     assert aux_hidden_states is not None
                     target_hidden_states = torch.cat(
@@ -2570,8 +2579,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             valid_sampled_tokens_count)
 
                 target_token_ids = self.input_ids.gpu[token_indices]
-                # TODO(woosuk): Support M-RoPE.
-                target_positions = self.positions.gpu[token_indices]
+                target_positions = self._get_positions(token_indices)
                 if self.use_aux_hidden_state_outputs:
                     assert aux_hidden_states is not None
                     target_hidden_states = torch.cat(
