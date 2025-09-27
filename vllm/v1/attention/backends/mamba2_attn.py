@@ -7,11 +7,12 @@ from typing import Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadataBuilder)
-from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
+from vllm.v1.attention.backends.utils import (PAD_SLOT_ID,
+                                              CommonAttentionMetadata,
+                                              compute_causal_conv1d_metadata,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -114,7 +115,7 @@ class Mamba2AttentionMetadata:
     num_prefill_tokens: int
     num_decodes: int
     num_decode_tokens: int
-    query_start_loc: torch.Tensor
+    query_start_loc_p: torch.Tensor
     seq_lens: torch.Tensor
 
     prep_initial_states: bool
@@ -131,7 +132,6 @@ class Mamba2AttentionMetadata:
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: Optional[dict] = None
-    cu_seqlen: Optional[int] = None
     batch_ptr: Optional[torch.Tensor] = None
     token_chunk_offset_ptr: Optional[torch.Tensor] = None
 
@@ -151,7 +151,7 @@ class Mamba2AttentionMetadataBuilder(
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> Mamba2AttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_p = None
         seq_lens = common_attn_metadata.seq_lens
 
         seq_idx_p = None
@@ -160,6 +160,9 @@ class Mamba2AttentionMetadataBuilder(
         # currently we really only support the FlashAttention backend
         has_initial_states_p = None
         prep_initial_states = False
+
+        # for causal_conv1d
+        nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
@@ -176,7 +179,7 @@ class Mamba2AttentionMetadataBuilder(
                 num_computed_tokens_cpu[num_reqs - num_prefills:num_reqs] > 0)
             prep_initial_states = torch.any(has_initial_states_cpu).item()
             has_initial_states_p = has_initial_states_cpu.to(
-                query_start_loc.device)
+                common_attn_metadata.query_start_loc.device)
 
             query_start_loc_p = common_attn_metadata.query_start_loc[
                 -num_prefills - 1:] - num_decode_tokens
@@ -187,7 +190,6 @@ class Mamba2AttentionMetadataBuilder(
                 device=query_start_loc_p.device),
                                                 query_start_loc_p.diff(),
                                                 output_size=num_prefill_tokens)
-            seq_idx_p.unsqueeze_(0)
 
             # We compute metadata for chunked prefill once at the top level
             # model forward and reuse them in mamba layers. If not needed,
@@ -197,6 +199,9 @@ class Mamba2AttentionMetadataBuilder(
                     _query_start_loc_to_chunk_indices_offsets(
                         query_start_loc_p, self.chunk_size,
                         num_prefill_tokens))
+
+            nums_dict, batch_ptr, token_chunk_offset_ptr = \
+                compute_causal_conv1d_metadata(query_start_loc_p)
 
         elif num_decodes <= self.decode_cudagraph_max_bs:
             # Pad state tensor for CUDA graph
@@ -211,7 +216,7 @@ class Mamba2AttentionMetadataBuilder(
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            query_start_loc=query_start_loc,
+            query_start_loc_p=query_start_loc_p,
             seq_lens=seq_lens,
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
@@ -220,5 +225,8 @@ class Mamba2AttentionMetadataBuilder(
             chunk_indices_p=chunk_indices_p,
             chunk_offsets_p=chunk_offsets_p,
             state_indices_tensor=state_indices_tensor,
+            nums_dict=nums_dict,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         return attn_metadata

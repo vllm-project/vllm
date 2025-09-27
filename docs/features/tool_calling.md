@@ -310,6 +310,15 @@ Flags:
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
 
+### LongCat-Flash-Chat Models (`longcat`)
+
+Supported models:
+
+* `meituan-longcat/LongCat-Flash-Chat`
+* `meituan-longcat/LongCat-Flash-Chat-FP8`
+
+Flags: `--tool-call-parser longcat`
+
 ### GLM-4.5 Models (`glm45`)
 
 Supported models:
@@ -318,6 +327,15 @@ Supported models:
 * `ZhipuAI/GLM-4.5-Air`
 
 Flags: `--tool-call-parser glm45`
+
+### Qwen3-Coder Models (`qwen3_xml`)
+
+Supported models:
+
+* `Qwen/Qwen3-480B-A35B-Instruct`
+* `Qwen/Qwen3-Coder-30B-A3B-Instruct`
+
+Flags: `--tool-call-parser qwen3_xml`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

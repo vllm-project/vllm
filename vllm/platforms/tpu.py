@@ -50,8 +50,7 @@ class TpuPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink) -> str:
-        if (selected_backend != _Backend.PALLAS
-                and selected_backend != _Backend.PALLAS_VLLM_V1):
+        if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if not use_v1:
@@ -74,10 +73,6 @@ class TpuPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         raise NotImplementedError
-
-    @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -176,11 +171,6 @@ class TpuPlatform(Platform):
 
     @classmethod
     def use_all_gather(cls) -> bool:
-        return True
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        # V1 support on TPU is experimental
         return True
 
     @classmethod
