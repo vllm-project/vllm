@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "pybind11==2.10.3", "cmake"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dllm"
+version = "0.1"
+description = "cluster deployment tool for vllm"
+
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.25.1",
+    "numpy>=1.19.2",
+    "fastapi",
+    "aiohttp",
+    "uvicorn",
+    "ray[serve]",
+    "click",
+    "psutil",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Operating System :: OS Independent",
+]
+
+[project.scripts]
+dllm = "dllm.scripts:cli"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "sphinx",
+    "sphinx-design",
+    "myst-parser",
+    "sphinx-click",
+]
+build = [
+    "wheel>=0.10.0",
+    "twine>=4.0.0",
+    "build>=0.10.0",
+]
+
+[tool.black]
+line-length = 120
+target-version = ["py310", "py311"]
