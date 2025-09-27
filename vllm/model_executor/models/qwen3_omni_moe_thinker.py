@@ -91,7 +91,7 @@ from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     maybe_prefix,
-    merge_multimodal_embeddings,
+    _merge_multimodal_embeddings,
 )
 from .vision import get_vit_attn_backend
 
@@ -1123,46 +1123,60 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        deepstack_input_embeds = None
-        if multimodal_embeddings is not None and len(multimodal_embeddings) != 0:
-            # TODO (ywang96): support overlapping modalitiy embeddings so that
-            # `use_audio_in_video` will work on V1.
-            # split the feat dim to obtain multi-scale visual feature
-            if self.visual.deepstack_visual_indexes is not None:
-                multiscale_len = len(self.visual.deepstack_visual_indexes)
-                multimodal_embeddings_multiscale = []
-                for index, embeddings in enumerate(multimodal_embeddings):
-                    if embeddings.shape[-1] != self.config.text_config.hidden_size:
-                        visual_dim = embeddings.shape[-1] // (multiscale_len + 1)
-                        main_dim, multi_dim = visual_dim, visual_dim * multiscale_len
-                        embeddings_main, embeddings_multiscale = torch.split(
-                            embeddings, [main_dim, multi_dim], dim=-1
-                        )
-                        multimodal_embeddings[index] = embeddings_main
-                        multimodal_embeddings_multiscale.append(embeddings_multiscale)
-                if len(multimodal_embeddings_multiscale) > 0:
-                    deepstack_input_embeds = inputs_embeds.new_zeros(inputs_embeds.size(0), multiscale_len * inputs_embeds.size(1))
-                    deepstack_input_embeds = merge_multimodal_embeddings(
-                        input_ids,
-                        deepstack_input_embeds,
-                        multimodal_embeddings_multiscale,
-                        placeholder_token_id=[self.config.image_token_id, self.config.video_token_id],
-                    )
-                    deepstack_input_embeds = deepstack_input_embeds.view(inputs_embeds.shape[0], multiscale_len, visual_dim).permute(1,0,2).contiguous()
-                    self._set_deepstack_input_embeds(deepstack_input_embeds)
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.language_model.get_input_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
 
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                [
-                    self.config.image_token_id,
-                    self.config.video_token_id,
-                    self.config.audio_token_id,
-                ],
-            )
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229.")
+
+        deepstack_input_embeds = None
+        # TODO (ywang96): support overlapping modalitiy embeddings so that
+        # `use_audio_in_video` will work on V1.
+        # split the feat dim to obtain multi-scale visual feature
+        if self.visual.deepstack_visual_indexes is not None:
+            multiscale_len = len(self.visual.deepstack_visual_indexes)
+            multimodal_embeddings_multiscale = []
+            for index, embeddings in enumerate(multimodal_embeddings):
+                if embeddings.shape[-1] != self.config.text_config.hidden_size:
+                    visual_dim = embeddings.shape[-1] // (multiscale_len + 1)
+                    main_dim, multi_dim = visual_dim, visual_dim * multiscale_len
+                    embeddings_main, embeddings_multiscale = torch.split(
+                        embeddings, [main_dim, multi_dim], dim=-1
+                    )
+                    multimodal_embeddings[index] = embeddings_main
+                    multimodal_embeddings_multiscale.append(embeddings_multiscale)
+
+            # NOTE: This branch should only be triggered for image/video,
+            # but not audio-only inputs
+            if len(multimodal_embeddings_multiscale) > 0:
+                deepstack_input_embeds = inputs_embeds.new_zeros(inputs_embeds.size(0), multiscale_len * inputs_embeds.size(1))
+                deepstack_input_embeds = _merge_multimodal_embeddings(
+                    inputs_embeds=deepstack_input_embeds,
+                    multimodal_embeddings=multimodal_embeddings_multiscale,
+                    is_multimodal=is_multimodal,
+                )
+                deepstack_input_embeds = deepstack_input_embeds.view(inputs_embeds.shape[0], multiscale_len, visual_dim).permute(1,0,2).contiguous()
+                self._set_deepstack_input_embeds(deepstack_input_embeds)
+
+        inputs_embeds = _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
         
         return inputs_embeds
 
