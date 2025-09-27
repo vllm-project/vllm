@@ -240,16 +240,16 @@ class FusedMoEPrepareAndFinalize(ABC):
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
 
-        Returns a callback or a hook callback pair that when invoked waits for 
-        results from other workers and has the same return signature as 
+        Returns a callback or a hook callback pair that when invoked waits for
+        results from other workers and has the same return signature as
         `prepare`, if a hook is returned this is more lightweight check that
-        the recv is complete without doing extra work (used by DBO, will be 
+        the recv is complete without doing extra work (used by DBO, will be
         refactored in the very near future)
-        
+
         e.g.
 
         ret = obj.prepare_async(...)
-        
+
         if isinstance(ret, tuple):
             hook, receiver = ret
             hook()
@@ -310,10 +310,10 @@ class FusedMoEPrepareAndFinalize(ABC):
         - weight_and_reduce_impl: An optional TopKWeightAndReduce
           implementation.
 
-        Returns a callback or a hook callback pair that when invoked waits for 
-        results from other workers and has the same return signature as 
+        Returns a callback or a hook callback pair that when invoked waits for
+        results from other workers and has the same return signature as
         `finalize`, if a hook is returned this is more lightweight check that
-        the recv is complete without doing extra work (used by DBO, will be 
+        the recv is complete without doing extra work (used by DBO, will be
         refactored in the very near future)
 
         ret = obj.finalize_async(output, ...)

@@ -146,13 +146,13 @@ def expert_info(kind) -> ExpertInfo:
     return info
 
 
-register_prepare_and_finalize(
-    MoEPrepareAndFinalizeNoEP,
-    standard_format,
-    common_float_types,
-    blocked_quantization_support=True,
-    backend=None,
-)
+# register_prepare_and_finalize(
+#     MoEPrepareAndFinalizeNoEP,
+#     standard_format,
+#     common_float_types,
+#     blocked_quantization_support=True,
+#     backend=None,
+# )
 
 register_experts(
     BatchedTritonExperts,
@@ -189,24 +189,34 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
         DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
         DeepEPLLPrepareAndFinalize)
+    from vllm.model_executor.layers.fused_moe.deepep_hybrid_prepare_finalize import (  # noqa: E501
+        DeepEPHybridPrepareAndFinalize)
+
+    # register_prepare_and_finalize(
+    #     DeepEPHTPrepareAndFinalize,
+    #     standard_format,
+    #     common_float_types,
+    #     blocked_quantization_support=True,
+    #     backend="deepep_high_throughput",
+    # )
+
+    # register_prepare_and_finalize(
+    #     DeepEPLLPrepareAndFinalize,
+    #     batched_format,
+    #     common_float_types,
+    #     blocked_quantization_support=True,
+    #     backend="deepep_low_latency",
+    # )
 
     register_prepare_and_finalize(
-        DeepEPHTPrepareAndFinalize,
+        DeepEPHybridPrepareAndFinalize,
         standard_format,
         common_float_types,
         blocked_quantization_support=True,
-        backend="deepep_high_throughput",
+        backend="deepep_hybrid",
     )
 
-    register_prepare_and_finalize(
-        DeepEPLLPrepareAndFinalize,
-        batched_format,
-        common_float_types,
-        blocked_quantization_support=True,
-        backend="deepep_low_latency",
-    )
-
-if has_pplx():
+if False and has_pplx():
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize)
     register_prepare_and_finalize(
@@ -217,7 +227,7 @@ if has_pplx():
         backend="pplx",
     )
 
-if (has_flashinfer_cutlass_fused_moe()
+if False and (has_flashinfer_cutlass_fused_moe()
         and current_platform.has_device_capability(100)):
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
         FlashInferExperts)
