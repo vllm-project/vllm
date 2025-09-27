@@ -716,13 +716,18 @@ class VllmConfig:
                                  f"but got '{self.load_config.load_format}'. "
                                  f"Model: {self.model_config.model}")
 
-    def compile_debug_dump_path(self, rank: int) -> Path:
+    def compile_debug_dump_path(self) -> Optional[Path]:
         """returns the path to dump the torch.compile 
             debug information for the given rank.
         """
-        assert self.compilation_config.debug_dump_path is not None, \
-            "debug_dump_path is not set."
-        path = self.compilation_config.debug_dump_path / f"rank_{rank}"
+        if self.compilation_config.debug_dump_path is None:
+            return None
+        tp_rank = self.parallel_config.rank
+        dp_rank = self.parallel_config.data_parallel_rank
+        data_parallel_size = self.parallel_config.data_parallel_size
+        append_path = f"rank_{tp_rank}" if data_parallel_size == 1 \
+            else f"rank_{tp_rank}_dprank_{dp_rank}"
+        path = self.compilation_config.debug_dump_path / append_path
         return path
 
     def __str__(self):

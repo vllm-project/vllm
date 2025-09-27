@@ -95,12 +95,10 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
         TODO(luka): use pattern object to manually produce pattern graph
         """
-        debug_dump_path = config.compilation_config.debug_dump_path
+        debug_dump_path = config.compile_debug_dump_path()
         if not debug_dump_path:
             return
 
-        rank = torch.distributed.get_rank()
-        debug_dump_path = config.compile_debug_dump_path(rank)
         debug_dump_path.mkdir(parents=True, exist_ok=True)
 
         from vllm.utils import unique_filepath
