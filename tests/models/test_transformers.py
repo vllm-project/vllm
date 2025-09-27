@@ -100,10 +100,9 @@ def test_distributed(
                          kwargs_test=kwargs)
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="bitsandbytes quantization is currently not supported in rocm.")
 @pytest.mark.parametrize("model, quantization_kwargs", [
+    ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
+    ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {}),
     (
         "meta-llama/Llama-3.2-1B-Instruct",
         {
@@ -121,6 +120,11 @@ def test_quantization(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+    if (current_platform.is_rocm()
+            and quantization_kwargs.get("quantization", "") == "bitsandbytes"):
+        pytest.skip(
+            "bitsandbytes quantization is currently not supported in rocm.")
+
     with vllm_runner(
             model, model_impl="auto", enforce_eager=True,
             **quantization_kwargs) as vllm_model:  # type: ignore[arg-type]

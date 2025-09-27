@@ -474,6 +474,12 @@ ENV CUDA_HOME=/usr/local/cuda
 RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a+PTX}" \
     && bash install_python_libraries.sh
 
+# CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
+# return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
+# consistently from the host (see https://github.com/vllm-project/vllm/issues/18859).
+# Until then, add /usr/local/nvidia/lib64 before the image cuda path to allow override.
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
+
 #################### vLLM installation IMAGE ####################
 
 #################### TEST IMAGE ####################
@@ -546,7 +552,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="0.46.1"; \
     fi; \
-    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' boto3 runai-model-streamer runai-model-streamer[s3]
+    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3]>=0.14.0'
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
