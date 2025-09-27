@@ -804,6 +804,20 @@ class EagleProposer:
 
         self.attn_layer_names = list(draft_attn_layer_names)
 
+        if self.is_multimodal_model:
+            # Even if the target model is multimodal, we can also use
+            # text-only draft models
+            try:
+                dummy_input_ids = torch.tensor([[1]],
+                                               device=self.input_ids.device)
+                self.model.get_input_embeddings(dummy_input_ids,
+                                                multimodal_embeddings=None)
+            except (NotImplementedError, AttributeError, TypeError):
+                logger.warning(
+                    "Draft model does not support multimodal inputs, "
+                    "falling back to text-only mode")
+                self.is_multimodal_model = False
+
         if supports_multimodal(target_model):
             # handle multimodality
             self.model.config.image_token_index = (
