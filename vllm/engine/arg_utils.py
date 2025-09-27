@@ -1545,6 +1545,9 @@ class EngineArgs:
         # for non-pooling tasks.
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
+            if self.enable_chunked_prefill is False:
+                raise ValueError(
+                    "Cannot disable chunked prefill for V1 engine.")
             self.enable_chunked_prefill = True
 
             # TODO: When prefix caching supports prompt embeds inputs, this
