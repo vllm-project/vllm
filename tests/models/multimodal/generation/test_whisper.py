@@ -105,7 +105,6 @@ def run_test(
             max_model_len=448,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend=distributed_executor_backend,
-            gpu_memory_utilization=0.5,
     ) as vllm_model:
         llm = vllm_model.llm
 
