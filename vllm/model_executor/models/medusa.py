@@ -82,6 +82,7 @@ class Medusa(nn.Module):
                     config.hidden_size,
                     org_num_embeddings=self.truncated_vocab_size,
                     padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                    prefix=maybe_prefix(prefix, "lm_heads"),
                 ) for _ in range(self.config.num_heads)
             ])
 
