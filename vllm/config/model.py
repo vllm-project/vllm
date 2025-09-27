@@ -63,13 +63,12 @@ ConvertType = Literal["none", "embed", "classify", "reward"]
 ConvertOption = Literal["auto", ConvertType]
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription", "draft"]
-_ResolvedTask = Literal["generate", "transcription", "encode", "embed",
-                        "classify", "reward", "draft"]
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal["raw_logits", "raw_logprobs", "processed_logits",
                        "processed_logprobs"]
-HfOverrides = Union[dict[str, Any], Callable[[type], type]]
+HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
+                                             PretrainedConfig]]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 
 _RUNNER_TASKS: dict[RunnerType, list[TaskOption]] = {
@@ -138,6 +137,9 @@ class ModelConfig:
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
+    allowed_media_domains: Optional[list[str]] = None
+    """If set, only media URLs that belong to this domain can be used for 
+    multi-modal inputs. """
     revision: Optional[str] = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
@@ -284,6 +286,7 @@ class ModelConfig:
     mm_encoder_tp_mode: InitVar[Optional[MMEncoderTPMode]] = None
     interleave_mm_strings: InitVar[Optional[bool]] = None
     skip_mm_profiling: InitVar[Optional[bool]] = None
+    video_pruning_rate: InitVar[Optional[float]] = None
 
     def compute_hash(self) -> str:
         """
@@ -312,6 +315,7 @@ class ModelConfig:
         factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
+        factors.append(self.video_pruning_rate)
 
         # hf_config can control how the model looks!
         try:
@@ -339,17 +343,19 @@ class ModelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(
-            self,
-            # Multimodal config init vars
-            limit_mm_per_prompt: Optional[dict[str, int]],
-            media_io_kwargs: Optional[dict[str, dict[str, Any]]],
-            mm_processor_kwargs: Optional[dict[str, Any]],
-            mm_processor_cache_gb: Optional[float],
-            mm_processor_cache_type: Optional[MMCacheType],
-            mm_shm_cache_max_object_size_mb: Optional[int],
-            mm_encoder_tp_mode: Optional[MMEncoderTPMode],
-            interleave_mm_strings: Optional[bool],
-            skip_mm_profiling: Optional[bool]) -> None:
+        self,
+        # Multimodal config init vars
+        limit_mm_per_prompt: Optional[dict[str, int]],
+        media_io_kwargs: Optional[dict[str, dict[str, Any]]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+        mm_processor_cache_gb: Optional[float],
+        mm_processor_cache_type: Optional[MMCacheType],
+        mm_shm_cache_max_object_size_mb: Optional[int],
+        mm_encoder_tp_mode: Optional[MMEncoderTPMode],
+        interleave_mm_strings: Optional[bool],
+        skip_mm_profiling: Optional[bool],
+        video_pruning_rate: Optional[float],
+    ) -> None:
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
@@ -613,6 +619,7 @@ class ModelConfig:
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
+                video_pruning_rate=video_pruning_rate,
             )
 
             mm_config_kwargs = {
