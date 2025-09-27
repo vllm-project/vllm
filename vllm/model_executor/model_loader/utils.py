@@ -95,6 +95,36 @@ def initialize_model(
 
 def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                   target_device: torch.device) -> None:
+    # following is to support on the fly quantization, currently only supported
+    # for torchao
+    if model_config.quantization == "torchao":
+        if getattr(model, "process_weights_after_loading_already_called",
+                   False):
+            # In case `process_weights_after_loading` is called multiple times
+            # we'll skip it at later times
+            logger.warning(
+                "process_weights_after_loading already called for model %s",
+                model)
+            return
+
+        from vllm.model_executor.model_loader.weight_utils import (
+            get_quant_config)
+        quant_config = get_quant_config(model_config, None)
+
+        # If checkpoint is already torchao serialized, this means it's
+        # pre-quantized quantization case, we'll skip saving the metadata
+        # Otherwise, this is Step I2 of initialization steps of
+        # online quantization
+        # This step record the weights metadata and weight attributes so we can
+        # restore the bfloat16 model weights during the relad step (R1 and R2)
+        # see Notes in online_quantization.py for more details
+        if hasattr(quant_config, "is_checkpoint_torchao_serialized") and \
+           not quant_config.is_checkpoint_torchao_serialized:
+            # to avoid circular dependency
+            from vllm.model_executor.model_loader.online_quantization import (
+                save_metadata_and_attributes_for_weight_reloading)
+            save_metadata_and_attributes_for_weight_reloading(model)
+
     for _, module in model.named_modules():
         if isinstance(module, QKVCrossParallelLinear):
             # NOTE(Isotr0py): special case for cross QKV layer because
@@ -243,7 +273,7 @@ def get_architecture_class_name(model_config: ModelConfig) -> str:
 class ParamMapping:
     """
     A class to handle parameter mapping for model weight loading.
-    It creates a bidirectional mapping between packed parameters and their 
+    It creates a bidirectional mapping between packed parameters and their
     constituent parts.
     """
     packed_mapping: dict[str, list[str]]
