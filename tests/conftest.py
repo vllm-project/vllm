@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-# ruff: noqa
+import contextlib
 
 from tblib import pickling_support
+
+# ruff: noqa
 
 # Install support for pickling exceptions so that we can nicely propagate
 # failures from tests running in a subprocess.
@@ -1065,6 +1066,23 @@ def caplog_vllm(temporary_enable_log_propagate, caplog):
     # To capture vllm log, we should enable propagate=True temporarily
     # because caplog depends on logs propagated to the root logger.
     yield caplog
+
+
+@pytest.fixture()
+def caplog_mp_workaround():
+    @contextlib.contextmanager
+    def ctx():
+        import logging.handlers
+        import multiprocessing as mp
+
+        logger_queue: mp.Queue[logging.LogRecord] = mp.Queue()
+        logger = logging.getLogger()
+        logger.addHandler(logging.handlers.QueueHandler(logger_queue))
+        yield
+        while not logger_queue.empty():
+            logger.handle(logger_queue.get())
+
+    return ctx
 
 
 @pytest.fixture(scope="session")
