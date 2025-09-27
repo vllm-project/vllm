@@ -546,10 +546,11 @@ class VllmConfig:
             self.compilation_config.debug_dump_path = \
                 self.compilation_config.debug_dump_path.absolute().expanduser()
         if envs.VLLM_DEBUG_DUMP_PATH is not None:
-            self.compilation_config.debug_dump_path = Path(
-                envs.VLLM_DEBUG_DUMP_PATH).absolute()
-            logger.warning("Debug dump path is overridden to %s",
-                           self.compilation_config.debug_dump_path)
+            env_path = Path(envs.VLLM_DEBUG_DUMP_PATH).absolute().expanduser()
+            if self.compilation_config.debug_dump_path:
+                logger.warning("Config-specified debug dump path is overridden"
+                               " by VLLM_DEBUG_DUMP_PATH to %s", env_path)
+            self.compilation_config.debug_dump_path = env_path
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
