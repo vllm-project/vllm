@@ -169,7 +169,7 @@ def kernel_unified_attention_2d(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    use_native_fp4: tl.constexpr = 2, #0 Original, 1 - native fp4, 2 - smoothed fp4 based on sage attention 2
+    use_native_fp4: tl.constexpr = 0, # options: 0 Original; 1 - native fp4 QK and fp8 PV; 2 - smoothed fp4 QK based on sage-attention2 and fp8 PV; >=3 - smoothed fp4 QK and fp4 PV
     PACK_ALONG_K: tl.constexpr = True,
 ):
     q_block_global_idx = tl.program_id(0)
@@ -373,12 +373,12 @@ def kernel_unified_attention_2d(
            #acc_base = None
            s_fp4 = scale * tl.dot_scaled(q_fp4, scale_q, "e2m1", tl.trans(k_fp4), tl.trans(scale_k), "e2m1", S2, lhs_k_pack=PACK_ALONG_K,
                                    rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32)
-           if use_native_fp4 == 2:
+           if use_native_fp4 >= 2:
                S2 += s_fp4 + detS
            else:
                S2 += s_fp4
-        #else:
-        S += scale * tl.dot(Q, K)
+        else:
+           S += scale * tl.dot(Q, K)
 
         if pid0 < -1 and pid1 < 1 and j == 0:
            tl.device_print("S-S2 ",S - S2)
@@ -453,7 +453,7 @@ def kernel_unified_attention_2d(
            # K_RHS, N = rhs.type.shape[-2:]
            acc_fp4 = tl.dot_scaled(p_fp4, scale_p, "e2m1", v_fp4_t, scale_v_t, "e2m1", acc*6.0, lhs_k_pack=PACK_ALONG_K,
                                    rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32) / 6.0
-        elif use_native_fp4 == 2:
+        elif use_native_fp4 >= 1:
            acc += tl.dot(P.to(tl.float8e5), V.to(tl.float8e5))
         else:           
            acc += tl.dot(P.to(V.dtype), V)
