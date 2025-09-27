@@ -881,6 +881,8 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
     at::Tensor& y_q,                      // (E, T, H) [OUT]
     at::Tensor& y_s,                      // (E, T, H//group_size) [OUT]
     bool use_ue8m0) {
+#ifndef USE_ROCM
+
   // This kernel currently only supports H % 128 == 0 and assumes a
   // fixed GROUP_SIZE of 128.
   TORCH_CHECK(input.dtype() == torch::kBFloat16);
@@ -910,26 +912,26 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-#define KERNEL(USE_UE8M0, THREAD_COUNT, STAGES)                              \
-  static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;                 \
-  int sms = vllm::SILU_V2_BLOCK_COUNT;                                       \
-  static constexpr int max_shared_mem_bytes =                                \
-      GROUP_SIZE * 2 * STAGES * NUM_WARPS * 2;                               \
-  dim3 grid(sms), block(THREAD_COUNT);                                       \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));          \
-  VLLM_DISPATCH_FP8_TYPES(                                                   \
-      y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {        \
-        vllm::silu_mul_fp8_quant_deep_gemm_kernel<                           \
-            max_shared_mem_bytes, fp8_t, THREAD_COUNT, Idx_t, USE_UE8M0,     \
-            GROUP_SIZE, STAGES>                                              \
-            <<<grid, block, max_shared_mem_bytes + (E + 1) * 16, stream>>>(  \
-                reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),          \
-                (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),               \
-                reinterpret_cast<int32_t*>(tokens_per_expert.data_ptr()), E, \
-                T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,       \
-                stride_yq_t, stride_yq_h, stride_ys_e, stride_ys_t,          \
-                stride_ys_g, stride_counts_e);                               \
-      });
+  #define KERNEL(USE_UE8M0, THREAD_COUNT, STAGES)                              \
+    static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;                 \
+    int sms = vllm::SILU_V2_BLOCK_COUNT;                                       \
+    static constexpr int max_shared_mem_bytes =                                \
+        GROUP_SIZE * 2 * STAGES * NUM_WARPS * 2;                               \
+    dim3 grid(sms), block(THREAD_COUNT);                                       \
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(input));          \
+    VLLM_DISPATCH_FP8_TYPES(                                                   \
+        y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {        \
+          vllm::silu_mul_fp8_quant_deep_gemm_kernel<                           \
+              max_shared_mem_bytes, fp8_t, THREAD_COUNT, Idx_t, USE_UE8M0,     \
+              GROUP_SIZE, STAGES>                                              \
+              <<<grid, block, max_shared_mem_bytes + (E + 1) * 16, stream>>>(  \
+                  reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),          \
+                  (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),               \
+                  reinterpret_cast<int32_t*>(tokens_per_expert.data_ptr()), E, \
+                  T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,       \
+                  stride_yq_t, stride_yq_h, stride_ys_e, stride_ys_t,          \
+                  stride_ys_g, stride_counts_e);                               \
+        });
 
   if (!use_ue8m0) {
     if (H >= 4096) {
@@ -950,4 +952,6 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
       KERNEL(true, THREAD_COUNT, 2);
     }
   }
+
+#endif
 }
