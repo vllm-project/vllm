@@ -97,6 +97,31 @@ class MultiModalRegistry:
         self._processor_factories = ClassRegistry[nn.Module,
                                                   _ProcessorFactories]()
 
+    def _extract_mm_options(
+        self,
+        model_config: "ModelConfig",
+    ) -> Optional[Mapping[str, ModalityDummyOptions]]:
+        """
+        Extract multimodal dummy options from model config.
+
+        Returns None if no configurable options are found, otherwise returns
+        a mapping of modality names to their dummy options.
+        """
+        if not model_config.multimodal_config:
+            return None
+
+        mm_options = {}
+        for modality in ["image", "video", "audio"]:
+            if hasattr(model_config.multimodal_config, 'get_dummy_options'):
+                options = model_config.multimodal_config.get_dummy_options(
+                    modality)
+                if isinstance(
+                        options,
+                    (ImageDummyOptions, VideoDummyOptions, AudioDummyOptions)):
+                    mm_options[modality] = options
+
+        return mm_options if len(mm_options) > 0 else None
+
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
         """
         Checks if the model supports multimodal inputs.
@@ -292,20 +317,7 @@ class MultiModalRegistry:
         # Extract configurable options from multimodal config.
         # Only include modalities that use advanced option types so legacy
         # count-only behavior remains unchanged.
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None
-        if model_config.multimodal_config:
-            mm_options = {}
-            for modality in ["image", "video", "audio"]:
-                if hasattr(model_config.multimodal_config,
-                           'get_dummy_options'):
-                    options = model_config.multimodal_config.get_dummy_options(
-                        modality)
-                    if isinstance(options,
-                                  (ImageDummyOptions, VideoDummyOptions,
-                                   AudioDummyOptions)):
-                        mm_options[modality] = options
-            if len(mm_options) == 0:
-                mm_options = None
+        mm_options = self._extract_mm_options(model_config)
 
         dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts,
                                                      mm_options)
@@ -338,20 +350,7 @@ class MultiModalRegistry:
         # Extract configurable options from multimodal config.
         # Only include modalities that use advanced option types so legacy
         # count-only behavior remains unchanged.
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None
-        if model_config.multimodal_config:
-            mm_options = {}
-            for modality in ["image", "video", "audio"]:
-                if hasattr(model_config.multimodal_config,
-                           'get_dummy_options'):
-                    options = model_config.multimodal_config.get_dummy_options(
-                        modality)
-                    if isinstance(options,
-                                  (ImageDummyOptions, VideoDummyOptions,
-                                   AudioDummyOptions)):
-                        mm_options[modality] = options
-            if len(mm_options) == 0:
-                mm_options = None
+        mm_options = self._extract_mm_options(model_config)
 
         dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts,
                                                      mm_options)

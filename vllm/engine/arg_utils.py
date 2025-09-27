@@ -102,8 +102,8 @@ def parse_limit_mm_per_prompt(val: str):
     """Parse limit-mm-per-prompt with support for configurable options."""
     import json
 
-    from vllm.config.multimodal import (AudioDummyOptions, BaseModalityOptions,
-                                        ImageDummyOptions, VideoDummyOptions)
+    from vllm.config.multimodal import (AudioDummyOptions, ImageDummyOptions,
+                                        VideoDummyOptions)
 
     try:
         parsed = json.loads(val)
@@ -116,27 +116,29 @@ def parse_limit_mm_per_prompt(val: str):
 
     result = {}
     for modality, options in parsed.items():
+        # Normalize int to dict first
         if isinstance(options, int):
-            # Legacy format
-            result[modality] = options
-        elif isinstance(options, dict):
-            # Configurable format - convert to appropriate dataclass
-            try:
-                if modality == "video":
-                    result[modality] = VideoDummyOptions(**options)
-                elif modality == "image":
-                    result[modality] = ImageDummyOptions(**options)
-                elif modality == "audio":
-                    result[modality] = AudioDummyOptions(**options)
-                else:
-                    # Unknown modality, use base options
-                    result[modality] = BaseModalityOptions(**options)
-            except TypeError as e:
-                raise ValueError(f"Invalid options for {modality}: {e}") from e
-        else:
+            options = {"count": options}
+        elif not isinstance(options, dict):
             raise ValueError(
                 f"Invalid options type for {modality}: {type(options)}. "
                 f"Must be int or dict.")
+
+        # Single path: create ModalityDummyOptions from dict
+        try:
+            if modality == "video":
+                result[modality] = VideoDummyOptions(**options)
+            elif modality == "image":
+                result[modality] = ImageDummyOptions(**options)
+            elif modality == "audio":
+                result[modality] = AudioDummyOptions(**options)
+            else:
+                # Unknown modality, raise error
+                raise ValueError(
+                    f"Unknown modality '{modality}'. "
+                    "Supported modalities are: image, video, audio")
+        except TypeError as e:
+            raise ValueError(f"Invalid options for {modality}: {e}") from e
 
     return result
 

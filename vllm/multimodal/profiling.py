@@ -290,7 +290,6 @@ class MultiModalProfiler(Generic[_I]):
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
         mm_embeddings_only: bool = True,
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
     ) -> Mapping[str, int]:
         if mm_counts is None:
             mm_counts = self.get_mm_limits()
@@ -302,7 +301,7 @@ class MultiModalProfiler(Generic[_I]):
         if max_tokens_per_item is not None:
             return max_tokens_per_item
 
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         return self._get_mm_num_tokens(mm_inputs,
                                        mm_embeddings_only=mm_embeddings_only)
 
@@ -310,7 +309,6 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
     ):
         """
         Returns the maximum length of the multimodal (image placeholders+text)
@@ -325,5 +323,4 @@ class MultiModalProfiler(Generic[_I]):
 
         return self._get_mm_max_tokens(seq_len,
                                        mm_counts,
-                                       mm_embeddings_only=False,
-                                       mm_options=mm_options)
+                                       mm_embeddings_only=False)

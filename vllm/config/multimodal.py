@@ -13,13 +13,7 @@ from vllm.config.utils import config
 
 
 @standard_dataclass
-class BaseModalityOptions:
-    """Base class for modality-specific dummy data options."""
-    count: int = 999
-
-
-@standard_dataclass
-class VideoDummyOptions(BaseModalityOptions):
+class VideoDummyOptions:
     """Options for generating dummy video data during profiling."""
     count: int = 999
     num_frames: Optional[int] = None
@@ -38,7 +32,7 @@ class VideoDummyOptions(BaseModalityOptions):
 
 
 @standard_dataclass
-class ImageDummyOptions(BaseModalityOptions):
+class ImageDummyOptions:
     """Options for generating dummy image data during profiling."""
     count: int = 999
     width: Optional[int] = None
@@ -54,7 +48,7 @@ class ImageDummyOptions(BaseModalityOptions):
 
 
 @standard_dataclass
-class AudioDummyOptions(BaseModalityOptions):
+class AudioDummyOptions:
     """Options for generating dummy audio data during profiling."""
     count: int = 999
     length: Optional[int] = None
@@ -67,14 +61,12 @@ class AudioDummyOptions(BaseModalityOptions):
 
 
 # Union type for all supported option types
-ModalityDummyOptions = Union[BaseModalityOptions, VideoDummyOptions,
-                             ImageDummyOptions, AudioDummyOptions]
+ModalityDummyOptions = Union[VideoDummyOptions, ImageDummyOptions,
+                             AudioDummyOptions]
 
-# Main configuration type supporting both legacy and configurable formats
-LimitPerPromptType = Union[
-    dict[str, int],  # Legacy: {"video": 1, "image": 5}
-    dict[str, Union[int, ModalityDummyOptions]]  # Configurable format
-]
+# Configuration type - all values normalized to ModalityDummyOptions
+# at initialization
+LimitPerPromptType = dict[str, ModalityDummyOptions]
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
@@ -188,9 +180,9 @@ class MultiModalConfig:
         if limit_data is None:
             # Unspecified modality is set to 999 by default
             return 999
-        elif isinstance(limit_data, int):
-            return limit_data
-        elif isinstance(limit_data, BaseModalityOptions):
+        elif isinstance(
+                limit_data,
+            (VideoDummyOptions, ImageDummyOptions, AudioDummyOptions)):
             return limit_data.count
         else:
             raise ValueError(
@@ -200,18 +192,10 @@ class MultiModalConfig:
                           modality: str) -> Optional[ModalityDummyOptions]:
         """
         Get the configurable dummy data options for a modality.
-        Returns None if no configurable options are configured.
+        Returns None if no options are configured for this modality.
         """
-        limit_data = self.limit_per_prompt.get(modality)
-
-        if isinstance(limit_data, (BaseModalityOptions, VideoDummyOptions,
-                                   ImageDummyOptions, AudioDummyOptions)):
-            return limit_data
-        elif isinstance(limit_data, int):
-            # Convert legacy format to base options
-            return BaseModalityOptions(count=limit_data)
-        else:
-            return None
+        # All values are now ModalityDummyOptions after normalization
+        return self.limit_per_prompt.get(modality)
 
     def merge_mm_processor_kwargs(
         self,
