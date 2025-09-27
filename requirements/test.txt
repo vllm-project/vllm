@@ -72,7 +72,9 @@ blobfile==3.0.0
 bm25s==0.2.13
     # via mteb
 boto3==1.35.57
-    # via tensorizer
+    # via
+    #   runai-model-streamer-s3
+    #   tensorizer
 botocore==1.35.57
     # via
     #   boto3
@@ -925,10 +927,10 @@ rsa==4.9.1
     # via google-auth
 rtree==1.4.0
     # via torchgeo
-runai-model-streamer==0.11.0
+runai-model-streamer==0.14.0
     # via -r requirements/test.in
-runai-model-streamer-s3==0.11.0
-    # via -r requirements/test.in
+runai-model-streamer-s3==0.14.0
+    # via runai-model-streamer
 s3transfer==0.10.3
     # via boto3
 sacrebleu==2.4.3
