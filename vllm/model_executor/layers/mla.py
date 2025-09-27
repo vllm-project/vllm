@@ -27,6 +27,7 @@ class MLAModules:
     q_proj: Optional[torch.nn.Module]
     indexer: Optional[torch.nn.Module]
     is_sparse: bool
+    topk_indices_buffer: Optional[torch.Tensor]
 
 
 @CustomOp.register("multi_head_latent_attention")
@@ -84,6 +85,7 @@ class MultiHeadLatentAttention(CustomOp):
             if self.indexer else None
         self.use_sparse = mla_modules.is_sparse and os.getenv(
             "VLLM_MLA_SPARSE_DISABLED") != "1"
+        self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
         # In the MLA backend, kv_cache includes both k_c and
         # pe (i.e. decoupled position embeddings). In particular,
@@ -157,11 +159,8 @@ class MultiHeadLatentAttention(CustomOp):
             positions, q[..., self.qk_nope_head_dim:], k_pe)
 
         if self.indexer and self.use_sparse:
-            topk_indices = self.indexer(hidden_states, q_c, positions,
+            _topk_indices = self.indexer(hidden_states, q_c, positions,
                                         self.rotary_emb)
-            # NOTE(Chen): a bit hacky, but need to modify Attention.forward
-            # otherwise. Try to refactor this later.
-            self.mla_attn.impl.set_topk_indices(topk_indices)
 
         attn_out = self.mla_attn(
             q,

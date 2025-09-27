@@ -22,6 +22,9 @@ from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
 from vllm.v1.kv_cache_interface import AttentionSpec
 import triton
 import triton.language as tl
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from vllm.model_executor.models.deepseek_v2 import Indexer
 
 logger = init_logger(__name__)
 
@@ -262,7 +265,7 @@ class FlashMLASparseMetadataBuilder(
         # mask = debug_topk_indices <= pos_gpu.unsqueeze(1)
         # debug_topk_indices = debug_topk_indices.masked_fill(~mask, -1)
         debug_topk_indices = None
-        return FlashMLASparseMetadata(
+        metadata = FlashMLASparseMetadata(
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
@@ -279,6 +282,7 @@ class FlashMLASparseMetadataBuilder(
             topk_tokens=self.topk_tokens,
             debug_topk_indices=debug_topk_indices,
         )
+        return metadata
 
 
 @dataclass
@@ -297,15 +301,22 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
             attn_type: str,
             kv_sharing_target_layer_name: Optional[str],
             # MLA Specific Arguments
+            topk_indice_buffer: Optional[torch.Tensor] = None,
+            indexer: Optional["Indexer"] = None,
             **mla_args) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
-                         alibi_slopes, sliding_window, kv_cache_dtype,
-                         logits_soft_cap, attn_type,
-                         kv_sharing_target_layer_name, **mla_args)
-        self.topk_indices = None
-
-    def set_topk_indices(self, topk_indices: torch.Tensor):
-        self.topk_indices = topk_indices
+        super().__init__(num_heads,
+                         head_size,
+                         scale,
+                         num_kv_heads,
+                         alibi_slopes,
+                         sliding_window,
+                         kv_cache_dtype,
+                         logits_soft_cap,
+                         attn_type,
+                         kv_sharing_target_layer_name,
+                         indexer=indexer,
+                         **mla_args)
+        self.topk_indice_buffer = indexer.topk_indices_buffer
 
     def forward(
         self,
@@ -368,15 +379,16 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
         attn_out = self._forward_bf16_kv(ql_nope, q_pe, kv_cache,
                                          attn_metadata, self.scale)
 
-        output[:num_actual_tokens] = self._v_up_proj(attn_out)
+        output[:num_actual_tokens] = self._v_up_proj(
+            attn_out[:num_actual_tokens])
         return output_padded
 
     def _forward_bf16_kv(self, ql_nope: torch.Tensor, q_pe: torch.Tensor,
                          kv_c_and_k_pe_cache: torch.Tensor,
                          attn_metadata: FlashMLASparseMetadata,
                          k_scale: torch.Tensor) -> torch.Tensor:
-        topk_indices = self.topk_indices[:attn_metadata.num_actual_tokens]
-        num_tokens = ql_nope.shape[0]
+        topk_indices = self.topk_indice_buffer
+        num_tokens = attn_metadata.num_actual_tokens
         q = torch.cat([ql_nope, q_pe], dim=-1)
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1])
@@ -391,14 +403,14 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
             q = q_padded
         # TODO: handle index / kv_cache correctly
         topk_indices_global = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
+            attn_metadata.req_id_per_token[:num_tokens],
             attn_metadata.block_table,
-            topk_indices,
+            topk_indices[:num_tokens],
             BLOCK_SIZE=attn_metadata.block_size,
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
         topk_indices_global = topk_indices_global.view(num_tokens, 1, -1)
-        output = flash_mla_sparse_prefill(q, kv_c_and_k_pe_cache,
+        output = flash_mla_sparse_prefill(q[:num_tokens], kv_c_and_k_pe_cache,
                                           topk_indices_global, k_scale)[0]
         output = output[:, :self.num_heads, :]
         return output

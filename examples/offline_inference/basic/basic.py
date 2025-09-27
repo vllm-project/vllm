@@ -41,7 +41,7 @@ Output: Let's add 3 and 3 together:\n\n3 + 3 = 6\n\nSo, 3 plus 3 equals 6."
 """
 def main():
     # Create an LLM.
-    llm = LLM(model="/home/vllm-dsv32/DeepSeek-V3.2-Preview-Fix", tensor_parallel_size=8,  enforce_eager=True)
+    llm = LLM(model="/home/vllm-dsv32/DeepSeek-V3.2-Preview-Fix", tensor_parallel_size=8)
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
