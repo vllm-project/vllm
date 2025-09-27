@@ -19,6 +19,7 @@ from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
                                          parse_chat_messages,
                                          parse_chat_messages_futures,
                                          resolve_chat_template_content_format,
+                                         resolve_chat_template_kwargs,
                                          resolve_hf_chat_template)
 from vllm.multimodal import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
@@ -37,6 +38,7 @@ QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN2VL_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 QWEN25VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
+QWEN3_MODEL_ID = "Qwen/Qwen3-8B"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
 HERMES_MODEL_ID = "NousResearch/Hermes-3-Llama-3.1-8B"
 MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
@@ -2253,6 +2255,89 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         model_config=model_config,
     )
     assert isinstance(chat_template, str)
+
+
+@pytest.mark.parametrize(
+    "model, expected_kwargs",
+    [
+        (
+            QWEN2VL_MODEL_ID,
+            {
+                "add_vision_id", "add_generation_prompt",
+                "continue_final_message", "tools"
+            },
+        ),
+        (
+            QWEN3_MODEL_ID,
+            {
+                "enable_thinking", "add_generation_prompt",
+                "continue_final_message", "tools"
+            },
+        ),
+    ],
+)
+def test_resolve_hf_chat_template_kwargs(sample_json_schema, model,
+                                         expected_kwargs):
+    """checks that chat_template is a dict type for HF models."""
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+
+    tools = ([{
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name",
+            "description": "This is a dummy function",
+            "parameters": sample_json_schema,
+        },
+    }])
+
+    chat_template_kwargs = {
+        # both unused
+        "unsed_kwargs_1": 123,
+        "unsed_kwargs_2": "abc",
+        # should not appear
+        "chat_template": "{% Hello world! %}",
+        # used by tokenizer
+        "continue_final_message": True,
+        "tools": tools,
+        # both used by Qwen2-VL and Qwen3
+        "add_generation_prompt": True,
+        # only used by Qwen2-VL
+        "add_vision_id": True,
+        # only used by Qwen3
+        "enable_thinking": True,
+    }
+
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
+
+    # Build the tokenizer
+    tokenizer = get_tokenizer(
+        model,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+
+    # Test detecting the tokenizer's chat_template
+    chat_template = resolve_hf_chat_template(
+        tokenizer,
+        chat_template=None,
+        tools=tools,
+        model_config=model_config,
+    )
+    resolved_chat_template_kwargs = resolve_chat_template_kwargs(
+        tokenizer,
+        chat_template=chat_template,
+        chat_template_kwargs=chat_template_kwargs,
+    )
+    assert set(resolved_chat_template_kwargs.keys()) == expected_kwargs
 
 
 # NOTE: Qwen2-Audio default chat template is specially defined inside
