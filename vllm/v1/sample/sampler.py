@@ -250,7 +250,6 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
         if not sampling_metadata.no_penalties:
-            assert sampling_metadata.prompt_token_ids is not None
             logits = apply_all_penalties(
                 logits,
                 sampling_metadata.prompt_token_ids,
