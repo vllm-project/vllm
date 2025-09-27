@@ -166,6 +166,8 @@ _configure_vllm_root_logger()
 
 logger = init_logger(__name__)
 
+print("Logging Initialized")
+
 
 def _trace_calls(log_path, root_dir, frame, event, arg=None):
     if event in ['call', 'return']:
