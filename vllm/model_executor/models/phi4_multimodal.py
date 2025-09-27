@@ -786,6 +786,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
                 target_ratios,
                 orig_width,
                 orig_height,
+                image_size,
             )
 
             # calculate the target width and height
