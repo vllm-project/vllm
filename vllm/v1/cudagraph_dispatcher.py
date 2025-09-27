@@ -120,7 +120,6 @@ class CudagraphDispatcher:
         # also check if non-uniform key exists for more "general"
         # piecewise cudagraph
         if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
-            # logger.info(f"{non_uniform_key=} in CUDAGraphMode.FULL")
             return CUDAGraphMode.PIECEWISE, non_uniform_key
 
         # finally, just return no cudagraphs
