@@ -54,6 +54,7 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
+        choices=["ngram", "eagle", "eagle3", "mtp"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
@@ -131,9 +132,9 @@ def main(args):
             "enforce_eager": args.enforce_eager,
             "max_model_len": args.max_model_len,
         }
-    elif args.method.endswith("mtp"):
+    elif args.method == "mtp":
         speculative_config = {
-            "method": args.method,
+            "method": "mtp",
             "num_speculative_tokens": args.num_spec_tokens,
         }
     else:
