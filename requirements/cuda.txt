@@ -6,8 +6,9 @@ numba == 0.61.2; python_version > '3.9'
 
 # Dependencies for NVIDIA GPUs
 ray[cgraph]>=2.48.0 # Ray Compiled Graph, required for pipeline parallelism in V1.
-torch==2.10.0.dev20250927+cu128
-torchaudio==2.10.0.dev20250927+cu128
+--index-url https://download.pytorch.org/whl/nightly/cu128
+torch>=2.10.0.dev20250927
+torchaudio>=2.8.0.dev20250909
 # These must be updated alongside torch
 torchvision==0.23.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 # https://github.com/facebookresearch/xformers/releases/tag/v0.0.32.post1
