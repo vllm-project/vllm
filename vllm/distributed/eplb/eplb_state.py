@@ -40,8 +40,6 @@ from vllm.distributed.parallel_state import (get_ep_group, get_node_count,
                                              in_the_same_node_as)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.utils import (
-    determine_expert_placement_strategy)
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .rebalance_algo import rebalance_experts
@@ -219,10 +217,7 @@ class EplbState:
         """
         Build the initial EPLB state.
         """
-        expert_placement_strategy = determine_expert_placement_strategy(
-            num_redundant_experts=\
-                parallel_config.eplb_config.num_redundant_experts,
-        )
+        expert_placement_strategy = parallel_config.expert_placement_strategy
 
         physical_to_logical_map_list = (
             cls.build_initial_global_physical_to_logical_map(
