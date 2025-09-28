@@ -129,7 +129,9 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
-        # Pre-constructed KVCacheBlocks with no blocks
+        # Pre-constructed KVCacheBlocks with no blocks, callers should use this
+        # via create_kv_cache_blocks instead of creating new ones to avoid GC
+        # overhead.
         self.empty_block_list = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups)))
 
