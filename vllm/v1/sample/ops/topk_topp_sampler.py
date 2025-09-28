@@ -248,11 +248,12 @@ def apply_top_k_top_p_triton(
     SIGMA = 2.15  # Top 0.03 outliers
     NUM_WARPS = 16
     NUM_STAGES = 3
+    probs = torch.full((NUM_PROGRAMS, vocab_size),
+                       -float('inf'),
+                       device=logits.device)
 
     if k is not None and p is None:
-        probs = torch.full((NUM_PROGRAMS, vocab_size),
-                           -float('inf'),
-                           device=logits.device)
+
         _topk_kernel[(NUM_PROGRAMS, )](logits,
                                        probs,
                                        k,
@@ -263,8 +264,7 @@ def apply_top_k_top_p_triton(
                                        num_warps=NUM_WARPS,
                                        num_stages=NUM_STAGES)
     elif k is None and p is not None:
-        probs = torch.full_like(logits, -float('inf'), device=logits.device)
-        probs_2 = torch.full_like(logits, -float('inf'), device=logits.device)
+        probs_2 = torch.full_like(probs, -float('inf'), device=logits.device)
         _topp_kernel[(NUM_PROGRAMS, )](logits,
                                        probs,
                                        probs_2,
@@ -276,7 +276,6 @@ def apply_top_k_top_p_triton(
                                        num_warps=NUM_WARPS,
                                        num_stages=NUM_STAGES)
     elif k is not None and p is not None:
-        probs = torch.full_like(logits, -float('inf'), device=logits.device)
         _topk_topp_kernel[(NUM_PROGRAMS, )](logits,
                                             probs,
                                             k,
