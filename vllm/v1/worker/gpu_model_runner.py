@@ -2986,7 +2986,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # for GQA/MQA.
         max_query_len = self.uniform_decode_query_len if uniform_decode else \
                                                                 num_tokens
-        if uniform_decode is not None:
+        if uniform_decode:
             assert max_query_len == uniform_query_len
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
