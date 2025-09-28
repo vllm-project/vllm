@@ -244,6 +244,7 @@ def apply_top_k_top_p_triton(
 
     device_prop = torch.cuda.get_device_properties(logits.device)
     NUM_PROGRAMS = device_prop.multi_processor_count
+    BLOCK_SIZE = 4096
     SIGMA = 2.15  # Top 0.03 outliers
 
     if k is not None and p is None:
@@ -251,30 +252,19 @@ def apply_top_k_top_p_triton(
                            -float('inf'),
                            device=logits.device)
         _topk_kernel[(NUM_PROGRAMS, )](logits, probs, k, batch_size, SIGMA,
-                                       vocab_size)
+                                       vocab_size, BLOCK_SIZE)
     elif k is None and p is not None:
         probs = torch.full_like(logits, -float('inf'), device=logits.device)
         probs_2 = torch.full_like(logits, -float('inf'), device=logits.device)
         _topp_kernel[(NUM_PROGRAMS, )](logits, probs, probs_2, p, batch_size,
-                                       SIGMA, vocab_size)
+                                       SIGMA, vocab_size, BLOCK_SIZE)
     elif k is not None and p is not None:
         probs = torch.full_like(logits, -float('inf'), device=logits.device)
         _topk_topp_kernel[(NUM_PROGRAMS, )](logits, probs, k, p, batch_size,
-                                            SIGMA, vocab_size)
+                                            SIGMA, vocab_size, BLOCK_SIZE)
     return logits
 
 
-def triton_get_configs():
-    return [
-        triton.Config({'BLOCK_SIZE': B}, num_stages=s, num_warps=w)
-        for B in [4096, 8192, 16384] for s in [1, 2, 3, 4] for w in [4, 8, 16]
-    ]
-
-
-@triton.autotune(
-    configs=triton_get_configs(),
-    key=['N'],
-)
 @triton.jit
 def _topk_kernel(LOGITS, PROBS, K, B, SIGMA: tl.constexpr, N: tl.constexpr,
                  BLOCK_SIZE: tl.constexpr):
@@ -387,7 +377,7 @@ def _topk_kernel(LOGITS, PROBS, K, B, SIGMA: tl.constexpr, N: tl.constexpr,
                     max_range = k_pivot_2
 
                 num_iters += 1
-                if num_iters >= 18:
+                if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-8:
                     k_pivot = k_pivot_0
 
             # Third pass: Apply top-k mask
@@ -401,10 +391,6 @@ def _topk_kernel(LOGITS, PROBS, K, B, SIGMA: tl.constexpr, N: tl.constexpr,
                     tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
 
 
-@triton.autotune(
-    configs=triton_get_configs(),
-    key=['N'],
-)
 @triton.jit
 def _topp_kernel(LOGITS, PROBS, PROBS_2, P, B, SIGMA: tl.constexpr,
                  N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
@@ -418,8 +404,8 @@ def _topp_kernel(LOGITS, PROBS, PROBS_2, P, B, SIGMA: tl.constexpr,
             p_pivot = -float('inf')
 
             LOGITS_ROW = LOGITS + row_id * N
-            PROBS_ROW = PROBS + row_id * N
-            PROBS_2_ROW = PROBS_2 + row_id * N
+            PROBS_ROW = PROBS + pid * N
+            PROBS_2_ROW = PROBS_2 + pid * N
 
             search_addr = PROBS_ROW
             search_range = N
@@ -579,8 +565,11 @@ def _topp_kernel(LOGITS, PROBS, PROBS_2, P, B, SIGMA: tl.constexpr,
                                          other=-float('inf'))
 
                     if force_remove_logit != -float('inf'):
-                        force_remove_mask = tl.abs(logits_blk -
-                                                   force_remove_logit) < 1e-5
+                        # Force remove duplicates
+                        tolerance = 1e-5 * tl.maximum(
+                            1.0, tl.abs(force_remove_logit))
+                        force_remove_mask = tl.abs(
+                            logits_blk - force_remove_logit) < tolerance
                         force_remove_count = tl.cumsum(
                             force_remove_mask) + current_num_force_remove
                         force_remove_count_mask = \
@@ -596,10 +585,6 @@ def _topp_kernel(LOGITS, PROBS, PROBS_2, P, B, SIGMA: tl.constexpr,
                     tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
 
 
-@triton.autotune(
-    configs=triton_get_configs(),
-    key=['N'],
-)
 @triton.jit
 def _topk_topp_kernel(LOGITS, PROBS, K, P, B, SIGMA: tl.constexpr,
                       N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
@@ -611,7 +596,7 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B, SIGMA: tl.constexpr,
         p_pivot = -float('inf')
 
         LOGITS_ROW = LOGITS + row_id * N
-        PROBS_ROW = PROBS + row_id * N
+        PROBS_ROW = PROBS + pid * N
 
         search_addr = LOGITS_ROW
         search_range = N
@@ -720,7 +705,7 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B, SIGMA: tl.constexpr,
                     max_range = k_pivot_2
 
                 num_iters += 1
-                if num_iters >= 18:
+                if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-8:
                     k_pivot = k_pivot_0
 
         ############### END OF TOP-K CODE ###############
@@ -847,8 +832,10 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B, SIGMA: tl.constexpr,
 
                 if force_remove_logit != -float('inf'):
                     # Force remove duplicates
+                    tolerance = 1e-5 * tl.maximum(1.0,
+                                                  tl.abs(force_remove_logit))
                     force_remove_mask = tl.abs(logits_blk -
-                                               force_remove_logit) < 1e-5
+                                               force_remove_logit) < tolerance
                     force_remove_count = tl.cumsum(
                         force_remove_mask) + current_num_force_remove
                     force_remove_count_mask = \
