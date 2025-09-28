@@ -642,7 +642,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                     speculative_model="baidu/ERNIE-4.5-21B-A3B-PT"),
     "Glm4MoeMTPModel": _HfExamplesInfo("zai-org/GLM-4.5",
                                         speculative_model="zai-org/GLM-4.5",
-                                        min_transformers_version="4.54",
+                                        min_transformers_version="4.56",
                                         is_available_online=False),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
