@@ -45,6 +45,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
+from pathlib import Path
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
                     Optional, TextIO, TypeVar, Union, cast, overload)
@@ -88,64 +89,6 @@ DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
-# Exception strings for non-implemented encoder/decoder scenarios
-
-# Reminder: Please update docs/features/compatibility_matrix.md
-# If the feature combo become valid
-
-STR_NOT_IMPL_ENC_DEC_SWA = \
-    "Sliding window attention for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
-    "Prefix caching for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
-    "Chunked prefill for encoder/decoder models " + \
-    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
-    "Models with logits_soft_cap "
-    "require FlashInfer backend, which is "
-    "currently not supported for encoder/decoder "
-    "models.")
-
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
-                             "supported with encoder/decoder "
-                             "models.")
-
-STR_NOT_IMPL_ENC_DEC_PP = ("Pipeline parallelism is not "
-                           "currently supported with "
-                           "encoder/decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_MM = ("Multimodal is not currently "
-                           "supported with encoder/decoder "
-                           "models.")
-
-STR_NOT_IMPL_ENC_DEC_SPEC_DEC = ("Speculative decoding is not "
-                                 "currently supported with encoder/"
-                                 "decoder models.")
-
-STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
-                                "backends currently supported with encoder/"
-                                "decoder models.")
-
-# Efficiently import all enc/dec error strings
-# rather than having to import all of the above
-STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
-    "STR_NOT_IMPL_ENC_DEC_SWA": STR_NOT_IMPL_ENC_DEC_SWA,
-    "STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE": STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
-    "STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL":
-    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
-    "STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP": STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP,
-    "STR_NOT_IMPL_ENC_DEC_LORA": STR_NOT_IMPL_ENC_DEC_LORA,
-    "STR_NOT_IMPL_ENC_DEC_PP": STR_NOT_IMPL_ENC_DEC_PP,
-    "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
-    "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
-    "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-}
-
 # Constants related to forcing the attention backend selection
 
 # String name of register which may be set in order to
@@ -157,10 +100,8 @@ STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
 # register, corresponding to possible backends
 STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
 STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
-STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
-STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 MB_bytes = 1_000_000
@@ -611,9 +552,10 @@ class AsyncMicrobatchTokenizer:
                 # If every request uses identical kwargs we can run a single
                 # batched tokenizer call for a big speed-up.
                 if can_batch and len(prompts) > 1:
-                    encode_fn = partial(self.tokenizer, prompts, **kwargs)
+                    batch_encode_fn = partial(self.tokenizer, prompts,
+                                              **kwargs)
                     results = await self._loop.run_in_executor(
-                        self._executor, encode_fn)
+                        self._executor, batch_encode_fn)
 
                     for i, fut in enumerate(result_futures):
                         if not fut.done():
@@ -949,7 +891,7 @@ def get_open_port() -> int:
 
 def get_open_ports_list(count: int = 5) -> list[int]:
     """Get a list of open ports."""
-    ports = set()
+    ports = set[int]()
     while len(ports) < count:
         ports.add(get_open_port())
     return list(ports)
@@ -987,8 +929,10 @@ def find_process_using_port(port: int) -> Optional[psutil.Process]:
     if sys.platform.startswith("darwin"):
         return None
 
+    our_pid = os.getpid()
     for conn in psutil.net_connections():
-        if conn.laddr.port == port:
+        if conn.laddr.port == port and (conn.pid is not None
+                                        and conn.pid != our_pid):
             try:
                 return psutil.Process(conn.pid)
             except psutil.NoSuchProcess:
@@ -1337,7 +1281,7 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
 
 def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
     if isinstance(obj, str) or not isinstance(obj, Iterable):
-        obj = [obj]
+        return [obj]  # type: ignore[list-item]
     return obj
 
 
@@ -1438,6 +1382,38 @@ def find_nccl_library() -> str:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info("Found nccl from library %s", so_file)
     return so_file
+
+
+def find_nccl_include_paths() -> Optional[list[str]]:
+    """
+    We either use the nccl.h specified by the `VLLM_NCCL_INCLUDE_PATH`
+    environment variable, or we find the library file brought by 
+    nvidia-nccl-cuXX. load_inline by default uses 
+    torch.utils.cpp_extension.include_paths
+    """
+    paths: list[str] = []
+    inc = envs.VLLM_NCCL_INCLUDE_PATH
+    if inc and os.path.isdir(inc):
+        paths.append(inc)
+
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("nvidia.nccl")
+        if spec and getattr(spec, "submodule_search_locations", None):
+            for loc in spec.submodule_search_locations:
+                inc_dir = os.path.join(loc, "include")
+                if os.path.exists(os.path.join(inc_dir, "nccl.h")):
+                    paths.append(inc_dir)
+    except Exception:
+        pass
+
+    seen = set()
+    out: list[str] = []
+    for p in paths:
+        if p and p not in seen:
+            out.append(p)
+            seen.add(p)
+    return out or None
 
 
 prev_set_stream = torch.cuda.set_stream
@@ -1745,6 +1721,7 @@ class FlexibleArgumentParser(ArgumentParser):
         "Additionally, list elements can be passed individually using +:\n"
         '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
         "   --json-arg.key4+ value3 --json-arg.key4+=\'value4,value5\'\n\n")
+    _search_keyword: Optional[str] = None
 
     def __init__(self, *args, **kwargs):
         # Set the default "formatter_class" to SortedHelpFormatter
@@ -1793,13 +1770,79 @@ class FlexibleArgumentParser(ArgumentParser):
             self._action_groups.append(group)
             return group
 
-    def format_help(self) -> str:
-        # Add tip about JSON arguments to the epilog
-        epilog = self.epilog or ""
-        if (self.add_json_tip
-                and not epilog.startswith(FlexibleArgumentParser._json_tip)):
-            self.epilog = FlexibleArgumentParser._json_tip + epilog
-        return super().format_help()
+    def format_help(self):
+        # Only use custom help formatting for bottom level parsers
+        if self._subparsers is not None:
+            return super().format_help()
+
+        formatter = self._get_formatter()
+
+        # Handle keyword search of the args
+        if (search_keyword := self._search_keyword) is not None:
+            # Normalise the search keyword
+            search_keyword = search_keyword.lower().replace("_", "-")
+            # Return full help if searching for 'all'
+            if search_keyword == 'all':
+                self.epilog = self._json_tip
+                return super().format_help()
+
+            # Return group help if searching for a group title
+            for group in self._action_groups:
+                if group.title and group.title.lower() == search_keyword:
+                    formatter.start_section(group.title)
+                    formatter.add_text(group.description)
+                    formatter.add_arguments(group._group_actions)
+                    formatter.end_section()
+                    formatter.add_text(self._json_tip)
+                    return formatter.format_help()
+
+            # Return matched args if searching for an arg name
+            matched_actions = []
+            for group in self._action_groups:
+                for action in group._group_actions:
+                    # search option name
+                    if any(search_keyword in opt.lower()
+                           for opt in action.option_strings):
+                        matched_actions.append(action)
+            if matched_actions:
+                formatter.start_section(
+                    f"Arguments matching '{search_keyword}'")
+                formatter.add_arguments(matched_actions)
+                formatter.end_section()
+                formatter.add_text(self._json_tip)
+                return formatter.format_help()
+
+            # No match found
+            formatter.add_text(
+                f"No group or arguments matching '{search_keyword}'.\n"
+                "Use '--help' to see available groups or "
+                "'--help=all' to see all available parameters.")
+            return formatter.format_help()
+
+        # usage
+        formatter.add_usage(self.usage, self._actions,
+                            self._mutually_exclusive_groups)
+
+        # description
+        formatter.add_text(self.description)
+
+        # positionals, optionals and user-defined groups
+        formatter.start_section("Config Groups")
+        config_groups = ""
+        for group in self._action_groups:
+            if not group._group_actions:
+                continue
+            title = group.title
+            description = group.description or ""
+            config_groups += f"{title: <24}{description}\n"
+        formatter.add_text(config_groups)
+        formatter.end_section()
+
+        # epilog
+        formatter.add_text(self.epilog)
+
+        # determine help from format above
+        return formatter.format_help()
 
     def parse_args(  # type: ignore[override]
         self,
@@ -1832,7 +1875,11 @@ class FlexibleArgumentParser(ArgumentParser):
         # Convert underscores to dashes and vice versa in argument names
         processed_args = list[str]()
         for i, arg in enumerate(args):
-            if arg.startswith('--'):
+            if arg.startswith("--help="):
+                FlexibleArgumentParser._search_keyword = arg.split(
+                    '=', 1)[-1].lower()
+                processed_args.append("--help")
+            elif arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
                     key = pattern.sub(repl, key, count=1)
@@ -2571,10 +2618,10 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 def direct_register_custom_op(
         op_name: str,
         op_func: Callable,
-        mutates_args: list[str],
+        mutates_args: Optional[list[str]] = None,
         fake_impl: Optional[Callable] = None,
         target_lib: Optional[Library] = None,
-        dispatch_key: str = "CUDA",
+        dispatch_key: Optional[str] = None,
         tags: tuple[torch.Tag, ...] = (),
 ):
     """
@@ -2601,6 +2648,13 @@ def direct_register_custom_op(
             "use vLLM in a fresh new environment and let it install "
             "the required dependencies.")
         return
+
+    if mutates_args is None:
+        mutates_args = []
+
+    if dispatch_key is None:
+        from vllm.platforms import current_platform
+        dispatch_key = current_platform.dispatch_key
 
     import torch.library
     if hasattr(torch.library, "infer_schema"):
@@ -3214,7 +3268,7 @@ def cprofile_context(save_file: Optional[str] = None):
 
     Args:
         save_file: path to save the profile result. "1" or
-          None will result in printing to stdout.
+            None will result in printing to stdout.
     """
     import cProfile
 
@@ -3271,7 +3325,7 @@ def check_use_alibi(model_config: ModelConfig) -> bool:
                       and getattr(cfg.attn_config, "alibi", False)))))
 
 
-def sha256(input) -> bytes:
+def sha256(input: Any) -> bytes:
     """Hash any picklable Python object using SHA-256.
 
     The input is serialized using pickle before hashing, which allows
@@ -3288,7 +3342,7 @@ def sha256(input) -> bytes:
     return hashlib.sha256(input_bytes).digest()
 
 
-def sha256_cbor(input) -> bytes:
+def sha256_cbor(input: Any) -> bytes:
     """
     Hash objects using CBOR serialization and SHA-256.
 
@@ -3443,3 +3497,63 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+def length_from_prompt_token_ids_or_embeds(
+    prompt_token_ids: Optional[list[int]],
+    prompt_embeds: Optional[torch.Tensor],
+) -> int:
+    """Calculate the request length (in number of tokens) give either
+    prompt_token_ids or prompt_embeds.
+    """
+    prompt_token_len = None if prompt_token_ids is None else len(
+        prompt_token_ids)
+    prompt_embeds_len = \
+        None if prompt_embeds is None else len(prompt_embeds)
+
+    if prompt_token_len is None:
+        if prompt_embeds_len is None:
+            raise ValueError(
+                "Neither prompt_token_ids nor prompt_embeds were defined.")
+        return prompt_embeds_len
+    else:
+        if (prompt_embeds_len is not None
+                and prompt_embeds_len != prompt_token_len):
+            raise ValueError(
+                "Prompt token ids and prompt embeds had different lengths"
+                f" prompt_token_ids={prompt_token_len}"
+                f" prompt_embeds={prompt_embeds_len}")
+        return prompt_token_len
+
+
+@contextlib.contextmanager
+def set_env_var(key, value):
+    old = os.environ.get(key)
+    os.environ[key] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            del os.environ[key]
+        else:
+            os.environ[key] = old
+
+
+def unique_filepath(fn: Callable[[int], Path]) -> Path:
+    """
+    unique_filepath returns a unique path by trying
+    to include an integer in increasing order.
+
+    fn should be a callable that returns a path that
+    includes the passed int at a fixed location.
+
+    Note: This function has a TOCTOU race condition.
+    Caller should use atomic operations (e.g., open with 'x' mode)
+    when creating the file to ensure thread safety.
+    """
+    i = 0
+    while True:
+        p = fn(i)
+        if not p.exists():
+            return p
+        i += 1

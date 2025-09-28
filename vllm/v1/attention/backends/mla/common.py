@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import ClassVar, Generic, Optional, TypeVar, Union
+from typing import Generic, Optional, TypeVar, Union
 
 import torch
 from tqdm import tqdm
@@ -204,7 +204,7 @@ from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -270,7 +270,7 @@ class MLACommonBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TRITON_MLA_VLLM_V1"
+        return "TRITON_MLA"
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
@@ -412,7 +412,8 @@ M = TypeVar("M", bound=MLACommonMetadata)
 def use_flashinfer_prefill() -> bool:
     # For blackwell default to flashinfer prefill if it's available since
     # it is faster than FA2.
-    return (flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL
+    return (not envs.VLLM_DISABLE_FLASHINFER_PREFILL and flashinfer_available
+            and not envs.VLLM_USE_CUDNN_PREFILL
             and current_platform.is_device_capability(100))
 
 
@@ -433,7 +434,35 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
-    reorder_batch_threshold: ClassVar[int] = 1
+    reorder_batch_threshold: int = 1
+
+    @staticmethod
+    def determine_chunked_prefill_workspace_size(
+            vllm_config: VllmConfig) -> int:
+        scheduler_config = vllm_config.scheduler_config
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+
+        chunked_prefill_workspace_size = min(
+            # Try for 8 full length request or at least 4 pages per-request
+            max(8 * model_config.max_model_len,
+                4 * scheduler_config.max_num_seqs * cache_config.block_size),
+            # For long-context models try not to over-allocate limiting
+            # kv-cache space, limiting it to 64k tokens,
+            # which would result in the workspace being:
+            #   2*(576)*(64*1024) = 144mb
+            # (assuming 576 MLA head dim, and fp16)
+            # which would result in up-projected context being
+            #   2*(192*128)*(64*1024) = 3gb
+            # (assuming 192 QK head dim, 128 heads, and fp16)
+            64 * 1024)
+
+        # Enforce that we enough for at least 1 page per request
+        chunked_prefill_workspace_size = max(
+            chunked_prefill_workspace_size,
+            scheduler_config.max_num_seqs * cache_config.block_size)
+
+        return chunked_prefill_workspace_size
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
@@ -447,7 +476,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         scheduler_config = vllm_config.scheduler_config
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
-        cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
         self.device = device
 
@@ -467,22 +495,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if self.aot_schedule:
             self.page_size = self.kv_cache_spec.block_size
 
-        self.chunked_prefill_workspace_size = min(
-            # Max sure there is enough for 8 full length request or at least
-            # 4 pages of cache per request
-            max(8 * self.model_config.max_model_len,
-                4 * scheduler_config.max_num_seqs * cache_config.block_size),
-            # For long-context models try not to over-allocate limiting
-            # kv-cache space, limiting it to 64k tokens,
-            # which would result in the workspace being:
-            #   2*(576)*(64*1024) = 144mb
-            # (assuming 576 MLA head dim, and fp16)
-            # which would result in up-projected context being
-            #   2*(192*128)*(64*1024) = 3gb
-            # (assuming 192 QK head dim, 128 heads, and fp16)
-            128 * 1024)
-        assert self.chunked_prefill_workspace_size >= \
-            scheduler_config.max_num_seqs * cache_config.block_size
+        self.chunked_prefill_workspace_size = \
+            self.determine_chunked_prefill_workspace_size(vllm_config)
+
         if self.dcp_world_size > 1:
             # Note(hc): The local kvcache is incomplete when DCP is triggered,
             # an additional kvcache allgather across the DCP group is therefore
@@ -941,6 +956,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        q_pad_num_heads: Optional[int] = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -958,6 +974,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
+        self.q_pad_num_heads = q_pad_num_heads
 
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
@@ -995,6 +1012,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 and current_platform.get_device_capability()[0] == 9)
 
         self.dcp_world_size: Optional[int] = None
+
+        self.chunked_prefill_workspace_size = \
+            MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
+            get_current_vllm_config())
 
     def _flash_attn_varlen_diff_headdims(self,
                                          q,
@@ -1133,7 +1154,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             True,  #Indicates actual_seq_lens are on GPU or CPU.
         )
 
-    def _v_up_proj(self, x):
+    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         if is_rocm_aiter_fp8bmm_enabled():
@@ -1145,12 +1166,23 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                                      transpose_bm=True)
             # Convert from (B, N, V) to (B, N * V)
             x = x.reshape(-1, self.num_heads * self.v_head_dim)
+            # Copy result
+            out.copy_(x)
         else:
+            # Convert from (B, N * V) to (N, B, V)
+            out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
+
             # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-            x = torch.bmm(x, self.W_UV)
+            torch.bmm(x, self.W_UV, out=out)  # Reuse "out" to make it "hot"
+
             # Convert from (N, B, V) to (B, N * V)
-            x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-        return x
+            out_new = out.transpose(0, 1).reshape(
+                -1, self.num_heads * self.v_head_dim)
+
+            # Adjust output buffer shape back to the original (B, N * V)
+            N, B, V = out.shape
+            out.resize_((B, N * V))
+            out.copy_(out_new)  # Copy result
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
@@ -1499,6 +1531,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 " for MLACommonImpl")
 
         if attn_metadata is None:
+            # During the profile run try to simulate to worse case output size
+            # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
+            # since this can be large
+            _ = torch.empty(
+                (self.chunked_prefill_workspace_size, self.num_heads,
+                 self.qk_nope_head_dim + self.v_head_dim),
+                device=k_c_normed.device,
+                dtype=k_c_normed.dtype,
+            )
+
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
             # same expert outputs.
@@ -1558,6 +1600,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # Convert from (B, N, P) to (N, B, P)
             decode_q_nope = decode_q_nope.transpose(0, 1)
 
+            # Pads the head_dim if necessary (for the underlying kernel)
+            if self.q_pad_num_heads is not None:
+                B, N, L = decode_q_pe.shape
+                decode_pe_padded = decode_q_pe.new_empty(
+                    (B, self.q_pad_num_heads, L))
+                decode_pe_padded.resize_((B, N, L))
+                decode_pe_padded.copy_(decode_q_pe)
+                decode_q_pe = decode_pe_padded
+
             if is_rocm_aiter_fp8bmm_enabled():
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
                 decode_ql_nope = aiter_triton_fp8_bmm(decode_q_nope,
@@ -1566,8 +1617,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                                                       group_size=128,
                                                       transpose_bm=True)
             else:
+                # Pads the head_dim if necessary (for the underlying kernel)
+                N, B, P = decode_q_nope.shape
+                _, _, L = self.W_UK_T.shape
+                if self.q_pad_num_heads is not None:
+                    decode_ql_nope = decode_q_nope.new_empty(
+                        (self.q_pad_num_heads, B, L))
+                    decode_ql_nope.resize_((N, B, L))
+
+                else:
+                    decode_ql_nope = decode_q_nope.new_empty((N, B, L))
+
                 # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
+                torch.bmm(decode_q_nope, self.W_UK_T, out=decode_ql_nope)
                 # Convert from (N, B, L) to (B, N, L)
                 decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
@@ -1602,5 +1664,5 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 attn_out = cp_lse_ag_out_rs(attn_out, lse, get_dcp_group())
 
             # v_up projection
-            output[:num_decode_tokens] = self._v_up_proj(attn_out)
+            self._v_up_proj(attn_out, out=output[:num_decode_tokens])
         return output_padded

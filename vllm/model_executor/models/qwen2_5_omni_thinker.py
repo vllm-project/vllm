@@ -50,7 +50,6 @@ from vllm.model_executor.models.qwen2_5_vl import (
 from vllm.model_executor.models.qwen2_audio import (
     Qwen2AudioProcessingInfo, _get_feat_extract_output_lengths)
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
@@ -866,24 +865,26 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 multimodal_embeddings += audio_embeddings
         return multimodal_embeddings
 
+    # TODO (ywang96): support overlapping modality embeddings so that
+    # `use_audio_in_video` will work on V1.
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
 
-            # TODO (ywang96): support overlapping modality embeddings so that
-            # `use_audio_in_video` will work on V1.
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings, [
-                    self.config.image_token_index,
-                    self.config.video_token_index,
-                    self.config.audio_token_index
-                ])
-        return inputs_embeds
+        return super().get_input_embeddings(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
 
     def get_multimodal_embeddings_v0(
             self, **kwargs: object) -> Optional[NestedTensors]:
@@ -955,10 +956,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

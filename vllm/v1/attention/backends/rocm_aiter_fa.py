@@ -232,7 +232,7 @@ class AiterFlashAttentionMetadata:
 
 class AiterFlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[AiterFlashAttentionMetadata]):
-    cudagraph_support = AttentionCGSupport.ALWAYS
+    cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -340,7 +340,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN_VLLM_V1"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionImpl"]:

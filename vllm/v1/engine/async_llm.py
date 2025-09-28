@@ -588,9 +588,6 @@ class AsyncLLM(EngineClient):
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
 
-    async def get_decoding_config(self):
-        raise ValueError("Not Supported on V1 yet.")
-
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.processor.input_preprocessor
 
@@ -604,11 +601,7 @@ class AsyncLLM(EngineClient):
     async def is_tracing_enabled(self) -> bool:
         return self.observability_config.otlp_traces_endpoint is not None
 
-    async def do_log_stats(
-        self,
-        scheduler_outputs=None,
-        model_output=None,
-    ) -> None:
+    async def do_log_stats(self) -> None:
         if self.logger_manager:
             self.logger_manager.log()
 

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional, Union, cast
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 from torch import nn
@@ -16,7 +16,6 @@ from transformers.models.got_ocr2.image_processing_got_ocr2 import (
     get_optimal_tiled_canvas)
 
 from vllm.config import VllmConfig
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
@@ -34,8 +33,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 
 
 class AyaVisionImagePixelInputs(TensorSchema):
@@ -348,12 +346,16 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
-    def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
-                                  pixel_values: torch.Tensor,
-                                  **kwargs) -> torch.Tensor:
-        target_dtype = vision_tower.get_input_embeddings().weight.dtype
-        image_features = vision_tower(pixel_values.to(dtype=target_dtype),
-                                      **kwargs)
+    def _image_pixels_to_features(
+        self,
+        vision_tower: SiglipVisionModel,
+        pixel_values: torch.Tensor,
+        **kwargs,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+        target_dtype: torch.dtype = \
+            vision_tower.get_input_embeddings().weight.dtype
+        image_features: Union[torch.Tensor, tuple[torch.Tensor, ...]] = \
+            vision_tower(pixel_values.to(dtype=target_dtype), **kwargs)
 
         def select_features(leaf: torch.Tensor):
             return self._select_image_features(
@@ -361,10 +363,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                 strategy=self.config.vision_feature_select_strategy,
             )
 
-        return cast(
-            Union[torch.Tensor, tuple[torch.Tensor, ...]],
-            json_map_leaves(select_features, image_features),
-        )
+        return json_map_leaves(select_features, image_features)
 
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
@@ -417,23 +416,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return self._process_image_input(image_input, **kwargs)
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                multimodal_embeddings=multimodal_embeddings,
-                placeholder_token_id=self.config.image_token_index,
-            )
-
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -449,8 +431,11 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=input_ids == self.config.image_token_index,
+            )
             input_ids = None
 
         hidden_states = self.language_model.model(
@@ -464,7 +449,5 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
