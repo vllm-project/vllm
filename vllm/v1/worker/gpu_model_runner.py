@@ -192,6 +192,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
+        from vllm.model_executor.layers.batch_invariant import (
+            init_batch_invariance)
+        init_batch_invariance()
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -365,6 +368,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
                                                      dtype=torch.int64)
 
+        # Only relevant for multimodal models
+        if self.supports_mm_inputs:
+            self.is_mm_embed = self._make_buffer(self.max_num_tokens,
+                                                 dtype=torch.bool)
+
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
             # NOTE: `mrope_positions` is implemented with one additional dummy
@@ -438,6 +446,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dtype=torch.int64,
             device="cpu",
             pin_memory=self.pin_memory)
+
+    def _get_positions(self, num_tokens: Any):
+        if isinstance(num_tokens, int):
+            if self.uses_mrope:
+                return self.mrope_positions.gpu[:, :num_tokens]
+            return self.positions.gpu[:num_tokens]
+        else:
+            if self.uses_mrope:
+                return self.mrope_positions.gpu[:, num_tokens]
+            return self.positions.gpu[num_tokens]
 
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
@@ -923,11 +941,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> tuple[PerLayerAttnMetadata, torch.Tensor,
                Optional[SpecDecodeMetadata], np.ndarray,
                Optional[CommonAttentionMetadata], int, Optional[UBatchSlices],
-               Optional[torch.Tensor]]:
+               Optional[torch.Tensor], bool]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
-            logits_indices, spec_decode_metadata
+            logits_indices, spec_decode_metadata,
+            num_scheduled_tokens, spec_decode_common_attn_metadata,
+            max_num_scheduled_tokens, use_cascade_attn
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1135,6 +1155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
+        use_cascade_attn = False
 
         # Used in the below loop.
         query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
@@ -1251,8 +1272,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         common_prefix_len=common_prefix_len,
                         common_attn_metadata=common_attn_metadata,
                         **extra_attn_metadata_args)
+                    use_cascade_attn |= getattr(attn_metadata_i, "use_cascade",
+                                                False)
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
+
+        # disable cascade attention when DBO
+        if ubatch_slices is not None:
+            use_cascade_attn = False
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1261,7 +1288,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
                 max_num_scheduled_tokens, ubatch_slices,
-                num_tokens_after_padding)
+                num_tokens_after_padding, use_cascade_attn)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1605,9 +1632,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
-    ) -> list[torch.Tensor]:
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        mm_embeds = list[torch.Tensor]()
+        is_mm_embed = self.is_mm_embed.cpu
+        is_mm_embed[:total_num_scheduled_tokens] = False
+
+        req_start_idx = 0
         should_sync_mrope_positions = False
-        mm_embeds: list[torch.Tensor] = []
+
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
 
@@ -1616,6 +1650,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = \
                 req_state.num_computed_tokens + shift_computed_tokens
+
             for mm_feature in req_state.mm_features:
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
@@ -1648,6 +1683,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
+                req_start_pos = req_start_idx + start_pos - num_computed_tokens
+                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
+                    = True if is_embed is None else is_embed
+
                 mm_embeds_item = gather_mm_placeholders(
                     encoder_output[start_idx:end_idx],
                     is_embed=is_embed,
@@ -1655,6 +1694,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_embeds_req.append(mm_embeds_item)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
+                assert req_state.mrope_positions is not None
                 should_sync_mrope_positions = True
                 mm_embeds_req, new_mrope_positions, new_delta = (
                     self.model.recompute_mrope_positions(
@@ -1663,18 +1703,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         mrope_positions=req_state.mrope_positions,
                         num_computed_tokens=req_state.num_computed_tokens,
                     ))
-                assert req_state.mrope_positions is not None
                 req_state.mrope_positions.copy_(new_mrope_positions)
                 req_state.mrope_position_delta = new_delta
 
             mm_embeds.extend(mm_embeds_req)
+            req_start_idx += num_scheduled_tokens
+
+        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
 
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
-            self.mrope_positions.copy_to_gpu(
-                scheduler_output.total_num_scheduled_tokens)
+            self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
-        return mm_embeds
+        return mm_embeds, is_mm_embed
 
     def _extract_encoder_inputs(
         self,
@@ -1968,14 +2009,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 and not self.model_config.is_encoder_decoder):
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+            mm_embeds, is_mm_embed = self._gather_mm_embeddings(
+                scheduler_output)
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             inputs_embeds_scheduled = self.model.get_input_embeddings(
-                input_ids=self.input_ids.gpu[:num_scheduled_tokens],
-                multimodal_embeddings=mm_embeds or None,
+                self.input_ids.gpu[:num_scheduled_tokens],
+                multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
             )
 
             # TODO(woosuk): Avoid the copy. Optimize.
@@ -2225,6 +2268,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         finally:
             self.prepare_inputs_event.record()
 
+    def _model_forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **model_kwargs: dict[str, Any],
+    ) -> Any:
+        """Helper method to call the model forward pass.
+
+        This method can be overridden by subclasses for model execution.
+        Motivation: We can inspect only this method versus 
+        the whole execute_model, which has additional logic.
+
+        Args:
+            input_ids: Input token IDs
+            positions: Token positions
+            intermediate_tensors: Tensors from previous pipeline stages
+            inputs_embeds: Input embeddings (alternative to input_ids)
+            **model_kwargs: Additional model arguments
+
+        Returns:
+            Model output tensor
+        """
+        return self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **model_kwargs,
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2251,8 +2326,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Prepare the decoder inputs.
                 (attn_metadata, logits_indices, spec_decode_metadata,
                  num_scheduled_tokens_np, spec_decode_common_attn_metadata,
-                 max_query_len, ubatch_slices, num_tokens_after_padding
-                 ) = self._prepare_inputs(scheduler_output)
+                 max_query_len, ubatch_slices, num_tokens_after_padding,
+                 use_cascade_attn) = self._prepare_inputs(scheduler_output)
 
             (
                 num_scheduled_tokens,
@@ -2273,7 +2348,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                                uniform_decode=uniform_decode)
             cudagraph_runtime_mode, batch_descriptor = \
-                self.cudagraph_dispatcher.dispatch(batch_descriptor)
+                self.cudagraph_dispatcher.dispatch(batch_descriptor,
+                                                   use_cascade_attn)
 
         # This is currently to get around the assert in the DPMetadata
         # where it wants `num_tokens_across_dp` to align with `num_tokens`
@@ -2293,7 +2369,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), record_function_or_nullcontext("Forward"),
               self.maybe_get_kv_connector_output(scheduler_output) as
               kv_connector_output):
-            model_output = self.model(
+            model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -2531,8 +2607,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 token_indices_to_sample = None
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
-                # TODO(woosuk): Support M-RoPE.
-                target_positions = self.positions.gpu[:num_scheduled_tokens]
+                target_positions = self._get_positions(num_scheduled_tokens)
                 if self.use_aux_hidden_state_outputs:
                     assert aux_hidden_states is not None
                     target_hidden_states = torch.cat(
@@ -2557,18 +2632,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             valid_sampled_tokens_count)
 
                 target_token_ids = self.input_ids.gpu[token_indices]
-                # TODO(woosuk): Support M-RoPE.
-                target_positions = self.positions.gpu[token_indices]
+                target_positions = self._get_positions(token_indices)
                 if self.use_aux_hidden_state_outputs:
                     assert aux_hidden_states is not None
                     target_hidden_states = torch.cat(
                         [h[token_indices] for h in aux_hidden_states], dim=-1)
                 else:
                     target_hidden_states = hidden_states[token_indices]
-            mm_embeds = None
+
             if self.supports_mm_inputs:
-                mm_embeds = self._gather_mm_embeddings(scheduler_output,
-                                                       shift_computed_tokens=1)
+                mm_embed_inputs = self._gather_mm_embeddings(
+                    scheduler_output,
+                    shift_computed_tokens=1,
+                )
+            else:
+                mm_embed_inputs = None
 
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
@@ -2578,8 +2656,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 last_token_indices=token_indices_to_sample,
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
-                mm_embeds=mm_embeds,
+                mm_embed_inputs=mm_embed_inputs,
             )
+
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
@@ -2701,16 +2780,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             "Cannot reload weights before model is loaded."
         model_loader = get_model_loader(self.load_config)
         logger.info("Reloading weights inplace...")
-        model = self.get_model()
-        model_loader.load_weights(model, model_config=self.model_config)
+        model_loader.load_weights(self.get_model(),
+                                  model_config=self.model_config)
 
     def save_tensorized_model(
         self,
         tensorizer_config: "TensorizerConfig",
     ) -> None:
-        model = self.get_model()
         TensorizerLoader.save_model(
-            model,
+            self.get_model(),
             tensorizer_config=tensorizer_config,
             model_config=self.model_config,
         )
@@ -2926,9 +3004,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
         """
-        assert cudagraph_runtime_mode is None or cudagraph_runtime_mode in {
-            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
-        }
+        assert cudagraph_runtime_mode is None or \
+            cudagraph_runtime_mode.valid_runtime_modes()
 
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.separate_routine(). This means that we are using
@@ -3113,7 +3190,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # filter out the valid batch descriptor
             _cg_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
                 BatchDescriptor(num_tokens=num_tokens,
-                                uniform_decode=uniform_decode))
+                                uniform_decode=uniform_decode)) \
+                if not is_profile else (CUDAGraphMode.NONE, None)
             if cudagraph_runtime_mode is not None:
                 # we allow forcing NONE when the dispatcher disagrees to support
                 # warm ups for cudagraph capture
@@ -3470,8 +3548,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             cudagraph_runtime_mode: CUDAGraphMode,
                             uniform_decode: bool):
         assert cudagraph_runtime_mode != CUDAGraphMode.NONE and \
-            cudagraph_runtime_mode in [CUDAGraphMode.FULL,
-                                        CUDAGraphMode.PIECEWISE]
+            cudagraph_runtime_mode.valid_runtime_modes(), \
+            f"Invalid cudagraph runtime mode: {cudagraph_runtime_mode}"
 
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
@@ -3594,6 +3672,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.calculate_reorder_batch_threshold()
 
     def initialize_cudagraph_capture(self) -> None:
+        """
+        Resolve the cudagraph_mode when there are multiple attention 
+        backends with potential conflicting CUDA graph support.
+        Then initialize the cudagraph_dispatcher based on the resolved
+        cudagraph_mode.
+        """
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_builder_name = None
 

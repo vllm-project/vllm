@@ -68,7 +68,7 @@ from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+from .interfaces import (MultiModalEmbeddings, SupportsEagle3, SupportsLoRA,
                          SupportsMultiModal, SupportsMultiModalPruning,
                          SupportsPP, SupportsQuant)
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
@@ -966,7 +966,7 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     dummy_inputs=Qwen2_5_VLDummyInputsBuilder)
 class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsLoRA, SupportsPP,
-                                         SupportsQuant,
+                                         SupportsQuant, SupportsEagle3,
                                          SupportsMultiModalPruning):
 
     packed_modules_mapping = {
@@ -1028,6 +1028,13 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.language_model.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
@@ -1357,19 +1364,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                     )
                 multimodal_embeddings += video_embeddings
         return multimodal_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                [self.config.image_token_id, self.config.video_token_id])
-        return inputs_embeds
 
     def get_input_embeddings_v0(
         self,
