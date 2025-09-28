@@ -88,8 +88,8 @@ from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
 
-# Official recommended max pixels is 24756 * 32 * 32
-_MAX_FRAMES_PER_VIDEO = 24756
+# Official recommended max pixels is 24576 * 32 * 32
+_MAX_FRAMES_PER_VIDEO = 24576
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
@@ -681,7 +681,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         # NOTE: By default in Qwen3-VL, one video token is converted to
         # "<{timestamp} seconds>" (on average 9.5 tokens) + vision_start_token + video_token + vision_end_token # noqa: E501
         formatted_video_soft_tokens = video_soft_tokens * 12.5
-        return formatted_video_soft_tokens
+        return int(formatted_video_soft_tokens)
 
     def _calculate_timestamps(self, indices: list[int] | torch.Tensor,
                               video_fps: float, merge_size: int):
