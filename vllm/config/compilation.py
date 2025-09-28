@@ -651,6 +651,11 @@ class CompilationConfig:
             
         logger.info("[VLLM DEBUG] Preserved _user_specified_splitting_ops: %s", 
                    self._user_specified_splitting_ops)
+        
+        # Setup dynamic partition rules if supported
+        logger.info("[VLLM DEBUG] Setting up dynamic partition rules...")
+        self._setup_dynamic_partition_rules()
+            
         self.splitting_ops = []
 
     def set_splitting_ops_for_attn_fusion(self):
@@ -691,6 +696,71 @@ class CompilationConfig:
 
         return use_fx_graph_piecewise_compilation or \
             use_inductor_piecewise_compilation
+    
+    def _setup_dynamic_partition_rules(self) -> None:
+        """Setup PyTorch 2.9+ dynamic partition rules if available."""
+        try:
+            import torch
+            from torch._inductor.scheduler import register_should_partition_rule
+            
+            def vllm_partition_rule(node, partition_nodes) -> bool:
+                """vLLM custom partition rule for dynamic graph partitioning."""
+                logger.info("[VLLM DEBUG] vllm_partition_rule called for node: %s", 
+                           getattr(node, 'target', 'unknown'))
+                try:
+                    if not hasattr(node, 'target'):
+                        logger.debug("[VLLM DEBUG] Node has no target attribute")
+                        return False
+
+                    target_str = str(node.target)
+                    logger.debug("[VLLM DEBUG] Checking node target: %s", target_str)
+
+                    # Check default attention operations
+                    for attn_op in self._attention_ops:
+                        if attn_op in target_str:
+                            logger.info("[VLLM DEBUG] ✅ Partitioning at attention op: %s",
+                                         target_str)
+                            return True
+
+                    # Check user-specified operations
+                    logger.debug("[VLLM DEBUG] User-specified ops: %s", 
+                               self._user_specified_splitting_ops)
+                    for op_name in self._user_specified_splitting_ops:
+                        if op_name in target_str:
+                            logger.info("[VLLM DEBUG] ✅ Partitioning at user op '%s': %s",
+                                         op_name, target_str)
+                            return True
+
+                    # Check cudagraph_unsafe tag (fallback)
+                    if (hasattr(node, 'meta') and 'tags' in node.meta
+                            and hasattr(torch._C, 'Tag')
+                            and hasattr(torch._C.Tag, 'cudagraph_unsafe')):
+                        tags = node.meta.get('tags', ())
+                        if torch._C.Tag.cudagraph_unsafe in tags:
+                            logger.info(
+                                "[VLLM DEBUG] ✅ Partitioning at cudagraph_unsafe: %s",
+                                target_str)
+                            return True
+
+                    logger.debug("[VLLM DEBUG] No partition needed for: %s", target_str)
+                    return False
+                except Exception as e:
+                    logger.warning("[VLLM DEBUG] Error in partition rule: %s", e)
+                    return False
+
+            logger.info("[VLLM DEBUG] Registering vllm_partition_rule with PyTorch...")
+            register_should_partition_rule(vllm_partition_rule)
+            logger.info("[VLLM DEBUG] ✅ Dynamic partition rules successfully registered!")
+            logger.info("[VLLM DEBUG] Available attention ops: %s", self._attention_ops)
+            logger.info("[VLLM DEBUG] User-specified splitting ops: %s", 
+                       getattr(self, '_user_specified_splitting_ops', []))
+            
+        except ImportError as e:
+            logger.warning("[VLLM DEBUG] Dynamic partition rules not available: %s", e)
+            logger.info("[VLLM DEBUG] Falling back to traditional splitting_ops behavior")
+        except Exception as e:
+            logger.error("[VLLM DEBUG] Unexpected error setting up partition rules: %s", e)
+            logger.info("[VLLM DEBUG] Falling back to traditional splitting_ops behavior")
 
     def custom_op_log_check(self):
         """
