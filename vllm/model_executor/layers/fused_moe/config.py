@@ -747,6 +747,8 @@ class FusedMoEConfig:
 
     has_bias: bool = False
 
+    is_act_and_mul: bool = True
+
     def __post_init__(self):
         if self.dp_size > 1:
             logger.debug_once("Using FusedMoEConfig::max_num_tokens=%d",

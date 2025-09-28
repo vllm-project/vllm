@@ -306,7 +306,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self.cutlass_fp8_supported = cutlass_fp8_supported()
         self.flashinfer_moe_backend: Optional[FlashinferMoeBackend] = None
         if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe() and \
-            layer.is_act_and_mul:
+            self.moe.is_act_and_mul:
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
@@ -354,7 +354,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                         params_dtype)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
-        if layer.is_act_and_mul:
+        if self.moe.is_act_and_mul:
             w13_up_dim = 2 * intermediate_size_per_partition
         else:
             w13_up_dim = intermediate_size_per_partition
@@ -386,7 +386,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             # For gated MoE, allocate 2 scales for w1 and w3 respectively.
             # They will be combined to a single scale after weight loading.
             # For non-gated MoE, allocate 1 scale for w13.
-            if layer.is_act_and_mul:
+            if self.moe.is_act_and_mul:
                 w13_weight_scale_shape = (num_experts, 2)
             else:
                 w13_weight_scale_shape = (num_experts, 1)
@@ -442,7 +442,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             # then dequant and requant each expert.
             if layer.w13_weight_scale.dim() == 2 and \
                 layer.w13_weight_scale.shape[1] == 2:
-                assert layer.is_act_and_mul, (
+                assert self.moe.is_act_and_mul, (
                     "w13_weight_scale should have 2 elements per expert "
                     "only for gated MoE")
 

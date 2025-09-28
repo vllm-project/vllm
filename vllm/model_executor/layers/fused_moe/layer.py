@@ -362,7 +362,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
-        if layer.is_act_and_mul:
+        if self.moe.is_act_and_mul:
             w13_up_dim = 2 * intermediate_size_per_partition
         else:
             w13_up_dim = intermediate_size_per_partition
@@ -1081,7 +1081,6 @@ class FusedMoE(CustomOp):
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
-        self.is_act_and_mul = is_act_and_mul
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -1096,6 +1095,7 @@ class FusedMoE(CustomOp):
             in_dtype=moe_in_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
+            is_act_and_mul=is_act_and_mul,
         )
         self.moe_config = moe
         self.moe_quant_config: Optional[FusedMoEQuantConfig] = None
@@ -1111,7 +1111,7 @@ class FusedMoE(CustomOp):
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
 
-        if not self.is_act_and_mul:
+        if not self.moe_config.is_act_and_mul:
             from vllm.model_executor.layers.quantization.modelopt import (
                 ModelOptFp8MoEMethod)  # Avoid circular import
             if not isinstance(
@@ -1331,7 +1331,7 @@ class FusedMoE(CustomOp):
 
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
-        if self.is_act_and_mul:
+        if self.moe_config.is_act_and_mul:
             shard_size = expert_data.shape[shard_dim] // 2
         else:
             shard_size = expert_data.shape[shard_dim]
