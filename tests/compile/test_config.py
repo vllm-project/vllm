@@ -19,7 +19,10 @@ def test_version():
 def test_use_cudagraphs_dynamic(monkeypatch):
     assert vllm.envs.VLLM_USE_V1
     vllm_config = VllmConfig()
-    assert vllm_config.compilation_config.use_cudagraph
+    # Default V1 configuration now starts without cudagraphs enabled; the
+    # engine decides when to capture based on runtime settings instead of a
+    # blanket default.
+    assert not vllm_config.compilation_config.use_cudagraph
 
     monkeypatch.setenv('VLLM_USE_V1', '0')
     vllm_config = VllmConfig()
@@ -135,9 +138,10 @@ def test_enforce_eager(vllm_runner, monkeypatch):
 def test_splitting_ops_dynamic():
     # Default config
     config = VllmConfig()
-    assert config.compilation_config.cudagraph_mode == \
-        CUDAGraphMode.FULL_AND_PIECEWISE
-    assert config.compilation_config.splitting_ops_contain_attention()
+    # Default V1 config leaves cudagraph mode unset; splitting ops are only
+    # populated when the engine decides to use piecewise compilation.
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert not config.compilation_config.splitting_ops_contain_attention()
 
     # When use_inductor_graph_partition=True
     if _is_torch_equal_or_newer('2.9.0.dev'):
