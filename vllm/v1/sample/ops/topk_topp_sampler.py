@@ -662,6 +662,16 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B, SIGMA: tl.constexpr,
 
         ############### START OF TOP-K CODE ###############
         k = tl.load(K + row_id)
+        max_range = max_logit
+        min_range = min_logit
+        if num_outliers > k:
+            max_range = max_logit
+            min_range = outlier_pivot
+            search_addr = PROBS_ROW
+            search_range = tl.cast(num_outliers, tl.int32)
+            search_iters = tl.cast(
+                (num_outliers + BLOCK_SIZE - 1) // BLOCK_SIZE, tl.int32)
+
         if k != N:  # All tokens are valid
 
             # THERE IS NO DUPLICATE LOGIT MANAGEMENT FOR THIS TOP-K
@@ -671,16 +681,6 @@ def _topk_topp_kernel(LOGITS, PROBS, K, P, B, SIGMA: tl.constexpr,
             # IF YOU NEED EXACTLY K LOGITS, PLEASE REFER TO THE TOP-P
             # IMPLEMENTATION AND IMPLEMENT THE DUPLICATE LOGIT MANAGEMENT
             # USING THE FORCE_REMOVE_LOGIT VARIABLE.
-
-            max_range = max_logit
-            min_range = min_logit
-            if num_outliers > k:
-                max_range = max_logit
-                min_range = outlier_pivot
-                search_addr = PROBS_ROW
-                search_range = tl.cast(num_outliers, tl.int32)
-                search_iters = tl.cast(
-                    (num_outliers + BLOCK_SIZE - 1) // BLOCK_SIZE, tl.int32)
 
             # Second passes: Quaternary search for pivots (nlog_4(n))
             num_iters = 0
