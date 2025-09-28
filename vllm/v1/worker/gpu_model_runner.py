@@ -3429,6 +3429,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         expected_num_items=max_mm_items_per_batch,
                     )
 
+                    # NOTE: This happens when encoder cache needs to store
+                    # the embeddings that encoder outputs are scattered onto.
+                    # In this case we create dummy embeddings of size
+                    # (encode_budget, hidden_size) and scatter encoder
+                    # output into it.
+                    encoder_output_shape = dummy_encoder_outputs[0].shape
+                    if encoder_output_shape[0] < encoder_budget:
+                        expanded_outputs = []
+                        for output in dummy_encoder_outputs:
+                            expanded = output.new_zeros(
+                                (encoder_budget, encoder_output_shape[-1]))
+                            num_tokens = output.shape[0]
+                            expanded[:num_tokens].copy_(output)
+                            expanded_outputs.append(expanded)
+
+                        dummy_encoder_outputs = expanded_outputs
+
                     # Cache the dummy encoder outputs.
                     self.encoder_cache["tmp"] = dict(
                         enumerate(dummy_encoder_outputs))
