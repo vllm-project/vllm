@@ -10,6 +10,7 @@ from vllm.utils.deep_gemm import (
     calc_diff,
     get_paged_mqa_logits_metadata,
     fp8_paged_mqa_logits,
+    get_num_sms,
 )
 
 
@@ -205,7 +206,7 @@ def test_deepgemm_fp8_paged_mqa_logits():
 
     max_model_len = 4096
     for batch_size, next_n in [(4, 1), (2, 2)]:
-        for heads, index_dim in [(16, 128)]:
+        for heads, index_dim in [(32, 128)]:
             for avg_kv in (2048,):
                 num_blocks, blocksize = max_model_len * 2, 64
 
@@ -256,7 +257,7 @@ def test_deepgemm_fp8_paged_mqa_logits():
                 kv_cache_fp8 = kv_cache_cast_to_fp8(kv_cache)
 
                 schedule_metadata = get_paged_mqa_logits_metadata(
-                    context_lens, blocksize, 132
+                    context_lens, blocksize, get_num_sms()
                 )
                 logits = fp8_paged_mqa_logits(
                     q_fp8,

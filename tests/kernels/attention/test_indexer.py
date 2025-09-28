@@ -12,6 +12,7 @@ from vllm.utils.deep_gemm import (
     calc_diff,
     get_paged_mqa_logits_metadata,
     fp8_paged_mqa_logits,
+    get_num_sms,
 )
 
 def kv_cache_cast_to_fp8(x: torch.Tensor) -> torch.Tensor:
@@ -196,7 +197,7 @@ def test_decode_paged_indexer():
     kv_cache_fp8 = kv_cache_cast_to_fp8(kv_cache)
 
     schedule_metadata = get_paged_mqa_logits_metadata(
-                    seq_len.int(), blocksize, 132)
+                    seq_len.int(), blocksize, get_num_sms())
     
     weights = weights.unsqueeze(-1) * (128**(-0.5)) * q_scale.squeeze(1)
     weights = weights.squeeze(-1)
