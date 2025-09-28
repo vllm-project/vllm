@@ -1003,12 +1003,11 @@ def try_get_tokenizer_config(
 
 @cache
 def try_get_dense_modules(
-    pretrained_model_name_or_path: Union[str, os.PathLike],
+    model: Union[str, Path],
     revision: Optional[str] = None,
 ) -> Optional[list[dict[str, Any]]]:
     try:
-        modules = get_hf_file_to_dict("modules.json",
-                                      pretrained_model_name_or_path, revision)
+        modules = get_hf_file_to_dict("modules.json", model, revision)
         if not modules:
             return None
 
@@ -1027,9 +1026,7 @@ def try_get_dense_modules(
             folder = module.get("path", "")
 
             config_path = f"{folder}/config.json" if folder else "config.json"
-            layer_config = get_hf_file_to_dict(config_path,
-                                               pretrained_model_name_or_path,
-                                               revision)
+            layer_config = get_hf_file_to_dict(config_path, model, revision)
             if not layer_config:
                 continue
             layer_config["folder"] = folder
