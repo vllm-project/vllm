@@ -245,7 +245,7 @@ def apply_top_k_top_p_triton(
     device_prop = torch.cuda.get_device_properties(logits.device)
     NUM_PROGRAMS = device_prop.multi_processor_count
     BLOCK_SIZE = 16384
-    SIGMA = 2.15  # Top 0.03 outliers
+    SIGMA = 2.15  # Top 0.03 outliers - Maybe dynamically adjust based on K?
     NUM_WARPS = 16
     NUM_STAGES = 3
     probs = torch.full((NUM_PROGRAMS, vocab_size),
@@ -253,7 +253,6 @@ def apply_top_k_top_p_triton(
                        device=logits.device)
 
     if k is not None and p is None:
-
         _topk_kernel[(NUM_PROGRAMS, )](logits,
                                        probs,
                                        k,
