@@ -230,7 +230,10 @@ class FlashMLASparseMetadataBuilder(
                          FlashMLASparseMetadata)
         self.topk_tokens = vllm_config.model_config.hf_config\
             .attn_module_list_cfg[0]["topk_tokens"]
-        self.num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
+        self.num_speculative_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens 
+            if vllm_config.speculative_config else 0
+        )
         self.reorder_batch_threshold += self.num_speculative_tokens
 
     def _build_prefill(

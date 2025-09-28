@@ -162,7 +162,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # NOTE(Chen): an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(
             self.vllm_config)
-        self.num_speculative_tokens = self.vllm_config.speculative_config.num_speculative_tokens
+        self.num_speculative_tokens = (
+            self.vllm_config.speculative_config.num_speculative_tokens 
+            if self.vllm_config.speculative_config else 0
+        )
         self.reorder_batch_threshold += self.num_speculative_tokens
 
     def build(self,
