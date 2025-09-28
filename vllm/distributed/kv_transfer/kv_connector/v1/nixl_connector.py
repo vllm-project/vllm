@@ -473,11 +473,10 @@ class NixlConnectorWorker:
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "backends", ["UCX"])
         # Agent.
-        # non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
-        # config = nixl_agent_config(backends=self.nixl_backends) if len(
-        #     non_ucx_backends) > 0 and nixl_agent_config is not None else None
-        config = nixl_agent_config(num_threads=8)
-        logger.info("==== USING NIXL THREADS = 8 ====")
+        non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
+        config = nixl_agent_config(backends=self.nixl_backends,
+                                   num_threads=8) if len(
+            non_ucx_backends) > 0 and nixl_agent_config is not None else None
 
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
