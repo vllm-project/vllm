@@ -244,24 +244,49 @@ def apply_top_k_top_p_triton(
 
     device_prop = torch.cuda.get_device_properties(logits.device)
     NUM_PROGRAMS = device_prop.multi_processor_count
-    BLOCK_SIZE = 4096
+    BLOCK_SIZE = 16384
     SIGMA = 2.15  # Top 0.03 outliers
+    NUM_WARPS = 16
+    NUM_STAGES = 3
 
     if k is not None and p is None:
         probs = torch.full((NUM_PROGRAMS, vocab_size),
                            -float('inf'),
                            device=logits.device)
-        _topk_kernel[(NUM_PROGRAMS, )](logits, probs, k, batch_size, SIGMA,
-                                       vocab_size, BLOCK_SIZE)
+        _topk_kernel[(NUM_PROGRAMS, )](logits,
+                                       probs,
+                                       k,
+                                       batch_size,
+                                       SIGMA,
+                                       vocab_size,
+                                       BLOCK_SIZE,
+                                       num_warps=NUM_WARPS,
+                                       num_stages=NUM_STAGES)
     elif k is None and p is not None:
         probs = torch.full_like(logits, -float('inf'), device=logits.device)
         probs_2 = torch.full_like(logits, -float('inf'), device=logits.device)
-        _topp_kernel[(NUM_PROGRAMS, )](logits, probs, probs_2, p, batch_size,
-                                       SIGMA, vocab_size, BLOCK_SIZE)
+        _topp_kernel[(NUM_PROGRAMS, )](logits,
+                                       probs,
+                                       probs_2,
+                                       p,
+                                       batch_size,
+                                       SIGMA,
+                                       vocab_size,
+                                       BLOCK_SIZE,
+                                       num_warps=NUM_WARPS,
+                                       num_stages=NUM_STAGES)
     elif k is not None and p is not None:
         probs = torch.full_like(logits, -float('inf'), device=logits.device)
-        _topk_topp_kernel[(NUM_PROGRAMS, )](logits, probs, k, p, batch_size,
-                                            SIGMA, vocab_size, BLOCK_SIZE)
+        _topk_topp_kernel[(NUM_PROGRAMS, )](logits,
+                                            probs,
+                                            k,
+                                            p,
+                                            batch_size,
+                                            SIGMA,
+                                            vocab_size,
+                                            BLOCK_SIZE,
+                                            num_warps=NUM_WARPS,
+                                            num_stages=NUM_STAGES)
     return logits
 
 
