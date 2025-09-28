@@ -186,6 +186,18 @@ class Platform:
             return device_id
 
     @classmethod
+    def import_general_kernels(cls) -> None:
+        """ Import any platform-specific C kernels. """
+        import vllm._C  # noqa: F401
+
+    @classmethod
+    def import_moe_kernels(cls) -> None:
+        """
+        Import any platform-specific Mixture of Experts kernels.
+        """
+        import vllm._moe_C  # noqa: F401
+
+    @classmethod
     def get_vit_attn_backend(cls, head_size: int,
                              dtype: torch.dtype) -> _Backend:
         return _Backend.TORCH_SDPA
