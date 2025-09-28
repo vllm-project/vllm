@@ -40,6 +40,7 @@ if current_platform.is_rocm():
         E_DIM: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
+        E_DIM_P2: tl.constexpr = triton.next_power_of_2(E_DIM)
         batch_idx = tl.program_id(0)
         block_idx = tl.program_id(1)
 
@@ -64,9 +65,11 @@ if current_platform.is_rocm():
                              block_idx).to(tl.int64)
 
             kv_buffer_off = kv_idx * BLOCK_SIZE * E_DIM + tl.arange(
-                0, BLOCK_SIZE)[:, None] * E_DIM + tl.arange(0, E_DIM)[None, :]
+                0, BLOCK_SIZE)[:, None] * E_DIM + tl.arange(0,
+                                                            E_DIM_P2)[None, :]
+            load_mask = tl.arange(0, E_DIM_P2)[None, :] < E_DIM
             k_vals = tl.load(k_buffer_ptr + kv_buffer_off,
-                             mask=block_mask,
+                             mask=block_mask & load_mask,
                              other=0.0)
             if k_vals.dtype.is_fp8():
                 k_vals = (k_vals.to(tl.float32) *
@@ -75,7 +78,7 @@ if current_platform.is_rocm():
                 k_vals = k_vals.to(output_dtype)
 
             v_vals = tl.load(v_buffer_ptr + kv_buffer_off,
-                             mask=block_mask,
+                             mask=block_mask & load_mask,
                              other=0.0)
             if v_vals.dtype.is_fp8():
                 v_vals = (v_vals.to(tl.float32) *
@@ -85,9 +88,13 @@ if current_platform.is_rocm():
             kv_values_off = batch_token_start * E_DIM + \
                 block_idx * BLOCK_SIZE * E_DIM + \
                 tl.arange(0, BLOCK_SIZE)[:, None] * E_DIM + \
-                tl.arange(0, E_DIM)[None, :]
-            tl.store(k_values_ptr + kv_values_off, k_vals, mask=block_mask)
-            tl.store(v_values_ptr + kv_values_off, v_vals, mask=block_mask)
+                tl.arange(0, E_DIM_P2)[None, :]
+            tl.store(k_values_ptr + kv_values_off,
+                     k_vals,
+                     mask=block_mask & load_mask)
+            tl.store(v_values_ptr + kv_values_off,
+                     v_vals,
+                     mask=block_mask & load_mask)
 
     @torch.inference_mode()
     def vllm_layout_trans(b_query_lens_loc,
