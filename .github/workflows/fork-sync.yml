@@ -36,8 +36,8 @@ jobs:
           UPSTREAM_REMOTE: ${{ github.event.inputs.upstream-remote || 'upstream' }}
           UPSTREAM_BRANCH: ${{ github.event.inputs.upstream-branch || 'main' }}
         run: |
-          chmod +x .github/extras/sync_with_upstream.sh
-          ./.github/extras/sync_with_upstream.sh "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
+          chmod +x extras/tools/fork-sync/sync_with_upstream.sh
+          ./extras/tools/fork-sync/sync_with_upstream.sh "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
 
       - name: Check for changes
         id: diff
