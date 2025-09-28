@@ -12,10 +12,8 @@
 // add support for SM120 Architecture
 #ifndef VLLM_MAX_THREADS_PER_SM
   #if defined(__CUDA_ARCH__)
-    #if __CUDA_ARCH__ >= 120 && __CUDA_ARCH__ < 130
+    #if (__CUDA_ARCH__ >= 1200 && __CUDA_ARCH__ < 1300) || (__CUDA_ARCH__ < 300)
       #define VLLM_MAX_THREADS_PER_SM 1536
-    #elif __CUDA_ARCH__ >= 800
-      #define VLLM_MAX_THREADS_PER_SM 2048
     #else
       #define VLLM_MAX_THREADS_PER_SM 2048
     #endif
