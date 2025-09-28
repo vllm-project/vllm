@@ -2,7 +2,7 @@
 
 import os
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 # creates XLA hlo graphs for all the context length buckets.
 os.environ['NEURON_CONTEXT_LENGTH_BUCKETS'] = "128,512,1024,2048"

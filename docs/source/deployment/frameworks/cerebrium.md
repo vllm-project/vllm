@@ -36,7 +36,7 @@ vllm = "latest"
 Next, let us add our code to handle inference for the LLM of your choice (`mistralai/Mistral-7B-Instruct-v0.1` for this example), add the following code to your `main.py`:
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.1")
 

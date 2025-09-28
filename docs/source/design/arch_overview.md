@@ -27,7 +27,7 @@ server.
 Here is a sample of `LLM` class usage:
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 # Define a list of input prompts
 prompts = [

@@ -9,7 +9,7 @@ from itertools import combinations
 
 import pytest
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.model_executor.utils import set_random_seed
 
 MODEL = "facebook/opt-125m"

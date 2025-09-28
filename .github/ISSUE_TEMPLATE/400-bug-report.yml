@@ -39,7 +39,7 @@ body:
       If relevant, add a minimal example so that we can reproduce the error by running the code. It is very important for the snippet to be as succinct (minimal) as possible, so please take time to trim down any irrelevant code to help us debug efficiently. We are going to copy-paste your code and we expect to get the same result as you did: avoid any external data, and include the relevant imports, etc. For example:
 
       ```python
-      from vllm import LLM, SamplingParams
+      from vllm.vllm import LLM, SamplingParams
 
       prompts = [
           "Hello, my name is",

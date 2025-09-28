@@ -11,7 +11,7 @@ from enum import Enum
 
 from pydantic import BaseModel
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.sampling_params import GuidedDecodingParams
 
 # Guided decoding by Choice (list of possible options)

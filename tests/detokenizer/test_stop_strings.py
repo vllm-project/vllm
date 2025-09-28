@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 import pytest
 
-from vllm import LLM, SamplingParams, envs
+from vllm.vllm import LLM, SamplingParams, envs
 
 MODEL = "meta-llama/llama-2-7b-hf"
 MAX_TOKENS = 200

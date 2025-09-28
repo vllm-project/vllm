@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 if os.getenv("VLLM_USE_V1", "0") != "1":
     pytest.skip("Test package requires V1", allow_module_level=True)

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 
 MODELS = ["distilbert/distilgpt2"]
 

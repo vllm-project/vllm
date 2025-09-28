@@ -6,7 +6,7 @@ import random
 
 import torch.distributed as dist
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import get_world_group
 
 dist.init_process_group(backend="gloo")

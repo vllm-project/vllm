@@ -18,7 +18,7 @@ sql_lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
 Then we instantiate the base model and pass in the `enable_lora=True` flag:
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
 llm = LLM(model="meta-llama/Llama-2-7b-hf", enable_lora=True)

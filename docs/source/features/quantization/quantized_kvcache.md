@@ -38,7 +38,7 @@ Here is an example of how to enable FP8 quantization:
 # To calculate kv cache scales on the fly enable the calculate_kv_scales
 # parameter
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
 llm = LLM(model="meta-llama/Llama-2-7b-chat-hf",
@@ -137,7 +137,7 @@ The above script will create a folder in your current directory containing your 
 When running the model you must specify `kv_cache_dtype="fp8"` in order to enable the kv cache quantization and use the scales.
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 sampling_params = SamplingParams(temperature=0.7, top_p=0.8)
 llm = LLM(model="Llama-3.1-8B-Instruct-FP8-KV", kv_cache_dtype="fp8")

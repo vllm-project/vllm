@@ -4,7 +4,7 @@ import asyncio
 import multiprocessing
 from typing import Callable, Union
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import MQLLMEngine

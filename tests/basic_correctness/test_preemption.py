@@ -10,7 +10,7 @@ import pytest
 from prometheus_client import REGISTRY
 
 import vllm.envs as envs
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
                                  ENABLE_ARTIFICIAL_PREEMPT)
 

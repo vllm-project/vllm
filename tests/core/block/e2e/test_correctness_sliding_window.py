@@ -5,7 +5,7 @@ import random
 import pytest
 
 from tests.kernels.utils import override_backend_env_variable
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
 from .conftest import get_text_from_llm_generator

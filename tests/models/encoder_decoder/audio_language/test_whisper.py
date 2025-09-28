@@ -7,7 +7,7 @@ from typing import Optional
 
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 
 from ....utils import create_new_process_for_each_test, multi_gpu_test

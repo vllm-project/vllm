@@ -73,7 +73,7 @@ def run_vllm(
     engine_args: EngineArgs,
     disable_detokenize: bool = False,
 ) -> float:
-    from vllm import LLM, SamplingParams
+    from vllm.vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
 
     assert all(

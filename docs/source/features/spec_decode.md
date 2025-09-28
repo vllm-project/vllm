@@ -20,7 +20,7 @@ Speculative decoding is a technique which improves inter-token latency in memory
 The following code configures vLLM in an offline mode to use speculative decoding with a draft model, speculating 5 tokens at a time.
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 prompts = [
     "The future of AI is",
@@ -97,7 +97,7 @@ The following code configures vLLM to use speculative decoding where proposals a
 matching n-grams in the prompt. For more information read [this thread.](https://x.com/joao_gante/status/1747322413006643259)
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 prompts = [
     "The future of AI is",
@@ -129,7 +129,7 @@ For more information see [this blog](https://pytorch.org/blog/hitchhikers-guide-
 [this technical report](https://arxiv.org/abs/2404.19124).
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 prompts = [
     "The future of AI is",
@@ -175,7 +175,7 @@ The following code configures vLLM to use speculative decoding where proposals a
 an [EAGLE (Extrapolation Algorithm for Greater Language-model Efficiency)](https://arxiv.org/pdf/2401.15077) based draft model. A more detailed example for offline mode, including how to extract request level acceptance rate, can be found [here](<gh-file:examples/offline_inference/eagle.py>).
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 prompts = [
     "The future of AI is",

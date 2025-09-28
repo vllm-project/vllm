@@ -10,7 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from tests.mq_llm_engine.utils import RemoteMQLLMEngine
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.multiprocessing import MQEngineDeadError

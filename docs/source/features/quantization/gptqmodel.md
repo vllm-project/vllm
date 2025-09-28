@@ -66,7 +66,7 @@ python examples/offline_inference/llm_engine_example.py --model ModelCloud/DeepS
 GPTQModel quantized models are also supported directly through the LLM entrypoint:
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 # Sample prompts.
 prompts = [

@@ -5,7 +5,7 @@ from typing import Optional
 
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"

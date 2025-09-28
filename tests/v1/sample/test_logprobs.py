@@ -10,7 +10,7 @@ from tests.v1.sample.utils import (
     BatchLogprobsComposition, BatchLogprobsSpecType,
     assert_incr_detok_str_matches_non_incr_detok_str,
     compute_correct_cumulative_logprob, get_test_batch)
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 
 from ...conftest import HfRunner, VllmRunner
 

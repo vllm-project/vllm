@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 import torch
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.config import ParallelConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.async_llm_engine import AsyncEngineArgs, AsyncLLMEngine

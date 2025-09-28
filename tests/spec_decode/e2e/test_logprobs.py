@@ -4,7 +4,7 @@ from itertools import cycle
 
 import pytest
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 
 from ..utils import maybe_enable_chunked_prefill
 from .conftest import run_equality_correctness_test

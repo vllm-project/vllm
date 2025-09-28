@@ -40,7 +40,7 @@ from itertools import cycle
 import pytest
 from transformers import AutoTokenizer
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 
 from ...utils import create_new_process_for_each_test
 from .conftest import (get_output_from_llm_generator,

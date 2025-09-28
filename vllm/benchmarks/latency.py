@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
                                    write_to_json)
 from vllm.engine.arg_utils import EngineArgs

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import torch
 import torch.nn as nn
+import os
 
 from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.communication_op import (broadcast_tensor_dict,
@@ -392,30 +393,19 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         pass
 
     def _configure_model_sampler_for_spec_decode(self):
-        """Configure model sampler to emit GPU tensors. This allows spec decode
-        to keep data on device without transferring to CPU and serializing,
-        which significantly reduces overhead of sampling during verification.
-
-        NOTE(cade): This breaks abstraction boundaries pretty badly. The better
-        design is to have the "move to CPU and serialize" sampling decision be
-        done outside of the model/sampler; this way the "last-mile" worker
-        object which interfaces with the scheduler can serialize and incur the
-        performance hit as necessary. This allows us to run the worker several
-        iterations in a row without incurring the "move to CPU and serialize"
-        performance penalty.
-
-        Since this requires a large change to vLLM, we defer it to later and
-        temporarily accept this broken abstraction boundary.
-
-        NOTE(cade): This will require a special check if the proposer worker
-        does not have a sampler (e.g. ngram speculation).
-        """
-        (self.scorer_worker.model_runner.sampler.include_gpu_probs_tensor
-         ) = True
-        (self.scorer_worker.model_runner.sampler.
-         should_modify_greedy_probs_inplace) = True
+        force_logprobs = os.getenv("DEEPCONF_FORCE_LOGPROBS", "1") == "1"
+        scorer_sampler = self.scorer_worker.model_runner.sampler
+        scorer_sampler.include_gpu_probs_tensor = True
+        scorer_sampler.should_modify_greedy_probs_inplace = False
         self.proposer_worker.set_include_gpu_probs_tensor()
-        self.proposer_worker.set_should_modify_greedy_probs_inplace()
+        try:
+            self.proposer_worker.set_should_modify_greedy_probs_inplace()
+        except Exception:
+            pass
+        if force_logprobs:
+            self._disable_logprobs = False
+            if hasattr(self.scorer_worker.model_runner, "disable_logprobs"):
+                self.scorer_worker.model_runner.disable_logprobs = False
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of cache blocks to use.
@@ -824,14 +814,79 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                        scoring_timer.elapsed_time_ms,
                        verification_timer.elapsed_time_ms)
 
+        # -------------------------
+        # 计算 spec_indices（非 prefill / 非 prompt 的那些序列）
+        # -------------------------
+        # non_spec_indices 在上面由 split_batch_by_proposal_len 给出并可能被过滤
+        # 它可能是 list/tuple/torch.Tensor。把它标准化为 python 列表。
+        try:
+            if isinstance(non_spec_indices, torch.Tensor):
+                non_spec_idx_list = non_spec_indices.tolist()
+            else:
+                non_spec_idx_list = list(non_spec_indices) if non_spec_indices is not None else []
+        except Exception:
+            non_spec_idx_list = list(non_spec_indices) if non_spec_indices is not None else []
+
+        total_seqs = len(execute_model_req.seq_group_metadata_list)
+        all_indices = list(range(total_seqs))
+        # spec_indices = 所有 index 中不在 non_spec_idx_list 的那些
+        spec_indices = [i for i in all_indices if i not in non_spec_idx_list]
+
+        # -------------------------
+        # 选择要传给 _create_output_sampler_list 的 target_logprobs
+        # 优先使用 _verify_tokens 返回的 target_logprobs（变量名 target_logprobs）。
+        # 如果该变量为 None，则回退到从 proposal_scores.probs 中选择 spec_indices。
+        # -------------------------
+        sel_target_logprobs = None
+        if 'target_logprobs' in locals() and target_logprobs is not None:
+            sel_target_logprobs = target_logprobs
+        else:
+            # 回退：从 proposal_scores.probs 中选取 spec_indices（如果有）
+            if hasattr(proposal_scores, "probs") and spec_indices:
+                try:
+                    # proposal_scores.probs 可能是 torch.Tensor
+                    sel_target_logprobs = proposal_scores.probs[spec_indices]
+                except Exception:
+                    # 保险回退：如果上面索引失败，尝试 torch.index_select
+                    try:
+                        idx_tensor = torch.tensor(spec_indices, dtype=torch.long, device=proposal_scores.probs.device)
+                        sel_target_logprobs = torch.index_select(proposal_scores.probs, 0, idx_tensor)
+                    except Exception:
+                        sel_target_logprobs = None
+            else:
+                sel_target_logprobs = None
+
+        sel_prompt_logprobs = proposal_scores.prompt_logprobs if not self._disable_logprobs and hasattr(proposal_scores, "prompt_logprobs") else None
+
+        # -------------------------
+        # 选取 draft logprob / token ids
+        # -------------------------
+        draft_logprobs = None
+        draft_token_ids = None
+        draft_topk_ids = None
+        draft_topk_logprobs = None
+        if not self._disable_logprobs:
+            if hasattr(proposals, "proposal_top1_logprobs"):
+                draft_logprobs = proposals.proposal_top1_logprobs  # [B, steps]
+            if hasattr(proposals, "proposal_top1_token_ids"):
+                draft_token_ids = proposals.proposal_top1_token_ids
+            if hasattr(proposals, "proposal_draft_topk_token_ids"):
+                draft_topk_ids = proposals.proposal_draft_topk_token_ids   # [B, steps, K]
+            if hasattr(proposals, "proposal_draft_topk_logprobs"):
+                draft_topk_logprobs = proposals.proposal_draft_topk_logprobs
+
         return self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
             accepted_token_ids,
-            target_logprobs=target_logprobs,
-            prompt_logprobs=proposal_scores.prompt_logprobs
-            if not self._disable_logprobs else None,
+            target_logprobs=sel_target_logprobs,
+            prompt_logprobs=sel_prompt_logprobs,
             k=execute_model_req.num_lookahead_slots,
-            stage_times=stage_times)
+            stage_times=stage_times,
+            draft_logprobs=draft_logprobs,
+            draft_token_ids=draft_token_ids,
+            draft_topk_ids=draft_topk_ids,
+            draft_topk_logprobs=draft_topk_logprobs,
+        )
 
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(
@@ -939,6 +994,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             torch.Tensor],  # shape: [nprompt_tokens, vocab_size]
         k: int,
         stage_times: Tuple[float, float, float],
+        draft_logprobs: Optional[torch.Tensor] = None,    # shape: [batch_size, k]
+        draft_token_ids: Optional[torch.Tensor] = None,   # shape: [batch_size, k]
+        draft_topk_ids: Optional[torch.Tensor] = None,     # [B, steps, K]
+        draft_topk_logprobs: Optional[torch.Tensor] = None # [B, steps, K]
     ) -> List[SamplerOutput]:
         """Given the accepted token ids, create a list of SamplerOutput.
 
@@ -1081,6 +1140,39 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                         step_index=step_index))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
+
+        # ─── 附加 draft model logprobs & token_ids ────────────────────────────────
+        if draft_logprobs is not None and draft_token_ids is not None:
+            # 转 [steps, B]
+            dp1 = draft_logprobs.transpose(0, 1)
+            dti1 = draft_token_ids.transpose(0, 1)
+            steps = dp1.shape[0]
+            decode_outputs = sampler_output_list[-steps:]
+            has_topk = (draft_topk_ids is not None and draft_topk_logprobs is not None)
+            if has_topk:
+                # 形状: [B, steps, K] -> [steps, B, K]
+                topk_ids = draft_topk_ids.transpose(0, 1)
+                topk_lps = draft_topk_logprobs.transpose(0, 1)
+            for step_idx, sampler_out in enumerate(decode_outputs):
+                for seq_idx, csgo in enumerate(sampler_out.outputs):
+                    draft_tok_id = int(dti1[step_idx, seq_idx].item())
+                    draft_lp = float(dp1[step_idx, seq_idx].item())
+                    csgo.draft_token_id = draft_tok_id
+                    csgo.draft_logprob = draft_lp
+                    if csgo.extra is None:
+                        csgo.extra = {}
+                    csgo.extra["draft_token_id"] = draft_tok_id
+                    csgo.extra["draft_logprob"] = draft_lp
+                    if has_topk:
+                        ids_row = topk_ids[step_idx, seq_idx]
+                        lps_row = topk_lps[step_idx, seq_idx]
+                        # 转 list
+                        csgo.extra["draft_topk"] = [
+                            {"token_id": int(ids_row[i].item()),
+                             "logprob": float(lps_row[i].item())}
+                            for i in range(ids_row.shape[0])
+                        ]
+        return sampler_output_list
 
         # Populate the data structures needed to keep track of sequences with
         # bonus tokens.

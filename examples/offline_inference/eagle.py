@@ -5,7 +5,7 @@ import os
 
 from transformers import AutoTokenizer
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 
 def load_prompts(dataset_path, num_prompts):

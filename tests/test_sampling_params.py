@@ -4,7 +4,7 @@
 
 import pytest
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 

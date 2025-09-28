@@ -10,7 +10,7 @@ VLLM_USE_V1=0 python examples/offline_inference/mlpspeculator.py
 import gc
 import time
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 
 def time_generation(llm: LLM, prompts: list[str],

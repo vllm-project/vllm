@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs

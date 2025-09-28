@@ -7,7 +7,7 @@ from typing import Optional, Union
 import pytest
 import torch
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import PromptLogprobs, SampleLogprobs

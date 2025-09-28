@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 _PROMPTS = [
     "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1",

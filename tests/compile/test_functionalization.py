@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.compilation.fusion import (FUSED_OPS, FusionPass, QuantKey,
                                      kFp8DynamicTokenSym, kFp8StaticTensorSym)

@@ -39,7 +39,7 @@ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf --tokenizer TinyLlama/TinyLlam
 You can also use the GGUF model directly through the LLM entrypoint:
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 # In this script, we demonstrate how to pass input to the chat method:
 conversation = [

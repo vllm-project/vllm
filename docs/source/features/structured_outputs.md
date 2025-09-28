@@ -258,7 +258,7 @@ Serving examples above.  One example for the usage of the `choice` parameter is
 shown below:
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.sampling_params import GuidedDecodingParams
 
 llm = LLM(model="HuggingFaceTB/SmolLM2-1.7B-Instruct")

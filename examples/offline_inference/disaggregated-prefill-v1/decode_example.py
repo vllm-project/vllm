@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
 # Read prompts from output.txt

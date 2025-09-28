@@ -10,7 +10,7 @@ import psutil
 import pytest
 from transformers import AutoTokenizer
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext

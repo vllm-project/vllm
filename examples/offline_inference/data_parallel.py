@@ -30,7 +30,7 @@ Multi-node:
 import os
 from time import sleep
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.utils import get_open_port
 
 

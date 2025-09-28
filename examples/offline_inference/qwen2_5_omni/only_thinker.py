@@ -7,7 +7,7 @@ with the correct prompt format on Qwen2.5-Omni (thinker only).
 from typing import NamedTuple
 
 import vllm.envs as envs
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset

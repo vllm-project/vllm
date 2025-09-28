@@ -2,7 +2,8 @@
 
 import copy
 import weakref
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, Optional
+import math
 
 import torch
 
@@ -36,8 +37,12 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
 
     def __init__(self, *args, **kwargs):
         DelegateWorkerBase.__init__(self, *args, **kwargs)
-        # Lazy initialization list.
         self._proposer: SpeculativeProposer
+        # 新增：缓存本轮 speculative step 的 draft token / logprob
+        self._draft_token_ids_tensor: Optional[torch.Tensor] = None  # [B, k]
+        self._draft_logprobs_tensor: Optional[torch.Tensor] = None   # [B, k]
+        self._draft_topk_token_ids: Optional[torch.Tensor] = None        # [B, steps, K]
+        self._draft_topk_logprobs: Optional[torch.Tensor] = None         # [B, steps, K]
 
     def init_device(self) -> None:
         self.worker.init_device()
@@ -53,7 +58,8 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         self.model_runner.sampler.include_gpu_probs_tensor = True
 
     def set_should_modify_greedy_probs_inplace(self) -> None:
-        self.model_runner.sampler.should_modify_greedy_probs_inplace = True
+        # 原实现会将 greedy 概率原地改写导致 logprob=0，这里改为关闭
+        self.model_runner.sampler.should_modify_greedy_probs_inplace = False
 
     @torch.inference_mode()
     def sampler_output(
@@ -62,60 +68,95 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         sample_len: int,
         seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[List[SamplerOutput], bool]:
-        """Run the model forward pass sample_len times. Returns the list of
-        sampler output, one per model forward pass, along with indicator of
-        whether torch tensor in sampler output need to be transposed in latter
-        sampler_output_to_torch logic.
+        self._draft_token_ids_tensor = None
+        self._draft_logprobs_tensor = None
+        self._draft_topk_token_ids = None
+        self._draft_topk_logprobs = None
 
-        For multi step worker, this indicator shall be True.
-        """
-        self._raise_if_unsupported(execute_model_req)
-        # Expand the batch for sequences with a bonus token.
-        # Perform a forward pass on the expanded batch and filter the
-        # response to retain only the original sequences' responses.
-        expanded_request, indices_of_seq_with_bonus_tokens =\
+        expanded_request, indices_of_seq_with_bonus_tokens = \
             self._expand_execute_model_request(
                 execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
-        # Run model sample_len times.
         model_outputs: List[SamplerOutput] = []
         if current_platform.is_cuda_alike() and isinstance(
                 self.model_runner, TP1DraftModelRunner
         ) and self.model_runner.supports_gpu_multi_step(expanded_request):
-            # Here we run the draft_model_runner with multi-step prepare
-            # on the GPU directly
             expanded_request.num_steps = sample_len
             self.model_runner.set_indices_of_seq_with_bonus_tokens(
                 indices_of_seq_with_bonus_tokens)
             model_outputs = self.execute_model(
                 execute_model_req=expanded_request)
         else:
-            # Here we run multi-step directly, with every step prepared
-            # on the CPU.
-            # TODO: Remove this branch once DraftModelRunner supports TP>1
-            # and other restrictions that are part of DraftModelRunner's
-            # supports_gpu_multi_step(..)
             if expanded_request.previous_hidden_states is not None:
                 self.worker.model_runner.return_hidden_states = True
             for _ in range(sample_len):
-                model_output: List[SamplerOutput] = self.worker.execute_model(
+                mo_list: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
-                assert (len(model_output) == 1
-                        ), "composing multistep workers not supported"
-                model_output = model_output[0]
+                assert len(mo_list) == 1
+                mo = mo_list[0]
                 self._maybe_update_previous_hidden_states(
-                    model_output, expanded_request)
-
+                    mo, expanded_request)
                 self._append_new_tokens(
-                    model_output, expanded_request.seq_group_metadata_list,
+                    mo, expanded_request.seq_group_metadata_list,
                     indices_of_seq_with_bonus_tokens)
-                model_outputs.append(model_output)
+                model_outputs.append(mo)
 
-        # move indices to device to avoid stream sync
-        indices_of_seq_with_bonus_tokens = torch.tensor(
+        # 收集 top1 draft token 与 logprob (不影响 sampler 内部字段)
+        draft_token_ids_steps: List[torch.Tensor] = []
+        draft_logprobs_steps: List[torch.Tensor] = []
+        topk_token_ids_steps: List[torch.Tensor] = []
+        topk_logprobs_steps: List[torch.Tensor] = []
+
+        for mo in model_outputs:
+            # top1 token ids
+            if mo.sampled_token_ids is not None:
+                ids = mo.sampled_token_ids.squeeze(-1)  # [B]
+            else:
+                ids_list = []
+                for out in mo.outputs:
+                    if out.samples:
+                        ids_list.append(out.samples[0].output_token)
+                    else:
+                        ids_list.append(-1)
+                ids = torch.tensor(ids_list, device=self.device, dtype=torch.long)
+
+            # 获取 logprobs 分布（优先 mo.logprobs -> [B, vocab]）
+            vocab_logprobs = None
+            if mo.logprobs is not None:
+                vocab_logprobs = mo.logprobs  # 已是 log 概率
+            elif mo.sampled_token_probs is not None:
+                probs = mo.sampled_token_probs.clamp_min(1e-30)
+                vocab_logprobs = probs.log()
+
+            # top1 logprob
+            if vocab_logprobs is not None:
+                lp_top1 = vocab_logprobs[torch.arange(ids.shape[0], device=ids.device), ids]
+            else:
+                lp_top1 = torch.zeros_like(ids, dtype=torch.float32)
+
+            # top-k
+            if vocab_logprobs is not None:
+                tk_vals, tk_ids = torch.topk(vocab_logprobs, k=20, dim=-1)
+            else:
+                # 无法获取：填充当前 top1
+                tk_ids = ids.unsqueeze(-1)
+                tk_vals = lp_top1.unsqueeze(-1)
+
+            draft_token_ids_steps.append(ids.detach().cpu())
+            draft_logprobs_steps.append(lp_top1.detach().cpu())
+            topk_token_ids_steps.append(tk_ids.detach().cpu())
+            topk_logprobs_steps.append(tk_vals.detach().cpu())
+
+        if draft_token_ids_steps:
+            self._draft_token_ids_tensor = torch.stack(draft_token_ids_steps, dim=1)          # [B, steps]
+            self._draft_logprobs_tensor = torch.stack(draft_logprobs_steps, dim=1)            # [B, steps]
+            self._draft_topk_token_ids = torch.stack(topk_token_ids_steps, dim=1)             # [B, steps, K]
+            self._draft_topk_logprobs = torch.stack(topk_logprobs_steps, dim=1)               # [B, steps, K]
+        
+        indices_of_seq_with_bonus_token_in_last_step_tensor = torch.tensor(
             indices_of_seq_with_bonus_tokens, device=self.device)
         filtered_model_outputs = self._filter_model_output(
-            model_outputs, indices_of_seq_with_bonus_tokens)
+            model_outputs, indices_of_seq_with_bonus_token_in_last_step_tensor)
         return filtered_model_outputs, True
 
     @staticmethod
@@ -239,11 +280,19 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         execute_model_req: ExecuteModelRequest,
         seq_ids_with_bonus_token_in_last_step: set,
     ) -> SpeculativeProposals:
-        """Produce speculations given an input batch of sequences. The number of
-        speculative tokens per sequence is determined by max_proposal_len.
-        """
-        return self._proposer.get_spec_proposals(
+        proposals = self._proposer.get_spec_proposals(
             execute_model_req, seq_ids_with_bonus_token_in_last_step)
+
+        # 注入扩展字段（不覆盖框架原字段）
+        if (self._draft_token_ids_tensor is not None and
+                self._draft_logprobs_tensor is not None):
+            proposals.proposal_top1_token_ids = self._draft_token_ids_tensor.to(self.device)   # [B, steps]
+            proposals.proposal_top1_logprobs = self._draft_logprobs_tensor.to(self.device)     # [B, steps]
+        if (self._draft_topk_token_ids is not None and
+                self._draft_topk_logprobs is not None):
+            proposals.proposal_draft_topk_token_ids = self._draft_topk_token_ids.to(self.device)      # [B, steps, K]
+            proposals.proposal_draft_topk_logprobs = self._draft_topk_logprobs.to(self.device)        # [B, steps, K]
+        return proposals
 
     @staticmethod
     def _append_new_tokens(

@@ -10,7 +10,7 @@ import depyf
 def test_tpu_compilation():
     temp_dir = tempfile.mkdtemp()
     with depyf.prepare_debug(temp_dir):
-        from vllm import LLM, SamplingParams
+        from vllm.vllm import LLM, SamplingParams
 
         prompts = [
             "A robot may not injure a human being",

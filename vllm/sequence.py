@@ -1080,10 +1080,15 @@ class CompletionSequenceGroupOutput(
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
     step_index: Optional[int] = 0
+    draft_token_id: Optional[int] = None
+    draft_logprob: Optional[float] = None
+    extra: Optional[dict[str, Any]] = None
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "
-                f"prompt_logprobs={self.prompt_logprobs})")
+                f"prompt_logprobs={self.prompt_logprobs}, "
+                f"draft_token_id={self.draft_token_id}, "
+                f"draft_logprob={self.draft_logprob})")
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, CompletionSequenceGroupOutput):

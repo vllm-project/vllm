@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 # vLLM does not guarantee the reproducibility of the results by default,
 # for the sake of performance. You need to do the following to achieve

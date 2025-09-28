@@ -6,7 +6,7 @@ Run `pytest tests/samplers/test_ignore_eos.py`.
 
 import pytest
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 
 
 @pytest.fixture(autouse=True)

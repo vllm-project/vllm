@@ -162,7 +162,7 @@ with torch.no_grad():
 Now, you can load and run the Quark quantized model directly through the LLM entrypoint:
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 # Sample prompts.
 prompts = [

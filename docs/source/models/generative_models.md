@@ -38,7 +38,7 @@ You can optionally control the language generation by passing {class}`~vllm.Samp
 For example, you can use greedy sampling by setting `temperature=0`:
 
 ```python
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 llm = LLM(model="facebook/opt-125m")
 params = SamplingParams(temperature=0)

@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Sequence as GenericSequence
 from typing import Any, Optional
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.inputs import EncoderDecoderInputs, token_inputs
 from vllm.lora.request import LoRARequest

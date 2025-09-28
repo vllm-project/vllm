@@ -21,7 +21,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from rlhf_utils import stateless_init_process_group
 from transformers import AutoModelForCausalLM
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.utils import get_ip, get_open_port
 
 

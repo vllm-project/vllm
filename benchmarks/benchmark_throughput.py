@@ -36,7 +36,7 @@ def run_vllm(
     engine_args: EngineArgs,
     disable_detokenize: bool = False,
 ) -> tuple[float, Optional[list[RequestOutput]]]:
-    from vllm import LLM, SamplingParams
+    from vllm.vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
     assert all(
         llm.llm_engine.model_config.max_model_len >= (
@@ -106,7 +106,7 @@ def run_vllm_chat(
     multimodal models as it properly handles multimodal inputs and chat
     formatting. For non-multimodal models, use run_vllm() instead.
     """
-    from vllm import LLM, SamplingParams
+    from vllm.vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
 
     assert all(
@@ -142,7 +142,7 @@ async def run_vllm_async(
     disable_frontend_multiprocessing: bool = False,
     disable_detokenize: bool = False,
 ) -> float:
-    from vllm import SamplingParams
+    from vllm.vllm import  SamplingParams
 
     async with build_async_engine_client_from_engine_args(
             engine_args, disable_frontend_multiprocessing) as llm:

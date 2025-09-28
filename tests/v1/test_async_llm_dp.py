@@ -7,7 +7,7 @@ from typing import Optional
 
 import pytest
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
 from vllm.platforms import current_platform

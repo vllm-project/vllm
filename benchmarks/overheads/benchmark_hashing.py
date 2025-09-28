@@ -3,7 +3,7 @@
 import cProfile
 import pstats
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 
 # A very long prompt, total number of tokens is about 15k.

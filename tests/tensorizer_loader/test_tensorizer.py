@@ -13,7 +13,7 @@ import pytest
 import torch
 from huggingface_hub import snapshot_download
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 # yapf conflicts with isort for this docstring
 # yapf: disable

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 from ...core.block.e2e.test_correctness_sliding_window import (check_answers,
                                                                prep_prompts)

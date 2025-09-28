@@ -6,7 +6,7 @@ from typing import Iterator, List, Optional, Tuple
 
 import torch
 
-from vllm import SamplingParams
+from vllm.vllm import  SamplingParams
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID, VLLM_TOKEN_ID_ARRAY_TYPE,
                            ExecuteModelRequest, SequenceData,

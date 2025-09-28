@@ -10,7 +10,7 @@ import gc
 import pytest
 import torch
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 
 @pytest.mark.skip(reason="In V1, we reject tokens > max_seq_len")

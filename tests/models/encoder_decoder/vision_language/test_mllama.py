@@ -6,7 +6,7 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForImageTextToText, AutoTokenizer
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
                                      global_force_attn_backend_context_manager)

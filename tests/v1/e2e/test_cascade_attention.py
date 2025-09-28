@@ -2,7 +2,7 @@
 
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 from ...utils import fork_new_process_for_each_test
 

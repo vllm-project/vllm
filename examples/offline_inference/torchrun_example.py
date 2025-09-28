@@ -8,7 +8,7 @@ the argument 2 should match the `tensor_parallel_size` below.
 see `tests/distributed/test_torchrun_example.py` for the unit test.
 """
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 # Create prompts, the same across all ranks
 prompts = [

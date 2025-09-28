@@ -4,7 +4,7 @@ Demonstrate prompting of text-to-text
 encoder/decoder models, specifically BART
 '''
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          TokensPrompt, zip_enc_dec_prompts)
 

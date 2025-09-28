@@ -12,7 +12,7 @@ from typing import Any, Optional, TypeAlias
 import torch
 import tqdm
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.profiler import layerwise_profile
 from vllm.utils import FlexibleArgumentParser

@@ -8,7 +8,7 @@ import os
 import time
 from multiprocessing import Event, Process
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
 

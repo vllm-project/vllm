@@ -3,7 +3,7 @@
 import os
 import time
 
-from vllm import LLM, SamplingParams
+from vllm.vllm import LLM, SamplingParams
 
 # enable torch profiler, can also be set on cmd line
 os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
