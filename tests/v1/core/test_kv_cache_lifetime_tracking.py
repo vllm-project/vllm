@@ -164,6 +164,19 @@ class TestBlockPoolLifetimeTracking:
         pool.reset_lifetime_stats()
         assert pool.lifetime_stats.total_blocks_freed == 0
 
+    def test_reset_prefix_cache_resets_lifetime_stats(self):
+        """Resetting the prefix cache should also clear lifetime stats."""
+
+        pool = BlockPool(
+            num_gpu_blocks=10, enable_caching=True, enable_kv_cache_events=False
+        )
+
+        pool.lifetime_stats.add_block_lifetime(7.5)
+        assert pool.lifetime_stats.total_blocks_freed == 1
+
+        assert pool.reset_prefix_cache() is True
+        assert pool.lifetime_stats.total_blocks_freed == 0
+
 
 class TestKVCacheManagerLifetimeIntegration:
     """Test KVCacheManager integration with lifetime tracking."""
@@ -207,6 +220,25 @@ class TestKVCacheManagerLifetimeIntegration:
                 manager.reset_kv_cache_lifetime_stats()
                 mock_pool.reset_lifetime_stats.assert_called_once()
 
+    def test_reset_prefix_cache_resets_lifetime_stats(self):
+        """KVCacheManager.reset_prefix_cache should clear lifetime stats."""
+        with patch("vllm.v1.core.kv_cache_manager.get_kv_cache_coordinator"):
+            from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+            with patch.object(KVCacheManager, "__init__", return_value=None):
+                manager = KVCacheManager.__new__(KVCacheManager)
+
+                mock_pool = MagicMock()
+                mock_pool.reset_prefix_cache.return_value = True
+
+                manager.block_pool = mock_pool
+                manager.log_stats = False
+                manager.prefix_cache_stats = None
+
+                assert manager.reset_prefix_cache() is True
+                mock_pool.reset_prefix_cache.assert_called_once()
+                mock_pool.reset_lifetime_stats.assert_called_once()
+
 
 @pytest.mark.integration
 class TestPrometheusMetricIntegration:
@@ -227,9 +259,11 @@ class TestPrometheusMetricIntegration:
 
             logger = PrometheusStatLogger(mock_config, [0])
 
-            # Verify the lifetime metric exists
-            assert hasattr(logger, "gauge_kv_cache_avg_lifetime")
-            assert 0 in logger.gauge_kv_cache_avg_lifetime
+            # Verify the lifetime metrics exist
+            assert hasattr(logger, "counter_kv_cache_total_lifetime_seconds")
+            assert 0 in logger.counter_kv_cache_total_lifetime_seconds
+            assert hasattr(logger, "counter_kv_cache_total_blocks_freed")
+            assert 0 in logger.counter_kv_cache_total_blocks_freed
 
     def test_prometheus_metric_recording(self):
         """Test that lifetime statistics are recorded to Prometheus."""
@@ -251,9 +285,13 @@ class TestPrometheusMetricIntegration:
 
             logger = PrometheusStatLogger(mock_config, [0])
 
-            # Mock the gauge set method
-            mock_gauge = MagicMock()
-            logger.gauge_kv_cache_avg_lifetime = {0: mock_gauge}
+            # Mock the counter inc methods
+            mock_total_seconds_counter = MagicMock()
+            mock_total_blocks_counter = MagicMock()
+            logger.counter_kv_cache_total_lifetime_seconds = {
+                0: mock_total_seconds_counter
+            }
+            logger.counter_kv_cache_total_blocks_freed = {0: mock_total_blocks_counter}
 
             # Create scheduler stats with lifetime data
             lifetime_stats = KVCacheLifetimeStats()
@@ -271,8 +309,15 @@ class TestPrometheusMetricIntegration:
             # Record the stats
             logger.record(scheduler_stats, None, 0)
 
-            # Verify the metric was set with correct value
-            mock_gauge.set.assert_called_once_with(15.0)
+            # Verify counters were incremented with correct values
+            mock_total_seconds_counter.inc.assert_called_once_with(30.0)
+            mock_total_blocks_counter.inc.assert_called_once_with(2)
+
+            # Record again to ensure only deltas are recorded
+            logger.record(scheduler_stats, None, 0)
+
+            mock_total_seconds_counter.inc.assert_called_once()
+            mock_total_blocks_counter.inc.assert_called_once()
 
 
 if __name__ == "__main__":

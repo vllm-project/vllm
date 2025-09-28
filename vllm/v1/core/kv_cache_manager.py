@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -12,7 +10,7 @@ from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import KVCacheLifetimeStats, PrefixCacheStats
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -25,28 +23,20 @@ class KVCacheBlocks:
     structure from the Scheduler.
     """
 
-    blocks: tuple[Sequence[KVCacheBlock], ...]
+    blocks: tuple[list[KVCacheBlock], ...]
     """
     `blocks[i][j]` refers to the i-th kv_cache_group
     and the j-th block of tokens.We don't use block of
     tokens as the outer dimension because it assumes all
-    kv_cache_groups have the same number of blocks, which is true for now but
-    will be broken if we want to give different block_size to different
+    kv_cache_groups have the same number of blocks, which is true for now but 
+    will be broken if we want to give different block_size to different 
     kv_cache_groups in the future.
-
-    Each single type KVCacheBlocks could be represented as:
-    - list[KVCacheBlock] for more than one KVCacheBlock
-    - an empty tuple for requests without KVCacheBlock
-      (a precomputed KVCacheBlocks is in KVCacheManager to avoid GC overhead)
     """
 
     def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
         """Adds two KVCacheBlocks instances."""
         return KVCacheBlocks(
-            tuple(
-                list(itertools.chain(blk1, blk2))
-                for blk1, blk2 in zip(self.blocks, other.blocks)
-            )
+            tuple(blk1 + blk2 for blk1, blk2 in zip(self.blocks, other.blocks))
         )
 
     @overload
@@ -84,10 +74,8 @@ class KVCacheBlocks:
         return [block.block_id for block in self.blocks[0] if block.block_hash is None]
 
     def new_empty(self) -> "KVCacheBlocks":
-        """
-        Creates a new KVCacheBlocks instance with no blocks.
-        """
-        return KVCacheBlocks(tuple(() for _ in range(len(self.blocks))))
+        """Creates a new KVCacheBlocks instance with no blocks."""
+        return KVCacheBlocks(tuple([] for _ in range(len(self.blocks))))
 
 
 class KVCacheManager:
@@ -143,15 +131,6 @@ class KVCacheManager:
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
 
-        # Pre-constructed KVCacheBlocks with no blocks, callers should use this
-        # via create_kv_cache_blocks instead of creating new ones to avoid GC
-        # overhead.
-        #
-        # We use nested tuples to ensure the empty KVCacheBlocks is immutable.
-        self.empty_kv_cache_blocks = KVCacheBlocks(
-            tuple(() for _ in range(self.num_kv_cache_groups))
-        )
-
     @property
     def usage(self) -> float:
         """Get the KV cache usage.
@@ -181,10 +160,6 @@ class KVCacheManager:
         """
         return self.block_pool.get_lifetime_stats()
 
-    def collect_recent_kv_cache_lifetimes(self) -> list[float]:
-        """Collect lifetimes recorded since the previous collection."""
-        return self.block_pool.collect_recent_lifetimes()
-
     def reset_kv_cache_lifetime_stats(self) -> None:
         """Reset the KV cache lifetime statistics."""
         self.block_pool.reset_lifetime_stats()
@@ -207,7 +182,7 @@ class KVCacheManager:
             request.sampling_params is not None
             and request.sampling_params.prompt_logprobs is not None
         ):
-            return self.empty_kv_cache_blocks, 0
+            return self.create_empty_block_list(), 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
@@ -224,16 +199,11 @@ class KVCacheManager:
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
-            if request.num_preemptions > 0:
-                self.prefix_cache_stats.preempted_requests += 1
-                self.prefix_cache_stats.preempted_queries += request.num_tokens
-                self.prefix_cache_stats.preempted_hits += num_new_computed_tokens
-            else:
-                self.prefix_cache_stats.requests += 1
-                self.prefix_cache_stats.queries += request.num_tokens
-                self.prefix_cache_stats.hits += num_new_computed_tokens
+            self.prefix_cache_stats.requests += 1
+            self.prefix_cache_stats.queries += request.num_tokens
+            self.prefix_cache_stats.hits += num_new_computed_tokens
 
-        return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
+        return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
     def allocate_slots(
         self,
@@ -286,7 +256,9 @@ class KVCacheManager:
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
         else:
-            new_computed_block_list = self.empty_kv_cache_blocks.blocks
+            new_computed_block_list = tuple(
+                [] for _ in range(len(self.kv_cache_config.kv_cache_groups))
+            )
 
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
@@ -338,7 +310,7 @@ class KVCacheManager:
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
-            return self.create_kv_cache_blocks(new_blocks)
+            return KVCacheBlocks(new_blocks)
 
         # NOTE(woosuk): We want to commit (cache) up to num_computed_tokens +
         # num_new_tokens, but must exclude "non-committable" tokens (e.g.,
@@ -349,7 +321,7 @@ class KVCacheManager:
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
-        return self.create_kv_cache_blocks(new_blocks)
+        return KVCacheBlocks(new_blocks)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -378,39 +350,49 @@ class KVCacheManager:
             self.prefix_cache_stats.reset = True
         return True
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
-        """Calculate the number of common prefix blocks for each kv cache group.
+    def get_num_common_prefix_blocks(
+        self,
+        request: Request,
+        num_running_requests: int,
+    ) -> list[int]:
+        """Calculate the number of common prefix blocks shared by all requests
+        in the RUNNING state for each kv cache group.
 
-        The function selects a running request and iterates through its blocks.
-        A block is considered a common prefix block if ALL requests with
-        allocated KV cache share it (i.e., ref_cnt equals the number of entries
-        in req_to_blocks).
+        The function determines this by selecting any request and iterating
+        through its blocks.  A block is considered a common prefix block if its
+        `ref_cnt` equals the total number of requests in the RUNNING state.
 
-        NOTE(woosuk): The number of requests with allocated KV cache is **greater
+        NOTE(woosuk): The number of requests in the RUNNING state is **greater
         than or equal to** the number of requests scheduled in the current step.
-        This is because having allocated KV cache only indicates that:
+        This is because the RUNNING state only indicates that:
         1. The request has not yet finished, and
         2. The request holds its blocks unfreed.
 
-        While all scheduled requests must have allocated KV cache, the inverse
-        is not necessarily true. There may be requests with allocated KV cache
-        that are not scheduled in the current step.
+        While all scheduled requests must be in the RUNNING state, the inverse
+        is not necessarily true. There may be RUNNING requests that are not
+        scheduled in the current step.
 
         This can result in an edge case where the number of common prefix blocks
         is 0, even though all scheduled requests share a common prefix. This
-        occurs because there may be unscheduled requests that do not share the
-        common prefix. Currently, this case cannot be easily detected, so the
-        function returns 0 in such cases.
+        occurs because there may be unscheduled RUNNING requests that do not
+        share the common prefix. Currently, this case cannot be easily detected,
+        so the function returns 0 in such cases.
 
         Args:
-            running_request_id: The request ID of any running request, used to
-                identify the common prefix blocks.
+            request: Any request in the RUNNING state, used to identify the
+                common prefix blocks.
+            num_running_requests: The total number of requests in the RUNNING
+                state. This can be different from the number of scheduled
+                requests in the current step.
 
         Returns:
             list[int]: The number of common prefix blocks for each kv cache
             group.
         """
-        return self.coordinator.get_num_common_prefix_blocks(running_request_id)
+        assert request.status == RequestStatus.RUNNING
+        return self.coordinator.get_num_common_prefix_blocks(
+            request.request_id, num_running_requests
+        )
 
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
@@ -422,7 +404,7 @@ class KVCacheManager:
 
     def get_blocks(self, request_id: str) -> KVCacheBlocks:
         """Get the blocks of a request."""
-        return self.create_kv_cache_blocks(self.coordinator.get_blocks(request_id))
+        return KVCacheBlocks(self.coordinator.get_blocks(request_id))
 
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""
@@ -433,8 +415,6 @@ class KVCacheManager:
         if self.enable_caching:
             self.coordinator.cache_blocks(request, num_computed_tokens)
 
-    def create_kv_cache_blocks(
-        self, blocks: tuple[list[KVCacheBlock], ...]
-    ) -> KVCacheBlocks:
-        # Only create new KVCacheBlocks for non-empty blocks
-        return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
+    def create_empty_block_list(self) -> KVCacheBlocks:
+        """Creates a new KVCacheBlocks instance with no blocks."""
+        return KVCacheBlocks(tuple([] for _ in range(self.num_kv_cache_groups)))

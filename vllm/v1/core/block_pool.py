@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -168,8 +168,8 @@ class BlockPool:
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
+        # KV cache lifetime statistics
         self.lifetime_stats = KVCacheLifetimeStats()
-        self._recent_lifetimes: list[float] = []
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -224,7 +224,7 @@ class BlockPool:
             block_size: Number of tokens in each block.
             kv_cache_group_id: The id of the KV cache group.
         """
-        if num_cached_blocks >= num_full_blocks:
+        if num_cached_blocks == num_full_blocks:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(request.block_hashes) >= num_full_blocks
@@ -285,6 +285,7 @@ class BlockPool:
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
+        # Record allocation time for lifetime tracking
         current_time = time.monotonic()
         for block in ret:
             if self.enable_caching:
@@ -331,7 +332,7 @@ class BlockPool:
             )
         return True
 
-    def touch(self, blocks: tuple[Sequence[KVCacheBlock], ...]) -> None:
+    def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -358,7 +359,9 @@ class BlockPool:
         # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
         current_time = time.monotonic()
+
         for block in blocks_list:
+            # Calculate and record lifetime if allocation time was tracked
             if (
                 block.allocation_time is not None
                 and block.ref_cnt == 1
@@ -366,7 +369,7 @@ class BlockPool:
             ):
                 lifetime = current_time - block.allocation_time
                 self.lifetime_stats.add_block_lifetime(lifetime)
-                self._recent_lifetimes.append(lifetime)
+                # Clear allocation time when block is freed
                 block.allocation_time = None
 
             block.ref_cnt -= 1
@@ -400,12 +403,13 @@ class BlockPool:
         for block in self.blocks:
             block.reset_hash()
 
+        # Reset lifetime statistics when the cache is cleared.
+        self.reset_lifetime_stats()
+
         logger.info("Successfully reset prefix cache")
 
         if self.enable_kv_cache_events:
             self.kv_event_queue.append(AllBlocksCleared())
-
-        self.reset_lifetime_stats()
 
         return True
 
@@ -431,7 +435,11 @@ class BlockPool:
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
 
     def take_events(self) -> list[KVCacheEvent]:
-        """Atomically takes all events and clears the queue."""
+        """Atomically takes all events and clears the queue.
+
+        Returns:
+            A list of KV cache events.
+        """
         if not self.enable_kv_cache_events:
             return []
         events = self.kv_event_queue
@@ -439,13 +447,13 @@ class BlockPool:
         return events
 
     def get_lifetime_stats(self) -> KVCacheLifetimeStats:
+        """Get the current KV cache lifetime statistics.
+
+        Returns:
+            The current lifetime statistics.
+        """
         return self.lifetime_stats
 
     def reset_lifetime_stats(self) -> None:
+        """Reset the KV cache lifetime statistics."""
         self.lifetime_stats.reset()
-        self._recent_lifetimes.clear()
-
-    def collect_recent_lifetimes(self) -> list[float]:
-        lifetimes = self._recent_lifetimes
-        self._recent_lifetimes = []
-        return lifetimes
