@@ -127,20 +127,17 @@ def demonstrate_lifetime_stats():
 
     # Show how the metric would appear in Prometheus
     print("\nPrometheus Metric Information:")
-    print("Metric Name: vllm:kv_cache_avg_lifetime_seconds")
-    print("Metric Type: Gauge")
-    print("Description: Average lifetime of KV cache blocks in seconds")
+    print("Metric Names:")
+    print("  - vllm:kv_cache_total_lifetime_seconds (Counter)")
+    print("  - vllm:kv_cache_total_blocks_freed (Counter)")
+    print(
+        "Description: Cumulative totals used to derive average KV cache "
+        "lifetime in Prometheus"
+    )
     print("Labels: model_name, engine")
-    print("\nExample metric output:")
-    print(
-        "# HELP vllm:kv_cache_avg_lifetime_seconds Average lifetime of "
-        "KV cache blocks in seconds."
-    )
-    print("# TYPE vllm:kv_cache_avg_lifetime_seconds gauge")
-    print(
-        "vllm:kv_cache_avg_lifetime_seconds{"
-        'model_name="facebook/opt-125m",engine="0"} 0.0234'
-    )
+    print("\nExample PromQL to derive average lifetime:")
+    print("  rate(vllm:kv_cache_total_lifetime_seconds[5m]) /")
+    print("  rate(vllm:kv_cache_total_blocks_freed[5m])")
 
     print("\n" + "=" * 60)
     print("Demonstration completed successfully!")
@@ -167,8 +164,8 @@ def show_implementation_details():
     print("   - Statistics can be reset independently")
 
     print("\n4. Prometheus Integration:")
-    print("   - Exposed as 'vllm:kv_cache_avg_lifetime_seconds' gauge metric")
-    print("   - Updated automatically when lifetime statistics are available")
+    print("   - Exposes counters for total lifetime seconds and blocks freed")
+    print("   - Average lifetime is derived via PromQL rate() division")
     print("   - Supports multi-engine labeling for distributed setups")
 
 

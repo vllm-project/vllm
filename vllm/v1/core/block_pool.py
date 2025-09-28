@@ -161,7 +161,7 @@ class BlockPool:
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
-        
+
         # KV cache lifetime statistics
         self.lifetime_stats = KVCacheLifetimeStats()
 
@@ -350,18 +350,18 @@ class BlockPool:
         # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
         current_time = time.monotonic()
-        
+
         for block in blocks_list:
             # Calculate and record lifetime if allocation time was tracked
-            if (block.allocation_time is not None and 
-                block.ref_cnt == 1 and not block.is_null):
+            if (block.allocation_time is not None and block.ref_cnt == 1
+                    and not block.is_null):
                 lifetime = current_time - block.allocation_time
                 self.lifetime_stats.add_block_lifetime(lifetime)
                 # Clear allocation time when block is freed
                 block.allocation_time = None
-            
+
             block.ref_cnt -= 1
-            
+
         self.free_block_queue.append_n([
             block for block in blocks_list
             if block.ref_cnt == 0 and not block.is_null
@@ -389,6 +389,9 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+
+        # Reset lifetime statistics when the cache is cleared.
+        self.reset_lifetime_stats()
 
         logger.info("Successfully reset prefix cache")
 

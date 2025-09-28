@@ -336,6 +336,7 @@ class KVCacheManager:
         """
         if not self.block_pool.reset_prefix_cache():
             return False
+        self.block_pool.reset_lifetime_stats()
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.reset = True
