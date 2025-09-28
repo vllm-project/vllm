@@ -2663,25 +2663,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 mm_embed_inputs = None
 
-            if (self.speculative_config.use_eagle()
-                    or self.speculative_config.uses_draft_model()):
-                assert isinstance(self.drafter,
-                                  (EagleProposer, DraftModelProposer))
-                cudagraph_args: CudaGraphArgs = dict(
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_descriptor,
-                )
-                draft_token_ids = self.drafter.propose(
-                    target_token_ids=target_token_ids,
-                    target_positions=target_positions,
-                    target_hidden_states=target_hidden_states,
-                    next_token_ids=next_token_ids,
-                    last_token_indices=token_indices_to_sample,
-                    sampling_metadata=sampling_metadata,
-                    common_attn_metadata=common_attn_metadata,
-                    mm_embed_inputs=mm_embed_inputs,
-                    cudagraph_args=cudagraph_args,
-                )
+            cudagraph_args: CudaGraphArgs = dict(
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=batch_descriptor,
+            )
+            draft_token_ids = self.drafter.propose(
+                target_token_ids=target_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                next_token_ids=next_token_ids,
+                last_token_indices=token_indices_to_sample,
+                sampling_metadata=sampling_metadata,
+                common_attn_metadata=common_attn_metadata,
+                mm_embed_inputs=mm_embed_inputs,
+                cudagraph_args=cudagraph_args,
+            )
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
