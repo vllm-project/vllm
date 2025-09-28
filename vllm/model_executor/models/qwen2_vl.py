@@ -79,7 +79,7 @@ from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 logger = init_logger(__name__)
 
 # For profile run
-_MAX_FRAMES_PER_VIDEO = 32
+_MAX_FRAMES_PER_VIDEO = 14
 
 # === Vision Inputs === #
 
@@ -932,6 +932,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
+            num_frames=1,
             image_processor=image_processor,
         )
         return num_image_tokens
@@ -956,6 +957,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_image_size, _ = self._get_vision_info(
             image_width=9999999,
             image_height=9999999,
+            num_frames=1,
             image_processor=None,
         )
         return max_image_size
@@ -969,10 +971,12 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             image_processor=None,
         )
 
-    def _get_max_video_frames(self, max_tokens: int) -> int:
+    def _get_max_video_frames(self,
+                              max_tokens: int,
+                              start_num_frames: int = 1) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
-        num_frames = 0
+        num_frames = start_num_frames
 
         while True:
             next_num_frames = num_frames + 1
@@ -994,12 +998,13 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        max_frames_per_video: int = _MAX_FRAMES_PER_VIDEO,
     ) -> int:
         max_videos = mm_counts.get("video", 0)
 
         max_total_frames = self._get_max_video_frames(seq_len)
         max_frames_per_video = min(max_total_frames // max(max_videos, 1),
-                                   _MAX_FRAMES_PER_VIDEO)
+                                   max_frames_per_video)
 
         return max(max_frames_per_video, 1)
 
