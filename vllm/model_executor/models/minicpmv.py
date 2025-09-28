@@ -50,7 +50,6 @@ from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -72,8 +71,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .utils import AutoWeightsLoader, flatten_bn, isin_list, maybe_prefix
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -1145,23 +1143,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         return self._process_multimodal_inputs(modalities)
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.llm.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            assert len(self.mm_token_ids) > 0
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                list(self.mm_token_ids),
-            )
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1179,8 +1160,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
 
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=isin_list(input_ids, list(self.mm_token_ids)),
+            )
             input_ids = None
 
         hidden_states = self.llm.model(
@@ -1194,9 +1178,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.llm.compute_logits(hidden_states, sampling_metadata)
+        return self.llm.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

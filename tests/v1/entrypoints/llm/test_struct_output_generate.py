@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -21,7 +22,8 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.sampling_params import (GuidedDecodingParams, SamplingParams,
+                                  StructuredOutputsParams)
 
 if TYPE_CHECKING:
     from vllm.config import TokenizerMode
@@ -79,14 +81,24 @@ class CarDescription(BaseModel):
     car_type: CarType
 
 
-def _load_json(s: str, backend: str) -> str:
-    if backend != "xgrammar":
-        return json.loads(s)
+def test_guided_decoding_deprecated():
+    with pytest.warns(DeprecationWarning,
+                      match="GuidedDecodingParams is deprecated.*"):
+        guided_decoding = GuidedDecodingParams(json_object=True)
 
-    # xgrammar specific workarounds
-    # https://github.com/mlc-ai/xgrammar/issues/286
-    s = re.sub(r'[\x00-\x1F\x7F-\xFF]', '', s)
-    return json.loads(s)
+    structured_outputs = StructuredOutputsParams(json_object=True)
+    assert fields(guided_decoding) == fields(structured_outputs)
+
+    with pytest.warns(DeprecationWarning,
+                      match="guided_decoding is deprecated.*"):
+        sp1 = SamplingParams(guided_decoding=guided_decoding)
+
+    with pytest.warns(DeprecationWarning,
+                      match="guided_decoding is deprecated.*"):
+        sp2 = SamplingParams.from_optional(guided_decoding=guided_decoding)
+
+    assert sp1 == sp2
+    assert sp1.structured_outputs == guided_decoding
 
 
 @pytest.mark.skip_global_cleanup
@@ -155,7 +167,12 @@ def test_structured_output(
         if backend != 'lm-format-enforcer':
             assert "\n" not in generated_text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        output_json = json.loads(generated_text)
+        try:
+            output_json = json.loads(generated_text)
+        except json.JSONDecodeError as e:
+            pytest.fail(
+                f"Invalid JSON from backend={backend}: {generated_text!r}\n"
+                f"Schema: {sample_json_schema}\nError: {e}")
         jsonschema.validate(instance=output_json, schema=sample_json_schema)
 
     #
@@ -403,7 +420,12 @@ def test_structured_output(
         generated_text = output.outputs[0].text
         assert generated_text is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        output_json = json.loads(generated_text)
+        try:
+            output_json = json.loads(generated_text)
+        except json.JSONDecodeError as e:
+            pytest.fail(
+                f"Invalid JSON from backend={backend}: {generated_text!r}\n"
+                f"Schema: {json_schema}\nError: {e}")
         jsonschema.validate(instance=output_json, schema=json_schema)
 
     #
@@ -446,7 +468,12 @@ def test_structured_output(
         generated_text = output.outputs[0].text
         assert generated_text is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        output_json = json.loads(generated_text)
+        try:
+            output_json = json.loads(generated_text)
+        except json.JSONDecodeError as e:
+            pytest.fail(
+                f"Invalid JSON from backend={backend}: {generated_text!r}\n"
+                f"Schema: {json_schema}\nError: {e}")
         jsonschema.validate(instance=output_json, schema=json_schema)
 
     if backend not in ["outlines", "lm-format-enforcer"]:

@@ -27,7 +27,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -787,6 +786,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
                 target_ratios,
                 orig_width,
                 orig_height,
+                image_size,
             )
 
             # calculate the target width and height
@@ -1342,12 +1342,12 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                                             image_attention_mask)
         return image_embeds
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
-            return None
+            return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor corresponding to a multimodal data item (image or video).
@@ -1370,18 +1370,6 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                 multimodal_embeddings += tuple(audio_embeddings)
 
         return multimodal_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                [_IMAGE_PLACEHOLDER_TOKEN_ID, _AUDIO_PLACEHOLDER_TOKEN_ID])
-        return inputs_embeds
 
     def get_input_embeddings_v0(
         self,
@@ -1451,10 +1439,8 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

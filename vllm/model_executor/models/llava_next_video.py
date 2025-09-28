@@ -13,7 +13,6 @@ from transformers import (BatchFeature, LlavaNextVideoConfig,
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.clip import CLIPVisionModel
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -31,8 +30,7 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import init_vision_tower_for_llava
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, WeightsMapper,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 from .vision import get_vision_encoder_info
 
 
@@ -416,19 +414,6 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_embeddings = self._process_video_pixels(video_input)
         return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.video_token_index)
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -450,8 +435,11 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=input_ids == self.config.video_token_index,
+            )
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -464,10 +452,8 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

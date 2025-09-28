@@ -18,7 +18,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -1152,7 +1151,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []
-            return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor corresponding to a multimodal data item (image or video).
@@ -1175,19 +1173,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                 multimodal_embeddings += tuple(audio_embeddings)
 
         return multimodal_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.model.embed_tokens(input_ids)
-        if multimodal_embeddings is not None and len(
-                multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                [_IMAGE_PLACEHOLDER_TOKEN_ID, _AUDIO_PLACEHOLDER_TOKEN_ID])
-        return inputs_embeds
 
     def get_input_embeddings_v0(
         self,
@@ -1257,10 +1242,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
