@@ -172,7 +172,7 @@ The following table lists backends that support full CUDA Graphs at the time of 
 | FlashMLA | `UNIFORM_BATCH` | |
 | AITER MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | CUTLASS MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
-| Mamba attention| `UNIFORM_SINGLE_TOKEN_DECODE` | Default is `FULL_AND_PIECEWISE` |
+| Mamba attention| `UNIFORM_SINGLE_TOKEN_DECODE` | |
 
 Unlisted backends are all declared as `NEVER`.
 
