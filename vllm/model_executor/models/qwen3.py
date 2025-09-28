@@ -186,16 +186,16 @@ class Qwen3DecoderLayer(nn.Module):
         else:
             attn_type = AttentionType.ENCODER_ONLY
 
-        layer_idx =int(prefix.split(".")[-1])
-        layer_head_num = getattr(config, 'layer_head_num', None)
-        layer_inter_size = getattr(config, 'layer_inter_size', None)
+        layer_idx = extract_layer_index(prefix)
+        layer_head_num = getattr(config, "layer_head_num", None)
+        layer_inter_size = getattr(config, "layer_inter_size", None)
 
-        if layer_head_num:
+        if layer_head_num is not None:
             self.layer_heads = config.layer_head_num[layer_idx]
         else:
             self.layer_heads = config.num_attention_heads
 
-        if layer_inter_size:
+        if layer_inter_size is not None:
             self.layer_inter_size = config.layer_inter_size[layer_idx]
         else:
             self.layer_inter_size = config.intermediate_size
