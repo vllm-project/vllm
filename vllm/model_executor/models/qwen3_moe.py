@@ -107,7 +107,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
     ):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
         quant_config = vllm_config.quant_config
 
@@ -293,7 +293,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -372,7 +372,7 @@ class Qwen3MoeModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config.get_text_config()
+        config = vllm_config.model_config.hf_text_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
         eplb_config = parallel_config.eplb_config
@@ -586,7 +586,7 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
