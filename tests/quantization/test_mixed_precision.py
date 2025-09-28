@@ -19,13 +19,6 @@ QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
         importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
 
-try:
-    huggingface_hub.list_repo_refs(
-        "amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8")
-    HF_HUB_AMD_ORG_ACCESS = True
-except huggingface_hub.errors.RepositoryNotFoundError:
-    HF_HUB_AMD_ORG_ACCESS = False
-
 
 @dataclass
 class ModelCase:
@@ -55,9 +48,6 @@ TEST_CONFIGS = {
 @pytest.mark.parametrize("model_name, accuracy_numbers", TEST_CONFIGS.items())
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
                     reason="amd-quark>=0.9 is not available")
-@pytest.mark.skipif(
-    not HF_HUB_AMD_ORG_ACCESS,
-    reason="Read access to huggingface.co/amd is required for this test.")
 def test_mixed_precision_model_accuracies(model_name: str,
                                           accuracy_numbers: dict):
 
