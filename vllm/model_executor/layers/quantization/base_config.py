@@ -162,3 +162,9 @@ class QuantizationConfig(ABC):
         """
         # TODO (@kylesayrs): add implementations for all subclasses
         pass
+
+    def maybe_update_config(self, model_name: str):  # noqa: B027
+        """
+        Interface to update values after config initialization.
+        """
+        pass

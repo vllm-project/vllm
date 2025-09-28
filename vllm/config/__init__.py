@@ -12,6 +12,7 @@ import textwrap
 from contextlib import contextmanager
 from dataclasses import field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
+from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Literal, Optional, Protocol, TypeVar,
                     Union, cast)
 
@@ -270,6 +271,7 @@ class VllmConfig:
                     f"{model_config.dtype} is not supported for quantization "
                     f"method {model_config.quantization}. Supported dtypes: "
                     f"{supported_dtypes}")
+            quant_config.maybe_update_config(model_config.model)
             return quant_config
         return None
 
@@ -458,15 +460,22 @@ class VllmConfig:
                            "to True to enable.")
         current_platform.check_and_update_config(self)
 
-        # final check of cudagraph mode after platform-specific update
+        # Do this after all the updates to compilation_config.level
+        if envs.VLLM_USE_V1 and \
+            self.compilation_config.level == CompilationLevel.PIECEWISE:
+            self.compilation_config.set_splitting_ops_for_v1()
+
+        # final check of cudagraph mode after all possible updates
         if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
-            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
+            if self.compilation_config.cudagraph_mode.has_full_cudagraphs()\
                 and self.model_config is not None and \
-                not self.model_config.disable_cascade_attn:
-                logger.info("CUDAGraphMode.FULL is not supported with "
-                            "cascade attention currently. Disabling cascade"
-                            "attention.")
-                self.model_config.disable_cascade_attn = True
+                not self.model_config.disable_cascade_attn and\
+                not self.compilation_config.cudagraph_mode.\
+                has_piecewise_cudagraphs():
+                logger.warning_once(
+                    "No piecewise cudagraph for executing cascade attention."
+                    " Will fall back to eager execution if a batch runs "
+                    "into cascade attentions")
 
             if self.compilation_config.cudagraph_mode\
                 .requires_piecewise_compilation():
@@ -475,6 +484,12 @@ class VllmConfig:
                     "Compilation level should be CompilationLevel.PIECEWISE "\
                     "when cudagraph_mode piecewise cudagraphs is used, "\
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
+
+            # final migrate the deprecated flags
+            self.compilation_config.use_cudagraph = self.compilation_config.\
+                cudagraph_mode!= CUDAGraphMode.NONE
+            self.compilation_config.full_cuda_graph = self.compilation_config.\
+                cudagraph_mode.has_full_cudagraphs()
 
         if self.parallel_config.enable_dbo:
             a2a_backend = envs.VLLM_ALL2ALL_BACKEND
@@ -486,13 +501,13 @@ class VllmConfig:
             "variable to deepep_low_latency or deepep_high_throughput and "\
             "install the DeepEP kernels."
 
+            if not self.model_config.disable_cascade_attn:
+                self.model_config.disable_cascade_attn = True
+                logger.warning_once(
+                    "Disabling cascade attention when DBO is enabled.")
+
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
-
-        # Do this after all the updates to compilation_config.level
-        if envs.VLLM_USE_V1 and \
-            self.compilation_config.level == CompilationLevel.PIECEWISE:
-            self.compilation_config.set_splitting_ops_for_v1()
 
         if (envs.VLLM_USE_V1
                 and not self.scheduler_config.disable_hybrid_kv_cache_manager):
@@ -526,6 +541,17 @@ class VllmConfig:
                     # Hybrid KV cache manager is not yet supported with chunked
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
+
+        if self.compilation_config.debug_dump_path:
+            self.compilation_config.debug_dump_path = \
+                self.compilation_config.debug_dump_path.absolute().expanduser()
+        if envs.VLLM_DEBUG_DUMP_PATH is not None:
+            env_path = Path(envs.VLLM_DEBUG_DUMP_PATH).absolute().expanduser()
+            if self.compilation_config.debug_dump_path:
+                logger.warning(
+                    "Config-specified debug dump path is overridden"
+                    " by VLLM_DEBUG_DUMP_PATH to %s", env_path)
+            self.compilation_config.debug_dump_path = env_path
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
@@ -657,6 +683,20 @@ class VllmConfig:
                                  f"must be 'runai_streamer', "
                                  f"but got '{self.load_config.load_format}'. "
                                  f"Model: {self.model_config.model}")
+
+    def compile_debug_dump_path(self) -> Optional[Path]:
+        """Returns a rank-aware path for dumping 
+        torch.compile debug information.
+        """
+        if self.compilation_config.debug_dump_path is None:
+            return None
+        tp_rank = self.parallel_config.rank
+        dp_rank = self.parallel_config.data_parallel_rank
+        data_parallel_size = self.parallel_config.data_parallel_size
+        append_path = f"rank_{tp_rank}" if data_parallel_size == 1 \
+            else f"rank_{tp_rank}_dp_{dp_rank}"
+        path = self.compilation_config.debug_dump_path / append_path
+        return path
 
     def __str__(self):
         return (
