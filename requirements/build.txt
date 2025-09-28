@@ -4,7 +4,6 @@ ninja
 packaging>=24.2
 setuptools>=77.0.3,<80.0.0
 setuptools-scm>=8
---index-url https://download.pytorch.org/whl/nightly/cu128
 torch>=2.10.0.dev20250927
 wheel
 jinja2>=3.1.6
