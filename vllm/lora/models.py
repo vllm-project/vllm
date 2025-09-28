@@ -3,7 +3,6 @@
 
 import math
 import os
-from collections.abc import Sequence
 from typing import Callable, Optional, TypeVar, Union
 
 import regex as re
@@ -415,10 +414,8 @@ class LoRAModelManager:
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
                 module_lora.optimize()
-                # Bias is not explicitly enabled with the flag enable_lora_bias.
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
-                                module_lora.embeddings_tensor,
-                                module_lora.bias)
+                                module_lora.embeddings_tensor)
             else:
                 module.reset_lora(index)
         return True
@@ -559,13 +556,9 @@ class LoRAModelManager:
                         embeddings_tensor_dim=embeddings_tensor_dim)
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
-                        module_name,
-                        module.lora_a_stacked[0].shape[-1],
-                        module.lora_b_stacked[0].shape[-2],
-                        rank,
-                        module.lora_a_stacked[0].dtype,
-                        "cpu"
-                    )
+                        module_name, module.lora_a_stacked[0].shape[-1],
+                        module.lora_b_stacked[0].shape[-2], rank,
+                        module.lora_a_stacked[0].dtype, "cpu")
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
@@ -574,11 +567,8 @@ class LoRAModelManager:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
                         module.lora_a_stacked[i].shape[-1],
-                        module.lora_b_stacked[i].shape[-2],
-                        rank,
-                        module.lora_a_stacked[i].dtype,
-                        "cpu"
-                    )
+                        module.lora_b_stacked[i].shape[-2], rank,
+                        module.lora_a_stacked[i].dtype, "cpu")
                     subloras.append(lora)
                 lora = PackedLoRALayerWeights.pack(subloras)
             model.loras[module_name] = lora

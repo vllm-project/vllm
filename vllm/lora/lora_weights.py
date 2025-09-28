@@ -68,8 +68,9 @@ class LoRALayerWeights:
         peft_helper: PEFTHelper,
         embeddings_tensor: Optional[torch.Tensor] = None,
     ) -> "LoRALayerWeights":
+        # lora_a and lora_b are set to None for config-based construction
         return cls(module_name, peft_helper.r, peft_helper.lora_alpha, None,
-                   None, None, embeddings_tensor,
+                   None, embeddings_tensor,
                    peft_helper.vllm_lora_scaling_factor)
 
     @classmethod
@@ -91,21 +92,14 @@ class LoRALayerWeights:
                              dtype=dtype,
                              device=device,
                              pin_memory=pin_memory)
-
-        embeddings_tensor = torch.rand(
-            10,
-            embeddings_tensor_dim,
-            dtype=dtype,
-            device=device,
-            pin_memory=pin_memory) if embeddings_tensor_dim else None
-        return cls(
-            module_name,
-            rank=rank,
-            lora_alpha=1,
-            lora_a=lora_a,
-            lora_b=lora_b,
-            embeddings_tensor=embeddings_tensor,
-        )
+        embeddings_tensor = None
+        if embeddings_tensor_dim is not None:
+            embeddings_tensor = torch.zeros([embeddings_tensor_dim, input_dim],
+                                            dtype=dtype,
+                                            device=device,
+                                            pin_memory=pin_memory)
+        # embeddings_tensor is created above if embeddings_tensor_dim is not None
+        return cls(module_name, rank, 1, lora_a, lora_b, embeddings_tensor)
 
 
 class PackedLoRALayerWeights(LoRALayerWeights):
@@ -125,7 +119,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             rank=rank,
             lora_alpha=0,
             lora_a=lora_a,
-            lora_b=lora_b,  
+            lora_b=lora_b,
             scaling=scaling,  # type: ignore
             embeddings_tensor=None,
         )

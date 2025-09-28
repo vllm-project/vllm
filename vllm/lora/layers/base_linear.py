@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, cast
+from typing import Optional
 
 import torch
 from transformers import PretrainedConfig
@@ -28,7 +28,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.tp_size = self.base_layer.tp_size
         self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(self.base_layer)
-    # lora_bias_stacked removed
+        # lora_bias_stacked removed
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
@@ -91,7 +91,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-    embeddings_tensor: Optional[torch.Tensor],
+        embeddings_tensor: Optional[torch.Tensor],
     ):
         # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers

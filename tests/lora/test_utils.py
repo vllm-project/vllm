@@ -66,28 +66,19 @@ def test_parse_fine_tuned_lora_name_valid():
         # Test with WeightsMapper
         LoRANameParserTestConfig(
             "base_model.model.model.layers.9.mlp.down_proj.lora_A.weight",
-            "language_model.model.layers.9.mlp.down_proj",
-            True,
-            False,
-            weights_mapper=WeightsMapper(
-                orig_to_new_prefix={"model.": "language_model.model."}),
-        ),
+            "language_model.model.layers.9.mlp.down_proj", True, False,
+            WeightsMapper(
+                orig_to_new_prefix={"model.": "language_model.model."})),
         LoRANameParserTestConfig(
             "base_model.model.model.layers.9.mlp.down_proj.lora_B.weight",
-            "language_model.model.layers.9.mlp.down_proj",
-            False,
-            False,
-            weights_mapper=WeightsMapper(
-                orig_to_new_prefix={"model.": "language_model.model."}),
-        ),
+            "language_model.model.layers.9.mlp.down_proj", False, False,
+            WeightsMapper(
+                orig_to_new_prefix={"model.": "language_model.model."})),
         LoRANameParserTestConfig(
             "model.layers.9.mlp.down_proj.lora_A.weight",
-            "language_model.model.layers.9.mlp.down_proj",
-            True,
-            False,
-            weights_mapper=WeightsMapper(
-                orig_to_new_prefix={"model.": "language_model.model."}),
-        ),
+            "language_model.model.layers.9.mlp.down_proj", True, False,
+            WeightsMapper(
+                orig_to_new_prefix={"model.": "language_model.model."})),
         LoRANameParserTestConfig(
             "model.layers.9.mlp.down_proj.lora_B.weight",
             "language_model.model.layers.9.mlp.down_proj",
@@ -98,8 +89,8 @@ def test_parse_fine_tuned_lora_name_valid():
         ),
     ]
     for name, module_name, is_lora_a, weights_mapper in fixture:
-        assert (module_name, is_lora_a) == parse_fine_tuned_lora_name(name, weights_mapper)
-
+        assert (module_name,
+                is_lora_a) == parse_fine_tuned_lora_name(name, weights_mapper)
 
 
 def test_parse_fine_tuned_lora_name_invalid():
