@@ -364,6 +364,9 @@ class CompilationConfig:
                                                      init=False)
     """User-specified splitting_ops when use_inductor_graph_partition=True"""
 
+    inductor_partition_user_ops: Optional[list[str]] = None
+    """Persistent copy of user-provided ops for inductor graph partition."""
+
     static_forward_context: dict[str, Any] = field(default_factory=dict,
                                                    init=False)
     """Per-model forward context
@@ -399,6 +402,7 @@ class CompilationConfig:
         factors.append(self.backend)
         factors.append(self.custom_ops)
         factors.append(self.splitting_ops)
+        factors.append(self.inductor_partition_user_ops)
         factors.append(self.use_inductor)
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
@@ -650,9 +654,18 @@ class CompilationConfig:
                 self.splitting_ops)
             # Store user configuration for potential future use
             self._user_specified_splitting_ops = list(self.splitting_ops)
+            self.inductor_partition_user_ops = list(self.splitting_ops)
             logger.warning_once(use_inductor_graph_partition_msg)
+        elif self.inductor_partition_user_ops:
+            # Restore user-provided ops captured in a previous process.
+            self._user_specified_splitting_ops = list(
+                self.inductor_partition_user_ops)
+            logger.info(
+                "[VLLM DEBUG] Restored user ops from inductor_partition_user_ops: %s",
+                self._user_specified_splitting_ops)
         else:
             self._user_specified_splitting_ops = []
+            self.inductor_partition_user_ops = None
 
         logger.info("[VLLM DEBUG] Preserved _user_specified_splitting_ops: %s",
                     self._user_specified_splitting_ops)
@@ -682,6 +695,8 @@ class CompilationConfig:
                     if op_name not in combined_ops:
                         combined_ops.append(op_name)
                 self.splitting_ops = combined_ops
+                self.inductor_partition_user_ops = list(
+                    self._user_specified_splitting_ops)
                 logger.info("[VLLM DEBUG] Restored combined splitting_ops: %s",
                             self.splitting_ops)
 
