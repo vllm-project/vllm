@@ -113,6 +113,12 @@ def _lazy_init() -> None:
     )
 
 
+def get_num_sms() -> int:
+    _lazy_init()
+    _dg = importlib.import_module("deep_gemm")
+    return int(_dg.get_num_sms())
+
+
 def fp8_gemm_nt(*args, **kwargs):
     _lazy_init()
     if _fp8_gemm_nt_impl is None:
@@ -305,5 +311,6 @@ __all__ = [
     "per_block_cast_to_fp8",
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
+    "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
 ]
