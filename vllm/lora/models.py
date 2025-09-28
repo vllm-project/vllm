@@ -132,7 +132,7 @@ class LoRAModel:
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
-            module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
+            module_name, is_lora_a = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper)
             if module_name not in loras:
                 lora_embeddings_tensor = None
@@ -151,13 +151,7 @@ class LoRAModel:
                 loras[module_name] = LoRALayerWeights.from_config(
                     module_name, peft_helper, lora_embeddings_tensor)
 
-            if is_bias:
-                loras[module_name].bias = tensor.to(device=device, dtype=dtype)
-                bias = tensor.to(device=device, dtype=dtype)
-                if pin_memory:
-                    bias = bias.pin_memory()
-                loras[module_name].bias = bias
-            elif is_lora_a:
+            if is_lora_a:
                 loras[module_name].lora_a = tensor.to(device=device,
                                                       dtype=dtype)
                 if pin_memory:
@@ -226,7 +220,7 @@ class LoRAModel:
 
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
-                module_name, _, _ = parse_fine_tuned_lora_name(
+                module_name, _ = parse_fine_tuned_lora_name(
                     lora_module, weights_mapper)
                 part_name = module_name.split(".")[-1]
                 if part_name not in expected_lora_modules:
@@ -422,15 +416,6 @@ class LoRAModelManager:
             if module_lora:
                 module_lora.optimize()
                 # Bias is not explicitly enabled with the flag enable_lora_bias.
-                bias = module_lora.bias
-                if ((torch.is_tensor(bias) or
-                     (isinstance(bias, Sequence) and any(b is not None
-                                                         for b in bias)))
-                        and not self.lora_config.bias_enabled):
-                    module_lora.bias = None
-                    raise ValueError(
-                        f"Adapter bias cannot be used for {module_name}"
-                        " without --enable-lora-bias.")
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
                                 module_lora.embeddings_tensor,
                                 module_lora.bias)
@@ -545,7 +530,6 @@ class LoRAModelManager:
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {})
         for module_name, module in self.model.named_modules():
-            bias_enabled = self.lora_config.bias_enabled
             if (not self._match_target_modules(module_name)
                     or not isinstance(module, BaseLayerWithLoRA)
                     or self._filter_unsupported_mm_module(module_name)):
@@ -572,8 +556,7 @@ class LoRAModelManager:
                         rank,
                         module.lora_a_stacked[0].dtype,
                         "cpu",
-                        embeddings_tensor_dim=embeddings_tensor_dim,
-                        bias_enabled=bias_enabled)
+                        embeddings_tensor_dim=embeddings_tensor_dim)
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
@@ -581,8 +564,7 @@ class LoRAModelManager:
                         module.lora_b_stacked[0].shape[-2],
                         rank,
                         module.lora_a_stacked[0].dtype,
-                        "cpu",
-                        bias_enabled=bias_enabled,
+                        "cpu"
                     )
             else:
                 parts = module_name.split(".")
@@ -595,8 +577,7 @@ class LoRAModelManager:
                         module.lora_b_stacked[i].shape[-2],
                         rank,
                         module.lora_a_stacked[i].dtype,
-                        "cpu",
-                        bias_enabled=bias_enabled,
+                        "cpu"
                     )
                     subloras.append(lora)
                 lora = PackedLoRALayerWeights.pack(subloras)
