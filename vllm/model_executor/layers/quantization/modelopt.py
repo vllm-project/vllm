@@ -383,12 +383,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALES - Per-tensor scaling for ModelOpts
-            # Allocate 2 scales for w1 and w3 respectively.
+            # For gated MoE, allocate 2 scales for w1 and w3 respectively.
             # They will be combined to a single scale after weight loading.
+            # For non-gated MoE, allocate 1 scale for w13.
             if layer.is_act_and_mul:
                 w13_weight_scale_shape = (num_experts, 2)
             else:
-                w13_weight_scale_shape = (num_experts, )
+                w13_weight_scale_shape = (num_experts, 1)
             w13_weight_scale = PerTensorScaleParameter(
                 data=torch.full(
                     w13_weight_scale_shape,
@@ -439,9 +440,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max of the w1 and w3 scales
             # then dequant and requant each expert.
-            if layer.w13_weight_scale.dim() == 2:
+            if layer.w13_weight_scale.dim() == 2 and \
+                layer.w13_weight_scale.shape[1] == 2:
                 assert layer.is_act_and_mul, (
-                    "w13_weight_scale should be 2D only for gated MoE")
+                    "w13_weight_scale should have 2 elements per expert "
+                    "only for gated MoE")
 
                 # Get the maximum scale across w1 and w3 for each expert
                 max_w13_scales = layer.w13_weight_scale.max(dim=1).values

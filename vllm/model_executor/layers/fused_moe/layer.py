@@ -37,8 +37,6 @@ from vllm.model_executor.layers.fused_moe.routing_simulator import (
     RoutingSimulator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.modelopt import (
-    ModelOptFp8MoEMethod)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -1114,6 +1112,8 @@ class FusedMoE(CustomOp):
         self.quant_method = quant_method
 
         if not self.is_act_and_mul:
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptFp8MoEMethod)  # Avoid circular import
             if not isinstance(
                     quant_method,
                 (UnquantizedFusedMoEMethod, ModelOptFp8MoEMethod)):
