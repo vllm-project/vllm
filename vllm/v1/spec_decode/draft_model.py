@@ -26,7 +26,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             vllm_config=vllm_config,
             device=device,
             pass_hidden_states_to_model=False,
-            pass_cudagraph_args_to_forward_ctx=True,
+            pass_cudagraph_args_to_forward_ctx=False,
             # The draft model runs one forward pass to prefill
             # the target_token_ids, and another forward pass for decoding
             # based on the next_token_ids. I.e. it needs 1 more forward pass.
@@ -37,25 +37,52 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             runner=runner)
         self._raise_if_multimodal()
         self._raise_if_mrope()
+    
+    def update_propose_kwargs(self, propose_kwargs: dict):
+        common_attn_metadata = propose_kwargs["common_attn_metadata"]
+        target_token_ids = propose_kwargs["target_token_ids"]
+        next_token_ids = propose_kwargs["next_token_ids"]
+        target_positions = propose_kwargs["target_positions"]
+        token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
-    def prepare_inputs_padded(self,
-                                common_attn_metadata: CommonAttentionMetadata,
-                                spec_decode_metadata: SpecDecodeMetadata,
-                                valid_sampled_tokens_count: torch.Tensor) -> \
-                    tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
-        tup = super().prepare_inputs_padded(common_attn_metadata,
-                                            spec_decode_metadata,
-                                            valid_sampled_tokens_count)
-        common_attn_metadata, token_indices, token_indices_to_sample = tup
+        # update target_token_ids
+        start_locs = torch.zeros(token_indices_to_sample.shape[0] + 1,
+                        device=token_indices_to_sample.device,
+                        dtype=torch.int32)
+        start_locs[1:] = token_indices_to_sample + 1
+        new_target_token_ids, _ = append_new_toks(toks=target_token_ids,
+                                                start_locs=start_locs,
+                                                new_toks=next_token_ids)
+        # update positions
+        positions_to_append = target_positions[token_indices_to_sample] + 1
+        new_target_positions, _ = append_new_toks(toks=target_positions,
+                                                start_locs=start_locs,
+                                                new_toks=positions_to_append)
+        # update common_attn_metadata
+        new_common_attn_metadata = self.update_common_attn_metadata(
+            new_target_positions, common_attn_metadata)
+        # update token_indices_to_sample
+        new_token_indices_to_sample = new_common_attn_metadata.query_start_loc[1:] - 1
+        
+        new_propose_kwargs = dict(
+            target_token_ids=new_target_token_ids,
+            target_positions=new_target_positions,
+            next_token_ids=None,
+            last_token_indices=new_token_indices_to_sample,
+            common_attn_metadata=new_common_attn_metadata,
+        )
+        return propose_kwargs | new_propose_kwargs
+
+    def update_common_attn_metadata(self, new_positions: torch.Tensor, common_attn_metadata: CommonAttentionMetadata):
         cad = common_attn_metadata
         batch_size = common_attn_metadata.batch_size()
 
         # token_indices is [0, ..., N], extend by batch_size
-        new_token_indices = self.arange[:len(token_indices) + batch_size]
+        # new_token_indices = self.arange[:len(target_token_ids) + len(next_token_ids)]
         # token indices to sample must be increased
         # by [+1, +2, ..., +batch_size]
-        new_token_indices_to_sample = token_indices_to_sample + self.arange[
-            1:batch_size + 1]
+        # new_token_indices_to_sample = last_token_indices + self.arange[
+        #     1:batch_size + 1]
 
         # query start loc mus be increased by [+0, +1, +2, ..., +batch_size]
         new_query_start_loc = cad.query_start_loc + self.arange[:len(
@@ -77,17 +104,16 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         # slot mapping depends on num_scheduled_tokens,
         # which increased by batch_size
         assert len(self.runner.input_batch.block_table.block_tables) == 1
-        kv_cache_group_id = 0
-        new_slot_mapping = self.runner.input_batch.block_table[
-            kv_cache_group_id].slot_mapping.gpu[:new_num_actual_tokens]
+        # kv_cache_group_id = 0
+        # new_slot_mapping = self.runner.input_batch.block_table[
+        #     kv_cache_group_id].slot_mapping.gpu[:new_num_actual_tokens]
 
-        # new_positions = self.runner.positions.gpu[:new_num_actual_tokens]
-        # block_numbers = new_positions // self.block_size
-        # block_ids = new_block_table_tensor.gather(
-        #     dim=1, index=block_numbers.view(1, -1))
-        # block_ids = block_ids.view(-1)
-        # new_slot_mapping = (block_ids * self.block_size
-        #                     + new_positions % self.block_size)
+        block_numbers = new_positions // self.block_size
+        block_ids = new_block_table_tensor.gather(
+            dim=1, index=block_numbers.view(1, -1))
+        block_ids = block_ids.view(-1)
+        new_slot_mapping = (block_ids * self.block_size
+                            + new_positions % self.block_size)
 
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
@@ -102,7 +128,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             block_table_tensor=new_block_table_tensor,
             slot_mapping=new_slot_mapping,
         )
-        return new_cad, new_token_indices, new_token_indices_to_sample
+        return new_cad
 
     def _raise_if_multimodal(self):
         if self.is_multimodal_model:
@@ -135,15 +161,16 @@ class DraftModelProposer(SpecDecodeBaseProposer):
     def set_input_ids_first_pass(self, target_token_ids: torch.Tensor,
                                  next_token_ids: torch.Tensor, num_tokens: int,
                                  last_token_indices: torch.Tensor) -> None:
-        start_locs = torch.zeros(last_token_indices.shape[0] + 1,
-                                 device=last_token_indices.device,
-                                 dtype=torch.int32)
-        start_locs[1:] = last_token_indices + 1
-        input_ids, _ = append_new_toks(toks=target_token_ids,
-                                       start_locs=start_locs,
-                                       new_toks=next_token_ids)
-        num_tokens = input_ids.shape[0]
-        self.input_ids[:num_tokens] = input_ids
+        # start_locs = torch.zeros(last_token_indices.shape[0] + 1,
+        #                          device=last_token_indices.device,
+        #                          dtype=torch.int32)
+        # start_locs[1:] = last_token_indices + 1
+        # input_ids, _ = append_new_toks(toks=target_token_ids,
+        #                                start_locs=start_locs,
+        #                                new_toks=next_token_ids)
+        # num_tokens = input_ids.shape[0]
+        # self.input_ids[:num_tokens] = input_ids
+        self.input_ids[:num_tokens] = target_token_ids
 
     def load_model(self, target_model: Any) -> None:
         """Takes target_model to satisfy the type checker."""

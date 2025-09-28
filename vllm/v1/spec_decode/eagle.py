@@ -172,7 +172,7 @@ class SpecDecodeBaseProposer:
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
-        batch_size = next_token_ids.shape[0]
+        batch_size = common_attn_metadata.batch_size()
 
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -246,6 +246,7 @@ class SpecDecodeBaseProposer:
 
         with set_forward_context(**forward_ctx_kwargs):
             ret_hidden_states = self.model(**model_kwargs)
+            self.runner.log_toks("Draft forward", model_kwargs["input_ids"])
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
@@ -392,6 +393,7 @@ class SpecDecodeBaseProposer:
 
             with set_forward_context(**forward_ctx_kwargs):
                 ret_hidden_states = self.model(**model_kwargs)
+                self.runner.log_toks("Draft forward", model_kwargs["input_ids"])
                 if not self.model_returns_tuple():
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states
