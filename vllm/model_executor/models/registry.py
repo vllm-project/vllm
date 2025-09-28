@@ -332,6 +332,7 @@ _SUBPROCESS_COMMAND = [
 ]
 
 _PREVIOUSLY_SUPPORTED_MODELS = {
+    "Phi4FlashForCausalLM": "0.10.2",
     "Phi3SmallForCausalLM": "0.9.2",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
