@@ -373,6 +373,7 @@ def gen_prompt_decode_to_target_len(
     target_token_len: int,
     max_retry: int = 10,
     add_special_tokens: bool = False,
+    rng: Optional[np.random.Generator] = None,
 ) -> tuple[str, list[int]]:
     """
     Ensure decoded-then-encoded prompt length matches the target token length.
@@ -402,11 +403,18 @@ def gen_prompt_decode_to_target_len(
         if len(token_sequence) == target_token_len:
             break
         elif len(token_sequence) < target_token_len:
-            extra_tokens = np.random.randint(
-                0,
-                tokenizer.vocab_size,
-                size=target_token_len - len(token_sequence),
-            ).tolist()
+            if rng is not None:
+                extra_tokens = rng.integers(
+                    0,
+                    tokenizer.vocab_size,
+                    size=target_token_len - len(token_sequence),
+                ).tolist()
+            else:
+                extra_tokens = np.random.randint(
+                    0,
+                    tokenizer.vocab_size,
+                    size=target_token_len - len(token_sequence),
+                ).tolist()
             token_sequence.extend(extra_tokens)
         elif len(token_sequence) > target_token_len:
             token_sequence = token_sequence[:target_token_len]
@@ -617,6 +625,7 @@ class RandomDataset(BenchmarkDataset):
             token_sequence=token_sequence,
             target_token_len=total_input_len,
             add_special_tokens=False,
+            rng=self._rng,
         )
         total_input_len = len(adjusted_token_sequence)
         return prompt, total_input_len, token_mismatch
