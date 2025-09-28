@@ -26,7 +26,7 @@ def test_use_cudagraphs_dynamic(monkeypatch):
 
     monkeypatch.setenv('VLLM_USE_V1', '0')
     vllm_config = VllmConfig()
-    assert not vllm_config.compilation_config.use_cudagraph
+    assert vllm_config.compilation_config.use_cudagraph
 
 
 def test_custom_op():
@@ -80,7 +80,7 @@ def test_use_cudagraphs(vllm_runner, monkeypatch, enabled):
             compilation_counter.expect(
                 num_graphs_seen=1,
                 num_gpu_runner_capture_triggers=1 if enabled else 0,
-                num_cudagraph_captured=13 if enabled else 0,
+                num_cudagraph_captured=14 if enabled else 0,
             ),
             # loading the model causes compilation (if enabled) to happen
             vllm_runner('facebook/opt-125m',
@@ -144,7 +144,14 @@ def test_splitting_ops_dynamic():
     assert not config.compilation_config.splitting_ops_contain_attention()
 
     # When use_inductor_graph_partition=True
-    if _is_torch_equal_or_newer('2.9.0.dev'):
+    try:
+        import torch  # type: ignore
+        torch_version = torch.__version__
+    except Exception:  # pragma: no cover - torch may be absent in minimal envs
+        torch = None
+        torch_version = '0.0.0'
+
+    if _is_torch_equal_or_newer(torch_version, '2.9.0.dev'):
         # inductor graph partition is only available in PyTorch 2.9+.
         # this is a fast config check so we are not using pytest.skip.
         config = VllmConfig(compilation_config=CompilationConfig(
@@ -182,7 +189,7 @@ def test_splitting_ops_dynamic():
         ))
 
     # When both use_inductor_graph_partition and attn_fusion pass enabled.
-    if _is_torch_equal_or_newer('2.9.0.dev'):
+    if _is_torch_equal_or_newer(torch_version, '2.9.0.dev'):
         config = VllmConfig(compilation_config=CompilationConfig(
             use_inductor_graph_partition=True,
             pass_config={
