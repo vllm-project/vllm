@@ -336,9 +336,10 @@ class Scheduler(SchedulerInterface):
         skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.
+        running_req_cnt = len(self.running)
         if not preempted_reqs:
             while self.waiting and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                if running_req_cnt == self.max_num_running_reqs:
                     break
 
                 request = self.waiting.peek_request()
@@ -512,18 +513,12 @@ class Scheduler(SchedulerInterface):
                 else:
                     new_reqs_for_pure_preill.append(request)
 
+                running_req_cnt += 1
                 req_index += 1
-                # self.running.append(request)
+
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
-                # if request.status == RequestStatus.WAITING:
-                #     scheduled_new_reqs.append(request)
-                # elif request.status == RequestStatus.PREEMPTED:
-                #     scheduled_resumed_reqs.append(request)
-                # else:
-                #     raise RuntimeError(
-                #         f"Invalid request status: {request.status}")
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
@@ -548,6 +543,7 @@ class Scheduler(SchedulerInterface):
         # reorder the request during scheduling, put chunked prefill at the top of 
         # the scheduled_new_reqs to make sure the actual reorder in model runner 
         # happens as less as possible.
+        assert running_req_cnt == len(new_reqs_for_chunk_prefill) + len(new_reqs_for_pure_preill) + len(self.running)
         new_reqs_for_chunk_prefill.extend(new_reqs_for_pure_preill)
         for req in new_reqs_for_chunk_prefill:
             self.running.append(req)
