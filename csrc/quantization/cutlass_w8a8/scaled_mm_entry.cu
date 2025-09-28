@@ -67,7 +67,7 @@ void cutlass_scaled_mm_sm100(torch::Tensor& c, torch::Tensor const& a,
                              std::optional<torch::Tensor> const& bias);
 #endif
 
-#if defined(ENABLE_SCALED_MM_SM90) && ENABLE_SCALED_MM_SM90 || \
+#if defined(ENABLE_SCALED_MM_SM90) && ENABLE_SCALED_MM_SM90 ||   \
     defined(ENABLE_SCALED_MM_SM100) && ENABLE_SCALED_MM_SM100 || \
     defined(ENABLE_SCALED_MM_SM120) && ENABLE_SCALED_MM_SM120
 void get_cutlass_moe_mm_data_caller(
