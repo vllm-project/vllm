@@ -741,11 +741,27 @@ class CompilationConfig:
         logger.info("[VLLM DEBUG] Target ops from _attention_ops: %s", self._attention_ops)
         logger.info("[VLLM DEBUG] Target ops from user: %s", self._user_specified_splitting_ops)
 
+        op_aliases: dict[str, str] = {
+            # Flash attention backends eventually lower to the unified
+            # attention custom op. Users historically list "flash_attention"
+            # in splitting_ops, so normalize it here.
+            "flash_attention": "vllm.unified_attention",
+        }
+
         # Keep candidate names ordered but deduplicated
         candidate_names: list[str] = []
-        for name in list(self._attention_ops) + list(self._user_specified_splitting_ops):
-            if name not in candidate_names:
-                candidate_names.append(name)
+        for raw_name in list(self._attention_ops) + list(
+                self._user_specified_splitting_ops):
+            normalized_name = op_aliases.get(raw_name, raw_name)
+            if normalized_name not in candidate_names:
+                candidate_names.append(normalized_name)
+
+        # Track which user-provided names were satisfied through aliasing so we
+        # do not flag them as unresolved later on.
+        alias_resolutions: set[str] = {
+            name for name in self._user_specified_splitting_ops
+            if name in op_aliases
+        }
 
         if not candidate_names:
             logger.info("[VLLM DEBUG] No candidate ops provided for dynamic partitioning")
@@ -865,6 +881,14 @@ class CompilationConfig:
             logger.debug("[VLLM DEBUG] Skipped already registered ops: %s",
                          skipped_already_registered)
 
+        if active_rule_ops and op_aliases:
+            inverse_aliases: dict[str, list[str]] = {}
+            for alias, target in op_aliases.items():
+                inverse_aliases.setdefault(target, []).append(alias)
+            for target_name, aliases in inverse_aliases.items():
+                if target_name in active_rule_ops:
+                    active_rule_ops.update(aliases)
+
         if not active_rule_ops:
             logger.warning("[VLLM DEBUG] No dynamic partition rules registered for resolved ops")
             return False
@@ -872,6 +896,11 @@ class CompilationConfig:
         unresolved_user_ops = [
             op_name for op_name in self._user_specified_splitting_ops
             if op_name not in active_rule_ops
+        ]
+
+        unresolved_user_ops = [
+            op_name for op_name in unresolved_user_ops
+            if op_name not in alias_resolutions
         ]
 
         if unresolved_user_ops:
