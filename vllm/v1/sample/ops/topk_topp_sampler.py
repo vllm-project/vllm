@@ -117,11 +117,6 @@ class TopKTopPSampler(nn.Module):
         p: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
-        if logits.shape[0] < 32:
-            # Curreny Triton implementation is not optimized for small batch
-            # sizes, as it launches a single program for a single batch.
-            return self.forward_native(logits, generators, k, p)
-
         logits = self.apply_top_k_top_p_triton(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
