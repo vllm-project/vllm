@@ -26,8 +26,6 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     """
     assert (layer.n_slices == len(layer.lora_a_stacked) == len(
         layer.lora_b_stacked) == len(layer.output_slices))
-    if layer.lora_bias_stacked is not None:
-        assert layer.n_slices == len(layer.lora_bias_stacked)
 
     output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
 
@@ -54,7 +52,6 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
         output,
         buffers,
         layer.lora_b_stacked,
-        layer.lora_bias_stacked,
         layer.output_slices,
         offset_start=0,
         add_input=True)
@@ -111,15 +108,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
-    def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
-        # TODO: Fix the slicing logic of bias.
-        if bias is None:
-            return bias
-        shard_size = self.output_size
-        start_idx = self.tp_rank * shard_size
-        end_idx = (self.tp_rank + 1) * shard_size
-        bias = bias[start_idx:end_idx]
-        return bias
+    # slice_bias removed
 
     def forward(
         self, input_: torch.Tensor
@@ -221,15 +210,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 dtype=lora_config.lora_dtype,
                 device=self.device,
             ) for output_size in self.output_slices)
-        if lora_config.bias_enabled:
-            self.lora_bias_stacked = tuple(
-                torch.zeros(
-                    max_loras,
-                    1,
-                    output_size,
-                    dtype=lora_config.lora_dtype,
-                    device=self.device,
-                ) for output_size in self.output_slices)
+        # lora_bias_stacked allocation removed
 
     def slice_lora_a(
         self, lora_a: list[Union[torch.Tensor, None]]
@@ -247,15 +228,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                                             (shard_id + 1), :]
         return sliced_lora_b
 
-    def slice_bias(
-        self, bias: list[Union[torch.Tensor,
-                               None]]) -> list[Union[torch.Tensor, None]]:
-        for i, (shard_id, shard_size) in enumerate(
-                zip(self.output_ids, self.output_slices)):
-            if (bias_i := bias[i]) is not None:
-                bias[i] = bias_i[shard_size * shard_id:shard_size *
-                                 (shard_id + 1)]
-        return bias
+    # slice_bias removed
 
     def set_lora(
         self,
@@ -263,15 +236,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
-        lora_bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
 
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
-            if lora_bias is not None:
-                lora_bias = self.slice_bias(lora_bias)
 
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
@@ -283,15 +253,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                     index, 0, :lora_b_i.shape[0], :lora_b_i.shape[1]].copy_(
                         lora_b_i, non_blocking=True)
 
-        if lora_bias is not None:
-            self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
-                                          self.lora_bias_stacked)
-            for i in range(self.n_slices):
-                if (lora_bias_i := lora_bias[i]) is not None:
-                    self.lora_bias_stacked[i][index,
-                                              0, :lora_bias_i.shape[0]].copy_(
-                                                  lora_bias_i,
-                                                  non_blocking=True)
+        # lora_bias_stacked copy removed
 
     @classmethod
     @_not_fully_sharded_can_replace
