@@ -172,7 +172,6 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.remove_skipped_blocks(request_id, num_computed_tokens)
 
-    # TODO(Jialin): maybe change to tuple[tuple] as well
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the blocks for the request.
