@@ -104,12 +104,16 @@ class Scheduler(SchedulerInterface):
 
         self.dcp_world_size = \
             vllm_config.parallel_config.decode_context_parallel_size
+        self.cp_world_size = vllm_config.parallel_config.context_parallel_size
         # Note(hc): The scheduler’s block_size must be multiplied
         # by dcp_world_size, since block hashes are computed on the
         # original full token sequence at a granularity of
         # original_block_size × dcp_world_size.
         if self.dcp_world_size > 1:
             self.block_size *= self.dcp_world_size
+
+        if self.cp_world_size > 1:
+            self.block_size *= self.cp_world_size
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
