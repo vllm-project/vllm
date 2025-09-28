@@ -679,8 +679,8 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         )
 
         # NOTE: By default in Qwen3-VL, one video token is converted to
-        # "<{timestamp} seconds>" (at most 9 tokens) + vision_start_token + video_token + vision_end_token # noqa: E501
-        formatted_video_soft_tokens = video_soft_tokens * 12
+        # "<{timestamp} seconds>" (on average 9.5 tokens) + vision_start_token + video_token + vision_end_token # noqa: E501
+        formatted_video_soft_tokens = video_soft_tokens * 12.5
         return formatted_video_soft_tokens
 
     def _calculate_timestamps(self, indices: list[int] | torch.Tensor,
