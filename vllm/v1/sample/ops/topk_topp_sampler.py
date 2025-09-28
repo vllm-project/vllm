@@ -116,6 +116,12 @@ class TopKTopPSampler(nn.Module):
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+
+        if logits.shape[0] < 32:
+            # Curreny Triton implementation is not optimized for small batch
+            # sizes, as it launches a single program for a single batch.
+            return self.forward_native(logits, generators, k, p)
+
         logits = self.apply_top_k_top_p_triton(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
@@ -138,9 +144,9 @@ class TopKTopPSampler(nn.Module):
         # CPU-GPU synchronization while `flashinfer_sample` does.
         if (k is None and p is None) or generators:
             if generators:
-                logger.debug_once("FlashInfer 0.2.3+ does not support "
-                                  "per-request generators. Falling back to "
-                                  "PyTorch-native implementation.")
+                logger.warning_once("FlashInfer 0.2.3+ does not support "
+                                    "per-request generators. Falling back to "
+                                    "PyTorch-native implementation.")
             return self.forward_native(logits, generators, k, p)
         assert self.logprobs_mode not in (
             "processed_logits", "processed_logprobs"
@@ -196,35 +202,40 @@ def apply_top_k_top_p(
     p: Optional[torch.Tensor],
 ) -> torch.Tensor:
     """Apply top-k and top-p masks to the logits.
-    """
-    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
+    If a top-p is used, this function will sort the logits tensor,
+    which can be slow for large batches.
+
+    The logits tensor may be updated in-place.
+    """
     if p is None:
         if k is None:
             return logits
 
         # Avoid sorting vocab for top-k only case.
-        logits = apply_top_k_only(logits, k)
-    else:
-        if k is not None:
-            # Apply top-k.
-            top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
-            # Get all the top_k values.
-            top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
-            top_k_mask = logits_sort < top_k_mask
-            logits_sort.masked_fill_(top_k_mask, -float("inf"))
+        return apply_top_k_only(logits, k)
 
-        if p is not None:
-            # Apply top-p.
-            probs_sort = logits_sort.softmax(dim=-1)
-            probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
-            top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
-            # at least one
-            top_p_mask[:12, -1] = False
-            logits_sort.masked_fill_(top_p_mask, -float("inf"))
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
-        # Re-sort the probabilities.
-        logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
+    if k is not None:
+        # Apply top-k.
+        top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
+        # Get all the top_k values.
+        top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
+        top_k_mask = logits_sort < top_k_mask
+        logits_sort.masked_fill_(top_k_mask, -float("inf"))
+
+    if p is not None:
+        # Apply top-p.
+        probs_sort = logits_sort.softmax(dim=-1)
+        probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
+        top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+        # at least one
+        top_p_mask[:, -1] = False
+        logits_sort.masked_fill_(top_p_mask, -float("inf"))
+
+    # Re-sort the probabilities.
+    logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
     return logits
 
 
@@ -235,6 +246,7 @@ def apply_top_k_top_p_triton(
 ) -> torch.Tensor:
 
     batch_size, vocab_size = logits.shape
+
     device_prop = torch.cuda.get_device_properties(logits.device)
     NUM_PROGRAMS = device_prop.multi_processor_count
     SIGMA = 2.15  # Top 0.03 outliers
