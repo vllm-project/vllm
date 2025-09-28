@@ -3,12 +3,11 @@ from typing import ClassVar, Optional
 
 from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
+from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, get_num_sms
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
                                               split_decodes_and_prefills)
 import torch
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -217,7 +216,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         if num_decodes > 0:
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             schedule_metadata = get_paged_mqa_logits_metadata(
-                seq_lens, self.kv_cache_spec.block_size, 132)
+                seq_lens, self.kv_cache_spec.block_size, get_num_sms())
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=common_attn_metadata.
                 block_table_tensor[:num_decodes, ...],
