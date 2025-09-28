@@ -661,7 +661,8 @@ class CompilationConfig:
             self._user_specified_splitting_ops = list(
                 self.inductor_partition_user_ops)
             logger.info(
-                "[VLLM DEBUG] Restored user ops from inductor_partition_user_ops: %s",
+                "[VLLM DEBUG] Restored user ops from "
+                "inductor_partition_user_ops: %s",
                 self._user_specified_splitting_ops)
         else:
             self._user_specified_splitting_ops = []
