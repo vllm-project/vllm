@@ -31,7 +31,10 @@ logger = init_logger(__name__)
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "ernie_mtp", "qwen3_next_mtp", "mimo_mtp"]
+                            "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
+                            "longcat_flash_mtp", "mtp"]
+MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
+                   "qwen3_next_mtp", "longcat_flash_mtp")
 
 
 @config
@@ -186,6 +189,13 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["Qwen3NextMTP"]
             })
+        if hf_config.model_type == "longcat_flash":
+            hf_config.model_type = "longcat_flash_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["LongCatFlashMTPModel"]
+            })
 
         return hf_config
 
@@ -199,14 +209,16 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
+        if self.method in MTP_MODEL_TYPES:
+            logger.warning("method `%s` is deprecated and replaced with mtp.",
+                           self.method)
+            self.method = "mtp"
+
         if self.model is None and self.num_speculative_tokens is not None:
-            # TODO(Shangming): Refactor mtp configuration logic when supporting
-            # mtp acceleration for more models besides deepseek_v3
-            if self.target_model_config and \
-                (self.target_model_config.hf_text_config.model_type \
-                        == "deepseek_v3" or
-                    self.target_model_config.hf_text_config.model_type in
-                        ("mimo","ernie4_5_moe", "qwen3_next")):
+            if self.method == "mtp":
+                assert (
+                    self.target_model_config
+                    is not None), "target_model_config must be present for mtp"
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
                 # Align the quantization of draft model for cases such as
@@ -216,8 +228,9 @@ class SpeculativeConfig:
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
             else:
-                raise ValueError("num_speculative_tokens was provided without "
-                                 "speculative model.")
+                raise ValueError(
+                    "num_speculative_tokens was provided but without "
+                    "speculative model.")
 
         # Automatically configure the method for ngram when "model" is used
         # instead of "method"
@@ -275,6 +288,8 @@ class SpeculativeConfig:
                     trust_remote_code,
                     allowed_local_media_path=self.target_model_config.
                     allowed_local_media_path,
+                    allowed_media_domains=self.target_model_config.
+                    allowed_media_domains,
                     dtype=self.target_model_config.dtype,
                     seed=self.target_model_config.seed,
                     revision=self.revision,
@@ -285,8 +300,6 @@ class SpeculativeConfig:
                     max_model_len,
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
-                    max_seq_len_to_capture=self.target_model_config.
-                    max_seq_len_to_capture,
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=SpeculativeConfig.hf_config_override,
                 )
@@ -308,29 +321,20 @@ class SpeculativeConfig:
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
                 elif (self.draft_model_config.hf_config.model_type
-                      in ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp")):
-                    self.method = "deepseek_mtp"
+                      in MTP_MODEL_TYPES):
+                    self.method = "mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
-                                "All Deepseek MTP models only have " \
-                                "one layer. Might need some code changes " \
-                                "to support multiple layers."
+                                "Enabling num_speculative_tokens > 1 will run" \
+                                "multiple times of forward on same MTP layer" \
+                                ",which may result in lower acceptance rate" \
                             )
-                elif (self.draft_model_config.hf_config.model_type ==
-                      "ernie_mtp"):
-                    self.method = "ernie_mtp"
+                elif (self.draft_model_config.hf_config.model_type
+                      in ("longcat_flash_mtp")):
+                    self.method = "longcat_flash_mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
-                                "All Ernie MTP models only have " \
-                                "one layer. Might need some code changes " \
-                                "to support multiple layers."
-                            )
-                elif (self.draft_model_config.hf_config.model_type ==
-                      "qwen3_next_mtp"):
-                    self.method = "qwen3_next_mtp"
-                    if self.num_speculative_tokens > 1:
-                        logger.warning(
-                                "All Qwen3Next MTP models only have " \
+                                "LongCat MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
                             )
@@ -340,7 +344,7 @@ class SpeculativeConfig:
                         "Speculative decoding with draft model is not "
                         "supported yet. Please consider using other "
                         "speculative decoding methods such as ngram, medusa, "
-                        "eagle, or deepseek_mtp.")
+                        "eagle, or mtp.")
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
@@ -527,7 +531,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        eagle3_target_supported = ["llama", "qwen", "gpt_oss"]
+        eagle3_target_supported = ["llama", "qwen", "minicpm", "gpt_oss"]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
@@ -549,8 +553,7 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp",
-                               "qwen3_next_mtp")
+        return self.method in ("eagle", "eagle3", "mtp")
 
     def __repr__(self) -> str:
         method = self.method

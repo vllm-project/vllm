@@ -52,8 +52,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
-from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
-                         SupportsQuant)
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP, SupportsQuant)
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     flatten_bn, make_empty_intermediate_tensors_factory,
                     maybe_prefix)
@@ -415,9 +415,12 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
                                        num_image_patches),
         )
+
         # Use overrides if provided; fallback to data-dependent hashing.
-        mm_hashes = (mm_uuids if mm_uuids is not None else self._hash_mm_items(
-            mm_items, hf_processor_mm_kwargs, tokenization_kwargs))
+        mm_hashes = self._hash_mm_items(mm_items,
+                                        hf_processor_mm_kwargs,
+                                        tokenization_kwargs,
+                                        mm_uuids=mm_uuids)
 
         return MultiModalInputs(
             type="multimodal",
@@ -444,7 +447,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.device_config: DeviceConfig = vllm_config.device_config
         self.model_config: ModelConfig = vllm_config.model_config
         self.parallel_config: ParallelConfig = vllm_config.parallel_config
-        self.quant_config: QuantizationConfig = vllm_config.quant_config
+        self.quant_config: Optional[
+            QuantizationConfig] = vllm_config.quant_config
 
         self.pp_group = get_pp_group()
         self.pp_size = self.pp_group.world_size
@@ -453,7 +457,18 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         # Weights to skip in `self.load_weights`
         self.skip_prefixes: list[str] = []
+        """Skip loading weights whose qualname starts with these prefixes."""
         self.skip_substrs: list[str] = []
+        """Skip loading weights whose qualname contains these substrings."""
+        self.ignore_unexpected_prefixes: list[str] = []
+        """Ignore unexpected weights whose qualname starts with these prefixes.
+        """
+        self.ignore_unexpected_suffixes: list[str] = []
+        """Ignore unexpected weights whose qualname ends with these suffixes."""
+
+        # Skip loading extra bias for GPTQ models.
+        if self.quant_config and "gptq" in self.quant_config.get_name():
+            self.ignore_unexpected_suffixes.append(".bias")
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         # TODO: @raushan, use the public `model.set_attn_implementation()`
@@ -560,9 +575,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             raise ValueError(
                 f"{type(self.model)} does not support tensor parallel. {tip}")
 
-        def _tensor_parallel(module: nn.Module,
-                             prefix: str = "",
-                             tp_plan=None):
+        def _tensor_parallel(module: nn.Module, prefix: str, tp_plan=None):
             tp_plan = tp_plan or {}
 
             # If the current module is a PreTrainedModel, set the tp_plan for
@@ -594,7 +607,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                                      prefix=qual_name,
                                      tp_plan=tp_plan)
 
-        _tensor_parallel(self.model)
+        _tensor_parallel(self.model, prefix="model")
 
     def create_attention_instances(
         self,
@@ -693,6 +706,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             self,
             skip_prefixes=self.skip_prefixes,
             skip_substrs=self.skip_substrs,
+            ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
+            ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
@@ -794,6 +809,9 @@ class TransformersForCausalLM(TransformersBase):
         else:
             self.lm_head = PPMissingLayer()
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings()(input_ids)
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -870,12 +888,18 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             multimodal_embeds = self.get_multimodal_embeddings(**kwargs)
             if multimodal_embeds is not None:
                 inputs_embeds = self.get_input_embeddings(
-                    input_ids, multimodal_embeds)
+                    input_ids,
+                    multimodal_embeds,
+                    is_multimodal=input_ids == self.config.image_token_id,
+                )
                 input_ids = None
 
         model_output = super().forward(input_ids, positions,
                                        intermediate_tensors, inputs_embeds)
         return model_output
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model
 
     def get_multimodal_embeddings(self, **kwargs):
         pixel_values = kwargs.pop("pixel_values", None)
@@ -931,15 +955,42 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings=None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self.model.get_input_embeddings()(input_ids)
-        if (multimodal_embeddings is not None
-                and len(multimodal_embeddings) != 0):
-            mask = (input_ids == self.config.image_token_id)
-            mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
-            multimodal_embeddings = torch.cat(multimodal_embeddings)
+        """
+        Apply token embeddings to `input_ids`.
 
-            inputs_embeds = inputs_embeds.masked_scatter(
-                mask, multimodal_embeddings)
-        return inputs_embeds
+        If `multimodal_embeddings` is passed, scatter them into
+        `input_ids` according to the mask `is_multimodal`.
+
+        In case the multi-modal token IDs exceed the vocabulary size of
+        the language model, you can set `handle_oov_mm_token=False`
+        to avoid calling the language model's `get_input_embeddings` method
+        on those tokens.
+        """
+        from .utils import _merge_multimodal_embeddings
+
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.model.get_input_embeddings(),
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229.")
+
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
