@@ -664,6 +664,76 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         )
 
 
+@triton.jit
+def compute_identity_kernel(
+    top_k: int,
+    hidden_states_ptr: tl.tensor,
+    expert_scales_ptr: tl.tensor,
+    num_tokens: int,
+    output_ptr: tl.tensor,
+    hidden_dim: int,
+    scales_stride: int,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    pid = tl.program_id(0)
+
+    batch_id = pid // (hidden_dim // BLOCK_SIZE)
+    dim_offset = pid % (hidden_dim // BLOCK_SIZE) * BLOCK_SIZE
+
+    if batch_id >= num_tokens or dim_offset >= hidden_dim:
+        return
+
+    h = tl.load(hidden_states_ptr + batch_id * hidden_dim + dim_offset +
+                tl.arange(0, BLOCK_SIZE),
+                mask=(dim_offset + tl.arange(0, BLOCK_SIZE)) < hidden_dim)
+
+    result = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+    for i in range(top_k):
+        scale = tl.load(expert_scales_ptr + batch_id * scales_stride + i)
+        result += h * scale
+
+    tl.store(output_ptr + batch_id * hidden_dim + dim_offset +
+             tl.arange(0, BLOCK_SIZE),
+             result,
+             mask=(dim_offset + tl.arange(0, BLOCK_SIZE)) < hidden_dim)
+
+
+def zero_experts_compute_triton(expert_indices: torch.Tensor,
+                                expert_scales: torch.Tensor, num_experts: int,
+                                zero_expert_type: str,
+                                hidden_states: torch.Tensor) -> torch.Tensor:
+    N = expert_indices.numel()
+    top_k = expert_indices.size(-1)
+    grid = lambda meta: (triton.cdiv(N, meta['BLOCK_SIZE']), )
+
+    if zero_expert_type == "identity":
+        zero_expert_mask = expert_indices < num_experts
+        zero_expert_scales = expert_scales.clone()
+        zero_expert_scales[zero_expert_mask] = 0.0
+
+    normal_expert_mask = expert_indices >= num_experts
+    expert_indices[normal_expert_mask] = 0
+    expert_scales[normal_expert_mask] = 0.0
+
+    output = torch.zeros_like(hidden_states).to(hidden_states.device)
+    hidden_dim = hidden_states.size(-1)
+    num_tokens = hidden_states.size(0)
+
+    grid = lambda meta: (num_tokens * (hidden_dim // meta['BLOCK_SIZE']), )
+    compute_identity_kernel[grid](
+        top_k,
+        hidden_states,
+        zero_expert_scales,
+        num_tokens,
+        output,
+        hidden_dim,
+        zero_expert_scales.stride(0),
+        BLOCK_SIZE=256,
+    )
+
+    return output
+
+
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
 def get_config_file_name(E: int,
                          N: int,
@@ -940,6 +1010,25 @@ def fused_topk(
     return topk_weights, topk_ids, token_expert_indices
 
 
+def fused_topk_bias(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+):
+    n_routed_experts = gating_output.shape[-1]
+    scores = gating_output.softmax(dim=-1)
+    scores_for_choice = scores.view(
+        -1, n_routed_experts) + e_score_correction_bias.unsqueeze(0)
+    topk_indices = torch.topk(scores_for_choice, k=topk, dim=-1,
+                              sorted=False)[1]
+    topk_weights = scores.gather(1, topk_indices)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
+
+
 # This is used by the Deepseek-V2 and Deepseek-V3 model
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def grouped_topk(
@@ -1015,6 +1104,79 @@ def grouped_topk(
     if routed_scaling_factor != 1.0:
         topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def eplb_map_to_physical_and_record(
+        topk_ids: torch.Tensor,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        indices_type: Optional[torch.dtype] = None) -> torch.Tensor:
+    '''
+    Map the logical expert ids to physical expert ids
+    and record the expert load metrics.
+
+    This will select a pseudo-random replica for each logical expert.
+    Only used for EPLB.
+
+    Args:
+        topk_ids: The logical expert ids.
+        expert_load_view: The expert load view.
+        logical_to_physical_map: The logical to physical map.
+        logical_replica_count: The logical replica count.
+        indices_type: The indices type.
+
+    Returns:
+        The physical expert ids.
+    '''
+
+    # 1. Convert the logical expert ids to physical expert ids
+    # Directly select a random replica for each logical expert
+
+    # In case `indices_type` is not `torch.long` or `torch.int`,
+    # e.g. `torch.uint32` as required by dispatch/combine kernels
+    topk_ids_long = topk_ids.long()
+    # Use (token position) modulo (replica count)
+    # to deterministically choose a replica
+    replica_count = logical_replica_count[topk_ids_long]
+    # Flatten-position based index, reshaped back to `topk_ids` shape
+    pos_indices = torch.arange(topk_ids.numel(),
+                               device=topk_ids.device,
+                               dtype=torch.long).reshape_as(topk_ids)
+    # Compute pseudo-random indices by modulo
+    replica_indices = (pos_indices % replica_count).unsqueeze(-1)
+    physical_ids = logical_to_physical_map[topk_ids_long].gather(
+        -1, replica_indices).squeeze(-1)
+
+    topk_ids = physical_ids
+
+    # 2. Record expert load metrics.
+
+    # TODO(bowen): When using `FusedMoEModularKernel`, this
+    # can be done in a more unified way, since
+    # `FusedMoEPrepareAndFinalize` will return the expert
+    # token count, in some cases directly from the kernel.
+    # However, now there are many code paths not using
+    # the modular kernel, e.g. calling `fused_experts`,
+    # so we decide to keep the logic here.
+    #
+    # If later refactor moved all the MoE kernel calls
+    # to the modular kernel, we can move this logic there
+    # to achieve better efficiency.
+
+    # `expert_load_view`: (num_physical_experts,)
+
+    # `torch.bincount` is not compilable, so use `scatter_add_` instead.
+    topk_ids_flatten = topk_ids.flatten()
+    expert_load_view.scatter_add_(
+        dim=0,
+        index=topk_ids_flatten.long(),
+        src=torch.ones_like(topk_ids_flatten).to(expert_load_view))
+
+    if indices_type is not None:
+        topk_ids = topk_ids.to(dtype=indices_type)
+    return topk_ids
 
 
 def fused_grouped_topk(
@@ -1183,7 +1345,6 @@ def outplace_fused_experts_fake(
 direct_register_custom_op(
     op_name="outplace_fused_experts",
     op_func=outplace_fused_experts,
-    mutates_args=[],
     fake_impl=outplace_fused_experts_fake,
     tags=(() if is_torch_equal_or_newer("2.7.0") else
           (torch.Tag.needs_fixed_stride_order, )),

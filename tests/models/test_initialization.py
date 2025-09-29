@@ -78,14 +78,13 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             return
 
         if model_arch in ("Phi4FlashForCausalLM", "MotifForCausalLM"):
-            # Phi4FlashForCausalLM and MotifForCausalLM
-            # only supports DIFFERENTIAL_FLASH_ATTN backend
-            m.setenv("VLLM_ATTENTION_BACKEND", "DIFFERENTIAL_FLASH_ATTN")
+            pytest.skip(
+                "Differential Flash Attention backend has been removed.")
         if model_arch == "GptOssForCausalLM":
             # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
             # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
             # L4 supports FA3.
-            m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+            m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         LLM(

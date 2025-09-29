@@ -3,9 +3,10 @@
 
 from typing import Optional
 
+import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.forward_context import DPMetadata
 from vllm.logger import init_logger
 from vllm.utils import round_up
@@ -27,6 +28,16 @@ def should_ubatch_with_num_tokens(
                                               orig_num_tokens_per_ubatch,
                                               padded_num_tokens_per_ubatch,
                                               dp_size, dp_rank)
+
+
+def check_ubatch_thresholds(config: ParallelConfig, num_tokens: int,
+                            uniform_decode: bool) -> bool:
+    if not config.enable_dbo:
+        return False
+    if uniform_decode:
+        return num_tokens >= config.dbo_decode_token_threshold
+    else:
+        return num_tokens >= config.dbo_prefill_token_threshold
 
 
 def get_dp_padding_ubatch(
@@ -95,11 +106,40 @@ def get_dp_padding_ubatch(
                                             dtype=torch.int32)
     return should_ubatch, num_tokens_after_padding
 
+def create_ubatch_slices(num_scheduled_tokens: np.ndarray, split_point: int) \
+    -> UBatchSlices:
+    # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
+    # in cu_num_tokens directly (i.e. query_start_loc)
+    cu_num_tokens = np.zeros(len(num_scheduled_tokens) + 1, dtype=np.int32)
+    np.cumsum(num_scheduled_tokens, dtype=np.int32, out=cu_num_tokens[1:])
+
+    first_ubatch_token_slice = slice(0, split_point)
+    second_ubatch_token_slice = slice(split_point, cu_num_tokens[-1])
+
+    # Determine request slices using exclusive stop semantics
+    # First ubatch includes requests whose tokens overlap [0, split_point)
+    first_ubatch_req_stop = int(
+        np.searchsorted(cu_num_tokens, split_point, side="left"))
+    first_ubatch_req_slice = slice(0, first_ubatch_req_stop)
+
+    # Second ubatch starts at the request that contains the split_point
+    # or the request starting exactly at split_point (if on boundary)
+    second_ubatch_req_start = int(
+        np.searchsorted(cu_num_tokens, split_point, side="right") - 1)
+    second_ubatch_req_slice = slice(second_ubatch_req_start,
+                                    len(cu_num_tokens) - 1)
+
+    return [
+        UBatchSlice(first_ubatch_req_slice, first_ubatch_token_slice),
+        UBatchSlice(second_ubatch_req_slice, second_ubatch_token_slice)
+    ]
+
 
 def ubatch_split(
-    max_num_scheduled_tokens: int,
+    num_scheduled_tokens_per_request: np.ndarray,
     num_tokens_unpadded: int,
     num_tokens_padded: int,
+    uniform_decode: bool,
     vllm_config: VllmConfig,
 ) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
     """
@@ -122,17 +162,20 @@ def ubatch_split(
         return (None, None)
 
     # Check preconditions for microbatching
-    should_attempt_ubatching = \
-        parallel_config.enable_dbo and \
-        num_tokens_unpadded >= \
-        parallel_config.dbo_decode_token_threshold \
-        and max_num_scheduled_tokens == 1
+    should_attempt_ubatching = check_ubatch_thresholds(
+        parallel_config,
+        num_tokens_unpadded,
+        uniform_decode=uniform_decode,
+    )
 
     # Don't microbatch unless every other DP worker is also microbatching
-    num_tokens_after_padding = None
-    (should_ubatch, num_tokens_after_padding) = get_dp_padding_ubatch(
-        num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching,
-        vllm_config)
+    should_ubatch, num_tokens_after_padding = get_dp_padding_ubatch(
+        num_tokens_unpadded,
+        num_tokens_padded,
+        should_attempt_ubatching,
+        vllm_config,
+    )
+
     if not should_ubatch:
         return (None, None)
 
@@ -141,15 +184,9 @@ def ubatch_split(
     # to the second ubatch in pad_out_ubatch_slice after attention
     # metadata creation
     assert num_tokens_after_padding is not None
-    total_num_tokens_per_ubatch = int(num_tokens_after_padding[0].item())
-    padded_first_ubatch_slice = slice(0, total_num_tokens_per_ubatch)
-    padded_second_ubatch_slice = slice(total_num_tokens_per_ubatch,
-                                       num_tokens_unpadded)
+    token_split_point = int(num_tokens_after_padding[0].item())
 
-    # Note there's an assumption here that there's 1 token per request
-    ubatch_slices = [
-        UBatchSlice(padded_first_ubatch_slice, padded_first_ubatch_slice),
-        UBatchSlice(padded_second_ubatch_slice, padded_second_ubatch_slice)
-    ]
+    ubatch_slices = create_ubatch_slices(num_scheduled_tokens_per_request,
+                                         token_split_point)
 
     return (ubatch_slices, num_tokens_after_padding)

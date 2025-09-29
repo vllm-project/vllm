@@ -35,9 +35,7 @@ from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
 from vllm.model_executor.models.radio import RadioModel
 from vllm.model_executor.models.utils import (flatten_bn,
                                               init_vllm_registered_model,
-                                              maybe_prefix,
-                                              merge_multimodal_embeddings)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+                                              maybe_prefix)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, MultiModalKwargsItems,
@@ -870,8 +868,8 @@ class NanoNemotronVLDummyInputsBuilder(
     info=NanoNemotronVLProcessingInfo,
     dummy_inputs=NanoNemotronVLDummyInputsBuilder,
 )
-class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
-                        SupportsMultiModal):
+class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
+                           SupportsMultiModal):
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -1097,8 +1095,8 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
 
         return modalities
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         # Validate the multimodal input keyword arguments
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if modalities is None:
@@ -1121,30 +1119,6 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
                 multimodal_embeddings += video_embeddings
 
         return multimodal_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-
-        if (multimodal_embeddings is not None
-                and len(multimodal_embeddings) != 0):
-            context_token_ids = [
-                token_id for token_id in (self.img_context_token_id,
-                                          self.video_context_token_id)
-                if token_id is not None
-            ]
-            assert len(context_token_ids) >= 1
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                context_token_ids,
-            )
-
-        return inputs_embeds
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
@@ -1184,10 +1158,8 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         adapter_dict = dict(self.mlp1.named_parameters())
@@ -1244,7 +1216,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
 
         try:
             print("=" * 100)
-            print("NemotronH_Nano_VL Model Architecture")
+            print("NemotronH_Nano_VL_V2 Model Architecture")
             print("=" * 100)
 
             total_params = 0
@@ -1328,7 +1300,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
             component_info[component]["size"] += param.numel()
 
         return {
-            "model_name": "NemotronH_Nano_VL",
+            "model_name": "NemotronH_Nano_VL_V2",
             "total_parameters": total_params,
             "memory_estimate_mb": total_params * 2 / (1024**2),  # bfloat16
             "components": component_info,
