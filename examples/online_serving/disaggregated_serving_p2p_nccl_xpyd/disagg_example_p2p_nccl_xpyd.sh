@@ -30,7 +30,7 @@ PREFILL_GPUS=${PREFILL_GPUS:-0}
 DECODE_GPUS=${DECODE_GPUS:-1,2,3}
 PREFILL_PORTS=${PREFILL_PORTS:-20003}
 DECODE_PORTS=${DECODE_PORTS:-20005,20007,20009}
-ASYNC_TRANSFER=${ASYNC_TRANSFER:-true}
+ASYNC_TRANSFER=${ASYNC_TRANSFER:-false}
 
 echo "Warning: P2P NCCL disaggregated prefill XpYd support for vLLM v1 is experimental and subject to change."
 echo ""

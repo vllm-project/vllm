@@ -89,24 +89,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
             port_offset=self._rank,
         ) if role == KVConnectorRole.WORKER else None
 
-    def _should_transfer_async(
-            self, kv_transfer_config: Optional[KVTransferConfig]) -> bool:
-        if kv_transfer_config is None:
-            logger.info("P2P NCCL: No config found, using sync mode")
-            return False
-
-        # Check for async mode in extra config
-        extra_config = getattr(kv_transfer_config, 'kv_connector_extra_config',
-                               {})
-        if extra_config is None:
-            extra_config = {}
-
-        async_transfer = extra_config.get('enable_async_transfer', False)
-        logger.info(
-            f"P2P NCCL connector initialized with async_transfer={async_transfer}"
-        )
-        return async_transfer
-
     # ==============================
     # Worker-side methods
     # ==============================
@@ -128,7 +110,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
         # Only consumer/decode loads KV Cache
         if self.is_producer:
             return
-        logger.debug("start_load_kv, is_producer:%s", self.is_producer)
 
         assert self.p2p_nccl_engine is not None
 
@@ -163,7 +144,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
             Returns:
                 None. The function modifies `layer` in-place.
             """
-            logger.debug("inject_kv_into_layer, tensor_id:%s", tensor_id)
             if (self._use_mla or layer.shape[1] == 2):  # MLA or FlashInfer
                 num_block = kv_cache.shape[0]
                 self.check_tensors_except_dim(layer, kv_cache, 0)
@@ -199,7 +179,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         # Load the KV for each request each layer
         for request in metadata.requests:
-            logger.info("loading KV for request:%s", request.request_id)
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, False)
             remote_address = ip + ":" + str(port + self._rank)
@@ -410,8 +389,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  block_size=self._block_size)
                 continue
             if new_req.req_id in self._requests_need_load:
-                logger.debug("consumer add_request new, request_id:%s",
-                             new_req.req_id)
                 meta.add_request(request_id=new_req.req_id,
                                  token_ids=new_req.prompt_token_ids,
                                  block_ids=new_req.block_ids[0],
@@ -493,20 +470,31 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self.chunked_prefill.pop(request.request_id, None)
 
-        if not self._async_transfer:
-            return False, None
+        return self._async_transfer, None
 
-        return True, None
-        # assert self.p2p_nccl_engine is not None
-        # no_compile_layers = (
-        #     self._vllm_config.compilation_config.static_forward_context)
-
-        # return self.p2p_nccl_engine.request_finished(
-        #     request.request_id, no_compile_layers)
 
     # ==============================
     # Static methods
     # ==============================
+
+    @staticmethod
+    def _should_transfer_async(
+            kv_transfer_config: Optional[KVTransferConfig]) -> bool:
+        if kv_transfer_config is None:
+            logger.info("P2P NCCL: No config found, using sync mode")
+            return False
+
+        # Check for async mode in extra config
+        extra_config = getattr(kv_transfer_config, 'kv_connector_extra_config',
+                               {})
+        if extra_config is None:
+            extra_config = {}
+
+        async_transfer = extra_config.get('enable_async_transfer', False)
+        logger.info(
+            f"P2P NCCL connector initialized with async_transfer={async_transfer}"
+        )
+        return async_transfer
 
     @staticmethod
     def parse_request_id(request_id: str, is_prefill=True) -> tuple[str, int]:
