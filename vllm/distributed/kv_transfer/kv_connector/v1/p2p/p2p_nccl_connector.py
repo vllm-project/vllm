@@ -85,6 +85,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self.p2p_nccl_engine = P2pNcclEngine(
             local_rank=self._local_rank,
             config=self.config,
+            async_transfer=self._async_transfer,
             hostname="",
             port_offset=self._rank,
         ) if role == KVConnectorRole.WORKER else None
@@ -471,7 +472,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self.chunked_prefill.pop(request.request_id, None)
 
         return self._async_transfer, None
-
 
     # ==============================
     # Static methods

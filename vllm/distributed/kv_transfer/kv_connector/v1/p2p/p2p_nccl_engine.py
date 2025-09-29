@@ -69,10 +69,12 @@ class P2pNcclEngine:
     def __init__(self,
                  local_rank: int,
                  config: KVTransferConfig,
+                 async_transfer: bool,
                  hostname: str = "",
                  port_offset: int = 0,
                  library_path: Optional[str] = None) -> None:
         self.config = config
+        self._async_transfer = async_transfer
         self.rank = port_offset
         self.local_rank = local_rank
         self.device = torch.device(f"cuda:{self.local_rank}")
@@ -530,6 +532,33 @@ class P2pNcclEngine:
             call to this method (this call or a prior one).
         """
 
+        if self._async_transfer:
+            return self._get_finished_async(finished_req_ids,
+                                            no_compile_layers)
+        else:
+            return self._get_finished_sync(finished_req_ids, no_compile_layers)
+
+    def _get_finished_sync(
+            self, finished_req_ids: set[str], no_compile_layers
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        for request_id in finished_req_ids:
+            for layer_name in no_compile_layers:
+                tensor_id = request_id + "#" + layer_name
+                if tensor_id in self.recv_store:
+                    with self.recv_store_cv:
+                        tensor = self.recv_store.pop(tensor_id, None)
+                        self.send_request_id_to_tensor_ids.pop(
+                            request_id, None)
+                        self.recv_request_id_to_tensor_ids.pop(
+                            request_id, None)
+                    if isinstance(tensor, tuple):
+                        addr, _, _ = tensor
+                        self.pool.free(addr)
+        return None, None
+
+    def _get_finished_async(
+            self, finished_req_ids: set[str], no_compile_layers
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
 
@@ -573,7 +602,7 @@ class P2pNcclEngine:
             self.recv_request_id_to_done_tensor_ids.pop(request_id, None)
             self.recv_request_id_to_tensor_ids.pop(request_id, None)
 
-        return finished_sending or None, finished_recving or None
+        return finished_sending, finished_recving
 
     def ping(self):
         sock = self.context.socket(zmq.DEALER)

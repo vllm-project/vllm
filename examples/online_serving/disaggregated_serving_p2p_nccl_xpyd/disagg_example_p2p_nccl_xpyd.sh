@@ -236,7 +236,7 @@ main() {
     vllm bench serve --port 8000 --seed $(date +%s) \
         --model $MODEL \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
-        --num-prompts 1 --burstiness 100 --request-rate 2 | tee benchmark.log
+        --num-prompts 200 --burstiness 100 --request-rate 2 | tee benchmark.log
 
     echo "Benchmarking done. Cleaning up..."
 
