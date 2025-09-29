@@ -135,7 +135,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
     def all_reduce(self, input_):
         if self._ar_manager is not None:
-            return self._ar_manager.all_reduce(input_)
+            out = self._ar_manager.all_reduce(input_)
+            if out is not None:
+                return out
 
         out = input_.clone()
         if self.device_group is None:

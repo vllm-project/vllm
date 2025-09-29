@@ -114,8 +114,12 @@ class AllReduceManager:
         self.device_group = device_group
         self.cfg = get_current_vllm_config().parallel_config.allreduce_config
         if self.ca_comm is not None:
-            self.cfg.custom_allreduce.max_mib = min(
-                self.ca_comm.max_size / MiB, self.cfg.custom_allreduce.max_mib)
+            if self.cfg.custom_allreduce.max_mib is not None:
+                self.cfg.custom_allreduce.max_mib = min(
+                    self.ca_comm.max_size / MiB,
+                    self.cfg.custom_allreduce.max_mib)
+            else:
+                self.cfg.custom_allreduce.max_mib = self.ca_comm.max_size / MiB
 
     def _allows(self, which: str, input_size: int) -> bool:
         policy = getattr(self.cfg, which)
