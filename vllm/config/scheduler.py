@@ -143,8 +143,8 @@ class SchedulerConfig:
     """
 
     split_prefill_from_chunk: bool = False
-    """Whether to split the prefill request into pure prefill and chunked prefill in a single
-    batch."""
+    """Whether to split the prefill request into pure prefill and chunked
+    prefill in a single batch."""
 
     def compute_hash(self) -> str:
         """
