@@ -10,7 +10,6 @@ import importlib
 import importlib.metadata
 from dataclasses import dataclass
 
-import huggingface_hub
 import lm_eval
 import pytest
 from packaging import version
