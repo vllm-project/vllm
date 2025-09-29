@@ -1,0 +1,100 @@
+{% if not add_generation_prompt is defined %}
+  {% set add_generation_prompt = false %}
+{% endif %}
+{% if not thinking is defined %}
+  {% set thinking = false %}
+{% endif %}
+{% set ns = namespace(is_first=false, is_tool=false, system_prompt='', is_first_sp=true, is_last_user=false, is_only_sys=false, is_prefix=false) %}
+{%- for message in messages %}
+  {%- if message['role'] == 'system' %}
+    {%- if ns.is_first_sp %}
+      {% set ns.system_prompt = ns.system_prompt + message['content'] %}
+      {% set ns.is_first_sp = false %}
+    {%- else %}
+      {% set ns.system_prompt = ns.system_prompt + '\n\n' + message['content'] %}
+    {%- endif %}
+    {% set ns.is_only_sys = true %}
+  {%- endif %}
+{%- endfor %}
+
+{% if tools is defined and tools is not none %}
+  {% set tool_ns = namespace(text='## Tools\nYou have access to the following tools:\n') %}
+  {% for tool in tools %}
+    {% set tool_ns.text = tool_ns.text + '\n### ' + tool.function.name + '\nDescription: ' + tool.function.description + '\n\nParameters: ' + (tool.function.parameters | tojson) + '\n' %}
+  {% endfor %}
+  {% set tool_ns.text = tool_ns.text + "\nIMPORTANT: ALWAYS adhere to this exact format for tool use:\n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>tool_call_name<｜tool▁sep｜>tool_call_arguments<｜tool▁call▁end｜>{{additional_tool_calls}}<｜tool▁calls▁end｜>\n\nWhere:\n\n- `tool_call_name` must be an exact match to one of the available tools\n- `tool_call_arguments` must be valid JSON that strictly follows the tool's Parameters Schema\n- For multiple tool calls, chain them directly without separators or spaces\n" %}
+  {% set ns.system_prompt = ns.system_prompt + '\n\n' + tool_ns.text %}
+{% endif %}
+
+{{ bos_token }}{{ ns.system_prompt }}
+{%- for message in messages %}
+  {%- if message['role'] == 'user' %}
+    {%- set ns.is_tool = false -%}
+    {%- set ns.is_first = false -%}
+    {%- set ns.is_last_user = true -%}
+    {{'<｜User｜>' + message['content']}}
+  {%- endif %}
+  {%- if message['role'] == 'assistant' and message['tool_calls'] is defined and message['tool_calls'] is not none %}
+    {%- if ns.is_last_user or ns.is_only_sys %}
+      {{'<｜Assistant｜></think>'}}
+    {%- endif %}
+    {%- set ns.is_last_user = false -%}
+    {%- set ns.is_first = false %}
+    {%- set ns.is_tool = false -%}
+    {%- for tool in message['tool_calls'] %}
+      {%- if not ns.is_first %}
+        {%- if message['content'] is none %}
+          {{'<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>'+ tool['function']['name'] + '<｜tool▁sep｜>' + tool['function']['arguments']|tojson + '<｜tool▁call▁end｜>'}}
+        {%- else %}
+          {{message['content'] + '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>' + tool['function']['name'] + '<｜tool▁sep｜>' + tool['function']['arguments']|tojson + '<｜tool▁call▁end｜>'}}
+        {%- endif %}
+        {%- set ns.is_first = true -%}
+      {%- else %}
+        {{'<｜tool▁call▁begin｜>'+ tool['function']['name'] + '<｜tool▁sep｜>' + tool['function']['arguments']|tojson + '<｜tool▁call▁end｜>'}}
+      {%- endif %}
+    {%- endfor %}
+    {{'<｜tool▁calls▁end｜><｜end▁of▁sentence｜>'}}
+  {%- endif %}
+  {%- if message['role'] == 'assistant' and (message['tool_calls'] is not defined or message['tool_calls'] is none) %}
+    {%- if ns.is_last_user %}
+      {{'<｜Assistant｜>'}}
+      {%- if message['prefix'] is defined and message['prefix'] and thinking %}
+        {{'<think>'}}
+      {%- else %}
+        {{'</think>'}}
+      {%- endif %}
+    {%- endif %}
+    {%- if message['prefix'] is defined and message['prefix'] %}
+      {%- set ns.is_prefix = true -%}
+    {%- endif %}
+    {%- set ns.is_last_user = false -%}
+    {%- if ns.is_tool %}
+      {{message['content'] + '<｜end▁of▁sentence｜>'}}
+      {%- set ns.is_tool = false -%}
+    {%- else %}
+      {%- set content = message['content'] -%}
+      {%- if '</think>' in content %}
+        {%- set content = content.split('</think>', 1)[1] -%}
+      {%- endif %}
+      {{content + '<｜end▁of▁sentence｜>'}}
+    {%- endif %}
+  {%- endif %}
+  {%- if message['role'] == 'tool' %}
+    {%- set ns.is_last_user = false -%}
+    {%- set ns.is_tool = true -%}
+    {{'<｜tool▁output▁begin｜>' + message['content'] + '<｜tool▁output▁end｜>'}}
+  {%- endif %}
+  {%- if message['role'] != 'system' %}
+    {% set ns.is_only_sys = false %}
+  {%- endif %}
+{%- endfor -%}
+{% if add_generation_prompt and not ns.is_tool%}
+  {% if ns.is_last_user or ns.is_only_sys or not ns.is_prefix %}
+    {{'<｜Assistant｜>'}}
+    {%- if not thinking %}
+      {{'</think>'}}
+    {%- else %}
+      {{'<think>'}}
+    {%- endif %}
+  {% endif %}
+{% endif %}
