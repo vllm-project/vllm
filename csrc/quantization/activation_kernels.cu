@@ -212,9 +212,8 @@ constexpr __nv_bfloat16 get_fp8_min() {
 }
 
 template <typename Idx_t>
-__device__ __forceinline__ int __search(int idx, int n,
-                                        const Idx_t* __restrict__ input,
-                                        Idx_t val) {
+__device__ __forceinline__ int warp_expert_search(
+    int idx, int n, const Idx_t* __restrict__ input, Idx_t val) {
   const Idx_t* input_ptr = input + idx;
   int base_offset = 0;
 
@@ -232,12 +231,6 @@ __device__ __forceinline__ int __search(int idx, int n,
     base_offset += 32;
     idx += 32;
   }
-}
-
-__device__ __forceinline__ unsigned get_lane_id() {
-  unsigned id;
-  asm("mov.u32 %0, %%laneid;" : "=r"(id));
-  return id;
 }
 
 template <int num_parallel_tokens>
@@ -360,7 +353,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   int32_t t_load{};
 
   if (token_id < tokens_upper) {
-    expert_id = __search<int>(lane_id, E, s_expert_offsets, token_id);
+    expert_id = warp_expert_search<int>(lane_id, E, s_expert_offsets, token_id);
     expert_offset = s_expert_offsets[expert_id];
     next_expert_offset = s_expert_offsets[expert_id + 1];
   } else {
@@ -384,6 +377,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   auto load_and_advance_y_pred = [&] {
     if (t_load < t_load_bound) {
+      // Here we are simply continuing to load data
+      // from the current token.
       auto smem_load_ptr_staged = smem_load_ptr + load_stage_offset;
 
       // It is very important that LOAD_STAGE_SIZE is constexpr to avoid
@@ -394,36 +389,47 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       cp_async4(smem_load_ptr_staged, load_ptr);
       load_ptr += GROUP_SIZE / 8;
       ++t_load;
-    } else {
+    } else if (token_id + 1 < tokens_upper) {
+      // We loaded everything from the current token, let's move on
+      // to the next one, and we checked that we have more tokens to load.
       ++token_id;
-      if (token_id < tokens_upper) {
-        t_load = 0;
-
-        if (token_id >= next_expert_offset) {
+      t_load = 0;
+      if (token_id >= next_expert_offset) {
+        // We need to find the next expert.
+        do {
+          // This is a loop because it's possible
+          // that some experts are assigned 0 tokens.
+          // NOTE: We are guaranteed that there's at least
+          // one more token left so we don't have to check for
+          // expert_id bounds.
           ++expert_id;
           // This skips 1 memory read.
           expert_offset = next_expert_offset;
           next_expert_offset = s_expert_offsets[expert_id + 1];
-          base_i = expert_id * (T * (H / 4));
-          token_offset = 0;
-        } else {
-          base_i += H / 4;
-          token_offset++;
-        }
+        } while (next_expert_offset == expert_offset);
 
+        base_i = expert_id * (T * (H / 4));
+        token_offset = 0;
         load_ptr = const_cast<__int128_t*>(input_128_ptr + base_i);
-
-        auto smem_load_ptr_staged = smem_load_ptr + load_stage_offset;
-
-        // It is very important that LOAD_STAGE_SIZE is constexpr to avoid
-        // unnecessary ALU ops.
-        load_stage_offset += LOAD_STAGE_SIZE;
-        load_stage_offset %= LOAD_STAGE_MOD;
-
-        cp_async4(smem_load_ptr_staged, load_ptr);
-        load_ptr += GROUP_SIZE / 8;
-        ++t_load;
+      } else {
+        // We remain within the same expert, so just
+        // move by H/4 __int128_t (2 * H/8).
+        base_i += H / 4;
+        token_offset++;
       }
+
+      load_ptr = const_cast<__int128_t*>(input_128_ptr + base_i);
+
+      auto smem_load_ptr_staged = smem_load_ptr + load_stage_offset;
+
+      // It is very important that LOAD_STAGE_SIZE is constexpr to avoid
+      // unnecessary ALU ops.
+      load_stage_offset += LOAD_STAGE_SIZE;
+      load_stage_offset %= LOAD_STAGE_MOD;
+
+      cp_async4(smem_load_ptr_staged, load_ptr);
+      load_ptr += GROUP_SIZE / 8;
+      ++t_load;
     }
     // We fence even if there is nothing to load to simplify pipelining.
     cp_async_fence();
@@ -439,7 +445,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       reinterpret_cast<__nv_fp8x4_e4m3*>(_y_q) + lane_id;
   auto y_scale_base_ptr = _y_s + warp_position_scales * stride_ys_g;
 
-  while (token_id < tokens_upper) {
+  for (auto j = tokens_lower; j < tokens_upper; j++) {
     const Idx_t base_ys = expert_id * stride_ys_e;
     auto y_s_ptr = y_scale_base_ptr + base_ys + token_offset * stride_ys_t;
     __nv_fp8x4_e4m3* y_q_ptr =
@@ -506,7 +512,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
         y_s_ptr += stride_ys_g;
       }
     }
-  };
+  }
 }
 
 template <typename fp8_type, int32_t NUM_WARPS, typename Idx_t,
