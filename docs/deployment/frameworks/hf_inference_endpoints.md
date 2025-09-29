@@ -1,3 +1,7 @@
+---
+title: Hugging Face Inference Endpoints
+---
+
 # Deploying Hugging Face Models with vLLM and Inference Endpoints
 
 ## Overview
