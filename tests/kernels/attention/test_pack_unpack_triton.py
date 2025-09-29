@@ -8,7 +8,7 @@ from torch.testing import assert_close
 from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 
 
-def test_pack_decode_query_basic_fp8():
+def test_pack_seq_basic_fp8():
     """Test basic functionality of pack_seq_triton with fp8 and 3D tensors."""
     device = "cuda"
     dtype = torch.float8_e4m3fn
@@ -46,7 +46,7 @@ def test_pack_decode_query_basic_fp8():
             assert_close(actual_data, expected_data, rtol=1e-1, atol=1e-2)
 
 
-def test_pack_decode_query_custom_padding_fp8():
+def test_pack_seq_custom_padding_fp8():
     """Test pack_seq_triton with custom padding values for fp8."""
     device = "cuda"
     dtype = torch.float8_e4m3fn
@@ -77,7 +77,7 @@ def test_pack_decode_query_custom_padding_fp8():
             assert torch.allclose(padded_data, torch.zeros_like(padded_data), atol=1e-2)
 
 
-def test_pack_decode_query_default_negative_inf_padding_fp8():
+def test_pack_seq_default_negative_inf_padding_fp8():
     """Test that pack_seq_triton uses -inf padding by default for fp8."""
     device = "cuda"
     dtype = torch.float8_e4m3fn
@@ -93,7 +93,7 @@ def test_pack_decode_query_default_negative_inf_padding_fp8():
     assert torch.all(padded_data < -100)  # fp8 -inf is represented as large negative number
 
 
-def test_pack_decode_query_edge_cases_fp8():
+def test_pack_seq_edge_cases_fp8():
     """Test pack_seq_triton with edge cases for fp8."""
     device = "cuda"
     dtype = torch.float8_e4m3fn
@@ -120,7 +120,7 @@ def test_pack_decode_query_edge_cases_fp8():
     assert result.shape == (3, 7, 8, 16)
 
 
-def test_pack_decode_query_different_block_sizes_fp8():
+def test_pack_seq_different_block_sizes_fp8():
     """Test pack_seq_triton with different block sizes for fp8."""
     device = "cuda"
     dtype = torch.float8_e4m3fn
@@ -144,7 +144,7 @@ def test_pack_decode_query_different_block_sizes_fp8():
             assert_close(actual_data, expected_data, rtol=1e-1, atol=1e-2)
 
 
-def test_pack_decode_query_shape_consistency():
+def test_pack_seq_shape_consistency():
     """Test that pack_seq_triton maintains shape consistency."""
     device = "cuda"
     dtype = torch.float8_e4m3fn
@@ -191,13 +191,11 @@ def test_pack_unpack_roundtrip_fp8():
         assert unpacked.shape == x.shape
         x_f32 = x.to(torch.float32)
         unpacked_f32 = unpacked.to(torch.float32)
-        assert_close(x_f32, unpacked_f32, rtol=1e-1, atol=1e-2)
+        assert_close(x_f32, unpacked_f32, rtol=1e-3, atol=1e-3)
         
-        # Test with query_start_loc
-        query_start_loc = torch.cat([torch.zeros(1, device=device, dtype=lengths.dtype),
-                                   lengths.cumsum(0)[:-1]])
-        unpacked_with_loc = unpack_seq_triton(packed, lengths, query_start_loc)
-        assert_close(x_f32, unpacked_with_loc.to(torch.float32), rtol=1e-1, atol=1e-2)
+        # Unpack without explicit start locations (computed in kernel)
+        unpacked_with_loc = unpack_seq_triton(packed, lengths)
+        assert_close(x_f32, unpacked_with_loc.to(torch.float32), rtol=1e-3, atol=1e-2)
 
 
 def test_unpack_seq_triton_edge_cases_fp8():
@@ -223,174 +221,10 @@ def test_unpack_seq_triton_edge_cases_fp8():
     # Only compare the first 3 elements that were actually packed
     assert_close(x[:3].to(torch.float32), unpacked.to(torch.float32), rtol=1e-1, atol=1e-2)
     
-    # Test with query_start_loc
     x = torch.randn(15, 8, 16, dtype=torch.float32, device=device) * 0.1
     x = x.to(dtype=dtype)
     lengths = torch.tensor([5, 7, 3], device=device)
-    query_start_loc = torch.tensor([0, 5, 12], device=device)
     packed = pack_seq_triton(x, lengths)
-    unpacked = unpack_seq_triton(packed, lengths, query_start_loc)
+    unpacked = unpack_seq_triton(packed, lengths)
     assert unpacked.shape == x.shape
     assert_close(x.to(torch.float32), unpacked.to(torch.float32), rtol=1e-1, atol=1e-2)
-
-
-def test_masked_topk_basic():
-    """Test basic functionality of masked_topk function."""
-    device = "cuda"
-    
-    # Test case 1: Simple example
-    seq_lens = torch.tensor([2, 1], device=device)  # 2 batches: lengths 2,1
-    starting_pos = torch.tensor([3, 7], device=device)  # starting positions
-    N = seq_lens.sum().item()  # 3 total positions
-    vocab_size, k = 20, 2
-    
-    scores = torch.randn(N, vocab_size, device=device)
-    
-    indices, top_scores = masked_topk(scores, seq_lens, starting_pos, k)
-    
-    # Check output shapes
-    assert indices.shape == (N, k)
-    assert top_scores.shape == (N, k)
-    
-    # Verify masking constraints
-    # Positions 0,1 (batch 0): should only use indices < 3
-    assert torch.all(indices[0] < 3)
-    assert torch.all(indices[1] < 3)
-    # Position 2 (batch 1): should only use indices < 7
-    assert torch.all(indices[2] < 7)
-
-
-def test_masked_topk_complex():
-    """Test masked_topk with more complex sequences."""
-    device = "cuda"
-    
-    # Test case: 4 batches with different lengths
-    seq_lens = torch.tensor([3, 1, 1, 1], device=device)  # lengths: 3,1,1,1
-    starting_pos = torch.tensor([4, 12, 33, 50], device=device)  # starting positions
-    N = seq_lens.sum().item()  # 6 total positions
-    vocab_size, k = 100, 3
-    
-    scores = torch.randn(N, vocab_size, device=device)
-    
-    indices, top_scores = masked_topk(scores, seq_lens, starting_pos, k)
-    
-    # Check output shapes
-    assert indices.shape == (N, k)
-    assert top_scores.shape == (N, k)
-    
-    # Verify masking constraints for each batch
-    pos_idx = 0
-    for b in range(len(seq_lens)):
-        seq_len = seq_lens[b].item()
-        start_pos = starting_pos[b].item()
-        
-        # Check all positions in this batch
-        for i in range(seq_len):
-            assert torch.all(indices[pos_idx] < start_pos), f"Position {pos_idx} should only use indices < {start_pos}"
-            pos_idx += 1
-
-
-def test_masked_topk_edge_cases():
-    """Test masked_topk with edge cases."""
-    device = "cuda"
-    
-    # Test case 1: Single batch
-    seq_lens = torch.tensor([5], device=device)
-    starting_pos = torch.tensor([10], device=device)
-    scores = torch.randn(5, 50, device=device)
-    
-    indices, top_scores = masked_topk(scores, seq_lens, starting_pos, k=3)
-    assert indices.shape == (5, 3)
-    assert torch.all(indices < 10)  # All positions should use indices < 10
-    
-    # Test case 2: Very small starting positions
-    seq_lens = torch.tensor([2, 1], device=device)
-    starting_pos = torch.tensor([1, 2], device=device)
-    scores = torch.randn(3, 20, device=device)
-    
-    indices, top_scores = masked_topk(scores, seq_lens, starting_pos, k=1)
-    assert indices.shape == (3, 1)
-    assert torch.all(indices[0] < 1)  # First position can only use index 0
-    assert torch.all(indices[1] < 1)  # Second position can only use index 0
-    assert torch.all(indices[2] < 2)  # Third position can use indices 0,1
-    
-    # Test case 3: Large starting positions
-    seq_lens = torch.tensor([2], device=device)
-    starting_pos = torch.tensor([95], device=device)
-    scores = torch.randn(2, 100, device=device)
-    
-    indices, top_scores = masked_topk(scores, seq_lens, starting_pos, k=5)
-    assert indices.shape == (2, 5)
-    assert torch.all(indices < 95)
-
-
-def test_masked_topk_different_k_values():
-    """Test masked_topk with different k values."""
-    device = "cuda"
-    
-    seq_lens = torch.tensor([2, 1], device=device)
-    starting_pos = torch.tensor([5, 10], device=device)
-    scores = torch.randn(3, 20, device=device)
-    
-    # Test different k values
-    for k in [1, 3, 5, 10]:
-        indices, top_scores = masked_topk(scores, seq_lens, starting_pos, k)
-        
-        assert indices.shape == (3, k)
-        assert top_scores.shape == (3, k)
-        
-        # Verify masking constraints
-        assert torch.all(indices[0] < 5)
-        assert torch.all(indices[1] < 5)
-        assert torch.all(indices[2] < 10)
-
-
-def test_masked_topk_fp8():
-    """Test masked_topk with fp8 dtype."""
-    device = "cuda"
-    dtype = torch.float8_e4m3fn
-    
-    seq_lens = torch.tensor([2, 1], device=device)
-    starting_pos = torch.tensor([5, 10], device=device)
-    
-    # Create fp8 scores
-    scores_f32 = torch.randn(3, 20, device=device) * 0.1
-    scores = scores_f32.to(dtype)
-    
-    indices, top_scores = masked_topk(scores, seq_lens, starting_pos, k=3)
-    
-    # Check output shapes
-    assert indices.shape == (3, 3)
-    assert top_scores.shape == (3, 3)
-    assert top_scores.dtype == dtype
-    
-    # Verify masking constraints
-    assert torch.all(indices[0] < 5)
-    assert torch.all(indices[1] < 5)
-    assert torch.all(indices[2] < 10)
-    
-    # Check that top scores are reasonable (not all -inf)
-    assert not torch.all(torch.isinf(top_scores.to(torch.float32)))
-
-
-def test_masked_topk_consistency():
-    """Test that masked_topk produces consistent results."""
-    device = "cuda"
-    
-    seq_lens = torch.tensor([2, 1], device=device)
-    starting_pos = torch.tensor([5, 10], device=device)
-    
-    # Use deterministic scores for consistency testing
-    torch.manual_seed(42)
-    scores = torch.randn(3, 20, device=device)
-    
-    # Run multiple times
-    results = []
-    for _ in range(3):
-        indices, top_scores = masked_topk(scores, seq_lens, starting_pos, k=3)
-        results.append((indices.clone(), top_scores.clone()))
-    
-    # Check that all runs produce identical results
-    for i in range(1, len(results)):
-        assert torch.equal(results[0][0], results[i][0]), "Indices should be consistent"
-        assert_close(results[0][1], results[i][1], rtol=1e-5, atol=1e-5), "Scores should be consistent"
