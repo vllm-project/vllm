@@ -212,6 +212,8 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                     # attempted to load as other weights later
                     is_expert_weight = True
                     name_mapped = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
                     if is_fused_expert:
                         loaded_weight = loaded_weight.transpose(-1,
                                                                 -2)  # no bias
@@ -230,8 +232,6 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                                 name_mapped, params_dict, loaded_weight,
                                 shard_id, num_experts)
                     else:
-                        if is_pp_missing_parameter(name_mapped, self):
-                            continue
                         # Skip loading extra parameters for GPTQ/modelopt models
                         if name_mapped.endswith(
                                 ignore_suffixes
@@ -322,7 +322,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         self.visual = Qwen3_VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
             use_data_parallel=self.use_data_parallel,
         )
