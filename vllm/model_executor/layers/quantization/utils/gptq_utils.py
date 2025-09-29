@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from fractions import Fraction
 from types import MappingProxyType
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import regex as re
 import torch
@@ -14,8 +14,12 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod)
 
-from ..gptq import GPTQConfig
-from ..gptq_marlin import GPTQMarlinConfig
+if TYPE_CHECKING:
+    from ..gptq import GPTQConfig
+    from ..gptq_marlin import GPTQMarlinConfig
+else:
+    GPTQConfig = object
+    GPTQMarlinConfig = object
 
 
 # Match dynamic rules with module name (prefix) and override quantize
