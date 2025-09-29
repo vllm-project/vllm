@@ -912,7 +912,7 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module,
     # requantize the weight and input to the specific scale
     # at the same time.
     should_use_deepgemm = should_use_deepgemm_for_fp8_linear(
-        torch.bfloat16, layer.weight)
+        layer.orig_dtype, layer.weight)
     if is_deep_gemm_e8m0_used() and should_use_deepgemm:
         block_sz = tuple(layer.weight_block_size)
         requant_weight_ue8m0_inplace(layer.weight.data,
