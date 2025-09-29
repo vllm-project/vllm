@@ -16,6 +16,7 @@ from vllm.attention.ops.flashmla import (flash_mla_sparse_prefill,
                                          get_mla_metadata)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
@@ -23,7 +24,6 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -306,9 +306,8 @@ class FlashMLASparseMetadataBuilder(
                                              dtype=torch.int32,
                                              device=self.device)
         self.num_speculative_tokens = (
-            vllm_config.speculative_config.num_speculative_tokens 
-            if vllm_config.speculative_config else 0
-        )
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config else 0)
         self.reorder_batch_threshold += self.num_speculative_tokens
 
         # Equation taken from FlashMLA/csrc/pybind.cpp
@@ -327,7 +326,8 @@ class FlashMLASparseMetadataBuilder(
         self.num_splits_buffer = torch.empty(
             # We pack all the tokens into one batch for sparse attention.
             # Otherwise, we can exceed the sm of `get_mla_metadata`.
-            (2, ),
+            (
+                2, ),
             dtype=torch.int32,
             device=device)
         self.req_id_per_token_buffer = torch.empty(
@@ -422,7 +422,8 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer = indexer.topk_indices_buffer
-        self.padding = 128 if current_platform.is_device_capability(100) else 64
+        self.padding = 128 if current_platform.is_device_capability(
+            100) else 64
 
     def _forward_bf16_kv(
             self, q: torch.Tensor, kv_c_and_k_pe_cache: torch.Tensor,
@@ -432,13 +433,12 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1])
 
-        # NOTE(Chen): kernel requires num_local_head to be a multiple of 
+        # NOTE(Chen): kernel requires num_local_head to be a multiple of
         # 64 on hopper and 128 on blackwell
         if self.num_heads % self.padding != 0:
             assert self.padding % self.num_heads == 0
-            logger.warning_once(
-                f"padding num_heads to {self.padding} due to sparse attn kernel requirement"
-            )
+            logger.warning_once(f"padding num_heads to {self.padding} \
+                    due to sparse attn kernel requirement")
             q_padded = q.new_empty((q.shape[0], self.padding, q.shape[2]))
             q_padded[:, :self.num_heads, :] = q
             q = q_padded

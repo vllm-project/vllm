@@ -5,13 +5,12 @@
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
-
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
+from vllm import _custom_ops as ops
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -128,9 +127,9 @@ def create_and_prepopulate_kv_cache(
                                entry_size,
                                dtype=torch.uint8,
                                device=device)
-        scale_tensor = (scale if isinstance(scale, torch.Tensor) else
-                        torch.tensor(scale, dtype=torch.float32,
-                                     device=device))
+        scale_tensor = (scale
+                        if isinstance(scale, torch.Tensor) else torch.tensor(
+                            scale, dtype=torch.float32, device=device))
         scale_tensor = scale_tensor.to(device=device, dtype=torch.float32)
     else:
         # Create MLA KV cache: (num_blocks, block_size, head_size)
@@ -154,8 +153,7 @@ def create_and_prepopulate_kv_cache(
         start = start_block_idx * block_size
 
         if use_fp8_ds_mla:
-            slots = torch.arange(context_len,
-                                 device=device,
+            slots = torch.arange(context_len, device=device,
                                  dtype=torch.long) + start
             ops.concat_and_cache_mla(
                 kv_c_context,
@@ -166,8 +164,8 @@ def create_and_prepopulate_kv_cache(
                 scale=scale_tensor,
             )
         else:
-            kv_context = torch.cat([kv_c_context, k_pe_context.squeeze(1)],
-                                   dim=-1)
+            kv_context = torch.cat(
+                [kv_c_context, k_pe_context.squeeze(1)], dim=-1)
             end = start + kv_context.shape[0]
             kv_cache_flat[start:end, ...] = kv_context
 

@@ -410,9 +410,7 @@ class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
         """
         hf_config = vllm_config.model_config.hf_config
 
-        is_v32 = hasattr(
-            hf_config, "index_topk"
-        )
+        is_v32 = hasattr(hf_config, "index_topk")
 
         if is_v32:
             # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
@@ -421,7 +419,8 @@ class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
             if cache_config.cache_dtype == "auto" or \
                 cache_config.cache_dtype.startswith("fp8"):
                 cache_config.cache_dtype = "fp8_ds_mla"
-                logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
+                logger.info(
+                    "Using custom fp8 kv-cache format for DeepSeekV3.2")
             if cache_config.cache_dtype == "bfloat16":
                 cache_config.cache_dtype = "auto"
                 logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")

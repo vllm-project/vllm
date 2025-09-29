@@ -53,20 +53,20 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.eh_proj = nn.Linear(config.hidden_size * 2,
                                  config.hidden_size,
                                  bias=False)
-        
-        self.is_v32 = hasattr(
-            config, "index_topk"
-        )
+
+        self.is_v32 = hasattr(config, "index_topk")
         if self.is_v32:
             topk_tokens = config.attn_module_list_cfg[0]["topk_tokens"]
-            topk_indices_buffer = torch.empty(vllm_config.scheduler_config.max_num_batched_tokens,
-                                              topk_tokens,
-                                              dtype=torch.int32,
-                                              device="cuda")
+            topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                topk_tokens,
+                dtype=torch.int32,
+                device="cuda")
         else:
             topk_indices_buffer = None
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
-        self.mtp_block = DeepseekV2DecoderLayer(vllm_config, prefix, topk_indices_buffer)
+        self.mtp_block = DeepseekV2DecoderLayer(vllm_config, prefix,
+                                                topk_indices_buffer)
 
     def forward(
         self,

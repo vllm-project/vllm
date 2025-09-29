@@ -1101,7 +1101,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-    
+
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi

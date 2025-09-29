@@ -16,8 +16,8 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
@@ -210,15 +210,13 @@ class EagleProposer:
             self.runner.attn_groups[0][0].metadata_builders[ubatch_id]
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0)
-         # FIXME: support hybrid kv for draft model (remove separate indexer)
+        # FIXME: support hybrid kv for draft model (remove separate indexer)
         if self.draft_indexer_metadata_builder:
             draft_indexer_metadata = (
-                self.draft_indexer_metadata_builder
-                .build_for_drafting(
+                self.draft_indexer_metadata_builder.build_for_drafting(
                     common_attn_metadata=common_attn_metadata,
                     draft_index=0,
-                )
-            )
+                ))
         else:
             draft_indexer_metadata = None
         # At this moment, we assume all eagle layers belong to the same KV
@@ -862,8 +860,8 @@ class EagleProposer:
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
         # FIXME: support hybrid kv for draft model
         target_indexer_layer_names = set(
-            get_layers_from_vllm_config(
-                self.vllm_config, DeepseekV32IndexerCache).keys())
+            get_layers_from_vllm_config(self.vllm_config,
+                                        DeepseekV32IndexerCache).keys())
 
         from vllm.compilation.backends import set_model_tag
         with set_model_tag("eagle_head"):
@@ -873,23 +871,23 @@ class EagleProposer:
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
-        indexer_layers = get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache)
-        draft_indexer_layer_names = (indexer_layers.keys() - target_indexer_layer_names)
+        indexer_layers = get_layers_from_vllm_config(self.vllm_config,
+                                                     DeepseekV32IndexerCache)
+        draft_indexer_layer_names = (indexer_layers.keys() -
+                                     target_indexer_layer_names)
         self.attn_layer_names = list(draft_attn_layer_names)
         self.indexer_layer_names = list(draft_indexer_layer_names)
 
         if self.indexer_layer_names:
             first_layer = self.indexer_layer_names[0]
             self.draft_indexer_metadata_builder = (
-                indexer_layers[first_layer]
-                    .get_attn_backend()
-                    .get_builder_cls()(
-                        indexer_layers[first_layer].get_kv_cache_spec(),
-                        self.indexer_layer_names,
-                        self.vllm_config,
-                        self.device,
-                    )
-            )
+                indexer_layers[first_layer].get_attn_backend().get_builder_cls(
+                )(
+                    indexer_layers[first_layer].get_kv_cache_spec(),
+                    self.indexer_layer_names,
+                    self.vllm_config,
+                    self.device,
+                ))
         else:
             self.draft_indexer_metadata_builder = None
 

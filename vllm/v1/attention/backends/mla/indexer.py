@@ -71,7 +71,8 @@ class DeepSeekV32IndexerDecodeMetadata:
 @dataclass
 class DeepseekV32IndexerMetadata:
 
-    #FIXME (zyongye) hacky way to access the data now, need to be in chunked meta
+    # FIXME (zyongye)
+    # hacky way to access the data now, need to be in chunked meta
     seq_lens: torch.Tensor
 
     num_reqs: int
@@ -100,18 +101,24 @@ def kv_spans_from_batches(start_seq_loc: torch.Tensor,
                           seq_len_per_batch: torch.Tensor):
     """
     Args:
-      start_seq_loc: 1D long tensor [B+1], cumulative counts of selected tokens per batch.
-                     Example: [0, 2, 4, 7] -> batch sizes (selected) [2, 2, 3], N=7 tokens total.
-      seq_len_per_batch: 1D long tensor [B], full sequence length (KV length) of each batch.
+      start_seq_loc: 1D long tensor [B+1], cumulative counts of 
+                     selected tokens per batch.
+            Example: [0, 2, 4, 7] -> 
+                     batch sizes (selected) [2, 2, 3], N=7 tokens total.
+      seq_len_per_batch: 1D long tensor [B], 
+                         full sequence length (KV length) of each batch.
                          Example: [5, 9, 4].
 
     Returns:
-      start_tensor: 1D long tensor [N], start offset in the concatenated KV cache for each token's batch.
-      end_location: 1D long tensor [N], **exclusive** end = start + token's local position.
+      start_tensor: 1D long tensor [N], start offset in the 
+                    concatenated KV cache for each token's batch.
+      end_location: 1D long tensor [N], 
+                    **exclusive** end = start + token's local position.
                     (So the attended KV slice is kv[start:end].)
 
-    Assumes each batch contributes its full `seq_len_per_batch[i]` keys to the KV cache, and
-    the selected tokens within a batch are the **last** `counts[i]` positions of that sequence.
+    Assumes each batch contributes its full `seq_len_per_batch[i]` 
+    keys to the KV cache, andthe selected tokens within a batch 
+    are the **last** `counts[i]` positions of that sequence.
     """
     q = start_seq_loc.to(dtype=torch.long)
     L = seq_len_per_batch.to(dtype=torch.long, device=q.device)
@@ -154,7 +161,8 @@ def kv_spans_from_batches(start_seq_loc: torch.Tensor,
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
-    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    # max_num_batched_tokens = \
+    #     vllm_config.scheduler_config.max_num_batched_tokens
     max_num_seq = vllm_config.scheduler_config.max_num_seqs
     # NOTE(Chen): an estimated max size of flattened_kv. Need to double check.
     return max_model_len * max_num_seq
@@ -165,31 +173,31 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         AttentionCGSupport.UNIFORM_BATCH
 
     reorder_batch_threshold: ClassVar[int] = 1
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
-        # NOTE(Chen): an estimated max size of flattened_kv. Need to double check.
+        #NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(
             self.vllm_config)
         self.num_speculative_tokens = (
-            self.vllm_config.speculative_config.num_speculative_tokens 
-            if self.vllm_config.speculative_config else 0
-        )
+            self.vllm_config.speculative_config.num_speculative_tokens
+            if self.vllm_config.speculative_config else 0)
         self.reorder_batch_threshold += self.num_speculative_tokens
 
         props = torch.cuda.get_device_properties(self.device)
         sm_count = props.multi_processor_count
-        self.num_sms = sm_count 
+        self.num_sms = sm_count
 
         self.decode_lens_buffer = torch.empty(
             (scheduler_config.max_num_seqs, ),
             dtype=torch.int32,
             device=self.device)
 
-        # See: DeepGMM/csrc/apis/attention.hpp 
-        self.scheduler_metadata_buffer = torch.empty(
-            (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
-        )
+        # See: DeepGMM/csrc/apis/attention.hpp
+        self.scheduler_metadata_buffer = torch.empty((self.num_sms + 1, 2),
+                                                     dtype=torch.int32,
+                                                     device=self.device)
 
     def build(self,
               common_prefix_len: int,
@@ -238,14 +246,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         decode_metadata = None
         if num_decodes > 0:
-            torch.diff(common_attn_metadata.query_start_loc[:num_decodes+1],
+            torch.diff(common_attn_metadata.query_start_loc[:num_decodes + 1],
                        out=self.decode_lens_buffer[:num_decodes])
             decode_lens = self.decode_lens_buffer[:num_decodes]
             decode_lens_cpu = torch.diff(
-                common_attn_metadata.query_start_loc_cpu[:num_decodes+1])
-            
-            # Use CPU to avoid GPU sync; breaking async scheduling            
-            requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()
+                common_attn_metadata.query_start_loc_cpu[:num_decodes + 1])
+
+            # Use CPU to avoid GPU sync; breaking async scheduling
+            requires_padding = (decode_lens_cpu.max()
+                                > decode_lens_cpu.min()).item()
 
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
 
