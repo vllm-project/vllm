@@ -3077,7 +3077,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # the num_tokens_after_padding for a single ubatch, but we have 2
             # TODO(sage,lucas): this is cruft that should be addressed in the
             # padding refactor.
-            num_tokens_after_padding = ubatch_num_tokens_after_padding * 2
+            num_tokens_after_padding = ubatch_num_tokens_after_padding * 2 if ubatch_num_tokens_after_padding is not None else None
 
         # If we failed to microbatch, currently need to resynchronize
         # TODO(lucas,sage): we should be able to avoid this second sync by
