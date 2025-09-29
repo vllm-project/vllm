@@ -204,9 +204,11 @@ class P2pNcclEngine:
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
     ) -> bool:
-        logger.debug("send_tensor, tensor_id:%s, tensor_size:%d, remote_address:%s, send_type:%s",
-                     tensor_id, tensor.element_size() * tensor.numel(),
-                     remote_address, self.send_type)
+        logger.debug(
+            "send_tensor, tensor_id:%s, tensor_size:%d, remote_address:%s, send_type:%s",
+            tensor_id,
+            tensor.element_size() * tensor.numel(), remote_address,
+            self.send_type)
         if remote_address is None:
             with self.recv_store_cv:
                 self.recv_store[tensor_id] = tensor
@@ -224,7 +226,8 @@ class P2pNcclEngine:
             with self.send_queue_cv:
                 self.send_queue.append(item)
                 self.send_queue_cv.notify()
-                logger.debug("send_queue_cv.notify, tensor_id:%s", item.tensor_id)
+                logger.debug("send_queue_cv.notify, tensor_id:%s",
+                             item.tensor_id)
             return True
 
         # GET
@@ -263,6 +266,7 @@ class P2pNcclEngine:
 
     def recv_tensor(
         self,
+        request_id: str,
         tensor_id: str,
         remote_address: typing.Optional[str] = None,
         async_transfer: bool = False,
@@ -272,13 +276,23 @@ class P2pNcclEngine:
             The received tensor, or `None` if no tensor is received,
             or False if the tensor is already injected into the layer.
         """
-        if tensor_id in self.recv_request_id_to_done_tensor_ids:
+        logger.debug(
+            "recv_tensor, tensor_id:%s, remote_address:%s, async_transfer:%s",
+            tensor_id, remote_address, async_transfer)
+        if request_id in self.recv_request_id_to_done_tensor_ids and \
+            tensor_id in self.recv_request_id_to_done_tensor_ids[request_id]:
+            logger.debug(
+                "recv_tensor, request_id:%s, tensor_id:%s, already injected into the layer",
+                request_id, tensor_id)
             return False
 
         if self.send_type == "PUT" or self.send_type == "PUT_ASYNC":
             start_time = time.time()
             with self.recv_store_cv:
                 while tensor_id not in self.recv_store:
+                    logger.debug(
+                        "recv_tensor, tensor_id:%s not in recv_store, waiting",
+                        tensor_id)
                     self.recv_store_cv.wait()
                 tensor = self.recv_store[tensor_id]
 
@@ -365,6 +379,9 @@ class P2pNcclEngine:
                     self.router_socket.send_multipart([remote_address, b"0"])
                     comm, rank = self.comms[remote_address.decode()]
                     self.recv(comm, tensor, rank ^ 1, self.recv_stream)
+                    logger.debug(
+                        "listen_for_requests, recv tensor, tensor_id:%s",
+                        tensor_id)
                     tensor_size = tensor.element_size() * tensor.numel()
                     if (self.buffer_size + tensor_size
                             > self.buffer_size_threshold):
@@ -432,6 +449,7 @@ class P2pNcclEngine:
         self.recv_request_id_to_tensor_ids[request_id].add(tensor_id)
 
     def have_injected_tensor_id(self, tensor_id: str):
+        logger.debug("have_injected_tensor_id, tensor_id:%s", tensor_id)
         request_id = tensor_id.split('#')[0]
         if request_id not in self.recv_request_id_to_done_tensor_ids:
             self.recv_request_id_to_done_tensor_ids[request_id] = set()
@@ -460,7 +478,8 @@ class P2pNcclEngine:
             start_time = time.time()
             with self.send_queue_cv:
                 while self.send_queue:
-                    logger.debug("wait_for_sent, send_queue:%s", [item.tensor_id for item in self.send_queue])
+                    logger.debug("wait_for_sent, send_queue:%s",
+                                 [item.tensor_id for item in self.send_queue])
                     self.send_queue_cv.wait()
             duration = time.time() - start_time
             logger.debug(
@@ -522,30 +541,94 @@ class P2pNcclEngine:
         finished_recving: set[str] = set()
 
         # Clear the buffer upon request completion.
-        for request_id in finished_req_ids:
-            all_layers_recv_done = True
+        for request_id in self.send_request_id_to_tensor_ids:
             all_layers_send_done = True
             for layer_name in no_compile_layers:
                 tensor_id = request_id + "#" + layer_name
-                if request_id not in self.recv_request_id_to_done_tensor_ids \
-                    or tensor_id not in self.recv_request_id_to_done_tensor_ids[
+                if tensor_id not in self.send_request_id_to_tensor_ids[
                         request_id]:
-                    all_layers_recv_done = False
-                if request_id not in self.send_request_id_to_tensor_ids \
-                    or tensor_id not in self.send_request_id_to_tensor_ids[
-                        request_id]:
+                    logger.debug(
+                        "tensor_id:%s not sent, sent tensor_ids:%s", tensor_id,
+                        self.send_request_id_to_tensor_ids[request_id])
                     all_layers_send_done = False
-                if not all_layers_recv_done and not all_layers_send_done:
+                    break
+            if all_layers_send_done:
+                logger.debug("request_id:%s all layers send done", request_id)
+                finished_sending.add(request_id)
+        for request_id in finished_sending:
+            self.send_request_id_to_tensor_ids.pop(request_id, None)
+
+        for request_id in self.recv_request_id_to_done_tensor_ids:
+            logger.debug(
+                "checking request_id:%s in recv_request_id_to_done_tensor_ids",
+                request_id)
+            all_layers_recv_done = True
+            for layer_name in no_compile_layers:
+                tensor_id = request_id + "#" + layer_name
+                if tensor_id not in self.recv_request_id_to_done_tensor_ids[
+                        request_id]:
+                    logger.debug(
+                        "tensor_id:%s not received, received tensor_ids:%s",
+                        tensor_id,
+                        self.recv_request_id_to_tensor_ids[request_id])
+                    all_layers_recv_done = False
                     break
             if all_layers_recv_done:
-                self.recv_request_id_to_tensor_ids.pop(request_id, None)
-                self.recv_request_id_to_done_tensor_ids.pop(request_id, None)
+                logger.debug("request_id:%s all layers recv done", request_id)
                 finished_recving.add(request_id)
-            if all_layers_send_done:
-                self.send_request_id_to_tensor_ids.pop(request_id, None)
-                finished_sending.add(request_id)
+        for request_id in finished_recving:
+            self.recv_request_id_to_done_tensor_ids.pop(request_id, None)
+            self.recv_request_id_to_tensor_ids.pop(request_id, None)
+
+        # for request_id in finished_req_ids:
+        #     all_layers_recv_done = True
+        #     all_layers_send_done = True
+        #     for layer_name in no_compile_layers:
+        #         tensor_id = request_id + "#" + layer_name
+        #         if request_id not in self.recv_request_id_to_done_tensor_ids \
+        #             or tensor_id not in self.recv_request_id_to_done_tensor_ids[
+        #                 request_id]:
+        #             if request_id not in self.recv_request_id_to_done_tensor_ids:
+        #                 logger.debug("request_id:%s not in recv_request_id_to_done_tensor_ids", request_id)
+        #             else:
+        #                 logger.debug("tensor_id:%s not received, received tensor_ids:%s", tensor_id, self.recv_request_id_to_tensor_ids[request_id])
+        #             all_layers_recv_done = False
+        #         if request_id not in self.send_request_id_to_tensor_ids \
+        #             or tensor_id not in self.send_request_id_to_tensor_ids[
+        #                 request_id]:
+        #             if request_id not in self.send_request_id_to_tensor_ids:
+        #                 logger.debug("request_id:%s not in send_request_id_to_tensor_ids", request_id)
+        #             else:
+        #                 logger.debug("tensor_id:%s not sent, sent tensor_ids:%s", tensor_id, self.send_request_id_to_tensor_ids[request_id])
+        #             all_layers_send_done = False
+        #         if not all_layers_recv_done and not all_layers_send_done:
+        #             break
+        #     if all_layers_recv_done:
+        #         self.recv_request_id_to_tensor_ids.pop(request_id, None)
+        #         self.recv_request_id_to_done_tensor_ids.pop(request_id, None)
+        #         finished_recving.add(request_id)
+        #     if all_layers_send_done:
+        #         self.send_request_id_to_tensor_ids.pop(request_id, None)
+        #         finished_sending.add(request_id)
 
         return finished_sending or None, finished_recving or None
+
+    # def request_finished(
+    #     self, request_id: str, no_compile_layers: list[str]
+    # ) -> tuple[bool, Optional[dict[str, Any]]]:
+    #     all_layers_send_done = True
+    #     for layer_name in no_compile_layers:
+    #         tensor_id = request_id + "#" + layer_name
+    #         if request_id not in self.send_request_id_to_tensor_ids \
+    #             or tensor_id not in self.send_request_id_to_tensor_ids[
+    #                 request_id]:
+    #             all_layers_send_done = False
+    #             break
+
+    #     if all_layers_send_done:
+    #         self.send_request_id_to_tensor_ids.pop(request_id, None)
+    #         return False, None
+    #     return True, None
 
     def ping(self):
         sock = self.context.socket(zmq.DEALER)

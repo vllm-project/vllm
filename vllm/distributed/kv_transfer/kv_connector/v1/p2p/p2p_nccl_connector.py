@@ -87,14 +87,16 @@ class P2pNcclConnector(KVConnectorBase_V1):
             hostname="",
             port_offset=self._rank,
         ) if role == KVConnectorRole.WORKER else None
-    
-    def _should_transfer_async(self, kv_transfer_config: Optional[KVTransferConfig]) -> bool:
+
+    def _should_transfer_async(
+            self, kv_transfer_config: Optional[KVTransferConfig]) -> bool:
         if kv_transfer_config is None:
             logger.info("P2P NCCL: No config found, using sync mode")
             return False
 
         # Check for async mode in extra config
-        extra_config = getattr(kv_transfer_config, 'kv_connector_extra_config', {})
+        extra_config = getattr(kv_transfer_config, 'kv_connector_extra_config',
+                               {})
         if extra_config is None:
             extra_config = {}
 
@@ -125,12 +127,15 @@ class P2pNcclConnector(KVConnectorBase_V1):
         # Only consumer/decode loads KV Cache
         if self.is_producer:
             return
+        logger.debug("start_load_kv, is_producer:%s", self.is_producer)
 
         assert self.p2p_nccl_engine is not None
 
         attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
-            return
+
+        # if attn_metadata is None:
+        #     logger.warning("start_load_kv, attn_metadata is None, returning")
+        #     return
 
         def inject_kv_into_layer(
             layer: torch.Tensor,
@@ -163,6 +168,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             Returns:
                 None. The function modifies `layer` in-place.
             """
+            logger.debug("inject_kv_into_layer, tensor_id:%s", tensor_id)
             if (isinstance(attn_metadata, MLACommonMetadata)
                     or layer.shape[1] == 2):  # MLA or FlashInfer
                 num_block = kv_cache.shape[0]
@@ -188,8 +194,20 @@ class P2pNcclConnector(KVConnectorBase_V1):
                         "num_block:%d, request_id:%s", len(block_ids),
                         num_block, request_id)
             else:
-                raise NotImplementedError(
-                    "Unsupported layer layout: %s", layer.shape)
+                assert attn_metadata is not None
+                # kv_connector_no_forward, assuming FlashAttention
+                num_block = kv_cache.shape[1]
+                self.check_tensors_except_dim(layer, kv_cache, 1)
+                if len(block_ids) == num_block:
+                    layer[:, block_ids, ...] = kv_cache
+                else:
+                    layer[:, block_ids[:num_block], ...] = kv_cache
+                    logger.warning(
+                        "🚧kv_cache does not match, block_ids:%d, "
+                        "num_block:%d, request_id:%s", len(block_ids),
+                        num_block, request_id)
+                # raise NotImplementedError(
+                #     "Unsupported layer layout: %s", layer.shape)
             self.p2p_nccl_engine.have_injected_tensor_id(tensor_id)
 
         # Get the metadata
@@ -198,10 +216,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
         assert isinstance(metadata, P2pNcclConnectorMetadata)
 
         if metadata is None:
+            logger.info("metadata is None, returning")
             return
 
+        logger.debug("loading KV for %d requests", len(metadata.requests))
         # Load the KV for each request each layer
         for request in metadata.requests:
+            logger.info("loading KV for request:%s", request.request_id)
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, False)
             remote_address = ip + ":" + str(port + self._rank)
@@ -213,28 +234,30 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # layers like FusedMoE
                 kv_cache = getattr(layer, 'kv_cache', None)
                 if kv_cache is None:
+                    logger.info("kv_cache is None for layer:%s, skipping",
+                                layer_name)
                     continue
 
                 layer = kv_cache[forward_context.virtual_engine]
 
                 tensor_id = request.request_id + "#" + layer_name
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    tensor_id,
-                    remote_address,
+                    request_id, tensor_id, remote_address,
                     self._async_transfer)
 
                 if kv_cache is None:
                     if self._async_transfer:
-                        # Current layer is not ready yet, 
+                        # Current layer is not ready yet,
                         # will load in the next engine step
                         break
                     else:
-                        logger.warning("🚧kv_cache is None, %s", request.request_id)
+                        logger.warning("🚧kv_cache is None, %s",
+                                       request.request_id)
                         continue
-                
+
                 if isinstance(kv_cache, torch.Tensor):
                     inject_kv_into_layer(layer, kv_cache, request.block_ids,
-                                        request.request_id, tensor_id)
+                                         request.request_id, tensor_id)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -488,8 +511,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
         if not self._async_transfer:
             return False, None
 
-        # TODO: Implement async transfer
         return True, None
+        # assert self.p2p_nccl_engine is not None
+        # no_compile_layers = (
+        #     self._vllm_config.compilation_config.static_forward_context)
+
+        # return self.p2p_nccl_engine.request_finished(
+        #     request.request_id, no_compile_layers)
 
     # ==============================
     # Static methods

@@ -156,7 +156,7 @@ async def handle_request():
 
         request_id = (
             f"___prefill_addr_{prefill_zmq_addr}___decode_addr_"
-            f"{decode_zmq_addr}_{random_uuid()}"
+            f"{decode_zmq_addr}_{random_uuid()}_x{count}"
         )
 
         # finish prefill
