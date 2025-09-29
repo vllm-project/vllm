@@ -1296,13 +1296,6 @@ class EngineArgs:
                 raise ValueError("Async scheduling is not supported with "
                                  "pipeline-parallel-size > 1.")
 
-            # Currently, async scheduling does not support speculative decoding.
-            # TODO(woosuk): Support it.
-            if self.speculative_config is not None:
-                raise ValueError(
-                    "Currently, speculative decoding is not supported with "
-                    "async scheduling.")
-
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:
             self.eplb_config.num_redundant_experts = self.num_redundant_experts

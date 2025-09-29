@@ -1029,7 +1029,7 @@ class Scheduler(SchedulerInterface):
         self,
         request: Request,
         new_token_ids: list[int],
-        proposed_token_ids: list[int] = None,
+        proposed_token_ids: Optional[list[int]] = None,
     ) -> tuple[list[int], bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner

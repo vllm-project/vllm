@@ -565,8 +565,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         # For async scheduling with speculative decoding, update rejected token num for
         # previous requests
-        updated_request_rejected_tokens = {}
-        if self.async_scheduling and self.speculative_config is not None and \
+        updated_request_rejected_tokens: dict[str, int] = {}
+        if self.use_async_scheduling and self.speculative_config is not None and \
             self.input_batch.prev_num_rejected_tokens_calc_event is not None:
             scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
             finished_req_ids = scheduler_output.finished_req_ids
@@ -682,6 +682,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     updated_request_rejected_tokens[req_id]
                 self.input_batch.num_tokens_no_spec[req_index] -= \
                     updated_request_rejected_tokens[req_id]
+                if updated_request_rejected_tokens[req_id] > 0:
+                    del req_state.output_token_ids[\
+                        -updated_request_rejected_tokens[req_id]:]
 
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
@@ -779,7 +782,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         if not self.model_config.is_hybrid or not self.speculative_config:
             return
-
+        assert not self.use_async_scheduling
         # Find the number of accepted tokens for each sequence.
         num_accepted_tokens = (torch.cat(
             [
@@ -982,7 +985,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             src=self.input_batch.prev_sampled_token_ids[
                 prev_common_req_indices_tensor, 0])
         
-        if self.speculative_config:
+        if self.speculative_config and \
+            self.input_batch.prev_draft_token_ids is not None:
             draft_token_index_tensor = torch.tensor(draft_flattened_indices,
                                               dtype=torch.int64,
                                               pin_memory=self.pin_memory).to(
@@ -2296,13 +2300,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # No Spec decode tokens
                 self.input_batch.prev_sampled_token_ids = \
                     sampled_token_ids
-            elif max(spec_decode_metadata.num_draft_tokens)>0:
+            elif spec_decode_metadata is not None:
                 # Include spec decode tokens, only the verified token
                 # the prev_sampled_token_ids and prev_num_rejected_tokens
                 # should have been updated before
                 assert self.input_batch.prev_sampled_token_ids is not None
-                assert self.input_batch.prev_num_rejected_tokens
-                self.input_batch.prev_num_rejected_tokens_calc_event
+                assert self.input_batch.prev_num_rejected_tokens is not None
+                assert self.input_batch.prev_num_rejected_tokens_calc_event \
+                    is not None
             
             self.input_batch.prev_sampled_token_ids_invalid_indices = \
                 invalid_req_indices_set
@@ -2327,7 +2332,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         req_idx not in invalid_req_indices_set else None
                 else:
                     has_proposed_tokens = self.speculative_config is not None \
-                        and max(spec_decode_metadata.num_draft_tokens) > 0
+                        and spec_decode_metadata is not None
                     max_sampled_tokens = 1 if not has_proposed_tokens \
                        else (1 + self.speculative_config.num_speculative_tokens)
                     sampled_ids = [-1] * max_sampled_tokens if \
@@ -2569,6 +2574,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_common_attn_metadata,
                     disable_padded_drafter_batch
                 )
+                if self.use_async_scheduling:
+                    self.input_batch.prev_draft_token_ids = \
+                        self._draft_token_ids.view(-1).to(dtype=torch.int32) #noqa
 
         use_padded_batch_for_eagle = self.speculative_config and \
             self.speculative_config.use_eagle() and \
@@ -2603,13 +2611,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 invalid_req_indices,
             ) = self._bookkeeping_sync(scheduler_output, sampler_output,
                                        logits, hidden_states,
-                                       num_scheduled_tokens)
+                                       num_scheduled_tokens,
+                                       spec_decode_metadata)
 
         if (self.speculative_config and not use_padded_batch_for_eagle
                 and input_fits_in_drafter):
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
-            propose_draft_token_ids(valid_sampled_token_ids)
+            propose_draft_token_ids(valid_sampled_token_ids, True)
 
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
@@ -2724,7 +2733,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         self.num_discarded_requests
                     )
                 if self.use_async_scheduling:
-                    self.input_batch.prev_sampled_token_ids = next_token_ids
+                    self.input_batch.prev_sampled_token_ids = \
+                        next_token_ids.unsqueeze(-1)
 
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
@@ -2738,6 +2748,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         dim=-1)
                 else:
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
+                if self.use_async_scheduling:
+                    self.input_batch.prev_num_rejected_tokens = None
+                    self.input_batch.\
+                        prev_num_rejected_tokens_calc_event = None
             else:
                 if disable_padded_drafter_batch:
                     token_indices_to_sample = None
@@ -2757,16 +2771,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             valid_sampled_tokens_count)
                     
                     if self.use_async_scheduling:
-                        if max(spec_decode_metadata.num_draft_tokens)>0:
-                            self.input_batch.prev_num_rejected_tokens = \
+                        self.input_batch.prev_num_rejected_tokens = \
                                 num_rejected_tokens
-                            self.input_batch.\
-                                prev_num_rejected_tokens_calc_event = \
-                                num_rejected_tokens_calc_event
-                        else:
-                            self.input_batch.prev_num_rejected_tokens = None
-                            self.input_batch.\
-                                prev_num_rejected_tokens_calc_event = None
+                        self.input_batch.\
+                            prev_num_rejected_tokens_calc_event = \
+                            num_rejected_tokens_calc_event
 
                 target_token_ids = self.input_ids.gpu[token_indices]
                 target_positions = self._get_positions(token_indices)

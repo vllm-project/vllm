@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
+from typing import Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -40,14 +41,19 @@ class AsyncScheduler(Scheduler):
         scheduler_output: SchedulerOutput,
     ) -> None:
         super()._update_after_schedule(scheduler_output)
+        next_spec_tokens = self.speculative_config.num_speculative_tokens \
+            if self.speculative_config else 0
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
-            num_scheduled_propose_token = \
-                len(scheduler_output.scheduled_spec_decode_tokens[req_id])
+            if req_id in scheduler_output.scheduled_spec_decode_tokens:
+                num_scheduled_propose_token = \
+                    len(scheduler_output.scheduled_spec_decode_tokens[req_id])
+            else:
+                num_scheduled_propose_token = 0
             if (request.num_computed_tokens == request.num_tokens +
                     num_scheduled_propose_token + 
                     request.num_output_placeholders):
-                if num_scheduled_propose_token > 0:
+                if next_spec_tokens > 0:
                     request.spec_token_ids = \
                         [DRAFT_TOKEN_PLACEHOLDER] * \
                             self.speculative_config.num_speculative_tokens
@@ -58,7 +64,7 @@ class AsyncScheduler(Scheduler):
         self,
         request: Request,
         new_token_ids: list[int],
-        proposed_token_ids: list[int] = None,
+        proposed_token_ids: Optional[list[int]] = None,
     ) -> tuple[list[int], bool]:
         status_before_update = request.status
         new_token_ids, stopped = super()._update_request_with_output(
@@ -68,9 +74,8 @@ class AsyncScheduler(Scheduler):
         if not self.speculative_config:
             request.num_output_placeholders -= len(new_token_ids)
         else:
-            assert proposed_token_ids is not None
-
-            spec_tokens = len(proposed_token_ids)
+            spec_tokens = len(proposed_token_ids) if proposed_token_ids \
+                                                else 0
             assert 1 <= len(new_token_ids) and len(new_token_ids) <= 1 + \
                     spec_tokens
             request.num_output_placeholders -= 1 + spec_tokens

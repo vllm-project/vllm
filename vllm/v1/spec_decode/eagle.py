@@ -552,10 +552,10 @@ class EagleProposer:
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             seq_lens=common_attn_metadata.seq_lens,
-            query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
+            query_start_loc_cpu=query_start_loc_cpu.clone(),
+            seq_lens_cpu=common_attn_metadata.seq_lens_cpu.clone(),
             num_computed_tokens_cpu=common_attn_metadata.
-            num_computed_tokens_cpu,
+            num_computed_tokens_cpu.clone(),
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
