@@ -239,7 +239,7 @@ class Sampler(nn.Module):
     def _combine_outputs_with_spec_tokens(
         self,
         output_token_ids: list[list[int]],
-        spec_token_ids: Optional[list[Optional[list[int]]]] = None,
+        spec_token_ids: Optional[list[list[int]]] = None,
     ):
         if spec_token_ids is None:
             return output_token_ids

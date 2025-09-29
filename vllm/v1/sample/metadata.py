@@ -43,4 +43,4 @@ class SamplingMetadata:
     logitsprocs: LogitsProcessors
 
     # Speculative token ids
-    spec_token_ids: Optional[list[Optional[list[int]]]] = None
+    spec_token_ids: Optional[list[list[int]]] = None
