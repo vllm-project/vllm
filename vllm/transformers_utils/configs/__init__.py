@@ -32,10 +32,12 @@ from vllm.transformers_utils.configs.step3_vl import (Step3TextConfig,
                                                       Step3VisionEncoderConfig,
                                                       Step3VLConfig)
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.transformers_utils.configs.deepseek_v3 import DeepseekV3Config
 
 __all__ = [
     "ChatGLMConfig",
     "DeepseekVLV2Config",
+    "DeepseekV3Config",
     "EAGLEConfig",
     "RWConfig",
     "JAISConfig",

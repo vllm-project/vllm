@@ -779,11 +779,11 @@ class Indexer(nn.Module):
         super().__init__()
         self.vllm_config = vllm_config
         self.config = config
-        self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
-        self.topk_tokens = config.attn_module_list_cfg[0]["topk_tokens"]
-        self.n_head = self.indexer_cfg["n_head"]  # 64
-        self.head_dim = self.indexer_cfg["head_dim"]  # 128
-        self.rope_dim = self.indexer_cfg["rope_dim"]  # 64
+        # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
+        self.topk_tokens = config.index_topk
+        self.n_head = config.index_n_heads  # 64
+        self.head_dim = config.index_head_dim  # 128
+        self.rope_dim = config.qk_rope_head_dim  # 64
         self.q_lora_rank = q_lora_rank  # 1536
         # no tensor parallel, just replicated
         self.wq_b = ReplicatedLinear(self.q_lora_rank,
@@ -962,8 +962,8 @@ class DeepseekV2MLAAttention(nn.Module):
             self.scaling = self.scaling * mscale * mscale
 
         self.is_v32 = hasattr(
-            config, "attn_module_list_cfg"
-        ) and "attn_index" in config.attn_module_list_cfg[0]
+            config, "index_topk"
+        )
 
         if self.is_v32:
             self.indexer = Indexer(vllm_config, config, hidden_size,
@@ -1141,10 +1141,10 @@ class DeepseekV2Model(nn.Module):
 
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(
-            config, "attn_module_list_cfg"
-        ) and "attn_index" in config.attn_module_list_cfg[0]
+            config, "index_topk"
+        )
         if self.is_v32:
-            topk_tokens = config.attn_module_list_cfg[0]["topk_tokens"]
+            topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(vllm_config.scheduler_config.max_num_batched_tokens,
                                               topk_tokens,
                                               dtype=torch.int32,

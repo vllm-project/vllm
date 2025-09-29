@@ -423,8 +423,9 @@ class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
         """
         hf_config = vllm_config.model_config.hf_config
 
-        is_v32 = hasattr(hf_config, "attn_module_list_cfg") \
-            and "attn_index" in hf_config.attn_module_list_cfg[0]
+        is_v32 = hasattr(
+            hf_config, "index_topk"
+        )
 
         if is_v32:
             # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
