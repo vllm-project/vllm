@@ -189,6 +189,30 @@ direct_register_custom_op(
 )
 
 
+def _fp8_gemm_nt_op(q_input: torch.Tensor, x_scale: torch.Tensor,
+                    weight: torch.Tensor, weight_scale: torch.Tensor,
+                    output: torch.Tensor, use_deep_gemm_e8m0: bool) -> None:
+    fp8_gemm_nt((q_input, x_scale), (weight, weight_scale),
+                output,
+                is_deep_gemm_e8m0_used=use_deep_gemm_e8m0)
+
+
+def _fp8_gemm_nt_op_fake(q_input: torch.Tensor, x_scale: torch.Tensor,
+                         weight: torch.Tensor, weight_scale: torch.Tensor,
+                         output: torch.Tensor,
+                         use_deep_gemm_e8m0: bool) -> None:
+    return None
+
+
+direct_register_custom_op(
+    "fp8_gemm_nt_op",
+    _fp8_gemm_nt_op,
+    mutates_args=["output"],
+    fake_impl=_fp8_gemm_nt_op_fake,
+    dispatch_key="CUDA",
+)
+
+
 # TODO fix ROCm->Triton custom path:
 #  https://github.com/vllm-project/vllm/issues/14397
 class W8A8BlockFp8LinearOp:
@@ -208,6 +232,7 @@ class W8A8BlockFp8LinearOp:
         self.act_quant_group_shape = act_quant_group_shape
         self.is_deep_gemm_supported = is_deep_gemm_supported()
         self.is_hopper = current_platform.is_device_capability(90)
+        self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
 
         # Get the correct blockscale mul and input quant operations.
         # We can't use _dispatch_w8a8_blockscale_op to figure out if we want
@@ -220,7 +245,7 @@ class W8A8BlockFp8LinearOp:
             False,
             self.act_quant_group_shape,
             column_major_scales=True,
-            use_ue8m0=is_deep_gemm_e8m0_used()) if self.is_deep_gemm_supported
+            use_ue8m0=self.use_deep_gemm_e8m0) if self.is_deep_gemm_supported
                                         else None)
 
     def apply(
@@ -255,15 +280,13 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
-        # ensure DeepGEMM-backed custom op is registered before use
-        import vllm.model_executor.layers.quantization.deepgemm  # noqa: F401
-
         assert self.deepgemm_input_quant_op is not None
         q_input, x_scale = self.deepgemm_input_quant_op(input_2d)
         output = torch.empty((q_input.shape[0], weight.shape[0]),
                              dtype=torch.bfloat16,
                              device=q_input.device)
-        fp8_gemm_nt((q_input, x_scale), (weight, weight_scale), output)
+        torch.ops.vllm.fp8_gemm_nt_op(q_input, x_scale, weight, weight_scale,
+                                      output, self.use_deep_gemm_e8m0)
         return output
 
     def _run_cutlass(

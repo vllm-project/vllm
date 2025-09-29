@@ -113,9 +113,12 @@ def fp8_gemm_nt(*args, **kwargs):
     _lazy_init()
     if _fp8_gemm_nt_impl is None:
         return _missing(*args, **kwargs)
-    return _fp8_gemm_nt_impl(*args,
-                             disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-                             **kwargs)
+    if "is_deep_gemm_e8m0_used" in kwargs:
+        use_ue8m0 = kwargs["is_deep_gemm_e8m0_used"]
+        del kwargs["is_deep_gemm_e8m0_used"]
+    else:
+        use_ue8m0 = is_deep_gemm_e8m0_used()
+    return _fp8_gemm_nt_impl(*args, disable_ue8m0_cast=not use_ue8m0, **kwargs)
 
 
 def m_grouped_fp8_gemm_nt_contiguous(*args, **kwargs):
