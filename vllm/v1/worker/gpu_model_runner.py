@@ -71,8 +71,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills,
-    reorder_batch_to_split_decodes_prefills_and_chunks,
-    split_attn_metadata)
+    reorder_batch_to_split_decodes_prefills_and_chunks, split_attn_metadata)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 # yapf conflicts with isort for this block
 # yapf: disable
