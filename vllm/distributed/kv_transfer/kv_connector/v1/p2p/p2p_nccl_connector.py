@@ -398,13 +398,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
         Update KVConnector state after block allocation.
         """
-        if not self.is_producer:
-            logger.debug("consumer update_state_after_alloc, request_id:%s, num_external_tokens:%d",
-                        request.request_id, num_external_tokens)
         if not self.is_producer and num_external_tokens > 0:
             self._requests_need_load[request.request_id] = (
                 request, blocks.get_block_ids()[0])
-            logger.debug("consumer update_state_after_alloc, _requests_need_load size:%d", len(self._requests_need_load))
 
     def build_connector_meta(
         self,
@@ -420,26 +416,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
 
         meta = P2pNcclConnectorMetadata()
-        if not self.is_producer:
-            logger.debug("consumer build_connector_meta, _requests_need_load:%s, "
-            "scheduled_new_reqs:%s, scheduled_cached_reqs:%s", 
-            self._requests_need_load, 
-            scheduler_output.scheduled_new_reqs, 
-            scheduler_output.scheduled_cached_reqs)
-            if self._async_transfer:
-                # Add request regardless of request is scheduled or not
-                for req_id, (req, block_ids) in self._requests_need_load.items():
-                    meta.add_request(request_id=req_id,
-                                    token_ids=req.prompt_token_ids,
-                                    block_ids=block_ids,
-                                    block_size=self._block_size)
-                # TODO: add_request for send, so that it is consistent?
 
         for new_req in scheduler_output.scheduled_new_reqs:
             if self.is_producer:
                 num_scheduled_tokens = (
                     scheduler_output.num_scheduled_tokens)[new_req.req_id]
-                # is this addition right?
                 num_tokens = num_scheduled_tokens + new_req.num_computed_tokens
                 # the request's prompt is chunked prefill
                 if num_tokens < len(new_req.prompt_token_ids):
@@ -454,7 +435,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  block_size=self._block_size)
                 continue
             if new_req.req_id in self._requests_need_load:
-                logger.debug("consumer add_request new, request_id:%s", new_req.req_id)
+                logger.debug("consumer add_request new, request_id:%s",
+                             new_req.req_id)
                 meta.add_request(request_id=new_req.req_id,
                                  token_ids=new_req.prompt_token_ids,
                                  block_ids=new_req.block_ids[0],
@@ -501,9 +483,17 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
                 block_ids = new_block_ids[0]
-                logger.debug("consumer add_request cached, request_id:%s", req_id)
                 meta.add_request(request_id=req_id,
                                  token_ids=token_ids,
+                                 block_ids=block_ids,
+                                 block_size=self._block_size)
+
+        if self._async_transfer and not self.is_producer:
+            # In async transfer mode, the requests cannot be scheduled before
+            # their KV cache is loaded. We add the requests to load the KV cache.
+            for req_id, (req, block_ids) in self._requests_need_load.items():
+                meta.add_request(request_id=req_id,
+                                 token_ids=req.prompt_token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size)
 
