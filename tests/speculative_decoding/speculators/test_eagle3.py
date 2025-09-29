@@ -14,6 +14,9 @@ from vllm.model_executor.models.interfaces import supports_eagle3
     pytest.param(
         "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized",
         id="qwen3-eagle3-speculator"),
+    pytest.param(
+        "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized-w4a16",
+        id="qwen3-eagle3-speculator-w4a16-verifier"),
 ])
 def test_eagle3_speculators_model(vllm_runner, example_prompts, model_path,
                                   monkeypatch):
