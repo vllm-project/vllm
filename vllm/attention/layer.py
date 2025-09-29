@@ -329,8 +329,8 @@ class Attention(nn.Module, AttentionLayerBase):
                     torch.ops.vllm.unified_attention_with_output(
                         query, key, value, output, self.layer_name)
                 else:
-                    torch.ops.vllm.unified_kv_cache_update(
-                        key, value, self.layer_name)
+                    # torch.ops.vllm.unified_kv_cache_update(
+                    #     key, value, self.layer_name)
                     torch.ops.vllm.unified_attention_no_kv_cache(
                         query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
@@ -618,7 +618,8 @@ def unified_attention_no_kv_cache(
                       attn_metadata,
                       output=output,
                       output_scale=output_scale,
-                      output_block_scale=output_block_scale)
+                      output_block_scale=output_block_scale,
+                      should_do_kv_cache_update=False)
 
     # TODO keep one of these two
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)

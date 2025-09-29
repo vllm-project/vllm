@@ -430,6 +430,7 @@ class FlashAttentionImpl(AttentionImpl):
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
+        should_do_kv_cache_update: bool = True,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -488,27 +489,29 @@ class FlashAttentionImpl(AttentionImpl):
         # # key and value may be None in the case of cross attention. They are
         # # calculated once based on the output from the encoder and then cached
         # # in KV cache.
-        # if (self.kv_sharing_target_layer_name is None and key is not None
-        #         and value is not None):
-        #     # Reshape the input keys and values and store them in the cache.
-        #     # Skip this if sharing KV cache with an earlier attention layer.
-        #     # NOTE(woosuk): Here, key and value are padded while slot_mapping
-        # is
-        #     # not padded. However, we don't need to do key[:num_actual_tokens]
-        #     # and value[:num_actual_tokens] because the
-        # reshape_and_cache_flash
-        #     # op uses the slot_mapping's shape to determine the number of
-        #     # actual tokens.
-        #     reshape_and_cache_flash(
-        #         key,
-        #         value,
-        #         key_cache,
-        #         value_cache,
-        #         attn_metadata.slot_mapping,
-        #         self.kv_cache_dtype,
-        #         layer._k_scale,
-        #         layer._v_scale,
-        #     )
+        if (should_do_kv_cache_update
+                and self.kv_sharing_target_layer_name is None
+                and key is not None and value is not None):
+            # print("ajskjaksjaksjkkLAJljaklJ")
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping
+            # is
+            # not padded. However, we don't need to do key[:num_actual_tokens]
+            # and value[:num_actual_tokens] because the
+            # reshape_and_cache_flash
+            # op uses the slot_mapping's shape to determine the number of
+            # actual tokens.
+            reshape_and_cache_flash(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
         if self.kv_cache_dtype.startswith("fp8"):
             # queries are quantized in the attention layer
