@@ -63,7 +63,7 @@ def override_config(config: GPTQQuantizationConfig, prefix: str):
 
 
 def get_dynamic_override(
-    config: Union[GPTQConfig, GPTQMarlinConfig],
+    config: GPTQQuantizationConfig,
     layer_name: str,
     key: Optional[str] = None,
     default_value: Union[int, bool,
