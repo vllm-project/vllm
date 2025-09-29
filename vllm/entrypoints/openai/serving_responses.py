@@ -235,8 +235,6 @@ class OpenAIServingResponses(OpenAIServing):
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
         if prev_response_id is not None:
-            if not prev_response_id.startswith("resp_"):
-                return self._make_invalid_id_error(prev_response_id)
             async with self.response_store_lock:
                 prev_response = self.response_store.get(prev_response_id)
             if prev_response is None:
@@ -924,9 +922,6 @@ class OpenAIServingResponses(OpenAIServing):
         stream: Optional[bool],
     ) -> Union[ErrorResponse, ResponsesResponse, AsyncGenerator[
             StreamingResponsesResponse, None]]:
-        if not response_id.startswith("resp_"):
-            return self._make_invalid_id_error(response_id)
-
         async with self.response_store_lock:
             response = self.response_store.get(response_id)
 
@@ -944,9 +939,6 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         response_id: str,
     ) -> Union[ErrorResponse, ResponsesResponse]:
-        if not response_id.startswith("resp_"):
-            return self._make_invalid_id_error(response_id)
-
         async with self.response_store_lock:
             response = self.response_store.get(response_id)
             if response is None:
@@ -971,13 +963,6 @@ class OpenAIServingResponses(OpenAIServing):
                 logger.exception("Background task for %s was cancelled",
                                  response_id)
         return response
-
-    def _make_invalid_id_error(self, response_id: str) -> ErrorResponse:
-        return self.create_error_response(
-            err_type="invalid_request_error",
-            message=(f"Invalid 'response_id': '{response_id}'. "
-                     "Expected an ID that begins with 'resp'."),
-        )
 
     def _make_not_found_error(self, response_id: str) -> ErrorResponse:
         return self.create_error_response(
