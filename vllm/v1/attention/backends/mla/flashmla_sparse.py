@@ -273,8 +273,6 @@ class FlashMLASparseMetadataBuilder(
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_BATCH
 
-    reorder_batch_threshold: ClassVar[int] = 128  # TODO(lucas): tune this
-
     reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
@@ -309,7 +307,8 @@ class FlashMLASparseMetadataBuilder(
             vllm_config.speculative_config.num_speculative_tokens 
             if vllm_config.speculative_config else 0
         )
-        self.reorder_batch_threshold += self.num_speculative_tokens
+        # Now deepgemm fp8_paged_mqa_logits does not support next_n > 2
+        self.reorder_batch_threshold += min(self.num_speculative_tokens, 1) 
 
         # Equation taken from FlashMLA/csrc/pybind.cpp
         h_q, h_k = self.num_heads, 1
