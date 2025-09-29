@@ -286,6 +286,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
     Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
     Idx_t stride_ys_g, Idx_t stride_counts_e) {
+#ifndef USE_ROCM
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
 
   static constexpr int LOAD_STAGE_SIZE = 2 * GROUP_SIZE / 8;
@@ -453,8 +454,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     cp_async_fence();
   };
 
-// We need to warm-up the pipeline.
-#pragma unroll
+  // We need to warm-up the pipeline.
+  #pragma unroll
   for (int i = 0; i < NUM_STAGES - 1; i++) {
     load_and_advance_y_pred();
   }
@@ -491,7 +492,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       __nv_bfloat162* s_up_comp = reinterpret_cast<__nv_bfloat162*>(&up64);
       __nv_bfloat162* s_gate_comp = reinterpret_cast<__nv_bfloat162*>(&gate64);
 
-#pragma unroll
+  #pragma unroll
       for (int32_t k = 0; k < 2; ++k) {
         __nv_bfloat162 gate = silu2_v2(__bfloat1622float2(s_gate_comp[k]));
         res[k] = __hmul2(gate, s_up_comp[k]);
@@ -511,7 +512,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
       auto y_s2 = make_bfloat162(inv_y, inv_y);
 
-#pragma unroll
+  #pragma unroll
       for (int32_t k = 0; k < 2; ++k) {
         res[k] = clip(__hmul2(res[k], y_s2), __bfloat162bfloat162(fp8_min),
                       __bfloat162bfloat162(fp8_max));
@@ -526,6 +527,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       }
     }
   }
+#endif
 }
 
 template <typename fp8_type, int32_t NUM_WARPS, typename Idx_t,
@@ -543,6 +545,7 @@ __global__ void silu_v1(const __nv_bfloat16* __restrict__ _input,
                         Idx_t stride_yq_e, Idx_t stride_yq_t, Idx_t stride_yq_h,
                         Idx_t stride_ys_e, Idx_t stride_ys_t, Idx_t stride_ys_g,
                         Idx_t stride_counts_e) {
+#ifndef USE_ROCM
   static constexpr __nv_bfloat16 fp8_min = get_fp8_min<fp8_type>();
   static constexpr __nv_bfloat16 fp8_max = get_fp8_max<fp8_type>();
   // We assign EPS with its 16-bit unsigned counterpart to allow constexpr.
@@ -659,7 +662,7 @@ __global__ void silu_v1(const __nv_bfloat16* __restrict__ _input,
     cp_async_fence();
   };
 
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < NUM_STAGES - 1; i++) {
     load_and_advance_y_pred();
   }
@@ -699,14 +702,14 @@ __global__ void silu_v1(const __nv_bfloat16* __restrict__ _input,
     __int64_t up64 = *s_up_compute_64;
     __nv_bfloat162* s_up_compute_32 = reinterpret_cast<__nv_bfloat162*>(&up64);
 
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 2; i++) {
       // For silu, we make sure that div is emitted.
       float2 gate = silu2(__bfloat1622float2(s_gate_compute_32[i]));
       results_bf162[i] = __float22bfloat162_rn(gate);
     }
 
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 2; i++) {
       results_bf162[i] = __hmul2(results_bf162[i], s_up_compute_32[i]);
     }
@@ -728,7 +731,7 @@ __global__ void silu_v1(const __nv_bfloat16* __restrict__ _input,
 
     auto y_s2 = make_bfloat162(inv_y, inv_y);
 
-#pragma unroll
+  #pragma unroll
     for (int32_t i = 0; i < 2; ++i) {
       results_bf162[i] =
           clip(__hmul2(results_bf162[i], y_s2), __bfloat162bfloat162(fp8_min),
@@ -744,6 +747,8 @@ __global__ void silu_v1(const __nv_bfloat16* __restrict__ _input,
       y_s_ptr += stride_ys_t;
     }
   }
+
+#endif
 }
 
 }  // namespace vllm
