@@ -427,9 +427,16 @@ class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
             and "attn_index" in hf_config.attn_module_list_cfg[0]
 
         if is_v32:
+            # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
+            #   "auto")
             cache_config = vllm_config.cache_config
-            if cache_config.cache_dtype.startswith("fp8"):
+            if cache_config.cache_dtype == "auto" or \
+                cache_config.cache_dtype.startswith("fp8"):
                 cache_config.cache_dtype = "fp8_ds_mla"
+                logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
+            if cache_config.cache_dtype == "bfloat16":
+                cache_config.cache_dtype = "auto"
+                logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
