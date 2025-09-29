@@ -40,6 +40,7 @@ def override_config(config: Union[GPTQConfig, GPTQMarlinConfig], prefix: str):
 
     config.pack_factor = Fraction(32, config.weight_bits)  # packed into int32
     if config.get_name() == "gptq_marlin":
+        assert isinstance(config, GPTQMarlinConfig)
         is_sym = get_dynamic_override(config, prefix, "sym", config.is_sym)
         if isinstance(is_sym, bool):
             config.is_sym = is_sym
@@ -51,6 +52,7 @@ def override_config(config: Union[GPTQConfig, GPTQMarlinConfig], prefix: str):
         config.quant_type = config.TYPE_MAP[(config.weight_bits,
                                              config.is_sym)]
     elif config.get_name() == "gptq":
+        assert isinstance(config, GPTQConfig)
         if config.weight_bits not in [2, 3, 4, 8]:
             raise ValueError(
                 "Currently, only 2/3/4/8-bit weight quantization is "
