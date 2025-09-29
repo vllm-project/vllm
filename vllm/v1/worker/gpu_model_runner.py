@@ -3208,8 +3208,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_runtime_mode = _cg_mode
 
             if ubatch_slices is not None:
-                # ubatches are already padded
+                # Adjust values to reflect a single ubatch.
+                # TODO(sage,lucas): this is cruft that should be addressed in
+                #  the padding refactor.
                 num_tokens_after_padding = ubatch_slices[0].num_tokens
+                if num_tokens_across_dp is not None:
+                    num_tokens_across_dp[:] = num_tokens_after_padding
+
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
