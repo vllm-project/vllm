@@ -13,7 +13,8 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -24,10 +25,11 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsEagle3, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -132,12 +134,18 @@ class MLPBlock(torch.nn.Module):
 
     def __init__(
         self,
-        config: GptOssConfig,
+        vllm_config: VllmConfig,
         layer_idx: int,
-        quant_config: QuantizationConfig,
         prefix: str = "",
     ):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
+
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+
         self.layer_idx = layer_idx
         self.num_experts = config.num_local_experts
         self.experts_per_token = config.num_experts_per_tok
@@ -155,11 +163,20 @@ class MLPBlock(torch.nn.Module):
                                 prefix=f"{prefix}.experts",
                                 apply_router_weight_on_input=False,
                                 has_bias=True,
-                                activation="swigluoai")
+                                activation="swigluoai",
+                                is_sequence_parallel=self.is_sequence_parallel)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        num_tokens = x.shape[0]
+        if self.is_sequence_parallel:
+            x = sequence_parallel_chunk(x)
+
         g = self.router(x)
         x = self.experts(hidden_states=x, router_logits=g)
+
+        if self.is_sequence_parallel:
+            x = tensor_model_parallel_all_gather(x.contiguous(), 0)
+            x = x[:num_tokens]
         return x
 
 
@@ -167,19 +184,20 @@ class TransformerBlock(torch.nn.Module):
 
     def __init__(
         self,
-        config: GptOssConfig,
-        cache_config: CacheConfig,
-        quant_config: QuantizationConfig,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+
         self.layer_idx = extract_layer_index(prefix)
         self.attn = OAIAttention(config,
                                  prefix=f"{prefix}.attn",
                                  cache_config=cache_config)
-        self.mlp = MLPBlock(config,
+        self.mlp = MLPBlock(vllm_config,
                             self.layer_idx,
-                            quant_config=quant_config,
                             prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
@@ -216,8 +234,6 @@ class GptOssModel(nn.Module):
     ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
-        self.cache_config = vllm_config.cache_config
-        self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
         self.config.hidden_size = self.config.hidden_size
         self.embedding = VocabParallelEmbedding(
@@ -227,9 +243,7 @@ class GptOssModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
             lambda prefix: TransformerBlock(
-                self.config,
-                cache_config=self.cache_config,
-                quant_config=self.quant_config,
+                vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
@@ -238,6 +252,7 @@ class GptOssModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], self.config.hidden_size))
+        self.aux_hidden_state_layers = tuple[int, ...]()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding(input_ids)
@@ -261,8 +276,12 @@ class GptOssModel(nn.Module):
             x = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        aux_hidden_states = []
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
+            if i in self.aux_hidden_state_layers:
+                aux_hidden_states.append(x if residual is None else x +
+                                         residual)
             x, residual = layer(x, positions, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -270,6 +289,9 @@ class GptOssModel(nn.Module):
                 "residual": residual
             })
         x, _ = self.norm(x, residual)
+
+        if len(aux_hidden_states) > 0:
+            return x, aux_hidden_states
         return x
 
     def _load_weights_mxfp4(
@@ -610,7 +632,7 @@ class GptOssModel(nn.Module):
                                             weights, stacked_params_mapping)
 
 
-class GptOssForCausalLM(nn.Module, SupportsPP):
+class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -657,6 +679,13 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
