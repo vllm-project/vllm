@@ -76,7 +76,7 @@ class CommunicatorRangeConfig:
 
 @config
 @dataclass
-class CommunicatorAllreduceSelectionConfig:
+class AllReduceConfig:
     """Configuration controlling usage of different device communicators.
 
     Each communicator can be enabled/disabled and constrained to a size range
@@ -182,8 +182,7 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
-    allreduce_config: CommunicatorAllreduceSelectionConfig = field(
-        default_factory=CommunicatorAllreduceSelectionConfig)
+    allreduce_config: AllReduceConfig = field(default_factory=AllReduceConfig)
     """ AllReduce algorithms configuration."""
 
     enable_dbo: bool = False
@@ -367,6 +366,7 @@ class ParallelConfig:
         factors.append(self.tensor_parallel_size)
         factors.append(self.enable_expert_parallel)
         factors.append(self.data_parallel_size)
+        factors.append(self.allreduce_config)
         factors.append(envs.VLLM_ALL2ALL_BACKEND)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
@@ -429,12 +429,11 @@ class ParallelConfig:
         # NCCL symm mem: default min based on arch + world-size (MiB)
         _set_default(cfg.nccl_symm_mem, "min_mib",
                      NCCL_SYMM_MEM_ALL_REDUCE_MIN_SIZES_MIB)
-        cfg.nccl_symm_mem.enable = cfg.nccl_symm_mem.enable and bool(
-            envs.VLLM_NCCL_ALLREDUCE_USE_SYMM_MEM)
-        if not (cfg.nccl_symm_mem.min_mib is None
-                and envs.VLLM_NCCL_ALLREDUCE_USE_SYMM_MEM):
-            logger.warning("nccl_symm_mem.min_mib is None when " \
-            "VLLM_NCCL_ALLREDUCE_USE_SYMM_MEM is true. " \
+        cfg.nccl_symm_mem.enable = cfg.nccl_symm_mem.enable and \
+            envs.VLLM_USE_NCCL_SYMM_MEM
+        if (cfg.nccl_symm_mem.min_mib is None and envs.VLLM_USE_NCCL_SYMM_MEM):
+            logger.warning("nccl_symm_mem.min_mib is None while " \
+            "VLLM_USE_NCCL_SYMM_MEM is true. " \
             "It might affect the allreduce performance.")
 
         # Custom allreduce: default max based on arch + world-size (MiB)
@@ -446,16 +445,16 @@ class ParallelConfig:
                      TORCH_SYMM_MEM_ALL_REDUCE_MIN_SIZES_MIB)
         _set_default(cfg.torch_symm_mem, "max_mib",
                      TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES_MIB)
-        cfg.torch_symm_mem.enable = cfg.torch_symm_mem.enable and bool(
-            envs.VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM)
-        if not (cfg.torch_symm_mem.min_mib is None
+        cfg.torch_symm_mem.enable = cfg.torch_symm_mem.enable and \
+            envs.VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM
+        if (cfg.torch_symm_mem.min_mib is None
                 and envs.VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM):
-            logger.warning("torch_symm_mem.min_mib is None when " \
+            logger.warning("torch_symm_mem.min_mib is None while " \
             " VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM is true. " \
             "It might affect the allreduce performance.")
-        if not (cfg.torch_symm_mem.max_mib is None
+        if (cfg.torch_symm_mem.max_mib is None
                 and envs.VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM):
-            logger.warning("torch_symm_mem.max_mib is None when " \
+            logger.warning("torch_symm_mem.max_mib is None while " \
             "VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM is true. " \
             "It might affect the allreduce performance.")
 
@@ -607,7 +606,7 @@ class ParallelConfig:
                 f"Expected to be `-1` or `[0, {self._api_process_count})`, "
                 f"but found: {self._api_process_rank}")
 
-        # finalize communicator selection ranges
+        # finalize allreduce selection ranges
         self._update_allreduce_ranges()
 
     @property

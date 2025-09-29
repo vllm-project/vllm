@@ -40,8 +40,8 @@ from vllm.config.model import (ConvertOption, HfOverrides, LogprobsMode,
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.observability import DetailedTraceModules, ObservabilityConfig
-from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
-                                  ParallelConfig)
+from vllm.config.parallel import (AllReduceConfig, DistributedExecutorBackend,
+                                  EPLBConfig, ParallelConfig)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType, SchedulerConfig, SchedulerPolicy
 from vllm.config.speculative import SpeculativeConfig

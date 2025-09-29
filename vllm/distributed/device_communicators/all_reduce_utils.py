@@ -19,12 +19,6 @@ import torch.multiprocessing as mp
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
-from vllm.distributed.device_communicators.custom_all_reduce import (
-    CustomAllreduce)
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.device_communicators.quick_all_reduce import (
-    QuickAllReduce)
-from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 from vllm.logger import init_logger
 from vllm.utils import (cuda_device_count_stateless,
                         update_environment_variables)
@@ -108,21 +102,23 @@ class AllReduceManager:
     """Manager of all-reduce path for CUDA-like backends."""
 
     def __init__(self,
-                 *,
-                 pynccl_comm: Optional[PyNcclCommunicator] = None,
-                 ca_comm: Optional[CustomAllreduce] = None,
-                 qr_comm: Optional[QuickAllReduce] = None,
-                 symm_mem_comm: Optional[SymmMemCommunicator] = None,
+                 pynccl_comm=None,
+                 ca_comm=None,
+                 qr_comm=None,
+                 symm_mem_comm=None,
                  device_group: Optional[dist.ProcessGroup] = None):
         self.pynccl_comm = pynccl_comm
         self.ca_comm = ca_comm
         self.qr_comm = qr_comm
         self.symm_mem_comm = symm_mem_comm
         self.device_group = device_group
+        self.cfg = get_current_vllm_config().parallel_config.allreduce_config
+        if self.ca_comm is not None:
+            self.cfg.custom_allreduce.max_mib = min(
+                self.ca_comm.max_size / MiB, self.cfg.custom_allreduce.max_mib)
 
     def _allows(self, which: str, input_size: int) -> bool:
-        cfg = get_current_vllm_config().parallel_config.allreduce_config
-        policy = getattr(cfg, which)
+        policy = getattr(self.cfg, which)
         if not policy.enable:
             return False
         return within_range(input_size, policy.min_mib, policy.max_mib)
@@ -131,7 +127,7 @@ class AllReduceManager:
         input_size = input_tensor.nbytes
         # 1) NCCL symmetric memory
         if (self.pynccl_comm is not None
-                and self._allows("nccl_symm_mem_allreduce", input_size)
+                and self._allows("nccl_symm_mem", input_size)
                 and self.pynccl_comm.should_use_nccl_symm_mem(input_tensor)):
             out = self.pynccl_comm.all_reduce_symmetric_with_copy(input_tensor)
             if out is not None:
@@ -169,14 +165,7 @@ class AllReduceManager:
             out = pynccl_comm.all_reduce(input_tensor)
             if out is not None:
                 return out
-
-        # 6) torch.distributed fallback
-        out = input_tensor.clone()
-        if self.device_group is None:
-            # Safety: if no group, do a no-op return of clone
-            return out
-        dist.all_reduce(out, group=self.device_group)
-        return out
+        return None
 
 
 def producer(batch_src: Sequence[int],

@@ -123,16 +123,26 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
         # Build all-reduce selector after communicators are created
-        self._ar_manager = AllReduceManager(
-            pynccl_comm=self.pynccl_comm,
-            ca_comm=self.ca_comm,
-            qr_comm=self.qr_comm,
-            symm_mem_comm=self.symm_mem_comm,
-            device_group=self.device_group,
-        )
+        self._ar_manager = None
+        if "tp" in unique_name:
+            self._ar_manager = AllReduceManager(
+                pynccl_comm=self.pynccl_comm,
+                ca_comm=self.ca_comm,
+                qr_comm=self.qr_comm,
+                symm_mem_comm=self.symm_mem_comm,
+                device_group=self.device_group,
+            )
 
     def all_reduce(self, input_):
-        return self._ar_manager.all_reduce(input_)
+        if self._ar_manager is not None:
+            return self._ar_manager.all_reduce(input_)
+
+        out = input_.clone()
+        if self.device_group is None:
+            # Safety: if no group, do a no-op return of clone
+            return out
+        torch.distributed.all_reduce(out, group=self.device_group)
+        return out
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size

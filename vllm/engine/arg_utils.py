@@ -21,17 +21,17 @@ from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigType, ConvertOption, DetailedTraceModules,
-                         Device, DeviceConfig, DistributedExecutorBackend,
-                         EPLBConfig, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         StructuredOutputsConfig, TaskOption, TokenizerMode,
-                         VllmConfig, get_attr_docs)
+from vllm.config import (AllReduceConfig, BlockSize, CacheConfig, CacheDType,
+                         CompilationConfig, ConfigType, ConvertOption,
+                         DetailedTraceModules, Device, DeviceConfig,
+                         DistributedExecutorBackend, EPLBConfig, HfOverrides,
+                         KVEventsConfig, KVTransferConfig, LoadConfig,
+                         LogprobsMode, LoRAConfig, MambaDType, MMEncoderTPMode,
+                         ModelConfig, ModelDType, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         RunnerOption, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, StructuredOutputsConfig,
+                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.config.utils import get_field
@@ -342,6 +342,8 @@ class EngineArgs:
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
     eplb_log_balancedness: bool = EPLBConfig.log_balancedness
+    allreduce_config: AllReduceConfig = get_field(ParallelConfig,
+                                                  "allreduce_config")
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
@@ -749,6 +751,8 @@ class EngineArgs:
             "--enable-multimodal-encoder-data-parallel",
             action="store_true",
             deprecated=True)
+        parallel_group.add_argument("--allreduce-config",
+                                    **parallel_kwargs["allreduce_config"])
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -1337,6 +1341,7 @@ class EngineArgs:
             decode_context_parallel_size=self.decode_context_parallel_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            allreduce_config=self.allreduce_config,
         )
 
         speculative_config = self.create_speculative_config(
