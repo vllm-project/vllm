@@ -3066,13 +3066,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         if self.parallel_config.enable_dbo and allow_microbatching:
-            ubatch_slices, num_tokens_after_padding = ubatch_split(
+            ubatch_slices, ubatch_num_tokens_after_padding = ubatch_split(
                 num_scheduled_tokens,
                 total_num_scheduled_tokens,
                 total_num_scheduled_tokens,
                 uniform_decode=uniform_decode,
                 vllm_config=self.vllm_config,
             )
+            # Currently when DBO is enabled `ubatch_split` returns
+            # the num_tokens_after_padding for a single ubatch, but we have 2
+            # TODO(sage,lucas): this is cruft that should be addressed in the 
+            # padding refactor.
+            num_tokens_after_padding = ubatch_num_tokens_after_padding * 2
 
         # If we failed to microbatch, currently need to resynchronize
         # TODO(lucas,sage): we should be able to avoid this second sync by
@@ -3203,7 +3208,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_runtime_mode = _cg_mode
 
             if ubatch_slices is not None:
-                num_tokens = num_tokens // 2
+                # ubatches are already padded
+                num_tokens_after_padding = ubatch_slices[0].num_tokens
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
