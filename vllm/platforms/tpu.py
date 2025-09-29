@@ -53,8 +53,7 @@ class TpuPlatform(Platform):
         if use_sparse:
             raise NotImplementedError(
                 "Sparse Attention is not supported on TPU.")
-        if (selected_backend != _Backend.PALLAS
-                and selected_backend != _Backend.PALLAS_VLLM_V1):
+        if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if not use_v1:

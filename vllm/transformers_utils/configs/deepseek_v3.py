@@ -5,8 +5,6 @@ from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-DEEPSEEK_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
-
 
 class DeepseekV3Config(PretrainedConfig):
 
