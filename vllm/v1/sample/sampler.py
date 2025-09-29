@@ -282,7 +282,7 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        output_token_ids: Optional[list[list[int]]],
+        output_token_ids: Optional[list[list[int]]] = None,
     ) -> torch.Tensor:
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
@@ -292,8 +292,8 @@ class Sampler(nn.Module):
                 sampling_metadata.presence_penalties,
                 sampling_metadata.frequency_penalties,
                 sampling_metadata.repetition_penalties,
-                output_token_ids
-                if output_token_ids else sampling_metadata.output_token_ids,
+                output_token_ids if output_token_ids is not None else
+                sampling_metadata.output_token_ids,
             )
         return logits
 
@@ -311,13 +311,13 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        output_token_ids: Optional[list[list[int]]],
+        output_token_ids: Optional[list[list[int]]] = None,
     ) -> torch.Tensor:
         if sampling_metadata.bad_words_token_ids:
             apply_bad_words(
                 logits,
                 sampling_metadata.bad_words_token_ids,
-                output_token_ids
-                if output_token_ids else sampling_metadata.output_token_ids,
+                output_token_ids if output_token_ids is not None else
+                sampling_metadata.output_token_ids,
             )
         return logits
