@@ -126,6 +126,7 @@ __device__ __forceinline__ __nv_bfloat162 silu2_v2(float2 x) {
                         __float2bfloat16_rn(silu(x.y)));
 }
 
+#ifndef USE_ROCM
 __device__ __forceinline__ float warp_max(float v) {
   static constexpr unsigned FULL_MASK = 0xffffffffu;
   for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
@@ -141,73 +142,90 @@ __device__ __forceinline__ __nv_bfloat16 warp_max(__nv_bfloat16 v) {
   }
   return v;
 }
+#endif
 
 template <typename T, typename U>
 __device__ __forceinline__ void cp_async4(T* _smem_ptr, const U* _glob_ptr) {
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   auto smem_ptr = reinterpret_cast<void*>(_smem_ptr);
   auto glob_ptr = reinterpret_cast<const void*>(_glob_ptr);
-  static constexpr int BYTES = 16;
-  int32_t smem = static_cast<int32_t>(__cvta_generic_to_shared(smem_ptr));
-  // TODO: Add prefetch here?
+  const int BYTES = 16;
+  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile(
       "{\n"
       "   cp.async.cg.shared.global [%0], [%1], %2;\n"
       "}\n" ::"r"(smem),
       "l"(glob_ptr), "n"(BYTES));
+#else
+  _smem_ptr[0] = _glob_ptr[0];
+#endif
 }
 
 __device__ __forceinline__ void cp_async_fence() {
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.commit_group;\n" ::);
+#else
+#endif
 }
 
 template <int N>
 __device__ __forceinline__ void cp_async_wait() {
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
+#else
+#endif
 }
 
 template <>
 __device__ __forceinline__ void cp_async_wait<0>() {
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   asm volatile("cp.async.wait_all;\n" ::);
+#else
+#endif
 }
 
-__device__ __forceinline__ __nv_bfloat16 clip(const __nv_bfloat16& v,
-                                              const __nv_bfloat16& mmin,
-                                              const __nv_bfloat16& mmax) {
+__device__ __forceinline__ float clip(float v, float mmin, float mmax) {
+#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
+  return fminf(mmax, fmaxf(v, mmin));
+#else
+#endif
+}
+
+__device__ __forceinline__ __nv_bfloat16 clip(__nv_bfloat16 v,
+                                              __nv_bfloat16 mmin,
+                                              __nv_bfloat16 mmax) {
   return __hmin(mmax, __hmax(v, mmin));
 }
 
-__device__ __forceinline__ __nv_bfloat162 clip(const __nv_bfloat162& v,
-                                               const __nv_bfloat162& mmin,
-                                               const __nv_bfloat162& mmax) {
+__device__ __forceinline__ __nv_bfloat162 clip(__nv_bfloat162 v,
+                                               __nv_bfloat162 mmin,
+                                               __nv_bfloat162 mmax) {
   return __hmin2(mmax, __hmax2(v, mmin));
 }
 
 // We use the following values for fp8 min/max:
 //  __nv_fp8_e4m3 = (-448, +448)
-//  __nv_fp8_e5m2 = (-57344.0, 57344.0)
-//  __nv_fp8_e8m0 = (5.877471754111438e-39, 1.7014118346046923e+38)
+//  __nv_fp8_e4m3uz = (-240.0, +240.0)
+// It is currently assumed that only
 template <class T>
 constexpr __nv_bfloat16 get_fp8_max() {
-  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn> ||
-                std::is_same_v<T, c10::Float8_e4m3fnuz>) {
+  static_assert(std::is_same_v<T, c10::Float8_e4m3fn> ||
+                std::is_same_v<T, c10::Float8_e4m3fnuz>);
+  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn>) {
     return __nv_bfloat16(__nv_bfloat16_raw{.x = 17376});
-  } else if constexpr (std::is_same_v<T, c10::Float8_e5m2> ||
-                       std::is_same_v<T, c10::Float8_e5m2fnuz>) {
-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 18272});
   } else {
-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 32512});
+    return __nv_bfloat16(__nv_bfloat16_raw{.x = 17264});
   }
 }
+
 template <class T>
 constexpr __nv_bfloat16 get_fp8_min() {
-  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn> ||
-                std::is_same_v<T, c10::Float8_e4m3fnuz>) {
+  static_assert(std::is_same_v<T, c10::Float8_e4m3fn> ||
+                std::is_same_v<T, c10::Float8_e4m3fnuz>);
+  if constexpr (std::is_same_v<T, c10::Float8_e4m3fn>) {
     return __nv_bfloat16(__nv_bfloat16_raw{.x = 50144});
-  } else if constexpr (std::is_same_v<T, c10::Float8_e5m2> ||
-                       std::is_same_v<T, c10::Float8_e5m2fnuz>) {
-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 51040});
   } else {
-    return __nv_bfloat16(__nv_bfloat16_raw{.x = 64});
+    return __nv_bfloat16(__nv_bfloat16_raw{.x = 50032});
   }
 }
 
