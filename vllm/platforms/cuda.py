@@ -129,7 +129,8 @@ class CudaPlatformBase(Platform):
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing
         if model_config is not None and model_config.use_mla:
-            use_sparse = os.getenv("VLLM_MLA_SPARSE_DISABLED") != "1"
+            use_sparse = hasattr(vllm_config.model_config.hf_config,
+                                 "index_topk")
             # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
             # then we default to FlashMLA backend for non-blackwell GPUs,
             # else we default to CutlassMLA. For each case, we force the

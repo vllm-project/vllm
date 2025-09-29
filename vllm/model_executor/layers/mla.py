@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -81,8 +80,7 @@ class MultiHeadLatentAttention(CustomOp):
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
-        self.use_sparse = mla_modules.is_sparse and os.getenv(
-            "VLLM_MLA_SPARSE_DISABLED") != "1"
+        self.use_sparse = mla_modules.is_sparse
 
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
