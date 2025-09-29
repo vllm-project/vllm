@@ -41,6 +41,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
+from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
@@ -58,6 +59,10 @@ from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOu
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
+
+"""
+MultiprocExecutor: the manager process, manages the workers.
+"""
 
 
 class FutureWrapper(Future):
@@ -104,16 +109,24 @@ class MultiprocExecutor(Executor):
         self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
-        self.world_size = self.parallel_config.world_size
-        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
-            f"global world_size ({self.parallel_config.world_size}) must be "
-            f"divisible by nnodes_within_dp "
-            f"({self.parallel_config.nnodes_within_dp}). "
-        )
-        self.local_world_size = self.parallel_config.local_world_size
-        tp_size = self.parallel_config.tensor_parallel_size
-        pp_size = self.parallel_config.pipeline_parallel_size
-        pcp_size = self.parallel_config.prefill_context_parallel_size
+        if not USE_TPU_INFERENCE:
+            self.world_size = self.parallel_config.world_size
+            assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
+                f"global world_size ({self.parallel_config.world_size}) must be "
+                f"divisible by nnodes_within_dp "
+                f"({self.parallel_config.nnodes_within_dp}). "
+            )
+            self.local_world_size = self.parallel_config.local_world_size
+            tp_size = self.parallel_config.tensor_parallel_size
+            pp_size = self.parallel_config.pipeline_parallel_size
+            pcp_size = self.parallel_config.prefill_context_parallel_size
+        else:
+            # Jax handles TP with SPMD, world_size = pp_size.
+            self.world_size = self.parallel_config.pipeline_parallel_size
+            self.local_world_size = self.world_size
+            tp_size = 1
+            pcp_size = 1
+            pp_size = self.parallel_config.pipeline_parallel_size
         assert self.world_size == tp_size * pp_size * pcp_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tp_size}) x pipeline"
@@ -199,6 +212,17 @@ class MultiprocExecutor(Executor):
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
+        
+            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+
+            # set up jax transfer connection.
+            if USE_TPU_INFERENCE:
+                for rank in range(1, self.world_size):
+                    self.collective_rpc(
+                        "initialize_pp_transfer_connect", unique_reply_rank=rank
+                    )
+
+            self.start_worker_monitor()
             success = True
         finally:
             if not success:
@@ -209,7 +233,7 @@ class MultiprocExecutor(Executor):
                         uw.death_writer.close()
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
-        self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+        # self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
         self.output_rank = self._get_output_rank()
 
@@ -274,6 +298,7 @@ class MultiprocExecutor(Executor):
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
             kv_output_aggregator=self.kv_output_aggregator,
         )
+        # logger.info(f'[debug] [multiproc executor] execute_model {len(outputs)=}, {type(outputs[0])=}')
 
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
@@ -425,6 +450,8 @@ class MultiprocExecutor(Executor):
         # 16-23, PP rank 2
         # 24-31, PP rank 3
         # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
+        if USE_TPU_INFERENCE:
+            return self.world_size - 1
         return (
             self.world_size
             - self.parallel_config.tensor_parallel_size
@@ -524,7 +551,12 @@ class WorkerProc:
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]
-        is_driver_worker = rank % vllm_config.parallel_config.tensor_parallel_size == 0
+        if USE_TPU_INFERENCE:
+            is_driver_worker = True
+        else:
+            is_driver_worker = (
+                rank % vllm_config.parallel_config.tensor_parallel_size == 0
+            )
         all_kwargs[local_rank] = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -533,6 +565,7 @@ class WorkerProc:
             "is_driver_worker": is_driver_worker,
             "shared_worker_lock": shared_worker_lock,
         }
+
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
@@ -572,8 +605,9 @@ class WorkerProc:
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
     ) -> UnreadyWorkerProcHandle:
-        context = get_mp_context()
+        context = get_mp_context()  # get a multiprocessing context
         # (reader, writer)
+        # this is the master proc of workerproc, it creates a two end pipe.
         reader, writer = context.Pipe(duplex=False)
 
         # Create death pipe to detect parent process exit
@@ -598,6 +632,8 @@ class WorkerProc:
         )
 
         proc.start()
+        # the goal is to receive a "ready" signal from the proc
+        # (this is a child process), so we close writer end (not needed).
         writer.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
@@ -639,6 +675,7 @@ class WorkerProc:
             unready_proc_handles
         )
         while pipes:
+            # this is also a master call waiting for any of the pipes to be ready.
             ready = multiprocessing.connection.wait(pipes.keys())
             for pipe in ready:
                 assert isinstance(pipe, Connection)
@@ -669,6 +706,19 @@ class WorkerProc:
         self.worker_response_mq = None
         destroy_model_parallel()
         destroy_distributed_environment()
+
+    """
+    How does worker_main finish
+    1. when multiprocExecutor shutdown()
+        The main process calls executor.shutdown().
+        Inside shutdown(), it closes a special communication channel called a "pipe": w.death_writer.close().
+        Each worker process has a background thread (monitor_parent_death) that is constantly listening on the other end of this pipe (death_pipe.recv()).
+        When the pipe is closed by the parent, recv() in the child raises an EOFError.
+        The monitor_parent_death thread catches this error and calls os.kill(os.getpid(), signal.SIGTERM), sending a termination signal to its own process.
+    2. os signal
+        signal handler set up in worker_main
+    3. daemon=true, so if the main process (multi proc executor) crashes or exists, worker proc will terminate.
+    """
 
     @staticmethod
     def worker_main(*args, **kwargs):
@@ -706,6 +756,7 @@ class WorkerProc:
                     # Parent process has exited, terminate this worker
                     logger.info_once("Parent process exited, terminating worker")
                     # Send signal to self to trigger clean shutdown
+                    # time.sleep(60)
                     shutdown_event.set()
                 except Exception as e:
                     logger.warning("Death monitoring error: %s", e)
@@ -716,6 +767,8 @@ class WorkerProc:
             death_monitor.start()
 
         try:
+            # for this pipe, it doesn't need to read,
+            # only need to write the response. so close the reader.
             reader.close()
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
