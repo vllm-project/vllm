@@ -2178,6 +2178,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_prompt_tokens = self.input_batch.num_prompt_tokens[index]
                 prompt_token_ids = (
                     self.input_batch.token_ids_cpu[index, :num_prompt_tokens])
+                prompt_token_ids = prompt_token_ids.tolist()
                 self.suffix_cache.start_request(req_id, prompt_token_ids)
 
             self.suffix_cache.add_active_response(req_id, sampled_ids)
