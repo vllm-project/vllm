@@ -292,8 +292,7 @@ class FlashMLASparseMetadataBuilder(
         self.num_heads = self.model_config.get_num_attention_heads(
             parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens = vllm_config.model_config.hf_config\
-            .attn_module_list_cfg[0]["topk_tokens"]
+        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
         self.topk_tokens_tensor = torch.tensor([self.topk_tokens],
                                                device=device,
