@@ -214,11 +214,14 @@ class RejectionSampler(nn.Module):
     def _combine_outputs_with_spec_tokens(
         self,
         output_token_ids: list[list[int]],
-        spec_token_ids: list[list[int]],
+        spec_token_ids: Optional[list[Optional[list[int]]]] = None,
     ):
+        if spec_token_ids is None:
+            return output_token_ids
+
         result = []
         for out, spec in zip(output_token_ids, spec_token_ids):
-            if len(spec) == 0:
+            if spec is None or len(spec) == 0:
                 continue
             result.append(out)
             for i in range(len(spec) - 1):

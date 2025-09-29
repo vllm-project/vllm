@@ -31,7 +31,6 @@ class SamplingMetadata:
     repetition_penalties: torch.Tensor
 
     output_token_ids: list[list[int]]
-    spec_token_ids: list[list[int]]
 
     # `allowed_token_ids_mask` is a 2D bool tensor of shape (max batch size,
     # vocab size).
@@ -42,3 +41,6 @@ class SamplingMetadata:
 
     # Loaded logits processors
     logitsprocs: LogitsProcessors
+
+    # Speculative token ids
+    spec_token_ids: Optional[list[Optional[list[int]]]] = None
