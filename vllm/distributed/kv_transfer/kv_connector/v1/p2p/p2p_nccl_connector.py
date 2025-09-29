@@ -195,10 +195,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
         assert isinstance(metadata, P2pNcclConnectorMetadata)
 
         if metadata is None:
-            logger.info("metadata is None, returning")
             return
 
-        logger.debug("loading KV for %d requests", len(metadata.requests))
         # Load the KV for each request each layer
         for request in metadata.requests:
             logger.info("loading KV for request:%s", request.request_id)
@@ -213,8 +211,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # layers like FusedMoE
                 kv_cache = getattr(layer, 'kv_cache', None)
                 if kv_cache is None:
-                    logger.info("kv_cache is None for layer:%s, skipping",
-                                layer_name)
                     continue
 
                 layer = kv_cache[forward_context.virtual_engine]
