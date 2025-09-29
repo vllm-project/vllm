@@ -17,6 +17,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from ..gptq import GPTQConfig
 from ..gptq_marlin import GPTQMarlinConfig
 
+
 # Match dynamic rules with module name (prefix) and override quantize
 # config if module (prefix) matches a rule
 def override_config(config: Union[GPTQConfig, GPTQMarlinConfig], prefix: str):
