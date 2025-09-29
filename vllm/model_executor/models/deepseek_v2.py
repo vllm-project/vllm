@@ -653,7 +653,7 @@ def sparse_attn_indexer(
     has_prefill = attn_metadata.num_prefills > 0
     num_decode_tokens = attn_metadata.num_decode_tokens
 
-    indexer_k_quant_and_cache(
+    ops.indexer_k_quant_and_cache(
         k,
         kv_cache,
         slot_mapping,

@@ -500,6 +500,64 @@ __global__ void concat_and_cache_ds_mla_kernel(
           src_val, scale_val);
 }
 
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void indexer_k_quant_and_cache_kernel(
+  const scalar_t* __restrict__ k,            // [num_tokens, head_dim]
+  cache_t* __restrict__ kv_cache,            // [num_blocks, block_size, cache_stride]
+  const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+  const int token_stride,                    // stride for each token in k
+  const int head_dim,                        // dimension of each head
+  const int block_stride,                    // stride for each block in kv_cache
+  const int cache_token_stride,              // stride for each token in kv_cache
+  const int cache_block_size,                // num_tokens for each block in kv_cache
+  const int quant_block_size,                // quantization block size
+  const bool use_ue8m0                       // use ue8m0 scale format
+) {
+  // NOTE: In each block of kv_cache, the quantized k and scales are stored separately.
+  // The first cache_block_size * head_dim elements are the quantized k values in FP8,
+  // and the last cache_block_size * head_dim * 4 / quant_block_size elements are the scales in FP32.
+  constexpr int VEC_SIZE = 4;
+  const int64_t token_idx = blockIdx.x;
+  const int64_t head_idx = (blockIdx.y * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  const int64_t cache_block_idx = slot_idx / cache_block_size;
+  const int64_t cache_inblock_idx = slot_idx % cache_block_size;
+  
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0 || (head_idx >= head_dim)) {
+    return;
+  }
+  
+  float2 k_val = (reinterpret_cast<const float2*>(k))[(token_idx * token_stride + head_idx) / VEC_SIZE];
+  scalar_t* k_val_ptr = reinterpret_cast<scalar_t*>(&k_val);
+  float amax = 0.0f;
+  for (int i = 0; i < VEC_SIZE; i++) {
+    amax = fmaxf(amax, fabsf(float(k_val_ptr[i])));
+  }
+  __syncwarp();
+
+  // Reduced amax
+  for (int mask = 16; mask > 0; mask /= 2) {
+    amax = fmaxf(amax, __shfl_xor_sync(unsigned(-1), amax, mask));
+  }
+  __syncwarp();
+  float scale = fmaxf(amax, 1e-4) / 448.0f;
+  if (use_ue8m0) {
+    scale = exp2f(ceilf(log2f(scale)));
+  }
+
+  const int64_t cache_block_start_offset = cache_block_idx * block_stride;
+  const int64_t cache_inblock_offset = cache_inblock_idx * head_dim + head_idx;
+  const int64_t dst_k_vals_offset = cache_block_start_offset + cache_inblock_offset;
+  for (int i = 0; i < VEC_SIZE; i++) {
+    kv_cache[dst_k_vals_offset + i] = fp8::scaled_convert<cache_t, scalar_t, kv_dt>(k_val_ptr[i], scale);
+  }
+  if (threadIdx.x == 0) {
+    const int64_t dst_scale_offset = cache_block_start_offset + cache_block_size * head_dim + cache_inblock_offset * 4 / quant_block_size;
+    reinterpret_cast<float*>(kv_cache)[dst_scale_offset / 4] = scale;
+  }
+}
+
 }  // namespace vllm
 
 // KV_T is the data type of key and value tensors.
@@ -1061,4 +1119,49 @@ void cp_gather_cache(
   } else {
     TORCH_CHECK(false, "Unsupported data type width: ", dtype_bits);
   }
+}
+
+// Macro to dispatch the kernel based on the data type.
+#define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)              \
+  vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>            \
+      <<<grid, block, 0, stream>>>(                                          \
+          reinterpret_cast<KV_T*>(k.data_ptr()),                             \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                   \
+          slot_mapping.data_ptr<int64_t>(),                                  \
+          k.stride(0),                                                       \
+          k.size(1),                                                         \
+          kv_cache.stride(0),                                                \
+          kv_cache.stride(1),                                                \
+          kv_cache.size(1),                                                  \
+          quant_block_size,                                                  \
+          use_ue8m0);
+
+void indexer_k_quant_and_cache(
+    torch::Tensor& k,              // [num_tokens, head_dim]
+    torch::Tensor& kv_cache,       // [num_blocks, block_size, cache_stride]
+    torch::Tensor& slot_mapping,   // [num_tokens]
+    int64_t quant_block_size,      // quantization block size
+    const std::string& scale_fmt) {
+  
+  int num_tokens = k.size(0);
+  int head_dim = k.size(1);
+  int cache_block_size = kv_cache.size(1);
+  int cache_stride = kv_cache.size(2);
+  bool use_ue8m0 = scale_fmt == "ue8m0";
+  
+  TORCH_CHECK(k.device() == kv_cache.device(),
+              "k and kv_cache must be on the same device");
+  TORCH_CHECK(k.device() == slot_mapping.device(),
+              "k and slot_mapping must be on the same device");
+  TORCH_CHECK(head_dim % quant_block_size == 0,
+              "head_dim must be divisible by quant_block_size");
+  
+  constexpr int vec_size = 4;
+  dim3 grid(num_tokens, (head_dim + quant_block_size * vec_size - 1) / (quant_block_size * vec_size));
+  dim3 block(32, vec_size);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(k));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  
+  DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), "fp8_e4m3",
+                             CALL_INDEXER_K_QUANT_AND_CACHE);
 }
