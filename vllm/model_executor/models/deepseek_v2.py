@@ -80,6 +80,7 @@ from vllm.utils.deep_gemm import (
     fp8_paged_mqa_logits,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
+from vllm.platforms import current_platform
 
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
