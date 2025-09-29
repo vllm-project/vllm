@@ -1299,4 +1299,9 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (kv_connector_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
+            if req_id not in self.requests:
+                logger.warning(
+                    "Got finished sending KV transfer for request %s,"
+                    "but the request is already freed.", req_id)
+            else:
+                self._free_blocks(self.requests[req_id])
