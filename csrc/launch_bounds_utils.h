@@ -10,11 +10,23 @@
 
 // compile-time estimate of max threads per SM for launch bounds.
 #ifndef VLLM_MAX_THREADS_PER_SM
-# if defined(__CUDA_ARCH__) && ( (__CUDA_ARCH__ == 860) || (__CUDA_ARCH__ == 890) || (__CUDA_ARCH__ == 1200) || (__CUDA_ARCH__ == 1210) )
-#   define VLLM_MAX_THREADS_PER_SM 1536
-# elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 750)
-#   define VLLM_MAX_THREADS_PER_SM 1024
+# ifdef __CUDA_ARCH__
+  /* 1536 thr/SM: Ampere GA10x (sm_86), Ada (sm_89),
+     Ada-Next / GB20x consumer (sm_120, sm_121) */
+#   if (__CUDA_ARCH__ == 860) || \
+       (__CUDA_ARCH__ == 890) || \
+       (__CUDA_ARCH__ == 1200) || \
+       (__CUDA_ARCH__ == 1210)
+#     define VLLM_MAX_THREADS_PER_SM 1536
+  /* 1024 thr/SM: Turing (sm_75) */
+#   elif (__CUDA_ARCH__ == 750)
+#     define VLLM_MAX_THREADS_PER_SM 1024
+  /* 2048 thr/SM: all others (Volta/Hopper/Blackwell/Thor, etc.) */
+#   else
+#     define VLLM_MAX_THREADS_PER_SM 2048
+#   endif
 # else
+  /* Host pass (no __CUDA_ARCH__): neutral default */
 #   define VLLM_MAX_THREADS_PER_SM 2048
 # endif
 #endif
