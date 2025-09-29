@@ -327,17 +327,7 @@ class RocmPlatform(Platform):
             cache_config.block_size = 16
 
         if parallel_config.worker_cls == "auto":
-            if vllm_config.speculative_config:
-                if not use_v1:
-                    raise NotImplementedError(
-                        "Speculative decoding is not supported on vLLM V0.")
-                parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
-            else:
-                if use_v1:
-                    parallel_config.worker_cls = \
-                        "vllm.v1.worker.gpu_worker.Worker"
-                else:
-                    parallel_config.worker_cls = "vllm.worker.worker.Worker"
+            parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
         if (use_v1 and use_aiter_rms_norm and not is_eager_execution
                 and "-rms_norm" not in compilation_config.custom_ops):

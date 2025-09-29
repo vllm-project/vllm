@@ -41,7 +41,7 @@ from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import (AsyncModelRunnerOutput, DraftTokenIds,
                              ModelRunnerOutput)
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -702,7 +702,7 @@ class WorkerProc:
 
 def set_multiprocessing_worker_envs():
     """ Set up environment variables that should be used when there are workers
-    in a multiprocessing environment. This should be called by the parent 
+    in a multiprocessing environment. This should be called by the parent
     process before worker processes are created"""
 
     _maybe_force_spawn()

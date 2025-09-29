@@ -10,7 +10,7 @@ from vllm.model_executor.model_loader import tensorizer as tensorizer_mod
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.executor.abstract import UniProcExecutor
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 MODEL_REF = "facebook/opt-125m"
 
