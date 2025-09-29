@@ -496,6 +496,22 @@ class FlexAttentionMetadata:
 
         used_pages = self.block_table[
             self.doc_ids, :cdiv(self.max_seq_len, self.block_size)]
+
+        if self.sliding_window and self.causal:
+            token_indices = torch.arange(self.doc_ids.shape[0],
+                                         device="cuda",
+                                         dtype=torch.long)
+            logical_q_idx = (token_indices - self.query_start_loc[self.doc_ids] +
+                             self.decode_offset[self.doc_ids])
+            min_kv_idx = torch.clamp(logical_q_idx - (self.sliding_window - 1),
+                                     min=0)
+            min_block_idx = min_kv_idx // self.block_size
+            logical_block_ids = torch.arange(cdiv(self.max_seq_len, self.block_size),
+                                             device="cuda",
+                                             dtype=torch.long)
+            sliding_mask = logical_block_ids >= min_block_idx[:, None]
+            used_pages = used_pages.masked_fill(~sliding_mask, 0)
+
         used_pages_padded = pad_to_multiple(used_pages,
                                             multiple=self.q_block_size,
                                             dim=0)
@@ -572,11 +588,13 @@ class FlexAttentionMetadataBuilder(
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.direct_build: bool = is_torch_equal_or_newer("2.9.0.dev0")
-        self.q_block_size: int = 16 if is_torch_equal_or_newer(
-            "2.9.0.dev0") else 128
-        self.kv_block_size: int = 16 if is_torch_equal_or_newer(
-            "2.9.0.dev0") else 128
+        self.direct_build: bool = True
+        # self.q_block_size: int = 16 if is_torch_equal_or_newer(
+        #     "2.9.0.dev0") else 128
+        # self.kv_block_size: int = 16 if is_torch_equal_or_newer(
+        #     "2.9.0.dev0") else 128
+        self.q_block_size: int = 128
+        self.kv_block_size: int = 128
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -755,18 +773,18 @@ class FlexAttentionImpl(AttentionImpl):
 
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
-            if attn_metadata.direct_build:
-                # TODO: Support skipping the computation of sliding window
-                # in direct block mask building code path.
-                logger.warning_once(
-                    "Using direct block mask building with sliding window, "
-                    "which is suboptimal now. Performance may be degraded.")
-                # update mask mod in attention metadata
-                attn_metadata.mask_mod = attn_metadata.get_mask_mod()
-                attn_metadata.block_mask = (
-                    attn_metadata._build_block_mask_direct())
-            else:
-                attn_metadata.block_mask = attn_metadata.build_block_mask()
+            # if attn_metadata.direct_build:
+            # TODO: Support skipping the computation of sliding window
+            # in direct block mask building code path.
+            logger.warning_once(
+                "Using direct block mask building with sliding window, "
+                "which is suboptimal now. Performance may be degraded.")
+            # update mask mod in attention metadata
+            attn_metadata.mask_mod = attn_metadata.get_mask_mod()
+            attn_metadata.block_mask = (
+                attn_metadata._build_block_mask_direct())
+            # else:
+            #     attn_metadata.block_mask = attn_metadata.build_block_mask()
 
         if not attn_metadata.causal:
             assert self.attn_type == AttentionType.ENCODER_ONLY

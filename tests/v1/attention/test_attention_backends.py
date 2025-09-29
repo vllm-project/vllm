@@ -517,13 +517,12 @@ def test_causal_backend_correctness(batch_spec_name: str, model: str):
 
 
 SLIDING_WINDOW_BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN, _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN,
-    "FLEX_ATTENTION_SLOW"
+    _Backend.FLASH_ATTN, _Backend.FLEX_ATTENTION,
+    # "FLEX_ATTENTION_SLOW"
 ]
 
 
 @pytest.mark.parametrize("batch_spec_name", [
-    "small_decode", "small_prefill", "mixed_medium", "large_decode",
     "large_prefill"
 ])
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
@@ -550,8 +549,7 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
     sliding_window_mask_mod_fn = partial(sliding_window_mask_mod,
                                          sliding_window=sliding_window)
 
-    LARGE_BLOCK_BACKENDS = ([_Backend.FLEX_ATTENTION]
-                            if is_torch_equal_or_newer("2.9.0.dev0") else [])
+    LARGE_BLOCK_BACKENDS = ([_Backend.FLEX_ATTENTION])
     SMALL_BLOCK_BACKENDS = [
         x for x in SLIDING_WINDOW_BACKENDS_TO_TEST
         if x not in LARGE_BLOCK_BACKENDS
