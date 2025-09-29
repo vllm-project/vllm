@@ -19,7 +19,7 @@ else()
   FetchContent_Declare(
         flashmla
         GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG 9140b54f8ca80a32b69972b46a68bfd0de4501b8
+        GIT_TAG e350c2d2e42f069ced7ceee68804f224553899ac
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -38,7 +38,7 @@ set(SUPPORT_ARCHS)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.3)
     list(APPEND SUPPORT_ARCHS 9.0a)
 endif()
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.9)
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8)
     list(APPEND SUPPORT_ARCHS 10.0a)
 endif()
 
