@@ -138,13 +138,15 @@ class ModelOptFp8Config(QuantizationConfig):
             if not quant_method:
                 raise ValueError("Missing 'quant_algo' in quantization config")
             kv_cache_quant_method = quant_config.get("kv_cache_quant_algo")
+            # "exclude_modules" is the key in the legacy hf_quant_config.json
             exclude_modules = quant_config.get("exclude_modules")
         else:
             # Compressed-tensors style format:
             # {"quant_algo": "...", "quant_method": "modelopt"}
             quant_method = config.get("quant_algo", "")
             kv_cache_quant_method = config.get("kv_cache_quant_algo")
-            exclude_modules = config.get("exclude_modules")
+            # "ignore" is the key in config.json
+            exclude_modules = config.get("ignore")
 
         if quant_method not in QUANT_ALGOS:
             raise ValueError(
@@ -723,6 +725,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
                     raise ValueError(f"group_size must be an integer, got "
                                      f"{type(group_size_raw)}") from None
 
+            # "exclude_modules" is the key in the legacy hf_quant_config.json
             exclude_modules = quant_config.get("exclude_modules", [])
             if not isinstance(exclude_modules, list):
                 raise ValueError(f"exclude_modules must be a list, got "
@@ -756,7 +759,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
                     raise ValueError(f"group_size must be an integer, got "
                                      f"{type(group_size_raw)}") from None
 
-            exclude_modules = config.get("exclude_modules", [])
+            # "ignore" is the key in config.json
+            exclude_modules = config.get("ignore", [])
             if not isinstance(exclude_modules, list):
                 raise ValueError(f"exclude_modules must be a list, got "
                                  f"{type(exclude_modules)}")
