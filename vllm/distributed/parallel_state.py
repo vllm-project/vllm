@@ -1178,6 +1178,7 @@ def init_distributed_environment(
             )
             backend = "gloo"
         # this backend is used for WORLD
+        # the worker is blocked until all world_size workers joins this call.
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
@@ -1193,6 +1194,8 @@ def init_distributed_environment(
         # setting, where we can use rank as local rank
         local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
     global _WORLD, _NODE_COUNT
+    # each worker has its own _WORLD, this is the perspective from the current
+    # worker, knowing its own rank.
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
