@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any, NamedTuple
+
+import torch
+import torch._inductor.pattern_matcher as pm
+from torch import fx
+from torch._higher_order_ops.auto_functionalize import auto_functionalized
+from torch._inductor.pattern_matcher import PatternMatcherPass
+from torch._ops import OpOverload
+
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape, QuantKey, ScaleDesc, kFp8DynamicTensorSym, kFp8DynamicTokenSym,
+    kFp8StaticTensorSym, kNvfp4Quant, kStaticTensorScale)
+from vllm.platforms import current_platform
+
+from .inductor_pass import enable_fake_mode
+from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+
+logger = init_logger(__name__)
+
+
+def empty_bf16(*args, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device="cuda")
+
+
+def empty_fp32(*args, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.float32, device="cuda")
+
+
+def empty_i32(*args, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.int32, device="cuda")
+
+
+def empty_fp4(*args, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.uint8, device="cuda")
+
+
+class SiluMulMXFP4GemmPattern:
+    def __init__(self):
+        pass
+    
+    def register(self, pm_pass: PatternMatcherPass):
+
+        def pattern(result: torch.Tensor,
+                                    result_silu_mul: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
+                                    scale: torch.Tensor):
+            at1 = auto_functionalized(torch.ops._C.silu_and_mul.default,
+                                    result=result_silu_mul,
+                                    input=input)
+            at2 = auto_functionalized(torch.ops.vllm.gemm_with_dynamic_quant.default,
+                                    result=result,
+                                    x=at1[1],
+                                    weight=weight,
+                                    weight_scale=scale,
+                                    x_scales=None)
+            return at2[1]
+
+
+        def replacement(result: torch.Tensor,
+                                    result_silu_mul: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
+                                    scale: torch.Tensor):
+            at = auto_functionalized(torch.ops.vllm.silu_and_mul_mxfp4_gemm.default,
+                                    result=result,
+                                    x=input,
+                                    weight=weight,
+                                    weight_scale=scale)
+            return at[1]
+        
+        inputs = [
+            empty_bf16(5, 4),  # result
+            empty_bf16(5, 4),  # result_silu_mul
+            empty_bf16(5, 4),  # input
+            empty_fp4(5, 4),  # weight
+            empty_fp4(1, 1), # scale
+        ]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            inputs,
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
+class ROCmFusionPass(VllmPatternMatcherPass):
+    """
+    This pass fuses a pre-defined set of custom ops into fused ops.
+    It uses the torch pattern matcher to find the patterns and replace them.
+    """
+
+    @enable_fake_mode
+    def __init__(self, config: VllmConfig):
+        super().__init__(config)
+
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="rocm_fusion_pass")
+
+        SiluMulMXFP4GemmPattern().register(self.patterns)
+
+        self.dump_patterns(config, self.patterns)
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph):
+        logger.info(graph)
+        self.matched_count = self.patterns.apply(graph)
+        logger.info("Replaced %s patterns", self.matched_count)
+
+    def uuid(self) -> Any:
+        return self.hash_source(self, SiluMulMXFP4GemmPattern)
