@@ -6,34 +6,34 @@ import hashlib
 import json
 import os
 from contextlib import contextmanager
-from dataclasses import field, replace
+from dataclasses import field, is_dataclass, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
 
 import torch
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.config.cache import CacheConfig
-from vllm.config.compilation import (CompilationConfig, CompilationLevel,
-                                     CUDAGraphMode)
-from vllm.config.device import DeviceConfig
-from vllm.config.kv_events import KVEventsConfig
-from vllm.config.kv_transfer import KVTransferConfig
-from vllm.config.load import LoadConfig
-from vllm.config.lora import LoRAConfig
-from vllm.config.model import ModelConfig
-from vllm.config.observability import ObservabilityConfig
-from vllm.config.parallel import ParallelConfig
-from vllm.config.scheduler import SchedulerConfig
-from vllm.config.speculative import SpeculativeConfig
-from vllm.config.structured_outputs import StructuredOutputsConfig
-from vllm.config.utils import SupportsHash, config
 from vllm.logger import init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
+
+from .cache import CacheConfig
+from .compilation import CompilationConfig, CompilationLevel, CUDAGraphMode
+from .device import DeviceConfig
+from .kv_events import KVEventsConfig
+from .kv_transfer import KVTransferConfig
+from .load import LoadConfig
+from .lora import LoRAConfig
+from .model import ModelConfig
+from .observability import ObservabilityConfig
+from .parallel import ParallelConfig
+from .scheduler import SchedulerConfig
+from .speculative import SpeculativeConfig
+from .structured_outputs import StructuredOutputsConfig
+from .utils import ConfigT, SupportsHash, config
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -721,10 +721,9 @@ def set_current_vllm_config(vllm_config: VllmConfig,
     except Exception:
         raise
     else:
-        logger.debug("enabled custom ops: %s",
-                     vllm_config.compilation_config.enabled_custom_ops)
-        logger.debug("disabled custom ops: %s",
-                     vllm_config.compilation_config.disabled_custom_ops)
+        if check_compile:
+            vllm_config.compilation_config.custom_op_log_check()
+
         if check_compile and \
             vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
             and compilation_counter.num_models_seen == num_models_seen:
@@ -759,3 +758,49 @@ def get_current_vllm_config() -> VllmConfig:
         logger.warning("Current vLLM config is not set.")
         return VllmConfig()
     return _current_vllm_config
+
+
+T = TypeVar("T")
+
+
+def get_layers_from_vllm_config(
+        vllm_config: VllmConfig,
+        layer_type: type[T],
+        layer_names: Optional[list[str]] = None) -> dict[str, T]:
+    """
+    Get layers from the vLLM config.
+
+    Args:
+        vllm_config: The vLLM config.
+        layer_type: The type of the layer to get.
+        layer_names: The names of the layers to get. If None, return all layers.
+    """
+
+    if layer_names is None:
+        layer_names = list(
+            vllm_config.compilation_config.static_forward_context.keys())
+
+    forward_context = vllm_config.compilation_config.static_forward_context
+
+    return {
+        layer_name: forward_context[layer_name]
+        for layer_name in layer_names
+        if isinstance(forward_context[layer_name], layer_type)
+    }
+
+
+def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
+    processed_overrides = {}
+    for field_name, value in overrides.items():
+        assert hasattr(
+            config, field_name), f"{type(config)} has no field `{field_name}`"
+        current_value = getattr(config, field_name)
+        if is_dataclass(current_value) and not is_dataclass(value):
+            assert isinstance(value, dict), (
+                f"Overrides to {type(config)}.{field_name} must be a dict"
+                f"  or {type(current_value)}, but got {type(value)}")
+            value = update_config(
+                current_value,  # type: ignore[type-var]
+                value)
+        processed_overrides[field_name] = value
+    return replace(config, **processed_overrides)
