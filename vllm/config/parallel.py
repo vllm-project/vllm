@@ -155,6 +155,10 @@ class ParallelConfig:
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
+    # Whether to profile Ray workers with unitrace
+    ray_workers_use_unitrace: bool = False
+    """Whether to profile Ray workers with unitrace, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-unitrace-profiler."""
+
     ray_runtime_env: Optional[RuntimeEnv] = None
     """Ray runtime environment to pass to distributed workers."""
 
@@ -519,6 +523,10 @@ class ParallelConfig:
                 "supported on current platform.")
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
+                             "run with Ray.")
+
+        if self.ray_workers_use_unitrace and not self.use_ray:
+            raise ValueError("Unable to use unitrace profiling unless workers "
                              "run with Ray.")
 
         return self
