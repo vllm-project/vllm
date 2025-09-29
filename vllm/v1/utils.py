@@ -394,3 +394,7 @@ def record_function_or_nullcontext(name: str) -> AbstractContextManager:
 
     _PROFILER_FUNC = func
     return func(name)
+
+
+def tensor_data(tensor: torch.Tensor) -> memoryview:
+    return tensor.flatten().contiguous().view(torch.uint8).numpy().data

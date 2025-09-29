@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         UniformTypeKVCacheSpecs)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
+from vllm.v1.utils import tensor_data
 
 # BlockHash represents the hash of a single KV-cache block used for
 # prefix caching.  Treating it as a distinct type from ``bytes`` helps
@@ -546,10 +547,6 @@ def generate_block_hash_extra_keys(
     return tuple(extra_keys), new_start_mm_idx
 
 
-def _tensor_bytes(tensor: torch.Tensor) -> bytes:
-    return (tensor.flatten().contiguous().view(torch.uint8).numpy().tobytes())
-
-
 def hash_block_tokens(
     hash_function: Callable[[Any], bytes],
     parent_block_hash: Optional[BlockHash],
@@ -577,9 +574,9 @@ def hash_block_tokens(
         parent_block_hash = NONE_HASH
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
-    curr_block_prompt_embeds_bytes = (None
-                                      if curr_block_prompt_embeds is None else
-                                      _tensor_bytes(curr_block_prompt_embeds))
+    curr_block_prompt_embeds_bytes = (
+        None if curr_block_prompt_embeds is None else
+        tensor_data(curr_block_prompt_embeds).tobytes())
     return BlockHash(
         hash_function((parent_block_hash, curr_block_token_ids_tuple,
                        curr_block_prompt_embeds_bytes, extra_keys)))
