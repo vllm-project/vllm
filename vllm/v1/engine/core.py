@@ -312,12 +312,17 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
-
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
+            # logger.info('core.py step no requests for scheduler')
             return {}, False
         scheduler_output = self.scheduler.schedule()
+
+        # logger.info(f'core.py step schedule {scheduler_output.total_num_scheduled_tokens=}, {scheduler_output.num_scheduled_tokens=}')
+        # logger.info(f'schedule {scheduler_output.total_num_scheduled_tokens} tokens')
+        # self.print_scheduler_output(scheduler_output.num_scheduled_tokens)
+        # logger.info(f'-------------------------')
 
         with self.log_error_detail(scheduler_output):
             model_output = self.model_executor.execute_model(scheduler_output)
@@ -362,6 +367,9 @@ class EngineCore:
         model_executed = False
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
+            # logger.info(f'schedule {scheduler_output.total_num_scheduled_tokens} tokens')
+            # self.print_scheduler_output(scheduler_output.num_scheduled_tokens)
+            # logger.info(f'-------------------------')
             future = self.model_executor.execute_model(scheduler_output, non_block=True)
             batch_queue.appendleft((future, scheduler_output))
 
@@ -373,9 +381,11 @@ class EngineCore:
             ):
                 # Don't block on next worker response unless the queue is full
                 # or there are no more requests to schedule.
+                # logger.info(f'core.py step_with_batch_queue not process queue')
                 return None, True
 
         elif not batch_queue:
+            # logger.info(f'core.py step_with_batch_queue no requests and no batch_queue')
             # Queue is empty. We should not reach here since this method should
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
@@ -390,6 +400,17 @@ class EngineCore:
             scheduler_output, model_output
         )
         return engine_core_outputs, model_executed
+
+    def print_scheduler_output(self, d):
+        for key, value in d.items():
+            logger.info(f"scheduler output {key}:{value}")
+
+    def print_model_output(self, model_output):
+        for req_id in model_output.req_ids:
+            index = model_output.req_id_to_index[req_id]
+            logger.info(
+                f"model output {req_id}:{model_output.sampled_token_ids[index]}"
+            )
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
