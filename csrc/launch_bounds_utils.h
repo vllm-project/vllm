@@ -9,7 +9,6 @@
 #endif
 
 // compile-time estimate of max threads per SM for launch bounds.
-// add support for SM120 Architecture
 #ifndef VLLM_MAX_THREADS_PER_SM
   #if defined(__CUDA_ARCH__)
     #if (__CUDA_ARCH__ >= 1200 && __CUDA_ARCH__ < 1300) || (__CUDA_ARCH__ < 300)
