@@ -59,6 +59,8 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
         key: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert key is not None
+        # self.cos_sin_cache here is complex tensor so we cannot cast into
+        # query's dtype directly with self._match_cos_sin_cache_dtype
         self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(query.device)
         query_ = torch.view_as_complex(query.float().reshape(
             *query.shape[:-1], -1, 2))
