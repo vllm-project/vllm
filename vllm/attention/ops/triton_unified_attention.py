@@ -856,7 +856,6 @@ def unified_attention(
         num_queries_per_kv)
     BLOCK_Q = BLOCK_M // num_queries_per_kv
     assert BLOCK_Q >= 1
-    assert BLOCK_M % num_queries_per_kv == 0
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
     # However, it is slow to realize the query_lens on cpu.
@@ -887,7 +886,6 @@ def unified_attention(
             num_2d_prgms,
         )
         assert config["BLOCK_Q"] >= 1
-        assert config["BLOCK_M"] % num_queries_per_kv == 0
         total_num_q_blocks = q.shape[0] // config["BLOCK_Q"] + num_seqs
 
         kernel_unified_attention_2d[(
