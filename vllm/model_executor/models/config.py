@@ -433,12 +433,10 @@ class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
             if cache_config.cache_dtype == "auto" or \
                 cache_config.cache_dtype.startswith("fp8"):
                 cache_config.cache_dtype = "fp8_ds_mla"
-                logger.info("Using custom fp8 format for DeepSeekV3.2")
+                logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
             if cache_config.cache_dtype == "bfloat16":
                 cache_config.cache_dtype = "auto"
-                logger.info(
-                    "DeepSeekV3.2 cache kernels reject bfloat16; falling back "
-                    "to activation dtype via auto.")
+                logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
