@@ -2351,6 +2351,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.cudagraph_dispatcher.dispatch(batch_descriptor,
                                                    use_cascade_attn)
 
+        # Set cudagraph mode to none if calc_kv_scales is true.
+        if attn_metadata is not None:
+            metadata_list = (attn_metadata.values() if isinstance(
+                attn_metadata, dict) else [attn_metadata])
+            if any(
+                    getattr(m, 'enable_kv_scales_calculation', False)
+                    for m in metadata_list):
+                cudagraph_runtime_mode = CUDAGraphMode.NONE
+
         # This is currently to get around the assert in the DPMetadata
         # where it wants `num_tokens_across_dp` to align with `num_tokens`
         if ubatch_slices is not None:
