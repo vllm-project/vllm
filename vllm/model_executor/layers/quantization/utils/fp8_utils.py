@@ -24,7 +24,7 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
-from vllm.utils.deep_gemm import (is_deep_gemm_e8m0_used,
+from vllm.utils.deep_gemm import (fp8_gemm_nt, is_deep_gemm_e8m0_used,
                                   is_deep_gemm_supported,
                                   should_use_deepgemm_for_fp8_linear)
 
@@ -260,13 +260,11 @@ class W8A8BlockFp8LinearOp:
 
         assert self.deepgemm_input_quant_op is not None
         q_input, x_scale = self.deepgemm_input_quant_op(input_2d)
-        return torch.ops.vllm.w8a8_deepgemm_block_scaled_mm(
-            q_input,
-            weight,
-            x_scale,
-            weight_scale,
-            self.weight_group_shape,
-            output_dtype=input_2d.dtype)
+        output = torch.empty((q_input.shape[0], weight.shape[0]),
+                             dtype=torch.bfloat16,
+                             device=q_input.device)
+        fp8_gemm_nt((q_input, x_scale), (weight, weight_scale), output)
+        return output
 
     def _run_cutlass(
         self,

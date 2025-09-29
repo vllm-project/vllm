@@ -531,7 +531,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                               trust_remote_code=True),
     "Llama_Nemotron_Nano_VL" : _HfExamplesInfo("nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1", # noqa: E501
                                                      trust_remote_code=True),
-    "NemotronH_Nano_VL": _HfExamplesInfo("nano_vl_dummy",
+    "NemotronH_Nano_VL_V2": _HfExamplesInfo("nano_vl_dummy",
                                           is_available_online=False,
                                           trust_remote_code=True),
     "Ovis": _HfExamplesInfo("AIDC-AI/Ovis2-1B", trust_remote_code=True,
@@ -642,7 +642,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                     speculative_model="baidu/ERNIE-4.5-21B-A3B-PT"),
     "Glm4MoeMTPModel": _HfExamplesInfo("zai-org/GLM-4.5",
                                         speculative_model="zai-org/GLM-4.5",
-                                        min_transformers_version="4.54",
+                                        min_transformers_version="4.56",
                                         is_available_online=False),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
@@ -651,6 +651,9 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                     trust_remote_code=True,
                                     speculative_model="XiaomiMiMo/MiMo-7B-RL"),
+    "Eagle3Qwen2_5vlForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen2.5-VL-7B-Instruct",
+        speculative_model="Rayzl/qwen2.5-vl-7b-eagle3-sgl"),
     "Qwen3NextMTP": _HfExamplesInfo("Qwen/Qwen3-Next-80B-A3B-Instruct",
                                      min_transformers_version="4.56.3"),
 }
