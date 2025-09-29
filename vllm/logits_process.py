@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from collections.abc import Sequence
 from typing import Callable, Union
 
 import torch
@@ -55,7 +55,7 @@ class NoBadWordsLogitsProcessor:
 
     def __call__(
         self,
-        past_tokens_ids: Union[list[int], tuple[int]],
+        past_tokens_ids: Sequence[int],
         logits: torch.FloatTensor,
     ) -> torch.Tensor:
         if self.word_bias is None:

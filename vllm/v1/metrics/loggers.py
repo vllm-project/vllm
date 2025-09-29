@@ -90,7 +90,6 @@ class LoggingStatLogger(StatLoggerBase):
                iteration_stats: Optional[IterationStats],
                engine_idx: int = 0):
         """Log Stats to standard output."""
-
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
 
@@ -411,6 +410,19 @@ class PrometheusStatLogger(StatLoggerBase):
         self.histogram_inter_token_latency = make_per_engine(
             histogram_inter_token_latency, engine_indexes, model_name)
 
+        histogram_request_time_per_output_token = self._histogram_cls(
+            name="vllm:request_time_per_output_token_seconds",
+            documentation=
+            "Histogram of time_per_output_token_seconds per request.",
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
+            ],
+            labelnames=labelnames)
+        self.histogram_request_time_per_output_token = make_per_engine(
+            histogram_request_time_per_output_token, engine_indexes,
+            model_name)
+
         request_latency_buckets = [
             0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
             40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
@@ -583,6 +595,8 @@ class PrometheusStatLogger(StatLoggerBase):
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request[engine_idx].observe(
                 finished_request.num_generation_tokens)
+            self.histogram_request_time_per_output_token[engine_idx].observe(
+                finished_request.mean_time_per_output_token)
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param)

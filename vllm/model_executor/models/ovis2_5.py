@@ -584,17 +584,6 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.llm.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
-            tmp = torch.concat(multimodal_embeddings, dim=0)
-            inputs_embeds[input_ids == self.image_pad_token_id] = tmp
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -605,15 +594,6 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
 
         # up until here we have a inputs_embeds 100% numerical identity
         # between the OG HF Transformers implementation and ours
