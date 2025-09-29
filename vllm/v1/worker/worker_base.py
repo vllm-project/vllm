@@ -40,6 +40,17 @@ class WorkerBase:
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ) -> None:
+        """
+        Initialize common worker components.
+
+        Args:
+            vllm_config: Complete vLLM configuration
+            local_rank: Local device index
+            rank: Global rank in distributed setup
+            distributed_init_method: Distributed initialization method
+            is_driver_worker: Whether this worker handles driver
+                responsibilities
+        """
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
