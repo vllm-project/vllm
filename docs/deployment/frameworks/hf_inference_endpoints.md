@@ -34,34 +34,35 @@ from openai import OpenAI
 import os
 
 client = OpenAI(
-	base_url = DEPLOYMENT_URL,
-	api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
+    base_url = DEPLOYMENT_URL,
+    api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
 )
 
 chat_completion = client.chat.completions.create(
-	model = "openai/gpt-oss-120b",
-	messages = [
-		{
-			"role": "user",
-			"content": [
-				{
-					"type": "image_url",
-					"image_url": {
-						"url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png"
-					}
-				},
-				{
-					"type": "text",
-					"text": "Convert this page to docling."
-				}
-			]
-		}
-	],
-	stream = True
+    model = "openai/gpt-oss-120b",
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Convert this page to docling."
+                }
+            ]
+        }
+    ],
+    stream = True
 )
 
 for message in chat_completion:
-	print(message.choices[0].delta.content, end = "")
+    print(message.choices[0].delta.content, end = "")
+
 ```
 
 > [!NOTE]
@@ -71,22 +72,22 @@ for message in chat_completion:
 
 This method applies to models with the `transformers` library tag in their metadata. It allows you to deploy a model directly from the Hub UI without manual configuration.
 
-1. Navigate to a model on [Hugging Face Hub](https://huggingface.co/models).
-For this example we will use the [`ibm-granite/granite-docling-258M`](https://huggingface.co/ibm-granite/granite-docling-258M) model. You can verify that the model is compatible by checking the front matter in the [README](https://huggingface.co/ibm-granite/granite-docling-258M/blob/main/README.md), where the library is tagged as `library: transformers`.
-2. Locate the **Deploy** button. The button appears for models tagged with `transformers`
-at the top right of the [model card](https://huggingface.co/ibm-granite/granite-docling-258M).
+1. Navigate to a model on [Hugging Face Hub](https://huggingface.co/models).  
+   For this example we will use the [`ibm-granite/granite-docling-258M`](https://huggingface.co/ibm-granite/granite-docling-258M) model. You can verify that the model is compatible by checking the front matter in the [README](https://huggingface.co/ibm-granite/granite-docling-258M/blob/main/README.md), where the library is tagged as `library: transformers`.
 
-    ![Locate deploy button](../../assets/deployment/hf-inference-endpoints-locate-deploy-button.png)
-    
+2. Locate the **Deploy** button. The button appears for models tagged with `transformers` at the top right of the [model card](https://huggingface.co/ibm-granite/granite-docling-258M).
+
+   ![Locate deploy button](../../assets/deployment/hf-inference-endpoints-locate-deploy-button.png)
+
 3. Click to **Deploy** button > **HF Inference Endpoints**. You will be taken to the Inference Endpoints interface to configure the deployment.
-    
-    ![Click deploy button](../../assets/deployment/hf-inference-endpoints-click-deploy-button.png)
+
+   ![Click deploy button](../../assets/deployment/hf-inference-endpoints-click-deploy-button.png)
 
 4. Select the Hardware (we choose AWS>GPU>T4 for the example) and Container Configuration. Choose `vLLM` as the container type and finalize the deployment pressing **Create Endpoint**.
 
-    ![Select Hardware](../../assets/deployment/hf-inference-endpoints-select-hardware.png)
+   ![Select Hardware](../../assets/deployment/hf-inference-endpoints-select-hardware.png)
 
-1. Use the deployed endpoint. Update the `DEPLOYMENT_URL` with the URL provided in the console (remember to add `/v1` needed). You can then use your endpoint programmatically or via the SDK.
+5. Use the deployed endpoint. Update the `DEPLOYMENT_URL` with the URL provided in the console (remember to add `/v1` needed). You can then use your endpoint programmatically or via the SDK.
 
 ```python
 # pip install openai
@@ -94,34 +95,34 @@ from openai import OpenAI
 import os
 
 client = OpenAI(
-	base_url = DEPLOYMENT_URL,
-	api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
+    base_url = DEPLOYMENT_URL,
+    api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
 )
 
 chat_completion = client.chat.completions.create(
-	model = "ibm-granite/granite-docling-258M",
-	messages = [
-		{
-			"role": "user",
-			"content": [
-				{
-					"type": "image_url",
-					"image_url": {
-						"url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png"
-					}
-				},
-				{
-					"type": "text",
-					"text": "Convert this page to docling."
-				}
-			]
-		}
-	],
-	stream = True
+    model = "ibm-granite/granite-docling-258M",
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Convert this page to docling."
+                }
+            ]
+        }
+    ],
+    stream = True
 )
 
 for message in chat_completion:
-	print(message.choices[0].delta.content, end = "")
+    print(message.choices[0].delta.content, end = "")
 ```
 
 > [!NOTE]
@@ -138,23 +139,23 @@ These models cannot be deployed using the **Deploy** button on the model card.
 
 In this guide, we demonstrate manual deployment using the [rednote-hilab/dots.ocr](https://huggingface.co/rednote-hilab/dots.ocr) model, an OCR model integrated with vLLM (see vLLM [PR](https://github.com/vllm-project/vllm/pull/24645)).
 
-1. Start a new deployment. Go to [Inference Endpoints](https://endpoints.huggingface.co/) and click `New` .
+1. Start a new deployment. Go to [Inference Endpoints](https://endpoints.huggingface.co/) and click `New`.
 
-    ![New Endpoint](../../assets/deployment/hf-inference-endpoints-new-endpoint.png)
-    
+   ![New Endpoint](../../assets/deployment/hf-inference-endpoints-new-endpoint.png)
+
 2. Search the model in the Hub. In the dialog, switch to **Hub** and search for the desired model.
 
-    ![Select model](../../assets/deployment/hf-inference-endpoints-select-model.png)
-    
-3. Choosing infrastructure. On the configuration page, select the cloud provider and hardware from the available options.
-For this demo, we choose AWS and L4 GPU. Adjust according to your hardware needs.
+   ![Select model](../../assets/deployment/hf-inference-endpoints-select-model.png)
 
-    ![Choose Infra](../../assets/deployment/hf-inference-endpoints-choose-infra.png)
-    
+3. Choosing infrastructure. On the configuration page, select the cloud provider and hardware from the available options.  
+   For this demo, we choose AWS and L4 GPU. Adjust according to your hardware needs.
+
+   ![Choose Infra](../../assets/deployment/hf-inference-endpoints-choose-infra.png)
+
 4. Configure the container. Scroll to the **Container Configuration** and select `vLLM` as the container type.
 
-    ![Configure Container](../../assets/deployment/hf-inference-endpoints-configure-container.png)
-    
+   ![Configure Container](../../assets/deployment/hf-inference-endpoints-configure-container.png)
+
 5. Create the endpoint. Click **Create Endpoint** to deploy the model.
 
 Once the endpoint is ready, you can use it with the OpenAI Completion API, cURL, or other SDKs. Remember to append `/v1` to the deployment URL if needed.
