@@ -205,6 +205,12 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
                              dtype: torch.dtype) -> _Backend:
+
+        # For Blackwell GPUs, force TORCH_SDPA for now.
+        # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
+        if cls.has_device_capability(100):
+            return _Backend.TORCH_SDPA
+
         if dtype not in (torch.float16, torch.bfloat16):
             return _Backend.XFORMERS
 
@@ -493,6 +499,30 @@ class CudaPlatformBase(Platform):
                     f"Your {gpu_name} GPU {compute_str}. "
                     "You can use float16 instead by explicitly setting the "
                     "`dtype` flag in CLI, for example: --dtype=half.")
+
+    @classmethod
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from src_cache to dst_cache on GPU."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+
+    @classmethod
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """Copy blocks from GPU to host (CPU)."""
+        _src_cache = src_cache[:, src_block_indices]
+        dst_cache[:, dst_block_indices] = _src_cache.cpu()
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:

@@ -43,7 +43,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .chatglm import ChatGLMBaseModel, ChatGLMModel
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import flatten_bn, isin_list
+from .utils import flatten_bn
 
 
 class GLMVImagePixelInputs(TensorSchema):
@@ -617,21 +617,6 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=isin_list(input_ids, [
-                    self.config.boi_token_id,
-                    self.config.pad_token_id,
-                    self.config.eoi_token_id,
-                ]),
-            )
-            input_ids = None
 
         hidden_states = self.transformer(input_ids, positions,
                                          intermediate_tensors, inputs_embeds)
