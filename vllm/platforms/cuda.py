@@ -218,6 +218,9 @@ class CudaPlatformBase(Platform):
             else:
                 # Fallback to XFORMERS
                 return _Backend.XFORMERS
+        # For Blackwell GPUs, force TORCH_SDPA for now.
+        if cls.has_device_capability(100):
+            return _Backend.TORCH_SDPA
         else:
             # Fallback for Volta/Turing GPUs or FA not supported
             return _Backend.XFORMERS
