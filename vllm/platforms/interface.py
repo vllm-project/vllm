@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
 
+from vllm.attention.backends.registry import _Backend
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
@@ -36,30 +37,6 @@ logger = init_logger(__name__)
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
-
-
-class _Backend(enum.Enum):
-    FLASH_ATTN = enum.auto()
-    TRITON_ATTN = enum.auto()
-    XFORMERS = enum.auto()
-    ROCM_FLASH = enum.auto()
-    ROCM_AITER_MLA = enum.auto()  # Supported by V1
-    ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
-    TORCH_SDPA = enum.auto()
-    FLASHINFER = enum.auto()
-    FLASHINFER_MLA = enum.auto()
-    TRITON_MLA = enum.auto()  # Supported by V1
-    CUTLASS_MLA = enum.auto()
-    FLASHMLA = enum.auto()  # Supported by V1
-    FLASH_ATTN_MLA = enum.auto()  # Supported by V1
-    PALLAS = enum.auto()
-    IPEX = enum.auto()
-    DUAL_CHUNK_FLASH_ATTN = enum.auto()
-    DIFFERENTIAL_FLASH_ATTN = enum.auto()
-    NO_ATTENTION = enum.auto()
-    FLEX_ATTENTION = enum.auto()
-    TREE_ATTN = enum.auto()
-    ROCM_ATTN = enum.auto()
 
 
 class PlatformEnum(enum.Enum):

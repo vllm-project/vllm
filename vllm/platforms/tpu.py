@@ -6,12 +6,13 @@ from typing import TYPE_CHECKING, Optional, Union, cast
 import torch
 from tpu_info import device
 
+from vllm.attention.backends.registry import _Backend
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import Platform, PlatformEnum, _Backend
+from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import BlockSize, ModelConfig, VllmConfig

@@ -12,10 +12,11 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+from vllm.attention.backends.registry import _Backend
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import CpuArchEnum, Platform, PlatformEnum, _Backend
+from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
