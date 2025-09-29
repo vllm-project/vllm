@@ -148,8 +148,9 @@ def kv_spans_from_batches(start_seq_loc: torch.Tensor,
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
     max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    max_num_seq = vllm_config.scheduler_config.max_num_seqs
     # NOTE(Chen): an estimated max size of flattened_kv. Need to double check.
-    return max_model_len + max_num_batched_tokens
+    return max_model_len * max_num_seq
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):

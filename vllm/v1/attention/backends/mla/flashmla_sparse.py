@@ -21,6 +21,7 @@ from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -388,13 +389,15 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1])
 
-        # NOTE(Chen): kernel requires num_local_head to be a multiple of 64.
-        if self.num_heads % 64 != 0:
-            assert 64 % self.num_heads == 0
+        # NOTE(Chen): kernel requires num_local_head to be a multiple of 
+        # 64 on hopper and 128 on blackwell
+        padding = 128 if current_platform.is_device_capability(100) else 64
+        if self.num_heads % padding != 0:
+            assert padding % self.num_heads == 0
             logger.warning_once(
-                "padding num_heads to 64 due to sparse attn kernel requirement"
+                f"padding num_heads to {padding} due to sparse attn kernel requirement"
             )
-            q_padded = q.new_empty((q.shape[0], 64, q.shape[2]))
+            q_padded = q.new_empty((q.shape[0], padding, q.shape[2]))
             q_padded[:, :self.num_heads, :] = q
             q = q_padded
 
