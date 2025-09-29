@@ -783,6 +783,15 @@ def sequence_parallel_chunk_impl_fake(x: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def should_skip_bias_param(name: str) -> bool:
+    """Check if a parameter name should be skipped as an extra bias parameter.
+    
+    Handles both standard (.bias) and expert layer (_bias) naming conventions.
+    Used for GPTQ models where extra bias parameters may be present.
+    """
+    return name.endswith(".bias") or name.endswith("_bias")
+
+
 direct_register_custom_op(
     op_name="sequence_parallel_chunk_impl",
     op_func=sequence_parallel_chunk_impl,
