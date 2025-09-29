@@ -35,7 +35,7 @@ from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
 from vllm.model_executor.models.radio import RadioModel
 from vllm.model_executor.models.utils import (flatten_bn,
                                               init_vllm_registered_model,
-                                              isin_list, maybe_prefix)
+                                              maybe_prefix)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, MultiModalKwargsItems,
@@ -1134,22 +1134,6 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
         if intermediate_tensors is not None:
             input_ids = None
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            context_token_ids = [
-                token_id for token_id in (self.img_context_token_id,
-                                          self.video_context_token_id)
-                if token_id is not None
-            ]
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=isin_list(input_ids, context_token_ids),
-            )
-            input_ids = None
 
         hidden_states = self.language_model(
             input_ids=input_ids,
