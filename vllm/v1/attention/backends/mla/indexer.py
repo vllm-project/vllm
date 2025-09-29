@@ -1,14 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 from typing import ClassVar, Optional
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
+import torch
+
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadata)
 from vllm.config import VllmConfig
-from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, get_num_sms
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+from vllm.logger import init_logger
+from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
                                               split_decodes_and_prefills)
-import torch
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -58,6 +63,8 @@ class DeepseekV32IndexerPrefillMetadata:
 class DeepSeekV32IndexerDecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
+    decode_lens: torch.Tensor
+    requires_padding: bool
     schedule_metadata: torch.Tensor
 
 
@@ -154,12 +161,13 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.UNIFORM_BATCH
 
     reorder_batch_threshold: ClassVar[int] = 1
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        max_model_len = self.vllm_config.model_config.max_model_len
-        max_num_batched_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        scheduler_config = self.vllm_config.scheduler_config
         # NOTE(Chen): an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(
             self.vllm_config)
@@ -168,6 +176,20 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config else 0
         )
         self.reorder_batch_threshold += self.num_speculative_tokens
+
+        props = torch.cuda.get_device_properties(self.device)
+        sm_count = props.multi_processor_count
+        self.num_sms = sm_count 
+
+        self.decode_lens_buffer = torch.empty(
+            (scheduler_config.max_num_seqs, ),
+            dtype=torch.int32,
+            device=self.device)
+
+        # See: DeepGMM/csrc/apis/attention.hpp 
+        self.scheduler_metadata_buffer = torch.empty(
+            (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
+        )
 
     def build(self,
               common_prefix_len: int,
@@ -216,14 +238,26 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         decode_metadata = None
         if num_decodes > 0:
+            torch.diff(common_attn_metadata.query_start_loc[:num_decodes+1],
+                       out=self.decode_lens_buffer[:num_decodes])
+            decode_lens = self.decode_lens_buffer[:num_decodes]
+            decode_lens_cpu = torch.diff(
+                common_attn_metadata.query_start_loc_cpu[:num_decodes+1])
+            
+            # Use CPU to avoid GPU sync; breaking async scheduling            
+            requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()
+
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
-            schedule_metadata = get_paged_mqa_logits_metadata(
-                seq_lens, self.kv_cache_spec.block_size, get_num_sms())
+
+            self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
+                seq_lens, self.kv_cache_spec.block_size, self.num_sms)
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=common_attn_metadata.
                 block_table_tensor[:num_decodes, ...],
                 seq_lens=common_attn_metadata.seq_lens[:num_decodes],
-                schedule_metadata=schedule_metadata,
+                decode_lens=decode_lens,
+                requires_padding=requires_padding,
+                schedule_metadata=self.scheduler_metadata_buffer,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(

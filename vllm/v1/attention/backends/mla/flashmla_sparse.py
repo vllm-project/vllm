@@ -17,8 +17,10 @@ from vllm.attention.ops.flashmla import (flash_mla_sparse_prefill,
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.platforms import current_platform
@@ -268,6 +270,8 @@ def triton_convert_req_index_to_global_index(
 @dataclass
 class FlashMLASparseMetadataBuilder(
         AttentionMetadataBuilder[FlashMLASparseMetadata]):
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.UNIFORM_BATCH
 
     reorder_batch_threshold: ClassVar[int] = 128  # TODO(lucas): tune this
 
@@ -281,6 +285,9 @@ class FlashMLASparseMetadataBuilder(
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.device = device
+
+        props = torch.cuda.get_device_properties(device)
+        sm_count = props.multi_processor_count
 
         self.num_heads = self.model_config.get_num_attention_heads(
             parallel_config)
@@ -300,9 +307,33 @@ class FlashMLASparseMetadataBuilder(
                                              dtype=torch.int32,
                                              device=self.device)
         self.num_speculative_tokens = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config else 0)
+            vllm_config.speculative_config.num_speculative_tokens 
+            if vllm_config.speculative_config else 0
+        )
         self.reorder_batch_threshold += self.num_speculative_tokens
+
+        # Equation taken from FlashMLA/csrc/pybind.cpp
+        h_q, h_k = self.num_heads, 1
+        s_q = 1  # inversely proportional to s_q, so s_q = 1 is the largest
+        max_num_sm_parts = int(
+            max((sm_count // 2) / h_k // (cdiv(h_q // h_k, 2 * 64) * s_q), 1))
+
+        self.tile_scheduler_metadata_buffer = torch.empty(
+            # TileSchedulerMetaDataSize = 8
+            # see: FlashMLA/csrc/params.h
+            (max_num_sm_parts, 8),
+            dtype=torch.int32,
+            device=device)
+        self.num_splits_buffer = torch.empty(
+            # We pack all the tokens into one batch for sparse attention.
+            # Otherwise, we can exceed the sm of `get_mla_metadata`.
+            (2, ),
+            dtype=torch.int32,
+            device=device)
+        self.req_id_per_token_buffer = torch.empty(
+            (vllm_config.scheduler_config.max_num_batched_tokens, ),
+            dtype=torch.int32,
+            device=device)
 
     def build(self,
               common_prefix_len: int,
@@ -315,8 +346,11 @@ class FlashMLASparseMetadataBuilder(
         seg_lengths = np.diff(starts)
         req_id_per_token = np.repeat(
             np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths)
-        req_id_per_token = torch.from_numpy(req_id_per_token)\
-            .to(device='cuda', non_blocking=True)
+        # Zero-fill for cudagraphs
+        self.req_id_per_token_buffer.fill_(0)
+        self.req_id_per_token_buffer[:req_id_per_token.shape[0]]\
+            .copy_(torch.from_numpy(req_id_per_token), non_blocking=True)
+        req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 
         fp8_extra_metadata = None
         if self.use_fp8_kv_cache:
@@ -328,9 +362,17 @@ class FlashMLASparseMetadataBuilder(
                 num_heads_k=1,
                 is_fp8_kvcache=True,
             )
+
+            num_sm_parts = tile_scheduler_metadata.size(0)
+            # Copy to persistent buffer for full-CG support
+            tile_scheduler_metadata_buffer = \
+                self.tile_scheduler_metadata_buffer[:num_sm_parts]
+            tile_scheduler_metadata_buffer.copy_(tile_scheduler_metadata)
+            self.num_splits_buffer.copy_(num_splits)
+
             fp8_extra_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
-                scheduler_metadata=tile_scheduler_metadata,
-                num_splits=num_splits,
+                scheduler_metadata=tile_scheduler_metadata_buffer,
+                num_splits=self.num_splits_buffer,
                 # cache_lens and block_table are basically unused in sparse case
                 # but the decode kernel will treat -1 and indices >= cache_lens
                 # as invalid so we make sure cache_lens is large enough to not

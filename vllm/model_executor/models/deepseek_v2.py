@@ -678,12 +678,10 @@ def sparse_attn_indexer(
     if has_decode:
         decode_metadata = attn_metadata.decode
         # kv_cache size requirement [num_block, block_size, n_head, head_dim],
-        # we only have [num_block, block_size, head_dim],
-        query_start_loc = attn_metadata.query_start_loc
-        decode_lens = query_start_loc[1:attn_metadata.num_decodes+1] - query_start_loc[:attn_metadata.num_decodes]
+        # we only have [num_block, block_size, head_dim],        
         kv_cache = kv_cache.unsqueeze(-2)
-        require_padding = (decode_lens.max() > decode_lens.min()).item()
-        if require_padding:
+        decode_lens = decode_metadata.decode_lens
+        if decode_metadata.requires_padding:
             # pad in edge case where we have short chunked prefill length < 
             # decode_threshold since we unstrictly split 
             # prefill and decode by decode_threshold (currently set to 1 + speculative tokens)
@@ -721,7 +719,7 @@ def sparse_attn_indexer(
         # ensure we don't set indices for the top k that out of range(masked already) 
         # this will happen if context length is shorter than K
         topk_indices[topk_indices > index_end_pos] = -1
-        if require_padding:
+        if decode_metadata.requires_padding:
             # if padded, we need to unpack the topk indices removing padded tokens
             topk_indices = unpack_seq_triton(topk_indices.reshape(batch_size, -1, logits.shape[-1]), decode_lens)
         topk_indices_buffer[:num_decode_tokens, :topk_indices.
