@@ -19,9 +19,6 @@ Certain models require the topk weights to be applied to the input activations r
 unless otherwise specified, backends are controlled via `VLLM_ALL2ALL_BACKEND`.  All backends except `flashinfer` only work with EP+DP or EP+TP. `Flashinfer` can work with EP or DP w/o EP.
 
 <style>
-td:not(:first-child) {
-  text-align: center !important;
-}
 td {
   padding: 0.5rem !important;
   white-space: nowrap;
@@ -30,11 +27,6 @@ td {
 th {
   padding: 0.5rem !important;
   min-width: 0 !important;
-}
-
-th:not(:first-child) {
-  writing-mode: vertical-lr;
-  transform: rotate(180deg)
 }
 </style>
 
@@ -47,24 +39,23 @@ th:not(:first-child) {
 | flashinfer_all2allv                   | standard           | nvfp4,fp8       | G,A,T                  | N     | N                     | [`FlashInferAllToAllMoEPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize.FlashInferAllToAllMoEPrepareAndFinalize] |
 | flashinfer<sup>4</sup>                | standard           | nvfp4,fp8       | G,A,T                  | N     | N                     | [`FlashInferCutlassMoEPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize.FlashInferCutlassMoEPrepareAndFinalize]   |
 | flashinfer<sup>4</sup>                | standard           | nvfp4,fp8       | G,A,T                  | N     | N                     | [`FlashInferCutlassMoEPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize.FlashInferCutlassMoEPrepareAndFinalize]   |
-| MoEPrepareAndFinalizeNoEP<sup>5</sup>    | standard           | fp8,int8        | G,A,T                  | N     | Y                     | [`MoEPrepareAndFinalizeNoEP`][vllm.model_executor.layers.fused_moe.prepare_finalize.MoEPrepareAndFinalizeNoEP]                                                      |
+| MoEPrepareAndFinalizeNoEP<sup>5</sup> | standard           | fp8,int8        | G,A,T                  | N     | Y                     | [`MoEPrepareAndFinalizeNoEP`][vllm.model_executor.layers.fused_moe.prepare_finalize.MoEPrepareAndFinalizeNoEP]                                                |
 | BatchedPrepareAndFinalize<sup>5</sup> | batched            | fp8,int8        | G,A,T                  | N     | Y                     | [`BatchedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.fused_batched_moe.BatchedPrepareAndFinalize]                                               |
 
-1. All types: mxfp4, nvfp4, int4, int8, fp8
-2. A,T quantization occurs after dispatch.
-3. All quantization happens after dispatch.
-4. Controlled by different env vars (`VLLM_FLASHINFER_MOE_BACKEND` "throughput" or "latency")
-5. This is a no-op dispatcher that can be used to pair with any modular experts to produce a modular kernel that runs w/o dispatch or combine.  These cannot be selected via environment variable.  These are generally use for testing or adapting an expert subclass to the `fused_experts` API.
-6. This depends on the experts implementation.
+!!! info "Table key"
+    1. All types: mxfp4, nvfp4, int4, int8, fp8
+    2. A,T quantization occurs after dispatch.
+    3. All quantization happens after dispatch.
+    4. Controlled by different env vars (`VLLM_FLASHINFER_MOE_BACKEND` "throughput" or "latency")
+    5. This is a no-op dispatcher that can be used to pair with any modular experts to produce a modular kernel that runs w/o dispatch or combine.  These cannot be selected via environment variable.  These are generally use for testing or adapting an expert subclass to the `fused_experts` API.
+    6. This depends on the experts implementation.
 
-### Quantization format key
+    ---
 
-| Quantization formats        | Symbol |
-|-----------------------------|--------|
-| Grouped                     | G      |
-| Grouped w/block size N      | G(N)   |
-| Per activation token        | A      |
-| Per tensor                  | T      |
+    - G - Grouped
+    - G(N) - Grouped w/block size N
+    - A - Per activation token
+    - T - Per tensor
 
 Modular kernels are supported by the following `FusedMoEMethodBase` classes.
 
@@ -91,37 +82,38 @@ Most experts flavors include an equivalent modular interface which will be a sub
 
 To be used with a particular `FusedMoEPrepareAndFinalize` sub-class, MoE kernels must have compatible activation formats, quantization types and quantization formats.
 
-| Kernel                       | Input act. format | Quant. types    | Quant. format | Activation function                         | Apply Weight On Input | Modular | Source                                                                                                                                                                                                 |
-|------------------------------|-------------------|-----------------|---------------|---------------------------------------------|-----------------------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| triton                       | standard          | all<sup>1</sup> | G,A,T         | silu, gelu, swigluoai, silu_no_mul, gelu_no_mul | Y                     | Y       | [`fused_experts`][vllm.model_executor.layers.fused_moe.fused_moe.fused_experts], [`TritonExperts`][vllm.model_executor.layers.fused_moe.fused_moe.TritonExperts]                                                                                                                  |
-| triton (batched)             | batched           | all<sup>1</sup> | G,A,T         | silu, gelu                                   | <sup>6</sup>          | Y       | [`BatchedTritonExperts`][vllm.model_executor.layers.fused_moe.fused_batched_moe.BatchedTritonExperts]                                                                                                                    |
-| deep gemm                    | standard, batched | fp8             | G(128),A,T    | silu, gelu                                   | <sup>6</sup>          | Y       | [`deep_gemm_moe_fp8`][vllm.model_executor.layers.fused_moe.deep_gemm_moe.deep_gemm_moe_fp8], [`DeepGemmExperts`][vllm.model_executor.layers.fused_moe.deep_gemm_moe.DeepGemmExperts], [`BatchedDeepGemmExperts`][vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe.BatchedDeepGemmExperts]             |
-| cutlass_fp4                  | standard, batched | nvfp4           | A,T           | silu                                        | Y                     | Y       | [`cutlass_moe_fp4`][vllm.model_executor.layers.fused_moe.cutlass_moe.cutlass_moe_fp4], [`CutlassExpertsFp4`][vllm.model_executor.layers.fused_moe.cutlass_moe.CutlassExpertsFp4]                                                                                                          |
-| cutlass_fp8                  | standard, batched | fp8             | A,T           | silu, gelu                                   | Y                     | Y       | [`cutlass_moe_fp8`][vllm.model_executor.layers.fused_moe.cutlass_moe.cutlass_moe_fp8], [`CutlassExpertsFp8`][vllm.model_executor.layers.fused_moe.cutlass_moe.CutlassExpertsFp8], [`CutlasBatchedExpertsFp8`][vllm.model_executor.layers.fused_moe.cutlass_moe.CutlassBatchedExpertsFp8]                                                                               |
-| flashinfer                   | standard          | nvfp4,fp8       | T             | <sup>5</sup>                                | N                     | Y       | [`flashinfer_cutlass_moe_fp4`][vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe.flashinfer_cutlass_moe_fp4], [`FlashInferExperts`][vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe.FlashInferExperts]                                                                                    |
-| gpt oss triton               | batched           | N/A             | N/A           | <sup>5</sup>                                | Y                     | Y       | [`triton_kernel_fused_experts`][vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe.triton_kernel_fused_experts], [`BatchedOAITritonExperts`][vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe.BatchedOAITritonExperts]                                                                         |
-| deep gemm+triton<sup>2</sup> | standard, batched | all<sup>1</sup> | G(128),A,T    | silu, gelu                                   | <sup>6</sup>          | Y       | [`TritonOrDeepGemmExperts`][vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe.TritonOrDeepGemmExperts], [`BatchedTritonOrDeepGemmExperts`][vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe.BatchedTritonOrDeepGemmExperts] |
-| marlin                       | standard          | <sup>3</sup>    | <sup>3</sup>  | silu, swigluoai                              | Y                     | N       | [`fused_marlin_moe`][vllm.model_executor.layers.fused_moe.fused_marlin_moe.fused_marlin_moe]                                                                                                                         |
-| trtllm                       | standard          | mxfp4,nvfp4     | G(16),G32)    | <sup>5</sup>                                | N                     | Y       | [`TrtLlmGenExperts`][vllm.model_executor.layers.fused_moe.trtllm_moe.TrtLlmGenExperts]                                                                                                                               |
-| pallas                       | standard          | N/A             | N/A           | silu                                        | N                     | N       | [`fused_moe`][vllm.model_executor.layers.fused_moe.moe_pallas.fused_moe]                                                                                                                                      |
-| iterative                    | standard          | N/A             | N/A           | silu                                        | N                     | N       | [`fused_moe`][vllm.model_executor.layers.fused_moe.moe_torch_iterative.fused_moe]                                                                                                                             |
-| rocm aiter moe               | standard          | fp8             | G(128),A,T    | silu, gelu                                   | Y                     | N       | [`rocm_aiter_fused_experts`][vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe.rocm_aiter_fused_moe_impl]                                                                                                             |
-| cpu_fused_moe                | standard          | N/A             | N/A           | silu                                        | N                     | N       | [`CPUFusedMOE`][vllm.model_executor.layers.fused_moe.cpu_fused_moe.CPUFusedMOE]                                                                                                                                 |
-| naive batched<sup>4</sup>    | batched           | int8,fp8        | G,A,T         | silu, gelu                                   | <sup>6</sup>          | Y       | [`NaiveBatchedExperts`][vllm.model_executor.layers.fused_moe.fused_batched_moe.NaiveBatchedExperts]                                                                                                    |
+| Kernel                       | Input act. format     | Quant. types     | Quant. format | Activation function                                         | Apply Weight On Input | Modular | Source                                                                                                                                                                                                                                                                                                      |
+|------------------------------|-----------------------|------------------|---------------|-------------------------------------------------------------|-----------------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| triton                       | standard              | all<sup>1</sup>  | G,A,T         | silu, gelu,</br>swigluoai,</br>silu_no_mul,</br>gelu_no_mul | Y                     | Y       | [`fused_experts`][vllm.model_executor.layers.fused_moe.fused_moe.fused_experts],</br>[`TritonExperts`][vllm.model_executor.layers.fused_moe.fused_moe.TritonExperts]                                                                                                                                        |
+| triton (batched)             | batched               | all<sup>1</sup>  | G,A,T         | silu, gelu                                                  | <sup>6</sup>          | Y       | [`BatchedTritonExperts`][vllm.model_executor.layers.fused_moe.fused_batched_moe.BatchedTritonExperts]                                                                                                                                                                                                       |
+| deep gemm                    | standard,</br>batched | fp8              | G(128),A,T    | silu, gelu                                                  | <sup>6</sup>          | Y       | [`deep_gemm_moe_fp8`][vllm.model_executor.layers.fused_moe.deep_gemm_moe.deep_gemm_moe_fp8],</br>[`DeepGemmExperts`][vllm.model_executor.layers.fused_moe.deep_gemm_moe.DeepGemmExperts],</br>[`BatchedDeepGemmExperts`][vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe.BatchedDeepGemmExperts] |
+| cutlass_fp4                  | standard,</br>batched | nvfp4            | A,T           | silu                                                        | Y                     | Y       | [`cutlass_moe_fp4`][vllm.model_executor.layers.fused_moe.cutlass_moe.cutlass_moe_fp4],</br>[`CutlassExpertsFp4`][vllm.model_executor.layers.fused_moe.cutlass_moe.CutlassExpertsFp4]                                                                                                                        |
+| cutlass_fp8                  | standard,</br>batched | fp8              | A,T           | silu, gelu                                                  | Y                     | Y       | [`cutlass_moe_fp8`][vllm.model_executor.layers.fused_moe.cutlass_moe.cutlass_moe_fp8],</br>[`CutlassExpertsFp8`][vllm.model_executor.layers.fused_moe.cutlass_moe.CutlassExpertsFp8],</br>[`CutlasBatchedExpertsFp8`][vllm.model_executor.layers.fused_moe.cutlass_moe.CutlassBatchedExpertsFp8]            |
+| flashinfer                   | standard              | nvfp4,</br>fp8   | T             | <sup>5</sup>                                                | N                     | Y       | [`flashinfer_cutlass_moe_fp4`][vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe.flashinfer_cutlass_moe_fp4],</br>[`FlashInferExperts`][vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe.FlashInferExperts]                                                                            |
+| gpt oss triton               | batched               | N/A              | N/A           | <sup>5</sup>                                                | Y                     | Y       | [`triton_kernel_fused_experts`][vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe.triton_kernel_fused_experts],</br>[`BatchedOAITritonExperts`][vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe.BatchedOAITritonExperts]                                                      |
+| deep gemm+triton<sup>2</sup> | standard,</br>batched | all<sup>1</sup>  | G(128),A,T    | silu, gelu                                                  | <sup>6</sup>          | Y       | [`TritonOrDeepGemmExperts`][vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe.TritonOrDeepGemmExperts],</br>[`BatchedTritonOrDeepGemmExperts`][vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe.BatchedTritonOrDeepGemmExperts]                                                 |
+| marlin                       | standard              | <sup>3</sup>     | <sup>3</sup>  | silu,</br>swigluoai                                         | Y                     | N       | [`fused_marlin_moe`][vllm.model_executor.layers.fused_moe.fused_marlin_moe.fused_marlin_moe]                                                                                                                                                                                                                |
+| trtllm                       | standard              | mxfp4,</br>nvfp4 | G(16),G(32)   | <sup>5</sup>                                                | N                     | Y       | [`TrtLlmGenExperts`][vllm.model_executor.layers.fused_moe.trtllm_moe.TrtLlmGenExperts]                                                                                                                                                                                                                      |
+| pallas                       | standard              | N/A              | N/A           | silu                                                        | N                     | N       | [`fused_moe`][vllm.model_executor.layers.fused_moe.moe_pallas.fused_moe]                                                                                                                                                                                                                                    |
+| iterative                    | standard              | N/A              | N/A           | silu                                                        | N                     | N       | [`fused_moe`][vllm.model_executor.layers.fused_moe.moe_torch_iterative.fused_moe]                                                                                                                                                                                                                           |
+| rocm aiter moe               | standard              | fp8              | G(128),A,T    | silu, gelu                                                  | Y                     | N       | [`rocm_aiter_fused_experts`][vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe.rocm_aiter_fused_moe_impl]                                                                                                                                                                                           |
+| cpu_fused_moe                | standard              | N/A              | N/A           | silu                                                        | N                     | N       | [`CPUFusedMOE`][vllm.model_executor.layers.fused_moe.cpu_fused_moe.CPUFusedMOE]                                                                                                                                                                                                                             |
+| naive batched<sup>4</sup>    | batched               | int8,</br>fp8    | G,A,T         | silu, gelu                                                  | <sup>6</sup>          | Y       | [`NaiveBatchedExperts`][vllm.model_executor.layers.fused_moe.fused_batched_moe.NaiveBatchedExperts]                                                                                                                                                                                                         |
 
-1. All types: mxfp4, nvfp4, int4, int8, fp8
-2. A dispatcher wrapper around triton and deep gemm experts.  Will select based on type + shape + quantization params
-3. uint4, uint8, fp8, fp4
-4. This is a naive implementation of experts that supports batched format. Mainly used for testing.
-5. The `activation` parameter is ignored and SwiGlu is used by default instead.
-6. Only handled by or supported when used with modular kernels.
+!!! info "Table key"
+    1. All types: mxfp4, nvfp4, int4, int8, fp8
+    2. A dispatcher wrapper around triton and deep gemm experts.  Will select based on type + shape + quantization params
+    3. uint4, uint8, fp8, fp4
+    4. This is a naive implementation of experts that supports batched format. Mainly used for testing.
+    5. The `activation` parameter is ignored and SwiGlu is used by default instead.
+    6. Only handled by or supported when used with modular kernels.
 
 ## Modular Kernel "families"
 
 The following table shows "families" of modular kernels that are intended to work together. There are some combinations which may work but have not yet been tested, e.g. flashinfer with other fp8 experts. Note that the "naive" backend will work with any non-modular experts.
 
-| backend                      | `FusedMoEPrepareAndFinalize` subclasses                | `FusedMoEPermuteExpertsUnpermute` subclasses                                                                   |
-|------------------------------|--------------------------------------------------------|----------------------------------------------------------------------------------------------------------------|
-| deepep_high_throughput, pplx | `DeepEPHTPrepareAndFinalize`, `PplxPrepareAndFinalize` | `BatchedDeepGemmExperts`, `BatchedTritonExperts`, `BatchedTritonOrDeepGemmExperts`, `CutlassBatchedExpertsFp8` |
-| deepep_low_latency           | `DeepEPLLPrepareAndFinalize`                           | `DeepGemmExperts`, `TritonExperts`, `TritonOrDeepGemmExperts`, `CutlassExpertsFp8`                             |
-| flashinfer                   | `FlashInferCutlassMoEPrepareAndFinalize`               | `FlashInferExperts`                                                                                            |
+| backend                          | `FusedMoEPrepareAndFinalize` subclasses                    | `FusedMoEPermuteExpertsUnpermute` subclasses                                                                               |
+|----------------------------------|------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| deepep_high_throughput,</br>pplx | `DeepEPHTPrepareAndFinalize`,</br>`PplxPrepareAndFinalize` | `BatchedDeepGemmExperts`,</br>`BatchedTritonExperts`,</br>`BatchedTritonOrDeepGemmExperts`,</br>`CutlassBatchedExpertsFp8` |
+| deepep_low_latency               | `DeepEPLLPrepareAndFinalize`                               | `DeepGemmExperts`,</br>`TritonExperts`,</br>`TritonOrDeepGemmExperts`,</br>`CutlassExpertsFp8`                             |
+| flashinfer                       | `FlashInferCutlassMoEPrepareAndFinalize`                   | `FlashInferExperts`                                                                                                        |
