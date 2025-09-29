@@ -469,21 +469,17 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       __int64_t up64 = *up64_ptr;
 
       // Compute
-      __nv_bfloat162 results_bf162[2];
-      __nv_bfloat162* s_up_compute_32 =
-          reinterpret_cast<__nv_bfloat162*>(&up64);
-      __nv_bfloat162* s_gate_compute_32 =
-          reinterpret_cast<__nv_bfloat162*>(&gate64);
+      __nv_bfloat162 res[2];
+      __nv_bfloat162* s_up_comp = reinterpret_cast<__nv_bfloat162*>(&up64);
+      __nv_bfloat162* s_gate_comp = reinterpret_cast<__nv_bfloat162*>(&gate64);
 
 #pragma unroll
-      for (int j = 0; j < 2; j++) {
-        __nv_bfloat162 gate =
-            silu2_v2(__bfloat1622float2(s_gate_compute_32[j]));
-        results_bf162[j] = __hmul2(gate, s_up_compute_32[j]);
+      for (int32_t k = 0; k < 2; ++k) {
+        __nv_bfloat162 gate = silu2_v2(__bfloat1622float2(s_gate_comp[k]));
+        res[k] = __hmul2(gate, s_up_comp[k]);
       }
 
-      auto _y_max2 =
-          __hmax2(__habs2(results_bf162[0]), __habs2(results_bf162[1]));
+      auto _y_max2 = __hmax2(__habs2(res[0]), __habs2(res[1]));
 
       _y_max2.x = __hmax(__hmax(_y_max2.x, _y_max2.y), EPS);
 
@@ -498,13 +494,12 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       auto y_s2 = make_bfloat162(inv_y, inv_y);
 
 #pragma unroll
-      for (int32_t j = 0; j < 2; ++j) {
-        results_bf162[j] =
-            clip(__hmul2(results_bf162[j], y_s2), __bfloat162bfloat162(fp8_min),
-                 __bfloat162bfloat162(fp8_max));
+      for (int32_t k = 0; k < 2; ++k) {
+        res[k] = clip(__hmul2(res[k], y_s2), __bfloat162bfloat162(fp8_min),
+                      __bfloat162bfloat162(fp8_max));
       }
 
-      *y_q_ptr = __nv_fp8x4_e4m3(results_bf162[0], results_bf162[1]);
+      *y_q_ptr = __nv_fp8x4_e4m3(res[0], res[1]);
       y_q_ptr += WARP_SIZE;
 
       if (!lane_id) {
