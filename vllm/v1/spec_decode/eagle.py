@@ -72,12 +72,13 @@ class EagleProposer:
 
         self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
 
-        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+        self.use_cuda_graph = (not current_platform.is_xpu()
+                               and self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
                                not self.vllm_config.model_config.enforce_eager)
         self.cudagraph_batch_sizes = list(
-            reversed(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+            reversed(self.vllm_config.compilation_config.
+                     cudagraph_capture_sizes)) if self.use_cuda_graph else []
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(self.max_num_tokens,
