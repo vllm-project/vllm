@@ -45,7 +45,7 @@ def create_sampling_metadata(
     all_greedy: bool,
     output_token_ids: Optional[list[list[int]]] = None,
     prompt_token_ids: Optional[torch.Tensor] = None,
-    last_spec_token_ids: Optional[torch.Tensor] = None,
+    spec_token_ids: Optional[torch.Tensor] = None,
     temperature: Optional[torch.Tensor] = None,
     top_k: Optional[torch.Tensor] = None,
     top_p: Optional[torch.Tensor] = None,
@@ -96,8 +96,8 @@ def create_sampling_metadata(
         presence_penalties=presence_penalties,
         repetition_penalties=repetition_penalties,
         output_token_ids=[] if output_token_ids is None else output_token_ids,
-        last_spec_token_ids=[]
-        if last_spec_token_ids is None else last_spec_token_ids,
+        spec_token_ids=[]
+        if spec_token_ids is None else spec_token_ids,
         allowed_token_ids_mask=allowed_token_ids_mask,
         bad_words_token_ids={}
         if bad_words_token_ids is None else bad_words_token_ids,
@@ -655,7 +655,7 @@ def test_frequency_penalties(rejection_sampler):
     metadata = create_sampling_metadata(
         all_greedy=True,
         output_token_ids=[[2], [3], [4]],
-        last_spec_token_ids=spec_tokens,
+        spec_token_ids=spec_tokens,
         prompt_token_ids=torch.tensor([[5, 6, 7], [6, 7, 8], [7, 8, 9]],
                                       device=DEVICE),
         frequency_penalties=[1.5, 1.5, 0.7],
@@ -689,7 +689,7 @@ def test_bad_words(rejection_sampler):
     metadata = create_sampling_metadata(
         all_greedy=True,
         output_token_ids=[[2], [3], [4]],
-        last_spec_token_ids=spec_tokens,
+        spec_token_ids=spec_tokens,
         bad_words_token_ids={
             0: [[
                 2,
@@ -742,7 +742,7 @@ def test_allowed_token_ids(rejection_sampler):
     metadata = create_sampling_metadata(
         all_greedy=True,
         output_token_ids=[[], [], []],
-        last_spec_token_ids=spec_tokens,
+        spec_token_ids=spec_tokens,
         allowed_token_ids_mask=mask,
     )
     bonus_token_tensor = torch.tensor(

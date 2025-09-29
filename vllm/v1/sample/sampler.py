@@ -260,7 +260,7 @@ class Sampler(nn.Module):
             # Combine base outputs with spec tokens.
             output_token_ids = self._combine_outputs_with_spec_tokens(
                 sampling_metadata.output_token_ids,
-                sampling_metadata.last_spec_token_ids,
+                sampling_metadata.spec_token_ids,
             )
 
         # Apply allowed token ids.

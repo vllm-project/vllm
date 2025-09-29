@@ -148,7 +148,7 @@ def _create_default_sampling_metadata(
         prompt_token_ids=_create_prompt_tokens_tensor(prompt_token_ids,
                                                       vocab_size, device),
         output_token_ids=output_token_ids,
-        last_spec_token_ids=[[] for _ in range(batch_size)],
+        spec_token_ids=[[] for _ in range(batch_size)],
         frequency_penalties=_create_penalty_tensor(batch_size, 0.0, device),
         presence_penalties=_create_penalty_tensor(batch_size, 0.0, device),
         repetition_penalties=_create_penalty_tensor(batch_size, 1.0, device),

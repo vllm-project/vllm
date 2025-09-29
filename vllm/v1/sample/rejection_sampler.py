@@ -154,7 +154,7 @@ class RejectionSampler(nn.Module):
         if any_penalties_or_bad_words:
             output_token_ids = self._combine_outputs_with_spec_tokens(
                 sampling_metadata.output_token_ids,
-                sampling_metadata.last_spec_token_ids,
+                sampling_metadata.spec_token_ids,
             )
         # Calculate indices of target logits
         if sampling_metadata.allowed_token_ids_mask is not None \
