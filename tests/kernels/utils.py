@@ -524,14 +524,14 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
     * Backend instance
     '''
-    if backend_name in (STR_XFORMERS_ATTN_VAL, "XFORMERS_VLLM_V1"):
+    if backend_name == STR_XFORMERS_ATTN_VAL:
         from vllm.v1.attention.backends.xformers import (
             XFormersAttentionBackend)
         return XFormersAttentionBackend()
-    if backend_name in (STR_FLASH_ATTN_VAL, "FLASH_ATTN_VLLM_V1"):
+    if backend_name == STR_FLASH_ATTN_VAL:
         from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
         return FlashAttentionBackend()
-    if backend_name == "TRITON_ATTN_VLLM_V1":
+    if backend_name == "TRITON_ATTN":
         from vllm.v1.attention.backends.triton_attn import (
             TritonAttentionBackend)
         return TritonAttentionBackend()
@@ -539,7 +539,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
         from vllm.v1.attention.backends.flex_attention import (
             FlexAttentionBackend)
         return FlexAttentionBackend()
-    if backend_name in ("TORCH_SDPA", "TORCH_SDPA_VLLM_V1"):
+    if backend_name == "TORCH_SDPA":
         from vllm.v1.attention.backends.cpu_attn import TorchSDPABackend
         return TorchSDPABackend()
     if backend_name == "FLASHINFER":
@@ -959,7 +959,6 @@ def make_test_metadata(
         return attn_backend_obj.make_metadata(
             num_prefills=num_prefills,
             slot_mapping=(None if kv_mmap is None else kv_mmap.slot_mapping),
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -1009,7 +1008,6 @@ def make_test_metadata(
         return attn_backend_obj.make_metadata(
             num_prefills=num_prefills,
             slot_mapping=kv_mmap.slot_mapping,
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,

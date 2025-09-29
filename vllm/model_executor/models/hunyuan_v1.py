@@ -972,6 +972,9 @@ class HunyuanV1ModelBase(nn.Module, SupportsLoRA, SupportsPP):
         )
         return loader.load_weights(weights)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
 
 class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
 
