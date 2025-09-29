@@ -167,6 +167,25 @@ class PyNcclCommunicator:
                                 cudaStream_t(stream.cuda_stream))
         return out_tensor
 
+    # ---- Symmetric memory helpers ----
+    def should_use_nccl_symm_mem(self, input_tensor: torch.Tensor) -> bool:
+        try:
+            from vllm.distributed.device_communicators.pynccl_allocator import (
+                is_symmetric_memory_enabled)
+            if self.disabled or not self.available:
+                return False
+            if self.world_size <= 1:
+                return False
+            return is_symmetric_memory_enabled()
+        except Exception:
+            return False
+
+    def all_reduce_symmetric_with_copy(
+            self, input_tensor: torch.Tensor) -> torch.Tensor:
+        # since currently we perform copy input -> symm_input -> out-of-place AR
+        # return symm_output, we don't need to check if input is symmetric
+        return torch.ops.vllm.all_reduce_symmetric_with_copy(input_tensor)
+
     def all_gather(self,
                    output_tensor: torch.Tensor,
                    input_tensor: torch.Tensor,

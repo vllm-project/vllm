@@ -61,6 +61,50 @@ class EPLBConfig:
 
 @config
 @dataclass
+class CommunicatorRangeConfig:
+    """Range policy for a communicator based on tensor size (in MiB)."""
+
+    enable: bool = True
+    """Whether the communicator is allowed to be used at all"""
+    min_mib: Optional[float] = None
+    """Optional inclusive lower bounds in MiB for input sizes
+    where this communicator may be used. If None, the bound is ignored."""
+    max_mib: Optional[float] = None
+    """Optional inclusive upper bounds in MiB for input sizes
+    where this communicator may be used. If None, the bound is ignored."""
+
+
+@config
+@dataclass
+class CommunicatorAllreduceSelectionConfig:
+    """Configuration controlling usage of different device communicators.
+
+    Each communicator can be enabled/disabled and constrained to a size range
+    (in MiB) for which it is allowed to run.
+
+    Notes:
+    - These settings act in addition to platform and runtime checks.
+    - If a communicator is disabled here, it will not be used even if the
+      runtime would otherwise allow it.
+    - If min/max are set, the input tensor size must fall within the range
+      for the communicator to be considered.
+    """
+
+    nccl_symm_mem: CommunicatorRangeConfig = field(
+        default_factory=CommunicatorRangeConfig)
+    """NCCL symmetric memory configuration."""
+
+    custom_allreduce: CommunicatorRangeConfig = field(
+        default_factory=CommunicatorRangeConfig)
+    """Custom CUDA all-reduce kernel configuration."""
+
+    torch_symm_mem: CommunicatorRangeConfig = field(
+        default_factory=CommunicatorRangeConfig)
+    """Torch symmetric memory configuration."""
+
+
+@config
+@dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
@@ -137,6 +181,10 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
+
+    allreduce_config: CommunicatorAllreduceSelectionConfig = field(
+        default_factory=CommunicatorAllreduceSelectionConfig)
+    """ AllReduce algorithms configuration."""
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
@@ -322,6 +370,95 @@ class ParallelConfig:
         factors.append(envs.VLLM_ALL2ALL_BACKEND)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
+    def _update_allreduce_ranges(self) -> None:
+        from vllm.distributed.device_communicators.all_reduce_utils import (
+            CUSTOM_ALL_REDUCE_MAX_SIZES_MIB,
+            NCCL_SYMM_MEM_ALL_REDUCE_MIN_SIZES_MIB,
+            TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES_MIB,
+            TORCH_SYMM_MEM_ALL_REDUCE_MIN_SIZES_MIB)
+        """Validate communicator selection ranges.
+
+        Ensures min/max are sane. This method intentionally keeps values in
+        MiB; conversion to bytes is handled at call sites.
+        """
+        cfg = self.allreduce_config
+        if cfg is None:
+            return
+
+        def _fix(c: CommunicatorRangeConfig) -> None:
+            # Normalize negatives to None; swap if min > max
+            if c.min_mib is not None and c.min_mib < 0:
+                c.min_mib = None
+            if c.max_mib is not None and c.max_mib < 0:
+                c.max_mib = None
+            if c.min_mib is not None and c.max_mib is not None \
+                    and c.min_mib > c.max_mib:
+                c.min_mib, c.max_mib = c.max_mib, c.min_mib
+
+        _fix(cfg.nccl_symm_mem)
+        _fix(cfg.custom_allreduce)
+        _fix(cfg.torch_symm_mem)
+
+        # Apply defaults from threshold tables if user did not set ranges
+        # We use TP size for communicator world sizes (these paths are TP-only)
+        tp_ws = max(1, self.tensor_parallel_size)
+        if tp_ws == 1:
+            return
+
+        try:
+            arch = current_platform.get_device_capability().as_version_str()
+        except Exception:
+            arch = None
+
+        def _set_default(policy: CommunicatorRangeConfig, attr: str,
+                         table: dict[str, dict[int, float]]):
+            if getattr(policy, attr) is not None:
+                return
+            if arch is None:
+                return
+            arch_table = table.get(arch)
+            if arch_table is None:
+                return
+            val = arch_table.get(tp_ws)
+            if val is None:
+                # Current world size not supported -> disable communicator
+                policy.enable = False
+                return
+            setattr(policy, attr, float(val))
+
+        # NCCL symm mem: default min based on arch + world-size (MiB)
+        _set_default(cfg.nccl_symm_mem, "min_mib",
+                     NCCL_SYMM_MEM_ALL_REDUCE_MIN_SIZES_MIB)
+        cfg.nccl_symm_mem.enable = cfg.nccl_symm_mem.enable and bool(
+            envs.VLLM_NCCL_ALLREDUCE_USE_SYMM_MEM)
+        if not (cfg.nccl_symm_mem.min_mib is None
+                and envs.VLLM_NCCL_ALLREDUCE_USE_SYMM_MEM):
+            logger.warning("nccl_symm_mem.min_mib is None when " \
+            "VLLM_NCCL_ALLREDUCE_USE_SYMM_MEM is true. " \
+            "It might affect the allreduce performance.")
+
+        # Custom allreduce: default max based on arch + world-size (MiB)
+        _set_default(cfg.custom_allreduce, "max_mib",
+                     CUSTOM_ALL_REDUCE_MAX_SIZES_MIB)
+
+        # Torch symmetric mem: defaults (MiB)
+        _set_default(cfg.torch_symm_mem, "min_mib",
+                     TORCH_SYMM_MEM_ALL_REDUCE_MIN_SIZES_MIB)
+        _set_default(cfg.torch_symm_mem, "max_mib",
+                     TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES_MIB)
+        cfg.torch_symm_mem.enable = cfg.torch_symm_mem.enable and bool(
+            envs.VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM)
+        if not (cfg.torch_symm_mem.min_mib is None
+                and envs.VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM):
+            logger.warning("torch_symm_mem.min_mib is None when " \
+            " VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM is true. " \
+            "It might affect the allreduce performance.")
+        if not (cfg.torch_symm_mem.max_mib is None
+                and envs.VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM):
+            logger.warning("torch_symm_mem.max_mib is None when " \
+            "VLLM_TORCH_ALLREDUCE_USE_SYMM_MEM is true. " \
+            "It might affect the allreduce performance.")
+
     def __post_init__(self) -> None:
         # Forward deprecated fields to their new location
         if self.num_redundant_experts is not None:
@@ -469,6 +606,9 @@ class ParallelConfig:
                 "Invalid value of `_api_process_rank`. "
                 f"Expected to be `-1` or `[0, {self._api_process_count})`, "
                 f"but found: {self._api_process_rank}")
+
+        # finalize communicator selection ranges
+        self._update_allreduce_ranges()
 
     @property
     def use_ray(self) -> bool:
