@@ -157,15 +157,17 @@ class TransformersMoEBase(TransformersBase):
         ], 0)
         reduce_results = num_experts_shared == 0
 
-        def reduce_results_hook(module, _, output):
-            """Forward hook that performs all-reduce on a nn.Module's output if
-            tensor parallel or expert parallel is enabled. This is used for
-            models with shared experts where the all reduce happens after any
-            shared experts have been added to the hidden state."""
-            if isinstance(output, tuple):
-                output = output[0]
-            return module.experts.maybe_all_reduce_tensor_model_parallel(
-                output)
+        def add_all_reduce(mlp: nn.Module):
+            """Adds an all-reduce to the output of `mlp.forward()`."""
+
+            class MLPWithAllReduce(mlp.__class__):
+
+                def forward(self, *args, **kwargs):
+                    output = super().forward(*args, **kwargs)
+                    return self.experts.maybe_all_reduce_tensor_model_parallel(
+                        output)
+
+            mlp.__class__ = MLPWithAllReduce
 
         # Unused kwargs since we use custom_routing_function:
         # - `scoring_func` and `e_score_correction_bias` only used for grouped
@@ -251,10 +253,11 @@ class TransformersMoEBase(TransformersBase):
                     mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
                     # If results are not all-reduced in FusedMoE, ensure they
-                    # are all-reduced at the end of mlp.forward()
+                    # are all-reduced at the end of mlp.forward() if tensor
+                    # parallel or expert parallel is enabled
                     if not reduce_results and (fused_experts.tp_size > 1
                                                or fused_experts.ep_size > 1):
-                        mlp.register_forward_hook(reduce_results_hook)
+                        add_all_reduce(mlp)
                 else:
                     _fused_moe(child_module, prefix=qual_name)
 
