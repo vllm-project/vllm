@@ -530,56 +530,55 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> AttentionBackend:
         return DeepseekV32IndexerBackend
 
-
-def rotate_activation(x: torch.Tensor) -> torch.Tensor:
-    assert x.dtype == torch.bfloat16
-    from fast_hadamard_transform import hadamard_transform
-    hidden_size = x.size(-1)
-    # make sure the hidden_size is expontial of 2
-    return hadamard_transform(x, scale=hidden_size**-0.5)
-
-
-def hadacore_transform(x: torch.Tensor, inplace: bool = False) -> torch.Tensor:
-    assert x.dtype == torch.bfloat16
-    return ops.hadacore_transform(x, inplace=inplace)
-
-
-def rotate_activation_fake(x: torch.Tensor, ) -> torch.Tensor:
-    return torch.empty_like(x)
-
-
-direct_register_custom_op(
-    op_name="rotate_activation",
-    op_func=rotate_activation,
-    mutates_args=["x"],
-    fake_impl=rotate_activation_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
 @torch.inference_mode()
-def indexer_k_quant_and_cache(
-    k,
-    kv_cache,
-    slot_mapping,
-    quant_block_size,
-    scale_fmt,
+def cp_gather_indexer_k_quant_cache(
+    kv_cache,       # [num_blocks, block_size, head_dim + 1]
+    dst_value,      # [cu_seq_lens[-1], head_dim]
+    dst_scale,       # [cu_seq_lens[-1], 4]
+    block_table,    # [batch_size, num_blocks]
+    cu_seq_lens,    # [batch_size + 1, ]
+    batch_size,
 ):
-    _, block_size, head_dim = kv_cache.shape
-    k_fp8, k_scale = torch.ops.vllm.tilelang_act_quant(k, quant_block_size,
-                                                       scale_fmt)
-    k_bytes = k_fp8.view(torch.uint8)
-    s_bytes = k_scale.view(torch.uint8)
+    num_blocks, block_size, _ = kv_cache.shape
+    head_dim = dst_value.shape[-1]
+    kv_cache = kv_cache.view(num_blocks, -1)
 
-    packed = torch.cat([k_bytes, s_bytes], dim=-1)
+    expected_value = []
+    expected_scale = []
+    for b in range(batch_size):
+        s = cu_seq_lens[b + 1] - cu_seq_lens[b]
+        if s == 0:
+            continue
+        tot = cdiv(s, block_size)
+        blocks = block_table[b, :tot]
 
-    block_idx = torch.div(slot_mapping, block_size, rounding_mode='floor')
-    inblock = slot_mapping - block_idx * block_size
-    linear = block_idx * block_size + inblock
+        value = []
+        scale = []
+        full_block = torch.arange(tot - 1, device=kv_cache.device, dtype=torch.int32)
+        # print(f"full_blocks: {blocks[full_block]}")
+        non_remaining_value = kv_cache[blocks[full_block], : block_size * head_dim].view(-1, head_dim)
+        non_remaining_scale = kv_cache[blocks[full_block], block_size * head_dim:].view(-1, 4)
 
-    kv_cache_flat = kv_cache.view(-1, head_dim)
-    # kv_cache_flat.shape: torch.Size([22326528, 132]), packed.shape: torch.Size([96, 132]), kv_cache.shape: torch.Size([348852, 64, 132]), linear.shape: torch.Size([91])
+        # for i in range(tot - 1):
+        #     value.append(kv_cache[blocks[i], :block_size * head_dim])
+        #     scale.append(kv_cache[blocks[i], block_size * head_dim:])
 
-    kv_cache_flat.index_copy_(0, linear, packed[:len(linear)])
+        remaining = s - (tot - 1) * block_size
+        # value.append(kv_cache[blocks[-1], :remaining * head_dim])
+        # scale.append(kv_cache[blocks[-1], block_size * head_dim: block_size * head_dim + remaining * 4])
+
+        value = torch.cat([non_remaining_value, kv_cache[blocks[-1], :remaining * head_dim].view(-1, head_dim)], dim=0)
+        scale = torch.cat([non_remaining_scale, kv_cache[blocks[-1], block_size * head_dim: block_size * head_dim + remaining * 4].view(-1, 4)], dim=0)
+
+        expected_value.append(value)
+        expected_scale.append(scale)
+
+    gather_value = torch.cat(expected_value, dim=0).view(-1, head_dim)
+    gather_scale = torch.cat(expected_scale, dim=0).view(-1, 4)
+    gather_value = gather_value.view(torch.float8_e4m3fn)
+    gather_scale = gather_scale.view(torch.float32)
+    dst_value.copy_(gather_value)
+    dst_scale.copy_(gather_scale)
 
 
 def sparse_attn_indexer(
@@ -636,21 +635,22 @@ def sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = attn_metadata.prefill
         num_prefills = attn_metadata.num_prefills
-        flattened_kv = torch.empty(
-            [prefill_metadata.total_seq_lens, head_dim + 4],
+        k_fp8 = torch.empty(
+            [prefill_metadata.total_seq_lens, head_dim],
             device=k.device,
-            dtype=torch.uint8)
-        ops.cp_gather_cache(
+            dtype=torch.float8_e4m3fn)
+        k_scale = torch.empty(
+            [prefill_metadata.total_seq_lens, 1],
+            device=k.device,
+            dtype=torch.float32)
+        cp_gather_indexer_k_quant_cache(
             kv_cache,
-            flattened_kv,
+            k_fp8,
+            k_scale,
             prefill_metadata.block_table,
             prefill_metadata.cu_seq_lens,
             num_prefills,
         )
-        # TODO: the memory footprint here can be optimized
-        k_fp8 = flattened_kv[..., :head_dim].view(
-            torch.float8_e4m3fn).contiguous()
-        k_scale = flattened_kv[..., head_dim:].view(torch.float32).contiguous()
         cu_seqlen_ks = prefill_metadata.cu_seqlen_ks
         cu_seqlen_ke = prefill_metadata.cu_seqlen_ke
         num_tokens = attn_metadata.num_actual_tokens
@@ -833,11 +833,6 @@ class Indexer(nn.Module):
         q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = torch.cat([k_pe.squeeze(1), k_nope], dim=-1)
-        # logger.info_once(f'q.shape: {q.shape}, k.shape: {k.shape}')
-        q = torch.ops.vllm.rotate_activation(q)
-        k = torch.ops.vllm.rotate_activation(
-            k
-        )  #FIXME (siyuanf) hadacore_transform causes illegal memory access when applying to k
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
