@@ -61,7 +61,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN_VLLM_V1"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
@@ -481,10 +481,10 @@ class FlashAttentionImpl(AttentionImpl):
                                                    attn_metadata, layer)
 
         # For decoder and cross-attention, use KV cache as before
-        # print("kv cache unbind att op:", kv_cache.unbind(0))
         key_cache, value_cache = kv_cache.unbind(0)
 
-        # TODO delete this code block
+        # TODO run this code block only if we force unified op as
+        # do_kv_cache_update(...)
         # # key and value may be None in the case of cross attention. They are
         # # calculated once based on the output from the encoder and then cached
         # # in KV cache.
@@ -598,7 +598,6 @@ class FlashAttentionImpl(AttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
 
-        # print("kv cache unbind:", kv_cache.unbind(0))
         key_cache, value_cache = kv_cache.unbind(0)
 
         # key and value may be None in the case of cross attention. They are
