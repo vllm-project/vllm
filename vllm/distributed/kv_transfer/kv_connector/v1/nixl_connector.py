@@ -12,6 +12,8 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from importlib import metadata
+from importlib.metadata import PackageNotFoundError
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import msgspec
@@ -76,6 +78,14 @@ _NIXL_SUPPORTED_DEVICE = {
 }
 # support for oot platform by providing mapping in current_platform
 _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
+
+
+def get_nixl_version(package_name: str = 'nixl') -> str:
+    """Gets the version of an installed Python package."""
+    try:
+        return metadata.version(package_name)
+    except PackageNotFoundError:
+        return "0.0.0"
 
 
 class NixlAgentMetadata(
@@ -480,8 +490,11 @@ class NixlConnectorWorker:
         if nixl_agent_config is None:
             config = None
         else:
+            ucx_args = {
+                'num_threads': 8,
+            } if get_nixl_version() >= '0.5.1' else {}
             config = nixl_agent_config(backends=self.nixl_backends) if len(
-                non_ucx_backends) > 0 else nixl_agent_config(num_threads=8)
+                non_ucx_backends) > 0 else nixl_agent_config(**ucx_args)
 
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
