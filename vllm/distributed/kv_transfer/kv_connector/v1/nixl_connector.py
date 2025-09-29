@@ -67,7 +67,10 @@ except ImportError:
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
 _NIXL_SUPPORTED_DEVICE = {
-    "cuda": ("cuda", ),
+    "cuda": (
+        "cuda",
+        "cpu",
+    ),
     "tpu": ("cpu", ),
     "xpu": ("cpu", ),
 }
@@ -701,6 +704,9 @@ class NixlConnectorWorker:
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Assign copy (d2h, h2d) operations when host buffer is used."""
+        # Set a no-op if the host buffer is not cpu.
+        if self.kv_buffer_device != "cpu":
+            return
         assert self.use_host_buffer
         self.copy_blocks = copy_operation
 
