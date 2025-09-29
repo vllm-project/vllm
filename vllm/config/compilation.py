@@ -749,7 +749,8 @@ class CompilationConfig:
         """
         try:
             import torch
-            from torch._inductor.scheduler import register_should_partition_rule
+            from torch._inductor.scheduler import (
+                register_should_partition_rule)
             from torch._ops import OpOverload, OpOverloadPacket
         except ImportError as e:
             logger.info(
