@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from contextlib import contextmanager
-from dataclasses import field, is_dataclass, replace
+from dataclasses import field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
@@ -33,7 +33,7 @@ from .parallel import ParallelConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import ConfigT, SupportsHash, config
+from .utils import SupportsHash, config
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -787,20 +787,3 @@ def get_layers_from_vllm_config(
         for layer_name in layer_names
         if isinstance(forward_context[layer_name], layer_type)
     }
-
-
-def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
-    processed_overrides = {}
-    for field_name, value in overrides.items():
-        assert hasattr(
-            config, field_name), f"{type(config)} has no field `{field_name}`"
-        current_value = getattr(config, field_name)
-        if is_dataclass(current_value) and not is_dataclass(value):
-            assert isinstance(value, dict), (
-                f"Overrides to {type(config)}.{field_name} must be a dict"
-                f"  or {type(current_value)}, but got {type(value)}")
-            value = update_config(
-                current_value,  # type: ignore[type-var]
-                value)
-        processed_overrides[field_name] = value
-    return replace(config, **processed_overrides)

@@ -26,10 +26,11 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.config.speech_to_text import SpeechToTextConfig
 from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.config.utils import (ConfigType, SupportsMetricsInfo, config,
-                               get_attr_docs, get_layers_from_vllm_config,
-                               is_init_field, update_config)
+                               get_attr_docs, is_init_field, update_config)
 from vllm.config.vllm import (VllmConfig, get_cached_compilation_config,
-                              get_current_vllm_config, set_current_vllm_config)
+                              get_current_vllm_config,
+                              get_layers_from_vllm_config,
+                              set_current_vllm_config)
 
 __all__ = [
     # From vllm.config.cache
@@ -94,7 +95,6 @@ __all__ = [
     "SupportsMetricsInfo",
     "config",
     "get_attr_docs",
-    "get_layers_from_vllm_config",
     "is_init_field",
     "update_config",
     # From vllm.config.vllm
@@ -102,4 +102,5 @@ __all__ = [
     "get_cached_compilation_config",
     "get_current_vllm_config",
     "set_current_vllm_config",
+    "get_layers_from_vllm_config",
 ]
