@@ -3,7 +3,6 @@
 
 import json
 import time
-from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -770,24 +769,36 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str,
     assert len(response.output_messages) > 0
 
 
-def mock_render_for_completion():
-    return list(range(1000000))
+@pytest.fixture(scope="module")
+def server_with_mock(monkeypatch_module: pytest.MonkeyPatch):
+    args = ["--enforce-eager", "--tool-server", "demo"]
+
+    with monkeypatch_module.context() as m:
+        m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
+        # Set environment variable to mock large prompt in subprocess
+        m.setenv("VLLM_TEST_MOCK_LARGE_PROMPT", "1")
+        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+            yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client_with_mock(server_with_mock):
+    async with server_with_mock.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@patch("vllm.entrypoints.openai.serving_responses.render_for_completion",
-       mock_render_for_completion)
-async def test_prompt_length_exceeds_max_model_len(client: OpenAI,
+async def test_prompt_length_exceeds_max_model_len(client_with_mock: OpenAI,
                                                    model_name: str):
 
     with pytest.raises(BadRequestError) as exc_info:
-        await client.responses.create(
+        await client_with_mock.responses.create(
             model=model_name,
             input="hello",
         )
 
     # Verify the error message matches what's expected from lines 287-294
     error = exc_info.value
-    assert "The engine prompt length exceeds the max_model_len" in str(error)
+    assert "'The engine prompt length" in str(error)
     assert "Please reduce prompt" in str(error)
