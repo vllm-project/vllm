@@ -27,8 +27,8 @@ def is_deep_gemm_supported() -> bool:
     is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
         or current_platform.is_device_capability(100))
-    return (envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and
-            is_supported_arch and not envs.VLLM_USE_FLASHINFER_MOE_FP8)
+    return (envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
+            and not envs.VLLM_USE_FLASHINFER_MOE_FP8)
 
 
 @functools.cache
@@ -46,7 +46,7 @@ def is_deep_gemm_e8m0_used() -> bool:
     if _fp8_gemm_nt_impl is None:
         logger.info_once("DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
         return False
-    
+
     if envs.VLLM_USE_FLASHINFER_MOE_FP8:
         logger.info_once("DeepGEMM E8M0 disabled: FlashInfer MOE is enabled.")
         return False
