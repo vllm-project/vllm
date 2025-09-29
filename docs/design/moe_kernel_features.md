@@ -37,6 +37,7 @@ th:not(:first-child) {
   transform: rotate(180deg)
 }
 </style>
+
 | Backend                               | Output act. format | Quant. types    | Quant. format          | Async | Apply Weight On Input | Sub-class                                                                                                                                                     |
 |---------------------------------------|--------------------|-----------------|------------------------|-------|-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | naive                                 | standard           | all<sup>1</sup> | G,A,T                  | N     | <sup>6</sup>          | [layer.py][vllm.model_executor.layers.fused_moe.layer.FusedMoE.forward_impl]                                                                                  |
@@ -109,6 +110,7 @@ th:not(:first-child) {
   transform: rotate(180deg)
 }
 </style>
+
 | Kernel                       | Input act. format | Quant. types    | Quant. format | Activation function                         | Apply Weight On Input | Modular | Source                                                                                                                                                                                                 |
 |------------------------------|-------------------|-----------------|---------------|---------------------------------------------|-----------------------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | triton                       | standard          | all<sup>1</sup> | G,A,T         | silu, gelu, swigluoai, silu_no_mul, gelu_no_mul | Y                     | Y       | [`fused_experts`][vllm.model_executor.layers.fused_moe.fused_moe.fused_experts], [`TritonExperts`][vllm.model_executor.layers.fused_moe.fused_moe.TritonExperts]                                                                                                                  |
