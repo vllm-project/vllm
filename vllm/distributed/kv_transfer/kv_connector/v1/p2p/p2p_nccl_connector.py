@@ -72,6 +72,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
         self.config = vllm_config.kv_transfer_config
+        self._use_mla = vllm_config.model_config.use_mla
         self._async_transfer = self._should_transfer_async(self.config)
         self.is_producer = self.config.is_kv_producer
         self.chunked_prefill: dict[str, Any] = {}
@@ -131,12 +132,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
-        attn_metadata = forward_context.attn_metadata
-
-        # if attn_metadata is None:
-        #     logger.warning("start_load_kv, attn_metadata is None, returning")
-        #     return
-
         def inject_kv_into_layer(
             layer: torch.Tensor,
             kv_cache: torch.Tensor,
@@ -169,8 +164,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 None. The function modifies `layer` in-place.
             """
             logger.debug("inject_kv_into_layer, tensor_id:%s", tensor_id)
-            if (isinstance(attn_metadata, MLACommonMetadata)
-                    or layer.shape[1] == 2):  # MLA or FlashInfer
+            if (self._use_mla or layer.shape[1] == 2):  # MLA or FlashInfer
                 num_block = kv_cache.shape[0]
                 self.check_tensors_except_dim(layer, kv_cache, 0)
                 if len(block_ids) == num_block:
@@ -193,21 +187,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                         "🚧kv_cache does not match, block_ids:%d, "
                         "num_block:%d, request_id:%s", len(block_ids),
                         num_block, request_id)
-            else:
-                assert attn_metadata is not None
-                # kv_connector_no_forward, assuming FlashAttention
-                num_block = kv_cache.shape[1]
-                self.check_tensors_except_dim(layer, kv_cache, 1)
-                if len(block_ids) == num_block:
-                    layer[:, block_ids, ...] = kv_cache
-                else:
-                    layer[:, block_ids[:num_block], ...] = kv_cache
-                    logger.warning(
-                        "🚧kv_cache does not match, block_ids:%d, "
-                        "num_block:%d, request_id:%s", len(block_ids),
-                        num_block, request_id)
-                # raise NotImplementedError(
-                #     "Unsupported layer layout: %s", layer.shape)
             self.p2p_nccl_engine.have_injected_tensor_id(tensor_id)
 
         # Get the metadata
