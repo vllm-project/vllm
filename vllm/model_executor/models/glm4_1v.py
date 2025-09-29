@@ -79,8 +79,7 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
 from .qwen2_vl import (_create_qwen2vl_field_factory,
                        apply_rotary_pos_emb_vision)
 from .utils import (AutoWeightsLoader, WeightsMapper,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
