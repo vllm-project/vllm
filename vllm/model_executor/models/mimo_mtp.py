@@ -34,7 +34,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2DecoderLayer
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .utils import maybe_prefix
@@ -118,6 +117,9 @@ class MiMoMultiTokenPredictor(nn.Module):
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -140,12 +142,10 @@ class MiMoMultiTokenPredictor(nn.Module):
         self,
         hidden_states: torch.Tensor,
         lm_head: ParallelLMHead,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         self.mtp_layers[str(self.mtp_start_layer_idx + spec_step_idx)]
-        logits = self.logits_processor(lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(lm_head, hidden_states)
         return logits
 
 
@@ -160,6 +160,9 @@ class MiMoMTP(nn.Module):
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
                                       prefix=maybe_prefix(prefix, "lm_head"))
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -178,11 +181,10 @@ class MiMoMTP(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> Optional[torch.Tensor]:
         return self.model.compute_logits(hidden_states, self.lm_head,
-                                         sampling_metadata, spec_step_idx)
+                                         spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

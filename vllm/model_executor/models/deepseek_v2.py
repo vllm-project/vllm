@@ -62,8 +62,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.platforms import current_platform
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv, direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend, DeepseekV32IndexerMetadata
@@ -133,45 +132,6 @@ class DeepseekV2MLP(nn.Module):
         return x
 
 
-# Chunk x along the num_tokens axis for sequence parallelism
-# NOTE: This is wrapped in a torch custom op to work around the following issue:
-# The output tensor can have a sequence length 0 at small input sequence lengths
-# even though we explicitly pad to avoid this.
-def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
-    tp_size = get_tensor_model_parallel_world_size()
-    tp_rank = get_tensor_model_parallel_rank()
-
-    # all_gather needs the sequence length to be divisible by tp_size
-    seq_len = x.size(0)
-    remainder = seq_len % tp_size
-    if remainder != 0:
-        pad_len = tp_size - remainder
-        x = nn.functional.pad(x, (0, 0, 0, pad_len))
-
-    chunk = x.shape[0] // tp_size
-    start = tp_rank * chunk
-    return torch.narrow(x, 0, start, chunk)
-
-
-def sequence_parallel_chunk_fake(x: torch.Tensor) -> torch.Tensor:
-    tp_size = get_tensor_model_parallel_world_size()
-    seq_len = cdiv(x.size(0), tp_size)
-    shape = list(x.shape)
-    shape[0] = seq_len
-    out = torch.empty(shape, dtype=x.dtype, device=x.device)
-    return out
-
-
-direct_register_custom_op(
-    op_name="sequence_parallel_chunk",
-    op_func=sequence_parallel_chunk,
-    mutates_args=[],
-    fake_impl=sequence_parallel_chunk_fake,
-    dispatch_key=current_platform.dispatch_key,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
-)
-
-
 class DeepseekV2MoE(nn.Module):
 
     def __init__(
@@ -193,20 +153,7 @@ class DeepseekV2MoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
-        # The all_reduce at the end of attention (during o_proj) means that
-        # inputs are replicated across each rank of the tensor parallel group.
-        # If using expert-parallelism with DeepEP All2All ops, replicated
-        # tokens results in useless duplicate computation and communication.
-        #
-        # In this case, ensure the input to the experts is sequence parallel
-        # to avoid the excess work.
-        #
-        # Not needed for pplx-kernels as it can handle duplicate input tokens.
-        self.is_sequence_parallel = (envs.VLLM_ALL2ALL_BACKEND
-                                     in ("deepep_high_throughput",
-                                         "deepep_low_latency")
-                                     and parallel_config.enable_expert_parallel
-                                     and self.tp_size > 1)
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
@@ -305,8 +252,7 @@ class DeepseekV2MoE(nn.Module):
         # TODO: We can replace the all_reduce at the end of attn with a
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel:
-            hidden_states = torch.ops.vllm.sequence_parallel_chunk(
-                hidden_states)
+            hidden_states = sequence_parallel_chunk(hidden_states)
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
@@ -860,7 +806,8 @@ class DeepseekV2MLAAttention(nn.Module):
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
     (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
     
-    For more info see MLACommonImpl in: vllm/attention/backends/mla/utils.py
+        For more info see MLACommonImpl in:
+        vllm/v1/attention/backends/mla/utils.py
     """
 
     def __init__(
@@ -1090,7 +1037,7 @@ class DeepseekV2DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
-            residual = hidden_states
+            residual = hidden_states.clone()
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(
@@ -1328,10 +1275,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

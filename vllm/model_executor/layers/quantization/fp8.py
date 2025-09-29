@@ -18,6 +18,8 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, fp8_w8a8_moe_quant_config)
+from vllm.model_executor.layers.fused_moe.layer import (
+    UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -33,7 +35,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     apply_fp8_block_linear, check_aiter_fp8_linear_support,
     create_fp8_input_scale, create_fp8_scale_parameter,
-    create_fp8_weight_parameter, get_col_major_tma_aligned_tensor,
+    create_fp8_weight_parameter, expert_weight_is_col_major,
     maybe_post_process_fp8_weight_block, process_fp8_weight_block_strategy,
     process_fp8_weight_tensor_strategy, requant_weight_ue8m0_inplace,
     validate_fp8_block_shape)
@@ -53,7 +55,9 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
+from vllm.utils.deep_gemm import (get_col_major_tma_aligned_tensor,
+                                  is_deep_gemm_e8m0_used,
+                                  is_deep_gemm_supported)
 from vllm.utils.flashinfer import has_flashinfer_moe
 
 if TYPE_CHECKING:
@@ -62,12 +66,6 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
-
-
-def _is_col_major(x: torch.Tensor) -> bool:
-    assert x.dim() == 3
-    b, m, n = x.shape
-    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
 
 
 class Fp8Config(QuantizationConfig):
@@ -178,6 +176,10 @@ class Fp8Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
+            if is_layer_skipped(prefix=prefix,
+                                ignored_layers=self.ignored_layers,
+                                fused_mapping=self.packed_modules_mapping):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -660,10 +662,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # DeepGemm scales need to be transposed and aligned. We try to do
             # it ahead of time for performance reasons.
             if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
-                if _is_col_major(layer.w13_weight_scale_inv):
+                if expert_weight_is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
                         get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv)
-                if _is_col_major(layer.w2_weight_scale_inv):
+                if expert_weight_is_col_major(layer.w2_weight_scale_inv):
                     layer.w2_weight_scale_inv = \
                         get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
 
@@ -811,10 +813,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
             # Ensure column-major TMA alignment expected by DeepGEMM.
-            if _is_col_major(layer.w13_weight_scale_inv):
+            if expert_weight_is_col_major(layer.w13_weight_scale_inv):
                 layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
                     layer.w13_weight_scale_inv)
-            if _is_col_major(layer.w2_weight_scale_inv):
+            if expert_weight_is_col_major(layer.w2_weight_scale_inv):
                 layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
                     layer.w2_weight_scale_inv)
 
@@ -915,6 +917,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+
         if enable_eplb:
             assert expert_load_view is not None
             assert logical_to_physical_map is not None
@@ -931,8 +934,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
                 assert (renormalize and use_grouped_topk
                         and custom_routing_function is None)
-
-                return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
+                result = torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
                     routing_logits=router_logits.to(torch.float32),
                     routing_bias=e_score_correction_bias,
                     x=x,
@@ -953,7 +955,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             else:
                 assert (not renormalize
                         and custom_routing_function is not None)
-                return apply_flashinfer_per_tensor_scale_fp8(
+                result = apply_flashinfer_per_tensor_scale_fp8(
                     layer=layer,
                     hidden_states=x,
                     router_logits=router_logits,
@@ -964,7 +966,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     topk_group=topk_group,
                     apply_router_weight_on_input=apply_router_weight_on_input)
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        zero_expert_num = getattr(layer, 'zero_expert_num', 0)
+        zero_expert_type = getattr(layer, 'zero_expert_type', None)
+
+        select_result = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -982,17 +987,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
+            global_num_experts=global_num_experts,
+            zero_expert_num=zero_expert_num,
+            zero_expert_type=zero_expert_type,
         )
 
         #
         # Note: the order of checks is important since self.fused_experts
         # can override fused_experts or cutlass but not rocm or marlin.
         #
+        topk_weights, topk_ids, zero_expert_result = select_result
+
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
                 rocm_aiter_fused_experts)
             assert self.fused_experts is None
-            return rocm_aiter_fused_experts(
+            result = rocm_aiter_fused_experts(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -1006,7 +1016,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
             assert self.fused_experts is None
-            return torch.ops.vllm.fused_marlin_moe(
+            result = torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -1023,7 +1033,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 expert_map=expert_map,
                 workspace=layer.workspace)
         elif self.fused_experts:
-            return self.fused_experts(
+            result = self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -1043,7 +1053,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert scoring_func == 'sigmoid', (
                 f"Expected 'sigmoid' scoring func but got {scoring_func}")
 
-            return flashinfer_cutlass_moe_fp8(
+            result = flashinfer_cutlass_moe_fp8(
                 x,
                 layer,
                 topk_weights,
@@ -1056,7 +1066,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
-            return fused_experts(
+            result = fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -1071,6 +1081,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_deep_gemm=self.allow_deep_gemm,
                 allow_cutlass_block_scaled_grouped_gemm=(
                     self.allow_cutlass_block_scaled_grouped_gemm))
+        if zero_expert_num != 0 and zero_expert_type is not None:
+            assert not isinstance(result, tuple), \
+                "Shared + zero experts are mutually exclusive not yet supported"
+            return result, zero_expert_result
+        else:
+            return result
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

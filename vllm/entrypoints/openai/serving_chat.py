@@ -68,6 +68,7 @@ class OpenAIServingChat(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        trust_request_chat_template: bool = False,
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
@@ -89,6 +90,7 @@ class OpenAIServingChat(OpenAIServing):
         self.response_role = response_role
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.trust_request_chat_template = trust_request_chat_template
         self.enable_log_outputs = enable_log_outputs
 
         # set up tool use
@@ -220,6 +222,16 @@ class OpenAIServingChat(OpenAIServing):
 
             if not self.use_harmony:
                 # Common case.
+                request_chat_template = request.chat_template
+                chat_template_kwargs = request.chat_template_kwargs
+                if not self.trust_request_chat_template and (
+                        request_chat_template is not None or
+                    (chat_template_kwargs and
+                     chat_template_kwargs.get("chat_template") is not None)):
+                    return self.create_error_response(
+                        "Chat template is passed with request, but "
+                        "--trust-request-chat-template is not set. "
+                        "Refused request with untrusted chat template.")
                 (
                     conversation,
                     request_prompts,
@@ -228,7 +240,7 @@ class OpenAIServingChat(OpenAIServing):
                     request,
                     tokenizer,
                     request.messages,
-                    chat_template=request.chat_template or self.chat_template,
+                    chat_template=request_chat_template or self.chat_template,
                     chat_template_content_format=self.
                     chat_template_content_format,
                     add_generation_prompt=request.add_generation_prompt,
@@ -1186,6 +1198,10 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
+                reasoning_content, content, _ = parse_chat_output(token_ids)
+                if not request.include_reasoning:
+                    reasoning_content = None
+
                 if self.tool_parser is not None:
                     tool_parser = self.tool_parser(tokenizer)
                     # NOTE: We use token_ids for openai tool parser
@@ -1194,10 +1210,7 @@ class OpenAIServingChat(OpenAIServing):
                         request=request,
                         token_ids=token_ids,  # type: ignore
                     )
-                    reasoning_content, content = None, tool_call_info.content
-                    if request.include_reasoning:
-                        reasoning_content, content, _ = parse_chat_output(
-                            token_ids)
+                    content = tool_call_info.content
                     message = ChatMessage(
                         role=role,
                         reasoning_content=reasoning_content,
@@ -1205,10 +1218,6 @@ class OpenAIServingChat(OpenAIServing):
                         tool_calls=tool_call_info.tool_calls,
                     )
                 else:
-                    reasoning_content, content, _ = parse_chat_output(
-                        token_ids)
-                    if not request.include_reasoning:
-                        reasoning_content = None
                     message = ChatMessage(
                         role=role,
                         reasoning_content=reasoning_content,

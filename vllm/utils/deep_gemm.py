@@ -73,6 +73,7 @@ _grouped_masked_impl: Callable[..., Any] | None = None
 _fp8_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
+_get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
@@ -80,6 +81,7 @@ def _lazy_init() -> None:
     global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl
     global _fp8_mqa_logits_impl, _fp8_paged_mqa_logits_impl
     global _get_paged_mqa_logits_metadata_impl
+    global _get_mn_major_tma_aligned_tensor_impl
 
     # fast path
     if (
@@ -111,12 +113,22 @@ def _lazy_init() -> None:
     _get_paged_mqa_logits_metadata_impl = getattr(
         _dg, "get_paged_mqa_logits_metadata", None
     )
+    _get_mn_major_tma_aligned_tensor_impl = getattr(
+        _dg, "get_mn_major_tma_aligned_tensor", None)
 
 
 def get_num_sms() -> int:
     _lazy_init()
     _dg = importlib.import_module("deep_gemm")
     return int(_dg.get_num_sms())
+
+
+def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
+    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor"""
+    _lazy_init()
+    if _get_mn_major_tma_aligned_tensor_impl is None:
+        return _missing()
+    return _get_mn_major_tma_aligned_tensor_impl(x)
 
 
 def fp8_gemm_nt(*args, **kwargs):
@@ -257,7 +269,7 @@ DEFAULT_BLOCK_SIZE = [128, 128]
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/dd6ed14acbc7445dcef224248a77ab4d22b5f240/deep_gemm/utils/math.py#L38
-# TODO(wentao): optimize this function, using triton or cuda kernel
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def per_block_cast_to_fp8(
         x: torch.Tensor,
         block_size: list[int] = DEFAULT_BLOCK_SIZE,
@@ -313,4 +325,5 @@ __all__ = [
     "is_deep_gemm_supported",
     "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
+    "get_col_major_tma_aligned_tensor",
 ]
