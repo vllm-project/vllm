@@ -263,6 +263,7 @@ class MLACommonBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,  # assumed to be 1 for MLA
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> Tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 

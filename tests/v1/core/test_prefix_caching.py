@@ -1337,7 +1337,6 @@ def test_eagle_with_sliding_window():
         head_size=1,
         dtype=torch.float32,
         sliding_window=block_size,
-        use_mla=False,
     )
     manager = KVCacheManager(
         KVCacheConfig(

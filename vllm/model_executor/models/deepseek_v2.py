@@ -74,7 +74,7 @@ from .utils import (PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import MLAAttentionSpec, KVCacheSpec
 from vllm.utils.deep_gemm import (
     fp8_mqa_logits,
     get_paged_mqa_logits_metadata,
@@ -514,12 +514,11 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
-        return FullAttentionSpec(
+        return MLAAttentionSpec( # Only has one vector instead of K + V
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-            use_mla=True  # Only has one vector instead of K + V
         )
 
     def forward(self):

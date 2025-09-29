@@ -82,6 +82,7 @@ class ROCmFlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> Tuple[int, ...]:
         paged_attn = _get_paged_attn_module()
         return paged_attn.get_kv_cache_shape(num_blocks, block_size,

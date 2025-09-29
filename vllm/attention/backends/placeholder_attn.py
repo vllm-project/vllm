@@ -51,6 +51,7 @@ class PlaceholderAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> Tuple[int, ...]:
         return (1, 1, 1, 1, 1)
 

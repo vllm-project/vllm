@@ -9,19 +9,6 @@ def _cuda_sm90_available() -> bool:
     return major == 9
 
 
-@pytest.mark.cuda
-def test_sparse_flashmla_imports_and_flags():
-    import vllm.attention.ops.flashmla as fm
-    # Functions should exist
-    assert hasattr(fm, "get_sparse_mla_metadata")
-    assert hasattr(fm, "flash_mla_sparse_with_kvcache")
-    assert hasattr(fm, "flash_mla_sparse_prefill")
-    # Support check should return a (bool, reason)
-    ok, reason = fm.is_flashmla_supported()
-    assert isinstance(ok, bool)
-    assert (reason is None) or isinstance(reason, str)
-
-
 def test_sparse_flashmla_metadata_smoke():
     import vllm.attention.ops.flashmla as fm
     ok, reason = fm.is_flashmla_supported()
@@ -34,16 +21,16 @@ def test_sparse_flashmla_metadata_smoke():
     num_heads_q = 128
     num_heads_k = 1
     q_seq_per_hk = seqlen_q * num_heads_q // num_heads_k
-    q_heads_per_hk = num_heads_q // num_heads_k
     topk = 128
 
     cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
 
-    tile_md, num_splits = fm.get_sparse_mla_metadata(cache_seqlens,
-                                                     q_seq_per_hk,
-                                                     num_heads_k,
-                                                     topk,
-                                                     q_heads_per_hk)
+    tile_md, num_splits = fm.get_mla_metadata(cache_seqlens,
+                                              q_seq_per_hk,
+                                              num_heads_k,
+                                              num_heads_q=num_heads_q,
+                                              topk=topk,
+                                              is_fp8_kvcache=True)
     assert tile_md.dtype == torch.int32
     assert num_splits.dtype == torch.int32
 
@@ -69,11 +56,13 @@ def test_sparse_flashmla_decode_smoke():
     q_seq_per_hk = seqlen_q * num_heads_q // num_heads_k
     q_heads_per_hk = num_heads_q // num_heads_k
     cache_seqlens = torch.zeros(batch_size, dtype=torch.int32, device=device)
-    tile_md, num_splits = fm.get_sparse_mla_metadata(cache_seqlens,
+    tile_md, num_splits = fm.get_mla_metadata(cache_seqlens,
+                                              
                                                      q_seq_per_hk,
                                                      num_heads_k,
-                                                     topk,
-                                                     q_heads_per_hk)
+                                                     num_heads_q=num_heads_q,
+                                                     topk=topk,
+                                                     is_fp8_kvcache=True)
 
     # Inputs
     q = torch.zeros((batch_size, seqlen_q, num_heads_q, head_dim_k),
@@ -86,9 +75,10 @@ def test_sparse_flashmla_decode_smoke():
                           dtype=torch.int32,
                           device=device)
 
-    out, lse = fm.flash_mla_sparse_with_kvcache(q, k_cache, cache_seqlens,
+    block_table = torch.zeros((batch_size, 128), dtype=torch.int32, device=device)
+    out, lse = fm.flash_mla_with_kvcache(q, k_cache, block_table, cache_seqlens,
                                                 head_dim_v, tile_md,
-                                                num_splits, indices)
+                                                num_splits, indices=indices, is_fp8_kvcache=True)
     assert out.shape[0] == batch_size
     assert out.shape[-1] == head_dim_v
     assert lse.shape[0] == batch_size

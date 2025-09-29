@@ -414,6 +414,24 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 "exactly equal.", mamba_padding_pct)
 
 
+class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
+
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Updated fp8 cache to custom "fp8_ds_mla" format for DeepSeekV32
+        """
+        hf_config = vllm_config.model_config.hf_config
+
+        is_v32 = hasattr(hf_config, "attn_module_list_cfg") \
+            and "attn_index" in hf_config.attn_module_list_cfg[0]
+
+        if is_v32:
+            cache_config = vllm_config.cache_config
+            if cache_config.cache_dtype.startswith("fp8"):
+                cache_config.cache_dtype = "fp8_ds_mla"
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -431,4 +449,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "MambaForCausalLM": MambaModelConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
+    "DeepseekV3ForCausalLM": DeepseekV3ForCausalLM,
 }

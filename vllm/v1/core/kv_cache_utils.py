@@ -1130,7 +1130,6 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,
-                    use_mla=spec.use_mla,
                     sliding_window=spec.sliding_window,
                 )
             elif isinstance(spec, ChunkedLocalAttentionSpec):
@@ -1139,7 +1138,6 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,
-                    use_mla=spec.use_mla,
                     attention_chunk_size=spec.attention_chunk_size,
                 )
 
