@@ -169,12 +169,16 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
         self.init_parameters(self.classifier,
                              dtype=self.model_config.head_dtype)
 
-        # CLSPool has already been applied in `pooling`.
-        # Add dim to match expected input shape of `classifier.forward`.
-        def classifier_pre_hook(module, args):
-            return args[0].unsqueeze(1), *args[1:]
+        class ClassifierWithReshape(self.classifier.__class__):
+            """CLSPool has already been applied in `pooling`.
+            Add dim to match expected input shape of `classifier.forward`."""
 
-        self.classifier.register_forward_pre_hook(classifier_pre_hook)
+            def forward(self, *args, **kwargs):
+                if len(args) > 0:
+                    args = (args[0].unsqueeze(1), *args[1:])
+                return super().forward(*args, **kwargs)
+
+        self.classifier.__class__ = ClassifierWithReshape
 
         self.pooler = DispatchPooler({
             "encode":
