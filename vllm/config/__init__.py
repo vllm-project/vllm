@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import textwrap
+import time
 from contextlib import contextmanager
 from dataclasses import field, fields, is_dataclass, replace
 from functools import cached_property, lru_cache
@@ -552,6 +553,9 @@ class VllmConfig:
                     "Config-specified debug dump path is overridden"
                     " by VLLM_DEBUG_DUMP_PATH to %s", env_path)
             self.compilation_config.debug_dump_path = env_path
+
+        # To give each torch profile run a unique.
+        self.instance_id = f"{int(time.time() * 1000)}"
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
