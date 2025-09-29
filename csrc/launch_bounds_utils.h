@@ -31,11 +31,11 @@
       #define VLLM_MAX_THREADS_PER_SM 2048
     #endif
   #else
-   /* Host pass (no __CUDA_ARCH__): neutral default */
+    /* Host pass (no __CUDA_ARCH__): neutral default */
     #define VLLM_MAX_THREADS_PER_SM 2048
   #endif
 #endif
- 
+
 // compute the number of blocks per SM to request in __launch_bounds__
 #define VLLM_BLOCKS_DIV(VAL) (VLLM_MAX_THREADS_PER_SM / (VAL))
 #define VLLM_CLAMP_BLOCKS_PER_SM(VAL) \
