@@ -762,11 +762,15 @@ class Indexer(nn.Module):
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
 
-        #TODO (zyongye) change dim to fp8 later to (self.head_dim + 4)
-        self.k_cache = DeepseekV32IndexerCache(head_dim=self.head_dim + 4,
-                                               dtype=torch.uint8,
-                                               prefix=f"{prefix}.k_cache",
-                                               cache_config=cache_config)
+        # NOTE: (zyongye) we use fp8 naive cache,
+        #       where we store value in fp8 and scale in fp32
+        #       per self.quant_block_size element
+        self.k_cache = DeepseekV32IndexerCache(
+            head_dim=self.head_dim +
+            self.head_dim // self.quant_block_size * 4,
+            dtype=torch.uint8,
+            prefix=f"{prefix}.k_cache",
+            cache_config=cache_config)
         self.max_model_len = vllm_config.model_config.max_model_len
         self.prefix = prefix
         from vllm.v1.attention.backends.mla.indexer import (
@@ -975,7 +979,6 @@ class DeepseekV2MLAAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # self.indexer(torch.tensor([]), torch.tensor([]))
         return self.mla_attn(positions, hidden_states)
 
 
