@@ -205,6 +205,12 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
                              dtype: torch.dtype) -> _Backend:
+
+        # For Blackwell GPUs, force TORCH_SDPA for now.
+        # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
+        if cls.has_device_capability(100):
+            return _Backend.TORCH_SDPA
+
         if dtype not in (torch.float16, torch.bfloat16):
             return _Backend.XFORMERS
 

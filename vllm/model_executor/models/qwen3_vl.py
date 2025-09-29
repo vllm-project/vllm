@@ -66,7 +66,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import is_list_of
@@ -336,14 +336,6 @@ class Qwen3_VisionTransformer(nn.Module):
         }:
             raise RuntimeError(
                 f"Qwen3-VL does not support {self.attn_backend} backend now.")
-        if current_platform.is_device_capability(
-                100) and self.attn_backend != _Backend.TORCH_SDPA:
-            # TODO(Roger/Wentao): remove this after FA
-            # or XFORMERS's issue fixed on Blackwell
-            logger.info_once("Qwen3-VL vision attention does not support "
-                             f"{self.attn_backend} backend on Blackwell now. "
-                             "Vision attention backend is set to TORCH_SDPA.")
-            self.attn_backend = _Backend.TORCH_SDPA
 
         self.blocks = nn.ModuleList([
             Qwen3_VisionBlock(
