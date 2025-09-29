@@ -331,7 +331,7 @@ _SUBPROCESS_COMMAND = [
 ]
 
 _PREVIOUSLY_SUPPORTED_MODELS = {
-    "MotifForCausalLM": "0.11.0",
+    "MotifForCausalLM": "0.10.2",
     "Phi3SmallForCausalLM": "0.9.2",
     "Phi4FlashForCausalLM": "0.10.2",
     # encoder-decoder models except whisper
