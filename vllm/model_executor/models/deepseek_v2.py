@@ -556,35 +556,6 @@ direct_register_custom_op(
     dispatch_key=current_platform.dispatch_key,
 )
 
-
-def tilelang_act_quant(
-    x: torch.Tensor,
-    block_size: int,
-    scale_fmt: Optional[str],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from vllm.utils.tile_lang_kernels import act_quant
-    return act_quant(x, block_size, scale_fmt)
-
-
-def tilelang_act_quant_fake(
-    x: torch.Tensor,
-    block_size: int,
-    scale_fmt: Optional[str],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return per_token_group_quant_fp8(x,
-                                     block_size,
-                                     column_major_scales=False,
-                                     use_ue8m0=scale_fmt is not None)
-
-
-direct_register_custom_op(
-    op_name="tilelang_act_quant",
-    op_func=tilelang_act_quant,
-    mutates_args=[],
-    fake_impl=tilelang_act_quant_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
 @torch.inference_mode()
 def indexer_k_quant_and_cache(
     k,
@@ -871,8 +842,13 @@ class Indexer(nn.Module):
         )  #FIXME (siyuanf) hadacore_transform causes illegal memory access when applying to k
 
         # we only quant q here since k quant is fused with cache insertion
-        q_fp8, q_scale = torch.ops.vllm.tilelang_act_quant(
-            q, self.quant_block_size, self.scale_fmt)
+        q = q.view(-1, self.head_dim)
+        q_fp8, q_scale = per_token_group_quant_fp8(q,
+                                          self.quant_block_size,
+                                          column_major_scales=False,
+                                          use_ue8m0=self.scale_fmt is not None)
+        q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
+        q_scale = q_scale.view(-1, self.n_head, 1)
 
         weights, _ = self.weights_proj(hidden_states)
         weights = weights.unsqueeze(
