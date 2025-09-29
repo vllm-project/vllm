@@ -101,6 +101,7 @@ class MultiHeadLatentAttention(CustomOp):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             kv_b_proj=self.kv_b_proj,
+            rotary_emb=self.rotary_emb,
         )
 
         self.prefix = prefix

@@ -1581,7 +1581,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
-            if envs.VLLM_MISTRAL_ENABLE_FUSED_ROPE_MLA_KV_WRITE:
+            if envs.VLLM_ENABLE_FUSED_ROPE_MLA_KV_WRITE:
                 assert isinstance(self.rotary_emb,
                                   DeepseekScalingRotaryEmbedding)
                 assert positions is not None
