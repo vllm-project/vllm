@@ -380,6 +380,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer = indexer.topk_indices_buffer
+        self.padding = 128 if current_platform.is_device_capability(100) else 64
 
     def _forward_bf16_kv(
             self, q: torch.Tensor, kv_c_and_k_pe_cache: torch.Tensor,
@@ -391,13 +392,12 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         # NOTE(Chen): kernel requires num_local_head to be a multiple of 
         # 64 on hopper and 128 on blackwell
-        padding = 128 if current_platform.is_device_capability(100) else 64
-        if self.num_heads % padding != 0:
-            assert padding % self.num_heads == 0
+        if self.num_heads % self.padding != 0:
+            assert self.padding % self.num_heads == 0
             logger.warning_once(
-                f"padding num_heads to {padding} due to sparse attn kernel requirement"
+                f"padding num_heads to {self.padding} due to sparse attn kernel requirement"
             )
-            q_padded = q.new_empty((q.shape[0], padding, q.shape[2]))
+            q_padded = q.new_empty((q.shape[0], self.padding, q.shape[2]))
             q_padded[:, :self.num_heads, :] = q
             q = q_padded
 
