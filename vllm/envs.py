@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
+    VLLM_RELAX_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
@@ -1074,6 +1075,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_DEEP_GEMM_WARMUP": lambda: bool(
         int(os.getenv("VLLM_SKIP_DEEP_GEMM_WARMUP", "0"))
     ),
+
+    # If set, use optimal heuristic warmup values instead of warming up
+    # all token sizes. This reduces warmup time but may result in JIT
+    # compilation during inference for some token sizes.
+    "VLLM_RELAX_DEEP_GEMM_WARMUP":
+    lambda: bool(int(os.getenv("VLLM_RELAX_DEEP_GEMM_WARMUP", "0"))),
+
     # Whether to use fused grouped_topk used for MoE expert selection.
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))

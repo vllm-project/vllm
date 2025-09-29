@@ -26,7 +26,8 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.utils.deep_gemm import fp8_gemm_nt, m_grouped_fp8_gemm_nt_contiguous
 
 
-def _generate_optimal_warmup_m_values(max_tokens: int, n: int, device: torch.device) -> list[int]:
+def _generate_optimal_warmup_m_values(max_tokens: int, n: int,
+                                      device: torch.device) -> list[int]:
     """
     Generate M values that cover all possible DeepGEMM kernel configurations.
     Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee15a82dd5fad5cd9beaa393c1f755e6b55/csrc/jit_kernels/heuristics/common.hpp
@@ -183,13 +184,18 @@ def _deepgemm_fp8_gemm_nt_warmup(w: torch.Tensor, ws: torch.Tensor, max_tokens: 
     )
     out = torch.empty((max_tokens, n), device=device, dtype=torch.bfloat16)
 
-    # Generate optimal M values instead of testing every token count
-    optimal_m_values = _generate_optimal_warmup_m_values(max_tokens, n, device)
+    # Use optimal M values only if VLLM_RELAX_DEEP_GEMM_WARMUP is set
+    # Otherwise warmup all token sizes to avoid JIT compilation in hotpath
+    if envs.VLLM_RELAX_DEEP_GEMM_WARMUP:
+        m_values = _generate_optimal_warmup_m_values(max_tokens, n, device)
+        desc = f"DeepGemm(fp8_gemm_nt) warmup (W={w.size()}) [relaxed]"
+    else:
+        m_values = list(range(1, max_tokens + 1))
+        desc = f"DeepGemm(fp8_gemm_nt) warmup (W={w.size()}) [all tokens]"
 
-    pbar = tqdm(total=len(optimal_m_values),
-                desc=f"DeepGemm(fp8_gemm_nt) warmup (W={w.size()}) ")
+    pbar = tqdm(total=len(m_values), desc=desc)
 
-    for num_tokens in optimal_m_values:
+    for num_tokens in m_values:
         fp8_gemm_nt((a1q[:num_tokens], a1q_scales[:num_tokens]), (w, ws),
                     out[:num_tokens])
         pbar.update(1)
