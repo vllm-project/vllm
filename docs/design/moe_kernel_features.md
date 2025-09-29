@@ -91,26 +91,6 @@ Most experts flavors include an equivalent modular interface which will be a sub
 
 To be used with a particular `FusedMoEPrepareAndFinalize` sub-class, MoE kernels must have compatible activation formats, quantization types and quantization formats.
 
-<style>
-td:not(:first-child) {
-  text-align: center !important;
-}
-td {
-  padding: 0.5rem !important;
-  white-space: nowrap;
-}
-
-th {
-  padding: 0.5rem !important;
-  min-width: 0 !important;
-}
-
-th:not(:first-child) {
-  writing-mode: vertical-lr;
-  transform: rotate(180deg)
-}
-</style>
-
 | Kernel                       | Input act. format | Quant. types    | Quant. format | Activation function                         | Apply Weight On Input | Modular | Source                                                                                                                                                                                                 |
 |------------------------------|-------------------|-----------------|---------------|---------------------------------------------|-----------------------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | triton                       | standard          | all<sup>1</sup> | G,A,T         | silu, gelu, swigluoai, silu_no_mul, gelu_no_mul | Y                     | Y       | [`fused_experts`][vllm.model_executor.layers.fused_moe.fused_moe.fused_experts], [`TritonExperts`][vllm.model_executor.layers.fused_moe.fused_moe.TritonExperts]                                                                                                                  |

@@ -242,8 +242,8 @@ Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kern
 
 ## FusedMoEPrepareAndFinalize Implementations
 
-See [Fused MoE Kernel features](./moe_kernel_features.md#Fused MoE Modular All2All backends) for a list of all the available modular prepare and finalize subclasses.
+See [Fused MoE Kernel features](./moe_kernel_features.md#Fused-MoE-Modular-All2All-backends) for a list of all the available modular prepare and finalize subclasses.
 
 ## FusedMoEPermuteExpertsUnpermute
 
-See [Fused MoE Kernel features](./moe_kernel_features.md#Fused MoE Experts Kernels) for a list of all the available modular experts.
+See [Fused MoE Kernel features](./moe_kernel_features.md#Fused-MoE-Experts-Kernels) for a list of all the available modular experts.
