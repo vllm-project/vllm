@@ -20,7 +20,8 @@ if TYPE_CHECKING:
     from ...conftest import HfRunner, VllmRunner
 
 MODELS = [
-    "ibm-granite/granite-4.0-tiny-preview",
+    #"ibm-granite/granite-4.0-tiny-preview",
+    "hmellor/tiny-random-BambaForCausalLM",
 ]
 
 

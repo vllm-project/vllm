@@ -301,8 +301,29 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         if not envs.VLLM_USE_V1:
             return
 
+        cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
         compilation_config = vllm_config.compilation_config
+
+        # TODO: find a way to keep this list updated, or redundant
+        MAMBA2_MODELS = [
+            "BambaForCausalLM",
+            "FalconH1ForCausalLM",
+            "GraniteMoeHybridForCausalLM",
+            "Mamba2ForCausalLM",
+            "NemotronHForCausalLM",
+            #"Plamo2ForCausalLM",  # currently fails
+            "Zamba2ForCausalLM",
+        ]
+        if cache_config.enable_prefix_caching:
+            if model_config.architecture in MAMBA2_MODELS:
+                logger.info("Warning: Prefix caching is currently enabled. "
+                            "Its support for Mamba2 layers is experimental. "
+                            "Please report any issues you may observe.")
+            else:
+                logger.info("Hybrid or mamba-based model detected without "
+                            "support for prefix caching: disabling.")
+                cache_config.enable_prefix_caching = False
 
         # TODO(tdoublep): remove as full cuda graph support is added
         FCG_NOT_SUPPORTED_MODELS = [
