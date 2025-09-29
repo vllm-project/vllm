@@ -184,7 +184,7 @@ register_experts(
 )
 
 # Disable on blackwell for now
-if has_deep_ep() and not current_platform.has_device_capability(100):
+if has_deep_ep(): # and not current_platform.has_device_capability(100):
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
         DeepEPHTPrepareAndFinalize)
     from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
