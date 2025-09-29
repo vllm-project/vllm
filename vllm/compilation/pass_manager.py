@@ -22,6 +22,9 @@ if current_platform.is_cuda_alike():
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
 
+if current_platform.is_rocm():
+    from .rocm_fusion import ROCmFusionPass
+
 from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
 from .noop_elimination import NoOpEliminationPass
