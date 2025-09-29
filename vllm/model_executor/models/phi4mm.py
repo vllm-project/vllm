@@ -35,8 +35,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
 from .phi4mm_audio import AudioEmbedding
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .utils import AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix
 
 # <|endoftext10|> (see vocab.json in hf model)
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
@@ -1174,35 +1173,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
         return multimodal_embeddings
 
-    def get_input_embeddings_v0(
-        self,
-        input_ids: torch.Tensor,
-        image_input: Optional[Phi4MMImagePixelInputs] = None,
-        audio_input: Optional[Phi4MMAudioFeatureInputs] = None,
-    ) -> torch.Tensor:
-        audio_projection_mode = 'speech'
-        inputs_embeds = self.get_input_embeddings(input_ids)
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                image_embeds,
-                placeholder_token_id=_IMAGE_PLACEHOLDER_TOKEN_ID,
-            )
-            audio_projection_mode = 'vision'
-
-        if audio_input is not None:
-            audio_embeds = self._process_audio_input(
-                audio_input, audio_projection_mode=audio_projection_mode)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                audio_embeds,
-                placeholder_token_id=_AUDIO_PLACEHOLDER_TOKEN_ID,
-            )
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1213,22 +1183,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     ) -> torch.Tensor:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner from
-        # `get_multimodal_embeddings` and `get_input_embeddings`, this
-        # condition is only for v0 compatibility.
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            audio_input = self._parse_and_validate_audio_input(**kwargs)
-
-            if image_input is None and audio_input is None:
-                inputs_embeds = None
-            else:
-                inputs_embeds = self.get_input_embeddings_v0(
-                    input_ids,
-                    image_input=image_input,
-                    audio_input=audio_input)
-                input_ids = None
 
         hidden_states = self.model(
             input_ids,
