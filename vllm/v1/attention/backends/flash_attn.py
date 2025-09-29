@@ -37,6 +37,7 @@ logger = init_logger(__name__)
 class FlashAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
+    include_kv_cache: bool = False
     supports_quant_query_input: bool = True
 
     @classmethod
@@ -60,7 +61,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN"
+        return "FLASH_ATTN_VLLM_V1"
 
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
@@ -480,30 +481,34 @@ class FlashAttentionImpl(AttentionImpl):
                                                    attn_metadata, layer)
 
         # For decoder and cross-attention, use KV cache as before
+        # print("kv cache unbind att op:", kv_cache.unbind(0))
         key_cache, value_cache = kv_cache.unbind(0)
 
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (self.kv_sharing_target_layer_name is None and key is not None
-                and value is not None):
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-            # not padded. However, we don't need to do key[:num_actual_tokens]
-            # and value[:num_actual_tokens] because the reshape_and_cache_flash
-            # op uses the slot_mapping's shape to determine the number of
-            # actual tokens.
-            reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+        # TODO delete this code block
+        # # key and value may be None in the case of cross attention. They are
+        # # calculated once based on the output from the encoder and then cached
+        # # in KV cache.
+        # if (self.kv_sharing_target_layer_name is None and key is not None
+        #         and value is not None):
+        #     # Reshape the input keys and values and store them in the cache.
+        #     # Skip this if sharing KV cache with an earlier attention layer.
+        #     # NOTE(woosuk): Here, key and value are padded while slot_mapping
+        # is
+        #     # not padded. However, we don't need to do key[:num_actual_tokens]
+        #     # and value[:num_actual_tokens] because the
+        # reshape_and_cache_flash
+        #     # op uses the slot_mapping's shape to determine the number of
+        #     # actual tokens.
+        #     reshape_and_cache_flash(
+        #         key,
+        #         value,
+        #         key_cache,
+        #         value_cache,
+        #         attn_metadata.slot_mapping,
+        #         self.kv_cache_dtype,
+        #         layer._k_scale,
+        #         layer._v_scale,
+        #     )
 
         if self.kv_cache_dtype.startswith("fp8"):
             # queries are quantized in the attention layer
@@ -573,6 +578,51 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=layer._v_scale,
         )
         return output
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+    ) -> None:
+
+        if attn_metadata is None:
+            # Profiling run.
+            return
+
+        if self.attn_type in (AttentionType.ENCODER_ONLY,
+                              AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return
+
+        # print("kv cache unbind:", kv_cache.unbind(0))
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
+        if (self.kv_sharing_target_layer_name is None and key is not None
+                and value is not None):
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+            # not padded. However, we don't need to do key[:num_actual_tokens]
+            # and value[:num_actual_tokens] because the reshape_and_cache_flash
+            # op uses the slot_mapping's shape to determine the number of
+            # actual tokens.
+            reshape_and_cache_flash(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
     def _forward_encoder_attention(
         self,

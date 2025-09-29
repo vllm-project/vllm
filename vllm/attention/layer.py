@@ -101,6 +101,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_backend: Optional[type[AttentionBackend]] = None,
         **extra_impl_args,
     ) -> None:
+        # raise ValueError("INIT ATTENTION HERE HERE HERE")
         """
         The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
@@ -267,6 +268,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # definition specify the output tensor shape.
         output_shape: Optional[torch.Size] = None,
     ) -> torch.Tensor:
+        # raise ValueError("FORWARD ATTENTION HERE HERE HERE")
         """
         The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
@@ -292,6 +294,13 @@ class Attention(nn.Module, AttentionLayerBase):
             query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
+            # TODO add if self.attn_backend.include_kv_cache do what is already
+            # here
+            # otherwise just cache then attention op
+            # start with flash infer for backend
+            # backends should have a field that tells us if they support
+            # separate kv cache update and attention op
+            # class AttentionBackend
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
             output = torch.zeros(output_shape,
@@ -325,18 +334,30 @@ class Attention(nn.Module, AttentionLayerBase):
                                   attn_metadata,
                                   output=output)
             else:
-                torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                if self.attn_backend.include_kv_cache:
+                    torch.ops.vllm.unified_attention_with_output(
+                        query, key, value, output, self.layer_name)
+                else:
+                    # WE ARE HERE IN OUR EXPERIMENT
+                    # torch.ops.vllm.unified_attention_with_output(
+                    #     query, key, value, output, self.layer_name)
+                    torch.ops.vllm.unified_kv_cache_update(
+                        query, key, value, output, self.layer_name)
+                    torch.ops.vllm.unified_attention_no_kv_cache(
+                        query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
+            assert self.attn_backend.include_kv_cache, "Attention backend does not support kv cache"  # noqa: E501
             if self.use_direct_call:
-                forward_context = get_forward_context()
-                attn_metadata = forward_context.attn_metadata
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                return self.impl.forward(self, query, key, value,
-                                         self_kv_cache, attn_metadata)
+                # TODO call unified_attention
+                return unified_attention(query, key, value, self.layer_name)
+                # forward_context = get_forward_context()
+                # attn_metadata = forward_context.attn_metadata
+                # if isinstance(attn_metadata, dict):
+                #     attn_metadata = attn_metadata[self.layer_name]
+                # self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                # return self.impl.forward(self, query, key, value,
+                #                          self_kv_cache, attn_metadata)
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
@@ -464,7 +485,11 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if self.attn_backend in {
+                _Backend.FLASH_ATTN,
+                _Backend.FLASH_ATTN_VLLM_V1,
+        }:
+
             cu_seqlens_q = torch.arange(0, (bsz + 1) * q_len,
                                         step=q_len,
                                         dtype=torch.int32,
@@ -560,6 +585,9 @@ def unified_attention(
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
+    # if self.attn_backend.include_kv_cache:
+    #     wait_for_kv_layer_from_connector(layer_name)
+
     wait_for_kv_layer_from_connector(layer_name)
 
     forward_context: ForwardContext = get_forward_context()
@@ -592,6 +620,106 @@ direct_register_custom_op(
 )
 
 
+def unified_attention_no_kv_cache(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
+) -> None:
+    wait_for_kv_layer_from_connector(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    self = forward_context.no_compile_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    print("unified_attention_no_kv_cache", self)
+    self.impl.forward(self,
+                      query,
+                      key,
+                      value,
+                      kv_cache,
+                      attn_metadata,
+                      output=output,
+                      output_scale=output_scale,
+                      output_block_scale=output_block_scale)
+
+    # maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+
+
+def unified_attention_no_kv_cache_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
+) -> None:
+    return
+
+
+def unified_kv_cache_update(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
+) -> None:
+    wait_for_kv_layer_from_connector(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    self = forward_context.no_compile_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    print("unified_kv_cache_update", self)
+    self.impl.do_kv_cache_update(
+        self,
+        key,
+        value,
+        kv_cache,
+        attn_metadata,
+    )
+
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+
+
+def unified_kv_cache_update_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
+) -> None:
+    return
+
+
+# TODO call self.impl.forward, no kv cache update (pass it as arg)
+direct_register_custom_op(
+    op_name="unified_attention_no_kv_cache",
+    op_func=unified_attention_no_kv_cache,
+    fake_impl=unified_attention_no_kv_cache_fake,
+    tags=tag_cudagraph_unsafe,
+)
+
+# TODO call a method on backend and this method should be in superclass of
+# all backends
+direct_register_custom_op(
+    op_name="unified_kv_cache_update",
+    op_func=unified_kv_cache_update,
+    fake_impl=unified_kv_cache_update_fake,
+    tags=tag_cudagraph_unsafe,
+)
+
+
 def unified_attention_with_output(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -608,6 +736,7 @@ def unified_attention_with_output(
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
+    print("unified_attention_with_output", self)
     self.impl.forward(self,
                       query,
                       key,
