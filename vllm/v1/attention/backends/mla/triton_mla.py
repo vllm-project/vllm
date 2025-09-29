@@ -8,6 +8,7 @@ import torch
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention
 from vllm.logger import init_logger
@@ -20,6 +21,7 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
 logger = init_logger(__name__)
 
 
+@register_attn_backend(_Backend.TRITON_MLA)
 class TritonMLABackend(MLACommonBackend):
 
     @staticmethod

@@ -9,6 +9,7 @@ import torch
 import vllm._custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
@@ -25,6 +26,7 @@ class CutlassMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         AttentionCGSupport] = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
 
+@register_attn_backend(_Backend.CUTLASS_MLA)
 class CutlassMLABackend(MLACommonBackend):
 
     @staticmethod

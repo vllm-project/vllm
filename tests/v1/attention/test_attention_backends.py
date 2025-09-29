@@ -11,7 +11,7 @@ from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 from tests.v1.attention.utils import (BatchSpec, create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
-                                      get_attention_backend)
+                                      try_get_attention_backend)
 from vllm.attention.backends.registry import _Backend
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
@@ -210,7 +210,7 @@ def run_attention_backend(
         actual_backend = _Backend.FLEX_ATTENTION
         use_direct_block_mask = False
 
-    builder_cls, impl_cls = get_attention_backend(actual_backend)
+    builder_cls, impl_cls = try_get_attention_backend(actual_backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
     if actual_backend == _Backend.FLASHINFER:

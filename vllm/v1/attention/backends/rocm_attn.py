@@ -11,6 +11,7 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -142,6 +143,7 @@ class RocmAttentionMetadataBuilder(
         return attn_metadata
 
 
+@register_attn_backend(_Backend.ROCM_ATTN)
 class RocmAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True

@@ -8,11 +8,10 @@ from typing import Optional, Union
 import pytest
 import torch
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import _Backend, backend_to_class_str
 from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
                          LoadConfig, ModelConfig, ModelDType, ParallelConfig,
                          SchedulerConfig, VllmConfig)
-from vllm.platforms import current_platform
 from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -110,54 +109,15 @@ def create_common_attn_metadata(
     )
 
 
-def get_attention_backend(backend_name: _Backend):
-    """Set up attention backend classes for testing.
-
-    Args:
-        backend_name: Name of the backend ("flash_attn", "flashinfer", etc.)
-        vllm_config: VllmConfig instance
-
-    Returns:
-        Tuple of (backend_builder_class, backend_impl_class)
-    """
-    backend_map = {
-        _Backend.FLASH_ATTN:
-        ("vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
-         if current_platform.is_cuda() else
-         "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
-         ),
-        _Backend.FLASHINFER:
-        "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
-        _Backend.FLEX_ATTENTION:
-        "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
-        _Backend.TRITON_ATTN:
-        "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
-        _Backend.TREE_ATTN:
-        "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
-        _Backend.XFORMERS:
-        "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",
-        _Backend.CUTLASS_MLA:
-        "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
-        _Backend.FLASHMLA:
-        "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
-        _Backend.FLASH_ATTN_MLA:
-        "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
-        _Backend.FLASHINFER_MLA:
-        "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",
-        _Backend.TRITON_MLA:
-        "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
-    }
-
-    if backend_name not in backend_map:
-        raise ValueError(f"Unknown backend: {backend_name}")
-
-    backend_class_name = backend_map[backend_name]
-
+def try_get_attention_backend(backend: _Backend) -> tuple[type, type]:
+    """Try to get the attention backend class, skipping test if not found."""
+    backend_class_str = backend_to_class_str(backend)
     try:
-        backend_class = resolve_obj_by_qualname(backend_class_name)
+        backend_class = resolve_obj_by_qualname(backend_class_str)
         return backend_class.get_builder_cls(), backend_class.get_impl_cls()
     except ImportError as e:
-        pytest.skip(f"{backend_name} not available: {e}")
+        pytest.skip(f"{backend_class_str} not available: {e}")
+        assert False  # unreachable -- satisfies mypy
 
 
 def create_standard_kv_cache_spec(

@@ -8,6 +8,7 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -315,6 +316,7 @@ class AiterFlashAttentionMetadataBuilder(
         return False
 
 
+@register_attn_backend(_Backend.ROCM_AITER_FA)
 class AiterFlashAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
