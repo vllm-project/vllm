@@ -30,7 +30,7 @@ from typing import Any, Callable, Optional, TypedDict, Union, cast
 import numpy as np
 import torch
 import torch.nn as nn
-import torchaudio.transforms as audio_transforms
+import torchaudio.functional as F
 from transformers import BatchFeature
 
 from vllm.attention.layer import MultiHeadAttention
@@ -41,7 +41,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -280,6 +279,63 @@ class DashengBlock(nn.Module):
         return x
 
 
+class DashengFrontend(nn.Module):
+
+    def __init__(self, config: DashengConfig):
+        super().__init__()
+        self.config = config
+
+        spectrogram_window = torch.hann_window(self.config.win_length)
+        self.register_buffer(
+            "spectrogram_window",
+            spectrogram_window,
+            persistent=False,
+        )
+        self.spectrogram_window: torch.Tensor
+
+        melscale_fbanks = F.melscale_fbanks(
+            n_freqs=self.config.n_fft // 2 + 1,
+            f_min=self.config.f_min,
+            f_max=self.config.f_max,
+            n_mels=self.config.n_mels,
+            sample_rate=self.config.sample_rate,
+        )
+        self.register_buffer("melscale_fbanks",
+                             melscale_fbanks,
+                             persistent=False)
+        self.melscale_fbanks: torch.Tensor
+
+    def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+        spectrogram = F.spectrogram(
+            waveform=waveform.to(torch.float32),
+            pad=0,
+            window=self.spectrogram_window,
+            n_fft=self.config.n_fft,
+            hop_length=self.config.hop_length,
+            win_length=self.config.win_length,
+            power=2,
+            normalized=False,
+            center=self.config.center,
+        )
+        mel_spectrogram = (
+            spectrogram.mT @ self.melscale_fbanks.to(torch.float32)).mT
+        # x has shape [batch, freq, time].
+        # F.amplitude_to_DB accepts inputs shaped as:
+        #   - [freq, time]
+        #   - [channel, freq, time]
+        #   - [..., channel, freq, time]
+        # Here we insert a channel dimension of size 1 before calling it,
+        # then remove that extra dimension afterward.
+        log_mel_spectrogram = F.amplitude_to_DB(
+            mel_spectrogram.unsqueeze(1),
+            multiplier=10,
+            amin=1e-10,
+            db_multiplier=0,
+            top_db=120,
+        ).squeeze(1)
+        return log_mel_spectrogram.to(waveform.dtype)
+
+
 class DashengAudioTransformer(nn.Module):
 
     def __init__(
@@ -293,7 +349,7 @@ class DashengAudioTransformer(nn.Module):
         self.target_length = config.target_length
         self.hop_length = config.hop_length
 
-        self._init_front_end(config)
+        self.front_end = DashengFrontend(config)
 
         self.init_bn = nn.BatchNorm2d(config.n_mels, momentum=0.01)
 
@@ -321,30 +377,6 @@ class DashengAudioTransformer(nn.Module):
                 prefix=f"{prefix}.blocks.{i}",
             ) for i in range(config.depth))
         self.norm = nn.LayerNorm(config.embed_dim, eps=1e-6)
-
-    def _init_front_end(self, config):
-        with set_default_torch_dtype(torch.float32):
-            self.front_end = nn.Sequential(
-                audio_transforms.MelSpectrogram(
-                    f_min=config.f_min,
-                    f_max=config.f_max,
-                    center=config.center,
-                    win_length=config.win_length,
-                    hop_length=config.hop_length,
-                    sample_rate=config.sample_rate,
-                    n_fft=config.n_fft,
-                    n_mels=config.n_mels,
-                ),
-                audio_transforms.AmplitudeToDB(top_db=120),
-            )
-
-            mel_spectrogram = self.front_end[0]
-            fb = mel_spectrogram.mel_scale.fb
-            win = mel_spectrogram.spectrogram.window
-            mel_spectrogram.mel_scale.fb = fb.to(torch.bfloat16).to(
-                torch.float32)
-            mel_spectrogram.spectrogram.window = win.to(torch.bfloat16).to(
-                torch.float32)
 
     def forward_features(
         self,
