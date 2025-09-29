@@ -129,6 +129,11 @@ def test_ngram_correctness(
     ["model_setup", "mm_enabled"],
     [
         (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
+        pytest.param(("eagle3", "Qwen/Qwen2.5-VL-7B-Instruct",
+                      "Rayzl/qwen2.5-vl-7b-eagle3-sgl", 1),
+                     False,
+                     marks=pytest.mark.skip(reason="Skipping due to its " \
+                               "head_dim not being a a multiple of 32")),
         (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
           "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
         (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
@@ -145,8 +150,8 @@ def test_ngram_correctness(
           "eagle618/eagle-deepseek-v3-random", 1), False),
     ],
     ids=[
-        "qwen3_eagle3", "llama3_eagle", "llama3_eagle3", "llama4_eagle",
-        "llama4_eagle_mm", "deepseek_eagle"
+        "qwen3_eagle3", "qwen2_5_vl_eagle3", "llama3_eagle", "llama3_eagle3",
+        "llama4_eagle", "llama4_eagle_mm", "deepseek_eagle"
     ])
 @pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())
