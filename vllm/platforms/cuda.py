@@ -110,17 +110,7 @@ class CudaPlatformBase(Platform):
         model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
-            if vllm_config.speculative_config:
-                if not envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Speculative decoding is not supported on vLLM V0.")
-                parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
-            else:
-                if envs.VLLM_USE_V1:
-                    parallel_config.worker_cls = \
-                        "vllm.v1.worker.gpu_worker.Worker"
-                else:
-                    parallel_config.worker_cls = "vllm.worker.worker.Worker"
+            parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
