@@ -37,9 +37,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama4 import (Llama4DecoderLayer,
                                                Llama4ForCausalLM)
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.multimodal.inputs import NestedTensors
 
-from .utils import AutoWeightsLoader, maybe_prefix, merge_multimodal_embeddings
+from .interfaces import SupportsMultiModal
+from .utils import AutoWeightsLoader, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -68,9 +68,9 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             Llama4DecoderLayer(
-                self.config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                config=self.config,
             ) for i in range(self.config.num_hidden_layers)
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
@@ -79,10 +79,7 @@ class LlamaModel(nn.Module):
         self.norm = RMSNorm(self.config.hidden_size,
                             eps=self.config.rms_norm_eps)
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -194,6 +191,11 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 scale=logit_scale)
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model
+
+    get_input_embeddings = SupportsMultiModal.get_input_embeddings  # type: ignore
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -220,20 +222,3 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             skip_prefixes=(["lm_head."]),
         )
         loader.load_weights(map(transform, weights))
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.model.get_input_embeddings(input_ids)
-
-        if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.config.image_token_index,
-            )
-
-        return inputs_embeds

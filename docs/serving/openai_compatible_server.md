@@ -351,12 +351,91 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
     To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
 
 Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
-<!-- TODO: api enforced limits + uploading audios -->
 
 #### API Enforced Limits
 
 Set the maximum audio file size (in MB) that VLLM will accept, via the
 `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` environment variable. Default is 25 MB.
+
+#### Uploading Audio Files
+
+The Transcriptions API supports uploading audio files in various formats including FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, and WEBM.
+
+**Using OpenAI Python Client:**
+
+??? code
+
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url="http://localhost:8000/v1",
+        api_key="token-abc123",
+    )
+
+    # Upload audio file from disk
+    with open("audio.mp3", "rb") as audio_file:
+        transcription = client.audio.transcriptions.create(
+            model="openai/whisper-large-v3-turbo",
+            file=audio_file,
+            language="en",
+            response_format="verbose_json"
+        )
+
+    print(transcription.text)
+    ```
+
+**Using curl with multipart/form-data:**
+
+??? code
+
+    ```bash
+    curl -X POST "http://localhost:8000/v1/audio/transcriptions" \
+      -H "Authorization: Bearer token-abc123" \
+      -F "file=@audio.mp3" \
+      -F "model=openai/whisper-large-v3-turbo" \
+      -F "language=en" \
+      -F "response_format=verbose_json"
+    ```
+
+**Supported Parameters:**
+
+- `file`: The audio file to transcribe (required)
+- `model`: The model to use for transcription (required)
+- `language`: The language code (e.g., "en", "zh") (optional)
+- `prompt`: Optional text to guide the transcription style (optional)
+- `response_format`: Format of the response ("json", "text") (optional)
+- `temperature`: Sampling temperature between 0 and 1 (optional)
+
+For the complete list of supported parameters including sampling parameters and vLLM extensions, see the [protocol definitions](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/protocol.py#L2182).
+
+**Response Format:**
+
+For `verbose_json` response format:
+
+??? code
+
+    ```json
+    {
+      "text": "Hello, this is a transcription of the audio file.",
+      "language": "en",
+      "duration": 5.42,
+      "segments": [
+        {
+          "id": 0,
+          "seek": 0,
+          "start": 0.0,
+          "end": 2.5,
+          "text": "Hello, this is a transcription",
+          "tokens": [50364, 938, 428, 307, 275, 28347],
+          "temperature": 0.0,
+          "avg_logprob": -0.245,
+          "compression_ratio": 1.235,
+          "no_speech_prob": 0.012
+        }
+      ]
+    }
+    ```
 
 #### Extra Parameters
 

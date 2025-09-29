@@ -14,6 +14,7 @@ from .jamba_tool_parser import JambaToolParser
 from .kimi_k2_tool_parser import KimiK2ToolParser
 from .llama4_pythonic_tool_parser import Llama4PythonicToolParser
 from .llama_tool_parser import Llama3JsonToolParser
+from .longcat_tool_parser import LongcatFlashToolParser
 from .minimax_tool_parser import MinimaxToolParser
 from .mistral_tool_parser import MistralToolParser
 from .openai_tool_parser import OpenAIToolParser
@@ -36,6 +37,7 @@ __all__ = [
     "Llama3JsonToolParser",
     "JambaToolParser",
     "Llama4PythonicToolParser",
+    "LongcatFlashToolParser",
     "PythonicToolParser",
     "Phi4MiniJsonToolParser",
     "DeepSeekV3ToolParser",

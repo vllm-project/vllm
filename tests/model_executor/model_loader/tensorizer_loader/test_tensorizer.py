@@ -14,6 +14,7 @@ import pytest
 import torch
 
 import vllm.model_executor.model_loader.tensorizer
+from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 # yapf: disable
@@ -27,7 +28,6 @@ from vllm.model_executor.model_loader.tensorizer_loader import (
 # yapf: enable
 from vllm.utils import PlaceholderModule
 
-from ..utils import VLLM_PATH, RemoteOpenAIServer
 from .conftest import DummyExecutor, assert_from_collective_rpc
 
 try:
