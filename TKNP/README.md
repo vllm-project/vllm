@@ -19,7 +19,7 @@ This document outlines the implementation plan for a new parallelism architectur
 
 ## Proposed Architecture: Token Parallelism (TKNP)
 
-**Token Parallel** is a new parallelism architecture designed for accelerating inference workloads with massive batch sizes and sequence lengths. The key idea is to allocate more GPU (compute, memory) for attention as we scale the number of nodes and GPUs. TKNP is compatible with tensor (TP) and pipeline (PP) parallel techniques. 
+**Token Parallel** is a new parallelism architecture designed for accelerating inference workloads with massive batch sizes and sequence lengths. The key idea is to allocate more GPU (compute, memory) for attention as we scale the number of nodes and GPUs. TKNP is compatible with tensor (TP), pipeline (PP), and expert (EP) parallel techniques. 
 
 ### Key Design Principles
 
@@ -71,7 +71,7 @@ Example of Tensor and Token Parallel with 2 node system
 --------------------------------------------------------------------------------
 Node 1 : | GPU 8 = GPU 9 = GPU 10 = GPU 11 = GPU 12 = GPU 13 = GPU 14 = GPU 15 |
 --------------------------------------------------------------------------------
-             ||     ||       |       ||       ||       ||        ||       ||         
+             ||     ||       ||       ||       ||       ||        ||       ||         
 --------------------------------------------------------------------------------
 Node 0 : | GPU 0 = GPU 1 = GPU 2  = GPU 3  = GPU 4  = GPU 5  = GPU 6  = GPU 7 |
 --------------------------------------------------------------------------------
@@ -80,13 +80,13 @@ Legend :
 =  : Tensor Parallel
 || : Token Parallel
 ```
+---
 
 ## Example forward pass 
 
 A sample forward pass would look something like this in the prefill stage. 
 
-TODO: 
-
+The entire forward pass in the prefill stage will be computed in the root node(s). After each layer is computed, the KV cache of a subset of requests will be transfered to the token parallel attention nodes and GPUs. We need to have this here for compatibility. Ideally, token parallel inference is only used during the decode stage. 
 
 A sample forward pass would look something like this in the decode stage. 
 
@@ -96,12 +96,17 @@ The input to the attention layer would be a tensor of shape input_attention = [b
 
 # Implementation status
 
-* Parallel states: Implementation complete. Check vllm/distributed/parallel_state.py
-* Token parallel classes: A simple prototype has been implemeted in vllm/model_executor/layers/token_parallel_linear.py
+We want to implement token parallel in vLLM framework. 
+
+* Parallel states: Implementation complete. vllm/distributed/parallel_state.py
+* Token parallel classes: A prototype has been implemeted in vllm/model_executor/layers/token_parallel_linear.py
+* Model integration: The token parallel linear classes have been integrated in vllm/model_executor/models/llama_tknp.py but haven't been tested yet.
+
+---
 
 # TODO
 
-We want to implement this architecture in vLLM and support a wide range of models. 
+We want to implement this architecture in vLLM and support a wide range of models. We want to implement this in vLLM v1 architecture.
 
 vLLM KV cache management
 + Learn how vLLM manages KV cache for each request
@@ -109,6 +114,46 @@ vLLM KV cache management
 + How can we do this in vLLM?
 + Which modules do we need to update and how do we update them? 
 
+
 Token Parallel Inference 
 + During prefill, we compute the KV cache in the root node and send the KV cache of a subset of the requests to the attention nodes. 
 + The prefill step needs to be here for compatibility. Ideally, we are operating in a disaggregated system where we have a different prefill and decode systems. In such a system, our token parallel server only perform the decode stage (after we get the KV cache from the prefill server)
+
+Key components that might require changes: 
++ Scheduler
++ KV Cache Manager
++ Attention 
++ Study the inference code and find any other components to be updated
+
+Task: 
+You are an expert machine learning engineer with a complete understanding of vLLM. Open and study each file in this repository when needed to understand how vLLM works. We want to have a working forward pass with token parallel enabled. Understand how vLLM manages KV cache for each request and implement a way to have token parallel compatible KV cache management: the GPUs in the token parallel group will hold KV cache for a subset of the batch or requests. During attention, each GPU will compute the attention computation independently for its share of requests. 
+
+**Update Attention calls**: 
+
++ Each token parallel attention rank will receive qkv for its respective set of requests. (NOTE: we need to make the scatter more flexible)
++ Each TKNP rank is responsible for caching the vectors to the KV cache 
++ The KV cache management in each TKNP rank will be different; we need to study how to do this.
++ Different requests will be assigned to each TKNP rank; These requests should utilize the KV cache efficiently (should utilize all request)
++ allocate_slots reserves blocks; block_table maps requests to block ids. Needs work.
+
+# Key things TODO:
+
+1. In token parallel attention ranks, we need to make sure that we are allocating more memory KV cache as we have more memory available compared to the root nodes with the model weights.
+    + This allows us to run larger batch sizes and longer sequence lengths in these ranks.
+
+2. Scheduler 
+    + We added a scheduler helper to assign requests to token parallel ranks. 
+    + Currently a simple round robin method is used: in the future we need to make this much more capable. 
+    + The token parallel scheduler needs to account for the number of tokens in each ranks and balance the load across the token parallel world. 
+    + The scheduler also calls the allocate_slots function; need to update this. 
+
+3. Update KVCacheManager, allocate_slots
+    + We need to introduce logic which only allocates slots for the required number of requests for the current rank.
+    + The scheduler decides which ranks is responsible for which requests. 
+    + Each rank should only be responsible for its own set of requests. 
+
+4. Attention & End to end system
+    + With the changes made, the attention computation needs to be accurate. 
+    + The default mode is to use the FlashAttn backend. The KV cache is stitched using the bind_kv_cahce function in gpu_model_runner.py.
+    + 
+    + The end to end system should work to serve LLM requests. 

@@ -1,7 +1,7 @@
 # Example usage:
 # Without token parallelism: torchrun --nproc-per-node=2 TKNP/test_torchrun.py --tensor-parallel-size 1 --pipeline-parallel-size 1 --enable-token-parallel --token-parallel-size 2
 # With token parallelism: torchrun --nproc-per-node=8 TKNP/test_torchrun.py --tensor-parallel-size 4 --pipeline-parallel-size 1 --data-parallel-size 1 --enable-token-parallel --token-parallel-size 2
-# General tests: torchrun --nproc-per-node=1 TKNP/test_torchrun.py
+# General tests: torchrun --nproc-per-node=1 TKNP/test_torchrun.py --tensor-parallel-size 1
 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -106,6 +106,9 @@ def main():
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}\n")
             print("-" * 50)
+            
+    # destroy the process group
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
