@@ -15,35 +15,25 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod)
 
 from ..gptq import GPTQConfig
-from ..gptq_bitblas import GPTQBitBLASConfig
 from ..gptq_marlin import GPTQMarlinConfig
-from ..gptq_marlin_24 import GPTQMarlin24Config
-
-GPTQQuantizationConfig = Union[GPTQConfig, GPTQBitBLASConfig, GPTQMarlinConfig,
-                               GPTQMarlin24Config]
-
 
 # Match dynamic rules with module name (prefix) and override quantize
 # config if module (prefix) matches a rule
-def override_config(config: GPTQQuantizationConfig, prefix: str):
-    if not isinstance(config, GPTQMarlin24Config):
-        weight_bits = get_dynamic_override(config, prefix, "bits",
-                                           config.weight_bits)
-        if isinstance(weight_bits, int):
-            config.weight_bits = weight_bits
-        desc_act = get_dynamic_override(config, prefix, "desc_act",
-                                        config.desc_act)
-        if isinstance(desc_act, bool):
-            config.desc_act = desc_act
-
-        # packed into int32
-        config.pack_factor = Fraction(32, config.weight_bits)
-
+def override_config(config: Union[GPTQConfig, GPTQMarlinConfig], prefix: str):
+    weight_bits = get_dynamic_override(config, prefix, "bits",
+                                       config.weight_bits)
+    if isinstance(weight_bits, int):
+        config.weight_bits = weight_bits
     group_size = get_dynamic_override(config, prefix, "group_size",
                                       config.group_size)
     if isinstance(group_size, int):
         config.group_size = group_size
+    desc_act = get_dynamic_override(config, prefix, "desc_act",
+                                    config.desc_act)
+    if isinstance(desc_act, bool):
+        config.desc_act = desc_act
 
+    config.pack_factor = Fraction(32, config.weight_bits)  # packed into int32
     if isinstance(config, GPTQMarlinConfig):
         is_sym = get_dynamic_override(config, prefix, "sym", config.is_sym)
         if isinstance(is_sym, bool):
@@ -63,7 +53,7 @@ def override_config(config: GPTQQuantizationConfig, prefix: str):
 
 
 def get_dynamic_override(
-    config: GPTQQuantizationConfig,
+    config: Union[GPTQConfig, GPTQMarlinConfig],
     layer_name: str,
     key: Optional[str] = None,
     default_value: Union[int, bool,

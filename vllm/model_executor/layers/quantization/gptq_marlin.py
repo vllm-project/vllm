@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -39,17 +39,11 @@ from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils import is_list_of
 
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.utils.gptq_utils import (
-        GPTQQuantizationConfig)
-else:
-    GPTQQuantizationConfig = Any
-
 logger = init_logger(__name__)
 
 
 def get_moe_quant_method(
-    config: GPTQQuantizationConfig,
+    config: "GPTQMarlinConfig",
     layer: torch.nn.Module,
     prefix: str,
     moe_method_cls: type,
