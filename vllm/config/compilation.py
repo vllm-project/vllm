@@ -8,7 +8,7 @@ from dataclasses import asdict, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
 
-from pydantic import TypeAdapter, field_validator
+from pydantic import TypeAdapter, field_serializer, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
@@ -72,6 +72,12 @@ class CUDAGraphMode(enum.Enum):
         return self in [
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         ]
+
+    def __str__(self) -> str:
+        return self.name
+
+    def __repr__(self) -> str:
+        return self.name
 
 
 @config
@@ -395,6 +401,11 @@ class CompilationConfig:
         factors.append(self.inductor_passes)
         factors.append(self.pass_config.uuid())
         return hashlib.sha256(str(factors).encode()).hexdigest()
+
+    # Serialize cudagraph_mode as its enum name (e.g., "FULL") instead of value
+    @field_serializer("cudagraph_mode", when_used="json")
+    def _serialize_cudagraph_mode(self, v: Optional[CUDAGraphMode], info):
+        return v.name if v is not None else None
 
     def __repr__(self) -> str:
         exclude = {
