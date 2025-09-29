@@ -142,7 +142,7 @@ class SpeculativeConfig:
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
-        if hf_config.model_type == "deepseek_v3":
+        if hf_config.model_type in ("deepseek_v3", "deepseek_v32"):
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -204,9 +204,8 @@ class SpeculativeConfig:
             # mtp acceleration for more models besides deepseek_v3
             if self.target_model_config and \
                 (self.target_model_config.hf_text_config.model_type \
-                        == "deepseek_v3" or
-                    self.target_model_config.hf_text_config.model_type in
-                        ("mimo","ernie4_5_moe", "qwen3_next")):
+                    in ("deepseek_v3", "deepseek_v32",
+                        "mimo","ernie4_5_moe", "qwen3_next")):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
                 # Align the quantization of draft model for cases such as
