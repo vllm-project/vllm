@@ -27,3 +27,4 @@ Some trainers also support **vLLM sleep mode**, which offloads parameters and ca
     - [`trl.GRPOConfig.use_vllm`](https://huggingface.co/docs/trl/main/en/grpo_trainer#trl.GRPOConfig.use_vllm)
     - [`trl.OnlineDPOConfig.use_vllm`](https://huggingface.co/docs/trl/main/en/online_dpo_trainer#trl.OnlineDPOConfig.use_vllm)
     - [`trl.RLOOConfig.use_vllm`](https://huggingface.co/docs/trl/main/en/rloo_trainer#trl.RLOOConfig.use_vllm)
+
