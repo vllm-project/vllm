@@ -100,7 +100,7 @@ class FlashAttnMLAMetadataBuilder(
         # accuracy issue when dcp is enabled. We will remove this once the
         # accuracy issue is resolved
         self.reorder_batch_threshold = 16 \
-            if get_dcp_group().world_size > 1 else self.reorder_batch_threshold
+            if self.dcp_world_size > 1 else self.reorder_batch_threshold
 
     def _schedule_decode(self, num_reqs, cu_query_lens, max_query_len, seqlens,
                          max_seq_len, causal):
@@ -130,7 +130,7 @@ class FlashAttnMLAMetadataBuilder(
                       num_decode_tokens: int) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])
         max_query_len = query_lens_cpu.max().item()
-        max_seq_len = seq_lens_cpu.max().item()
+        max_seq_len = seq_lens_device.max().item()
 
         scheduler_metadata = self._schedule_decode(
             num_reqs=seq_lens_cpu.numel(),
