@@ -122,8 +122,12 @@ __device__ __forceinline__ float2 silu2(float2 x) {
 }
 
 __device__ __forceinline__ __nv_bfloat162 silu2_v2(float2 x) {
+#ifndef USE_ROCM
   return make_bfloat162(__float2bfloat16_rn(silu(x.x)),
                         __float2bfloat16_rn(silu(x.y)));
+#else
+  return __float22bfloat162_rn(make_float2(silu(x.x), silu(x.y)));
+#endif
 }
 
 #ifndef USE_ROCM
