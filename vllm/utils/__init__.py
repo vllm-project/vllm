@@ -2722,6 +2722,12 @@ class MemorySnapshot:
         if self.auto_measure:
             self.measure()
 
+    def _get_device_sm(self):
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability()
+            return major * 10 + minor
+        return 0
+
     def measure(self):
         # we measure the torch peak memory usage via allocated_bytes,
         # rather than `torch.cuda.memory_reserved()` .
@@ -2732,6 +2738,14 @@ class MemorySnapshot:
             "allocated_bytes.all.peak", 0)
 
         self.free_memory, self.total_memory = torch.cuda.mem_get_info()
+        shared_sysmem_device_mem_sms = (87, 110, 121)  # Orin, Thor, Spark
+        if self._get_device_sm() in shared_sysmem_device_mem_sms:
+            # On these devices, which use sysmem as device mem, torch.cuda.mem_get_info()
+            # only reports "free" memory, which can be lower than what is actually
+            # available due to not including cache memory. So we use the system available
+            # memory metric instead.
+            self.free_memory = psutil.virtual_memory().available
+
         self.cuda_memory = self.total_memory - self.free_memory
 
         # torch.cuda.memory_reserved() is how many bytes
