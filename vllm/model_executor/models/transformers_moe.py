@@ -30,8 +30,7 @@ from vllm.utils import direct_register_custom_op
 
 from .transformers import (TransformersBase, TransformersForCausalLM,
                            TransformersForMultimodalLM, TransformersModel,
-                           can_enable_torch_compile, log_replacement,
-                           replace_linear_class)
+                           can_enable_torch_compile, log_replacement)
 from .utils import maybe_prefix
 
 
@@ -193,7 +192,6 @@ class TransformersMoEBase(TransformersBase):
         expert_mapping = self.get_expert_mapping()
 
         # Configs
-        quant_config = self.quant_config
         parallel_config = self.parallel_config
         eplb_config = parallel_config.eplb_config
 
@@ -210,13 +208,6 @@ class TransformersMoEBase(TransformersBase):
                     # Alias for readability
                     mlp = module
                     experts = child_module
-                    # GPTQ configs ddo not have lists of ignored modules
-                    # and AutoGPTQ seems to avoid gate quantization.
-                    if (quant_config and "gptq" in quant_config.get_name()
-                            and (gate := getattr(mlp, "gate", None))):
-                        new_gate = replace_linear_class(
-                            gate, prefix=f"{prefix}.gate")
-                        mlp.gate = new_gate
                     # Do the experts have biases
                     has_bias = False
                     for experts_param_name, _ in experts.named_parameters():
