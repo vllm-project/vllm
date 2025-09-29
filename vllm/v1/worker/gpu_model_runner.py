@@ -3075,7 +3075,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             # Currently when DBO is enabled `ubatch_split` returns
             # the num_tokens_after_padding for a single ubatch, but we have 2
-            # TODO(sage,lucas): this is cruft that should be addressed in the 
+            # TODO(sage,lucas): this is cruft that should be addressed in the
             # padding refactor.
             num_tokens_after_padding = ubatch_num_tokens_after_padding * 2
 
