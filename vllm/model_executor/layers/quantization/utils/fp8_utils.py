@@ -23,7 +23,7 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
-from vllm.utils.deep_gemm import (is_deep_gemm_e8m0_used,
+from vllm.utils.deep_gemm import (fp8_gemm_nt, is_deep_gemm_e8m0_used,
                                   should_use_deepgemm_for_fp8_linear)
 
 logger = init_logger(__name__)
@@ -141,17 +141,10 @@ def apply_w8a8_block_fp8_linear(
             block_size[1],
             column_major_scales=True,
         )
-
-        # ensure DeepGEMM-backed custom op is registered before use
-        import vllm.model_executor.layers.quantization.deepgemm  # noqa: F401
-
-        output = torch.ops.vllm.w8a8_block_fp8_matmul_deepgemm(
-            q_input,
-            weight,
-            x_scale,
-            weight_scale,
-            block_size,
-            output_dtype=output_dtype)
+        output = torch.empty((q_input.shape[0], weight.shape[0]),
+                             dtype=torch.bfloat16,
+                             device=q_input.device)
+        fp8_gemm_nt((q_input, x_scale), (weight, weight_scale), output)
         if bias is not None:
             output += bias
         return output.to(dtype=output_dtype).view(*output_shape)
