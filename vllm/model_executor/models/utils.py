@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from torch.func import functional_call
 from transformers import PretrainedConfig
+from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -439,6 +440,9 @@ def _merge_multimodal_embeddings(
     return inputs_embeds
 
 
+@deprecated("`merge_multimodal_embeddings` has been replaced with "
+            "`SupportsMultiModal.get_input_embeddings` and will be "
+            "removed in v0.12.")
 def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,

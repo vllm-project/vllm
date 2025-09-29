@@ -45,8 +45,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsTranscription)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 
 logger = init_logger(__name__)
 
