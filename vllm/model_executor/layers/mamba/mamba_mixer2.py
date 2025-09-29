@@ -504,7 +504,7 @@ class MambaMixer2(MambaBase, CustomOp):
             seq_idx_p = attn_metadata.seq_idx_p
             query_start_loc_p = attn_metadata.query_start_loc_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
-            last_chunk_p = attn_metadata.last_chunk_p
+            last_chunk_indices_p = attn_metadata.last_chunk_indices_p
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -636,7 +636,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 seq_idx=seq_idx_p,
                 cu_seqlens=query_start_loc_p,
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
-                last_chunk=last_chunk_p,
+                last_chunk_indices=last_chunk_indices_p,
                 initial_states=initial_states,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),

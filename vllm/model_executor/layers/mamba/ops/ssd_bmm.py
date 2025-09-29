@@ -181,6 +181,8 @@ def _bmm_chunk_fwd(a,
     Argument:
         a: (seqlen, ngroups, k)
         b: (seqlen, ngroups, k)
+        chunk_size: int
+        cu_chunk_seq_lens: (nchunks+1,)
         causal: if True, then out[i, j] for i > j will be arbitrary, only out[i, j] for i <= j are
             guaranteed to be correct.
     Return:

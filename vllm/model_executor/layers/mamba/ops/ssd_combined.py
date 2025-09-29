@@ -38,7 +38,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    seq_idx=None,
                                    cu_seqlens=None,
                                    cu_chunk_seqlens=None,
-                                   last_chunk=None,
+                                   last_chunk_indices=None,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    state_dtype=None):
@@ -151,7 +151,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         initial_states=initial_states,
     )
 
-    return states[last_chunk]
+    return states[last_chunk_indices]
 
 
 def mamba_chunk_scan_combined_varlen(
@@ -163,7 +163,7 @@ def mamba_chunk_scan_combined_varlen(
         chunk_size,
         cu_seqlens,
         cu_chunk_seqlens,
-        last_chunk,
+        last_chunk_indices,
         seq_idx,
         out,
         D=None,
@@ -182,8 +182,10 @@ def mamba_chunk_scan_combined_varlen(
         B: (seqlen, ngroups, dstate)
         C: (seqlen, ngroups, dstate)
         chunk_size: int
-        seq_idx: (nchunks)
-        cu_seqlens: (batch + 1)
+        cu_seqlens: (batch + 1,)
+        cu_chunk_seqlens: (nchunks + 1,)
+        last_chunk_indices: (batch,)
+        seq_idx: (nchunks,)
         out: (seqlen, nheads, headdim) preallocated output tensor
         D: (nheads, headdim) or (nheads,)
         z: (seqlen, nheads, headdim)
@@ -214,7 +216,7 @@ def mamba_chunk_scan_combined_varlen(
         seq_idx=seq_idx,
         cu_seqlens=cu_seqlens,
         cu_chunk_seqlens=cu_chunk_seqlens,
-        last_chunk=last_chunk,
+        last_chunk_indices=last_chunk_indices,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
         state_dtype=state_dtype)

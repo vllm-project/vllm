@@ -40,8 +40,16 @@ class Mamba2AttentionMetadata:
     # the batch has no prefill request.
     has_initial_states_p: Optional[torch.Tensor]
     seq_idx_p: Optional[torch.Tensor]
+
+    # cu_chunk_seqlen_p is a tensor of shape (nchunks+1,) that contains, for
+    # each chunk, its offests into the varlen sequence dimension. It is defined
+    # such that the i-th chunk contains tokens from cu_chunk_seqlen_p[i] to
+    # cu_chunk_seqlen_p[i+1].
     cu_chunk_seqlen_p: Optional[torch.Tensor]
-    last_chunk_p: Optional[torch.Tensor]
+
+    # last_chunk_indices_p is a tensor of shape (batch,) that contains the
+    # index of the last chunk for every sequence in the (prefill) batch.
+    last_chunk_indices_p: Optional[torch.Tensor]
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
 
@@ -66,16 +74,16 @@ class Mamba2AttentionMetadataBuilder(
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> Mamba2AttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        query_start_loc_p = None
         seq_lens = common_attn_metadata.seq_lens
 
+        query_start_loc_p = None
         seq_idx_p = None
+        cu_chunk_seqlen_p = None
+        last_chunk_indices_p = None
+
         # Need flags to indicate if there are initial states
-        # currently we really only support the FlashAttention backend
         has_initial_states_p = None
         prep_initial_states = False
-        cu_chunk_seqlen_p = None
-        last_chunk_p = None
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
@@ -106,10 +114,19 @@ class Mamba2AttentionMetadataBuilder(
             query_start_loc_p_cpu = common_attn_metadata.query_start_loc_cpu[
                 -num_prefills - 1:] - num_decode_tokens
 
-            # TODO (tdoublep): Optimize the code
+            # The code below carefully constructs the chunks such that:
+            # 1. Chunks contain tokens from a *single* sequence only.
+            # 2. For every sequence, we are guaranteed that we can
+            #    retrieve the mamba state *every* chunk_size tokens.
+            # Constraint (1) dramatically simplifies the mamba2 kernels.
+            # Constraint (2) dramatically simplifies the implementation
+            # of prefix caching for mamba2 (wip). We need to take care
+            # of the interaction with chunked prefill in order to
+            # satisfy constraint (2).
+            # TODO (tdoublep): This code could probably be optimized.
             cu_chunk_seqlen = []
             seq_idx = []
-            last_chunk = []
+            last_chunk_indices = []
             seqlen_pos = 0
             for req_idx in range(num_prefills):
                 this_num_computed = num_computed_tokens_p[req_idx].item()
@@ -138,7 +155,7 @@ class Mamba2AttentionMetadataBuilder(
                     this_new_tokens -= chunk_len
 
                 assert this_new_tokens == 0
-                last_chunk.append(len(cu_chunk_seqlen) - 1)
+                last_chunk_indices.append(len(cu_chunk_seqlen) - 1)
 
             cu_chunk_seqlen.append(seqlen_pos)
 
@@ -149,9 +166,10 @@ class Mamba2AttentionMetadataBuilder(
                 cu_chunk_seqlen,
                 device=query_start_loc_p.device,
                 dtype=torch.int32)
-            last_chunk_p = torch.as_tensor(last_chunk,
-                                           device=query_start_loc_p.device,
-                                           dtype=torch.int32)
+            last_chunk_indices_p = torch.as_tensor(
+                last_chunk_indices,
+                device=query_start_loc_p.device,
+                dtype=torch.int32)
 
             nums_dict, batch_ptr, token_chunk_offset_ptr = \
                 compute_causal_conv1d_metadata(query_start_loc_p)
@@ -177,7 +195,7 @@ class Mamba2AttentionMetadataBuilder(
             seq_idx_p=seq_idx_p,
             state_indices_tensor=state_indices_tensor,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
-            last_chunk_p=last_chunk_p,
+            last_chunk_indices_p=last_chunk_indices_p,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
