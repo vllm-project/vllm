@@ -505,30 +505,25 @@ __global__ void indexer_k_quant_and_cache_kernel(
   const scalar_t* __restrict__ k,            // [num_tokens, head_dim]
   cache_t* __restrict__ kv_cache,            // [num_blocks, block_size, cache_stride]
   const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-  const int token_stride,                    // stride for each token in k
   const int head_dim,                        // dimension of each head
-  const int block_stride,                    // stride for each block in kv_cache
-  const int cache_token_stride,              // stride for each token in kv_cache
-  const int cache_block_size,                // num_tokens for each block in kv_cache
   const int quant_block_size,                // quantization block size
+  const int cache_block_size,                // cache block size
+  const int cache_stride,                    // stride for each token in kv_cache
   const bool use_ue8m0                       // use ue8m0 scale format
 ) {
-  // NOTE: In each block of kv_cache, the quantized k and scales are stored separately.
-  // The first cache_block_size * head_dim elements are the quantized k values in FP8,
-  // and the last cache_block_size * head_dim * 4 / quant_block_size elements are the scales in FP32.
   constexpr int VEC_SIZE = 4;
   const int64_t token_idx = blockIdx.x;
-  const int64_t head_idx = (blockIdx.y * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
+  const int64_t head_dim_idx = (blockIdx.y * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
   const int64_t slot_idx = slot_mapping[token_idx];
-  const int64_t cache_block_idx = slot_idx / cache_block_size;
-  const int64_t cache_inblock_idx = slot_idx % cache_block_size;
+  const int64_t block_idx = slot_idx / cache_block_size;
+  const int64_t block_offset = slot_idx % cache_block_size;
   
   // NOTE: slot_idx can be -1 if the token is padded
-  if (slot_idx < 0 || (head_idx >= head_dim)) {
+  if (slot_idx < 0 || (head_dim_idx >= head_dim)) {
     return;
   }
   
-  float2 k_val = (reinterpret_cast<const float2*>(k))[(token_idx * token_stride + head_idx) / VEC_SIZE];
+  float2 k_val = (reinterpret_cast<const float2*>(k))[(token_idx * head_dim + head_dim_idx) / VEC_SIZE];
   scalar_t* k_val_ptr = reinterpret_cast<scalar_t*>(&k_val);
   float amax = 0.0f;
   for (int i = 0; i < VEC_SIZE; i++) {
@@ -546,15 +541,13 @@ __global__ void indexer_k_quant_and_cache_kernel(
     scale = exp2f(ceilf(log2f(scale)));
   }
 
-  const int64_t cache_block_start_offset = cache_block_idx * block_stride;
-  const int64_t cache_inblock_offset = cache_inblock_idx * head_dim + head_idx;
-  const int64_t dst_k_vals_offset = cache_block_start_offset + cache_inblock_offset;
+  const int64_t dst_offset = block_idx * cache_block_size * cache_stride + block_offset * head_dim + head_dim_idx;
   for (int i = 0; i < VEC_SIZE; i++) {
-    kv_cache[dst_k_vals_offset + i] = fp8::scaled_convert<cache_t, scalar_t, kv_dt>(k_val_ptr[i], scale);
+    kv_cache[dst_offset + i] = fp8::scaled_convert<cache_t, scalar_t, kv_dt>(k_val_ptr[i], scale);
   }
   if (threadIdx.x == 0) {
-    const int64_t dst_scale_offset = cache_block_start_offset + cache_block_size * head_dim + cache_inblock_offset * 4 / quant_block_size;
-    reinterpret_cast<float*>(kv_cache)[dst_scale_offset / 4] = scale;
+    const int64_t dst_scale_idx = block_idx * cache_block_size * cache_stride + cache_block_size * head_dim + (block_offset * head_dim + head_dim_idx) * 4 / quant_block_size;
+    reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
   }
 }
 
@@ -1127,14 +1120,8 @@ void cp_gather_cache(
       <<<grid, block, 0, stream>>>(                                          \
           reinterpret_cast<KV_T*>(k.data_ptr()),                             \
           reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                   \
-          slot_mapping.data_ptr<int64_t>(),                                  \
-          k.stride(0),                                                       \
-          k.size(1),                                                         \
-          kv_cache.stride(0),                                                \
-          kv_cache.stride(1),                                                \
-          kv_cache.size(1),                                                  \
-          quant_block_size,                                                  \
-          use_ue8m0);
+          slot_mapping.data_ptr<int64_t>(), head_dim, quant_block_size,      \
+          cache_block_size, cache_stride, use_ue8m0);
 
 void indexer_k_quant_and_cache(
     torch::Tensor& k,              // [num_tokens, head_dim]
