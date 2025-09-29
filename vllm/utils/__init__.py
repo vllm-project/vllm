@@ -2076,10 +2076,10 @@ class FlexibleArgumentParser(ArgumentParser):
 
 
 def _is_benchmark_command() -> bool:
-    """Check if we're running a vLLM benchmark command, such as `vllm bench *`."""
-    import sys, argparse
+    """Check if we're running a vLLM benchmark command, """
+    """such as `vllm bench *`"""
     # Minimal "peek" parser, only cares about which subcommand was chosen.
-    p = argparse.ArgumentParser(add_help=False)
+    p = ArgumentParser(add_help=False)
     sp = p.add_subparsers(dest="subcmd")
     sp.add_parser("bench", add_help=False)
     try:
