@@ -286,6 +286,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "Eagle3Qwen2_5vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
@@ -332,6 +333,7 @@ _SUBPROCESS_COMMAND = [
 
 _PREVIOUSLY_SUPPORTED_MODELS = {
     "Phi3SmallForCausalLM": "0.9.2",
+    "Phi4FlashForCausalLM": "0.10.2",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
     "BartModel": "0.10.2",
