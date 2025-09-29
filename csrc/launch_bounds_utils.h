@@ -10,17 +10,13 @@
 
 // compile-time estimate of max threads per SM for launch bounds.
 #ifndef VLLM_MAX_THREADS_PER_SM
-  #if defined(__CUDA_ARCH__) && ( \
-        (__CUDA_ARCH__ == 860)  || \
-        (__CUDA_ARCH__ == 890)  || \
-        (__CUDA_ARCH__ == 1200) || \
-        (__CUDA_ARCH__ == 1210) )
-    #define VLLM_MAX_THREADS_PER_SM 1536
-  #elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 750)
-    #define VLLM_MAX_THREADS_PER_SM 1024
-  #else
-    #define VLLM_MAX_THREADS_PER_SM 2048
-  #endif
+# if defined(__CUDA_ARCH__) && ( (__CUDA_ARCH__ == 860) || (__CUDA_ARCH__ == 890) || (__CUDA_ARCH__ == 1200) || (__CUDA_ARCH__ == 1210) )
+#   define VLLM_MAX_THREADS_PER_SM 1536
+# elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 750)
+#   define VLLM_MAX_THREADS_PER_SM 1024
+# else
+#   define VLLM_MAX_THREADS_PER_SM 2048
+# endif
 #endif
 
 // compute the number of blocks per SM to request in __launch_bounds__
