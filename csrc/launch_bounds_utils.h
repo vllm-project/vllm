@@ -31,7 +31,7 @@
       #define VLLM_MAX_THREADS_PER_SM 2048
     #endif
   #else
-    /* Host pass (no __CUDA_ARCH__): neutral default */
+    /* Host pass (no __CUDA_ARCH__): default */
     #define VLLM_MAX_THREADS_PER_SM 2048
   #endif
 #endif
