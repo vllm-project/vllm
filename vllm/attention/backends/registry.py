@@ -29,7 +29,7 @@ class _Backend(enum.Enum):
     TREE_ATTN = enum.auto()
 
 
-BACKEND_MAPPING = {}
+BACKEND_MAP = {}
 
 
 def register_attn_backend(backend: _Backend, class_path: str | None = None):
@@ -45,7 +45,7 @@ def register_attn_backend(backend: _Backend, class_path: str | None = None):
 
     def decorator(cls):
         path = class_path or f"{cls.__module__}.{cls.__qualname__}"
-        BACKEND_MAPPING[backend] = path
+        BACKEND_MAP[backend] = path
         return cls
 
     return decorator
@@ -60,7 +60,7 @@ def backend_to_class_str(backend: _Backend) -> str:
     Returns:
         The backend class string
     """
-    return BACKEND_MAPPING[backend]
+    return BACKEND_MAP[backend]
 
 
 def backend_to_class(backend: _Backend) -> Type:
