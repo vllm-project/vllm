@@ -50,9 +50,13 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
+from vllm.platforms.tpu import USE_TPU_INFERENCE
 
 logger = init_logger(__name__)
 
+'''
+MultiprocExecutor: the manager process, manages the workers.
+'''
 
 class MultiprocExecutor(Executor):
     supports_pp: bool = True
@@ -66,9 +70,15 @@ class MultiprocExecutor(Executor):
         self.failure_callback: FailureCallback | None = None
         self.io_thread_pool: ThreadPoolExecutor | None = None
 
-        self.world_size = self.parallel_config.world_size
-        tensor_parallel_size = self.parallel_config.tensor_parallel_size
-        pp_parallel_size = self.parallel_config.pipeline_parallel_size
+        if not USE_TPU_INFERENCE:
+            self.world_size = self.parallel_config.world_size
+            tensor_parallel_size = self.parallel_config.tensor_parallel_size
+            pp_parallel_size = self.parallel_config.pipeline_parallel_size
+        else:
+            # Jax handles TP with SPMD, world_size = pp_size.
+            self.world_size = self.parallel_config.pipeline_parallel_size
+            tensor_parallel_size = 1
+            pp_parallel_size = self.parallel_config.pipeline_parallel_size
         assert self.world_size == tensor_parallel_size * pp_parallel_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
@@ -99,6 +109,10 @@ class MultiprocExecutor(Executor):
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
+            # the for loop itself is sync, but the `make_worker_process` calls
+            # context.Process(target=...).start(), it's non-blocking, so it
+            # creates the worker process in background process, and return to
+            # the main process to make the next worker process.
             for rank in range(self.world_size):
                 unready_workers.append(
                     WorkerProc.make_worker_process(
@@ -113,13 +127,20 @@ class MultiprocExecutor(Executor):
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
+            # wait_for_ready is a blocking call.
             self.workers = WorkerProc.wait_for_ready(unready_workers)
 
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
+            # check the broadcast mq has been connected by all the reader queue in each worker process.
             self.rpc_broadcast_mq.wait_until_ready()
             for w in self.workers:
                 w.worker_response_mq.wait_until_ready()
+            
+            # set up jax transfer connection.
+            if USE_TPU_INFERENCE:
+                for rank in range(1, self.world_size):
+                    self.collective_rpc("initialize_pp_transfer_connect", unique_reply_rank=rank)
 
             self.start_worker_monitor()
             success = True
@@ -202,6 +223,7 @@ class MultiprocExecutor(Executor):
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
+        # logger.info(f'[debug] [multiproc executor] execute_model {len(outputs)=}, {type(outputs[0])=}')
 
         # aggregate all workers output to a single output
         assert self.kv_output_aggregator is not None
@@ -365,6 +387,8 @@ class MultiprocExecutor(Executor):
         # 16-23, PP rank 2
         # 24-31, PP rank 3
         # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
+        if USE_TPU_INFERENCE:
+            return self.world_size - 1
         return self.world_size - self.parallel_config.tensor_parallel_size
 
 
@@ -417,7 +441,10 @@ class WorkerProc:
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]
-        is_driver_worker = rank % vllm_config.parallel_config.tensor_parallel_size == 0
+        if USE_TPU_INFERENCE:
+            is_driver_worker = True
+        else:
+            is_driver_worker = rank % vllm_config.parallel_config.tensor_parallel_size == 0
         all_kwargs[rank] = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -426,6 +453,14 @@ class WorkerProc:
             "is_driver_worker": is_driver_worker,
             "shared_worker_lock": shared_worker_lock,
         }
+
+        # set tpu visible devices for Jax
+        if USE_TPU_INFERENCE:
+            tp = vllm_config.parallel_config.tensor_parallel_size
+            os.environ["TPU_PROCESS_BOUNDS"] = "1,1,1"
+            os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,{tp},1"
+            os.environ["TPU_VISIBLE_CHIPS"] = "0,1,2,3" if self.rank==0 else "4,5,6,7"
+            logger.info(f'{self.rank=}, {os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"]=}, {os.environ["TPU_VISIBLE_CHIPS"]=}')
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
@@ -472,8 +507,9 @@ class WorkerProc:
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
     ) -> UnreadyWorkerProcHandle:
-        context = get_mp_context()
+        context = get_mp_context()  # get a multiprocessing context
         # (reader, writer)
+        # this is the master proc of workerproc, it creates a two end pipe.
         reader, writer = context.Pipe(duplex=False)
 
         # Create death pipe to detect parent process exit
@@ -498,6 +534,8 @@ class WorkerProc:
         )
 
         proc.start()
+        # the goal is to receive a "ready" signal from the proc
+        # (this is a child process), so we close writer end (not needed). 
         writer.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
@@ -518,6 +556,7 @@ class WorkerProc:
             unready_proc_handles
         )
         while pipes:
+            # this is also a master call waiting for any of the pipes to be ready.
             ready = multiprocessing.connection.wait(pipes.keys())
             for pipe in ready:
                 assert isinstance(pipe, Connection)
@@ -555,6 +594,19 @@ class WorkerProc:
         destroy_model_parallel()
         destroy_distributed_environment()
 
+
+    '''
+    How does worker_main finish
+    1. when multiprocExecutor shutdown()
+        The main process calls executor.shutdown().
+        Inside shutdown(), it closes a special communication channel called a "pipe": w.death_writer.close().
+        Each worker process has a background thread (monitor_parent_death) that is constantly listening on the other end of this pipe (death_pipe.recv()).
+        When the pipe is closed by the parent, recv() in the child raises an EOFError.
+        The monitor_parent_death thread catches this error and calls os.kill(os.getpid(), signal.SIGTERM), sending a termination signal to its own process.
+    2. os signal
+        signal handler set up in worker_main
+    3. daemon=true, so if the main process (multi proc executor) crashes or exists, worker proc will terminate.
+    '''
     @staticmethod
     def worker_main(*args, **kwargs):
         """Worker initialization and execution loops.
@@ -591,6 +643,7 @@ class WorkerProc:
                     # Parent process has exited, terminate this worker
                     logger.info("Parent process exited, terminating worker")
                     # Send signal to self to trigger clean shutdown
+                    # time.sleep(60)
                     shutdown_event.set()
                 except Exception as e:
                     logger.warning("Death monitoring error: %s", e)
@@ -601,6 +654,8 @@ class WorkerProc:
             death_monitor.start()
 
         try:
+            # for this pipe, it doesn't need to read, 
+            # only need to write the response. so close the reader.
             reader.close()
             worker = WorkerProc(*args, **kwargs)
 
@@ -685,7 +740,17 @@ class WorkerProc:
 
     def worker_busy_loop(self, cancel: threading.Event | None = None):
         """Main busy loop for Multiprocessing Workers"""
+        # index = 0
         while True:
+            # if index >= 1:
+            #     queue_count = 0
+            #     while True:
+            #         self.rpc_broadcast_mq.dequeue(
+            #     cancel=cancel, indefinite=True)
+            #         queue_count += 1
+            #         logger.info(f'worker{self.rank} warmup dequeue {queue_count=}')
+            # index += 1
+            # logger.info(f'worker{self.rank} {len(self.rpc_broadcast_mq)=}')
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                 cancel=cancel, indefinite=True
             )
