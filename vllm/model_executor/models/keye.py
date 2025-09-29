@@ -41,7 +41,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -50,7 +49,7 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
 from .siglip import SiglipMLP
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, is_pp_missing_parameter,
-                    maybe_prefix, merge_multimodal_embeddings)
+                    maybe_prefix)
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
@@ -1450,32 +1449,6 @@ class BaseKeyeModule(nn.Module):
                 multimodal_embeddings += video_embeddings
         return multimodal_embeddings
 
-    def get_input_embeddings_v0(
-        self,
-        input_ids: torch.Tensor,
-        image_input: Optional[Any] = None,
-        video_input: Optional[Any] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.get_input_embeddings(input_ids)
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                image_embeds,
-                placeholder_token_id=self.config.image_token_id,
-            )
-
-        if video_input is not None:
-            video_embeds = self._process_video_input(video_input)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                video_embeds,
-                placeholder_token_id=self.config.video_token_id,
-            )
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1499,23 +1472,6 @@ class BaseKeyeModule(nn.Module):
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            video_input = self._parse_and_validate_video_input(**kwargs)
-            if image_input is None and video_input is None:
-                inputs_embeds = None
-            else:
-                if uses_mrope(self.config):
-                    assert positions.ndim == 2 and positions.size(0) == 3, (
-                        "multimodal section rotary embedding requires "
-                        f"(3, seq_len) positions, but got {positions.size()}")
-                inputs_embeds = self.get_input_embeddings_v0(
-                    input_ids,
-                    image_input=image_input,
-                    video_input=video_input,
-                )
-                input_ids = None
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
