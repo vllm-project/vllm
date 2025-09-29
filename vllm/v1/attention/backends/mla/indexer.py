@@ -172,7 +172,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_BATCH
 
-    reorder_batch_threshold: ClassVar[int] = 1
+    reorder_batch_threshold: int = 1
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -183,7 +183,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config else 0)
-        self.reorder_batch_threshold += self.num_speculative_tokens
+        # Now deepgemm fp8_paged_mqa_logits does not support next_n > 2
+        self.reorder_batch_threshold += min(self.num_speculative_tokens, 1)
 
         props = torch.cuda.get_device_properties(self.device)
         sm_count = props.multi_processor_count

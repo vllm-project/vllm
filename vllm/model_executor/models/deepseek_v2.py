@@ -637,18 +637,18 @@ def sparse_attn_indexer(
                 decode_lens.shape[0], -1, *q_fp8.shape[1:])
         # TODO: move and optimize below logic with triton kernels
         batch_size = padded_q_fp8_decode_tokens.shape[0]
+        next_n = padded_q_fp8_decode_tokens.shape[1]
         assert batch_size == decode_metadata.seq_lens.shape[0]
+        num_padded_tokens = batch_size * next_n
         logits = fp8_paged_mqa_logits(
             padded_q_fp8_decode_tokens,
             kv_cache,
-            weights[:num_decode_tokens],
+            weights[:num_padded_tokens],
             decode_metadata.seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
         )
-        # [B, N, L]
-        next_n = padded_q_fp8_decode_tokens.shape[1]
         # padded query len
         current_device = padded_q_fp8_decode_tokens.device
         padded_num_tokens = batch_size * next_n
@@ -676,7 +676,7 @@ def sparse_attn_indexer(
             # if padded, we need to unpack
             # the topk indices removing padded tokens
             topk_indices = unpack_seq_triton(
-                topk_indices.reshape(batch_size, -1, logits.shape[-1]),
+                topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
                 decode_lens)
         topk_indices_buffer[:num_decode_tokens, :topk_indices.
                             shape[-1]] = topk_indices.to(dtype=torch.int32)
