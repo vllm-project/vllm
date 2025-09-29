@@ -1411,22 +1411,6 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner from
-        # `get_multimodal_embeddings` and `get_input_embeddings`, this
-        # condition is only for v0 compatibility.
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            audio_input = self._parse_and_validate_audio_input(**kwargs)
-
-            if image_input is None and audio_input is None:
-                inputs_embeds = None
-            else:
-                inputs_embeds = self.get_input_embeddings_v0(
-                    input_ids,
-                    image_input=image_input,
-                    audio_input=audio_input)
-                input_ids = None
-
         hidden_states = self.language_model(
             input_ids,
             positions,

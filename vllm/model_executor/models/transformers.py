@@ -881,19 +881,6 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # NOTE: In v1, inputs_embeds is always generated at model runner from
-        # `get_multimodal_embeddings` and `get_input_embeddings`, this
-        # condition is only for v0 compatibility.
-        if inputs_embeds is None:
-            multimodal_embeds = self.get_multimodal_embeddings(**kwargs)
-            if multimodal_embeds is not None:
-                inputs_embeds = self.get_input_embeddings(
-                    input_ids,
-                    multimodal_embeds,
-                    is_multimodal=input_ids == self.config.image_token_id,
-                )
-                input_ids = None
-
         model_output = super().forward(input_ids, positions,
                                        intermediate_tensors, inputs_embeds)
         return model_output
