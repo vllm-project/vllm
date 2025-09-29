@@ -317,7 +317,8 @@ class FlashMLASparseMetadataBuilder(
         s_q = 1  # inversely proportional to s_q, so s_q = 1 is the largest
         max_num_sm_parts = int(
             max((sm_count // 2) / h_k // (cdiv(h_q // h_k, 2 * 64) * s_q), 1))
-
+        if current_platform.is_device_capability(100):
+            max_num_sm_parts *= 2
         self.tile_scheduler_metadata_buffer = torch.empty(
             # TileSchedulerMetaDataSize = 8
             # see: FlashMLA/csrc/params.h
