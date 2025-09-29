@@ -361,6 +361,12 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             block_size=model_config.max_model_len,
         ).page_size_bytes
 
+        # Model may be marked as is_hybrid
+        #  but mamba is skipped via config,
+        #  return directly
+        if mamba_page_size == 0:
+            return
+
         # Attention backend constraints:
         # - FlashAttention (FA) requires block size to be multiple of 16
         # - MLA (Multi-head Latent Attention) requires larger alignment:
@@ -382,6 +388,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
         # too small.
+        #
         if (cache_config.block_size is None
                 or cache_config.block_size < attn_block_size):
             cache_config.block_size = attn_block_size
