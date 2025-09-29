@@ -216,9 +216,8 @@ def resolve_current_platform_cls_qualname() -> str:
         logger.info("Automatically detected platform %s.",
                     activated_builtin_plugins[0])
     elif _is_benchmark_command():
-        # can safely fallback to CPU platform for benchmark commands instead of UnspecifiedPlatform
-        # benchmark command are just running some LLM API calls, so it doesn't matter which platform is used
-        # else, may cause errors in benchmark execution when initializing the the CLI parsers
+        # For 'vllm bench *' commands: use CPU as a placeholder to avoid UnspecifiedPlatform errors during CLI init;
+        # platform choice doesn’t matter here since benchmarks pick devices at runtime.
         platform_cls_qualname = "vllm.platforms.cpu.CpuPlatform"
         logger.warning(
             "No platform detected while running benchmark commands, but defaults to CPU Platform instead of UnspecifiedPlatform to avoid CLI parser errors. "
