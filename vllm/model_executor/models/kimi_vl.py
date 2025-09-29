@@ -433,22 +433,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
-        # NOTE: In v1, inputs_embeds is always generated at model runner from
-        # `get_multimodal_embeddings` and `get_input_embeddings`, this
-        # condition is only for v0 compatibility.
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            if image_input is None:
-                inputs_embeds = None
-            else:
-                image_embeds = self._process_image_input(image_input)
-                inputs_embeds = self.get_input_embeddings(
-                    input_ids,
-                    image_embeds,
-                    is_multimodal=input_ids ==
-                    self.config.media_placeholder_token_id,
-                )
-                input_ids = None
 
         hidden_states = self.language_model(
             input_ids=input_ids,

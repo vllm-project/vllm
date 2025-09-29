@@ -45,8 +45,7 @@ from vllm.sequence import IntermediateTensors
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, init_vllm_registered_model, isin_list,
-                    maybe_prefix)
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from .vision import get_vision_encoder_info
 
 EOT = "<|endofturn|>"
@@ -747,18 +746,6 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                multimodal_embeddings,
-                is_multimodal=isin_list(
-                    input_ids,
-                    [self.config.image_token_id, self.config.video_token_id]),
-            )
-            input_ids = None
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
                                                   intermediate_tensors,

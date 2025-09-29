@@ -69,8 +69,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, WeightsMapper,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 
 try:
     import flash_attn
@@ -908,26 +907,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             multimodal_embeddings.append((video_embeds, "video"))
         return multimodal_embeddings
 
-    def get_input_embeddings_v0(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-
-        for embeddings, modality in multimodal_embeddings:
-            if modality == "audio":
-                placeholder_token_id = self.config.audio_token_index
-            if modality == "image":
-                placeholder_token_id = self.config.image_token_index
-            if modality == "video":
-                placeholder_token_id = self.config.video_token_index
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, embeddings, placeholder_token_id)
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -938,14 +917,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings_v0(**kwargs)
-            inputs_embeds = self.get_input_embeddings_v0(
-                input_ids, multimodal_embeddings)
-            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
