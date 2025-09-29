@@ -103,6 +103,7 @@ plugins:
           - https://pytorch.org/docs/stable/objects.inv
           - https://psutil.readthedocs.io/en/stable/objects.inv
           - https://huggingface.co/docs/transformers/main/en/objects.inv
+          - https://huggingface.co/docs/trl/main/en/objects.inv
 
 markdown_extensions:
   - attr_list
