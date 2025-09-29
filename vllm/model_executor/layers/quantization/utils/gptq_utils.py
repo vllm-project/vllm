@@ -11,15 +11,13 @@ import torch
 
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_bitblas import (
-    GPTQBitBLASConfig)
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
-from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
-    GPTQMarlin24Config)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod)
+
+from ..gptq import GPTQConfig
+from ..gptq_bitblas import GPTQBitBLASConfig
+from ..gptq_marlin import GPTQMarlinConfig
+from ..gptq_marlin_24 import GPTQMarlin24Config
 
 GPTQQuantizationConfig = Union[GPTQConfig, GPTQBitBLASConfig, GPTQMarlinConfig,
                                GPTQMarlin24Config]
@@ -65,12 +63,11 @@ def override_config(config: GPTQQuantizationConfig, prefix: str):
 
 
 def get_dynamic_override(
-    config: GPTQQuantizationConfig,
+    config: Union[GPTQConfig, GPTQMarlinConfig],
     layer_name: str,
     key: Optional[str] = None,
     default_value: Union[int, bool,
                          None] = None) -> Union[dict, int, bool, None]:
-    assert isinstance(config, (GPTQConfig, GPTQMarlinConfig))
     for pattern, pattern_dict in config.dynamic.items():
         # Negative match: matched modules are excluded from quantized init
         if pattern.startswith("-:"):
@@ -130,13 +127,12 @@ def is_layer_gptq_quantized(
 
 
 def get_linear_quant_method(
-    config: GPTQQuantizationConfig,
+    config: Union[GPTQConfig, GPTQMarlinConfig],
     layer: torch.nn.Module,
     prefix: str,
     linear_method_cls: type,
 ):
     cloned_config = deepcopy(config)
-    assert not isinstance(cloned_config, GPTQMarlin24Config)
     parallel_lm_head_quantized = isinstance(
         layer, ParallelLMHead) and cloned_config.lm_head_quantized
     if isinstance(layer, LinearBase) or parallel_lm_head_quantized:
