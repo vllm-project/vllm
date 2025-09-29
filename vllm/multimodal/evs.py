@@ -13,24 +13,24 @@ import typing
 import torch
 
 
-def compute_retained_tokens_count(video_size_thw: torch.LongTensor,
-                                  spatial_merge_size: int, q: float) -> int:
+def compute_retained_tokens_count(tokens_per_frame: int, num_frames: int,
+                                  q: float) -> int:
     """
     Compute the number of retained tokens for a given video.
     Method ensures that we retain all the tokens from the first frame
     regardless of the pruning rate.
 
     Args:
-        video_size_thw: The size of the video in the format of (T, H, W).
-        spatial_merge_size: The size of the spatial merge.
+        tokens_per_frame: The number of tokens per frame.
+        num_frames: The total number of frames.
         q: The pruning rate.
 
     Returns:
         The number of retained tokens.
     """
-    T, H, W = map(int, video_size_thw)
-    min_num_tokens = (H // spatial_merge_size) * (W // spatial_merge_size)
-    evs_num_tokens = int(T * min_num_tokens * (1 - q))
+    total_tokens = tokens_per_frame * num_frames
+    evs_num_tokens = int(total_tokens * (1 - q))
+    min_num_tokens = tokens_per_frame
     return max(min_num_tokens, evs_num_tokens)
 
 

@@ -939,9 +939,12 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             ).video_pruning_rate
             if (modality == "video" and video_pruning_rate is not None
                     and video_pruning_rate > 0.0):
+                T, H, W = map(int, grid_thw)
+                tokens_per_frame = (H // image_processor.merge_size) * (
+                    W // image_processor.merge_size)
                 num_tokens = compute_retained_tokens_count(
-                    grid_thw,
-                    image_processor.merge_size,
+                    tokens_per_frame,
+                    T,
                     video_pruning_rate,
                 )
             # End of EVS-specific code
