@@ -114,7 +114,7 @@ WORKDIR /workspace/vllm
 RUN --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
     cp requirements/test.in requirements/cpu-test.in && \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
-    uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --extra-index-url https://download.pytorch.org/whl/test/cpu
+    uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --torch-backend cpu
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/cpu-test.txt
@@ -162,7 +162,7 @@ ADD ./.buildkite/ ./.buildkite/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -e tests/vllm_test_utils 
+    uv pip install -e tests/vllm_test_utils
 
 ENTRYPOINT ["bash"]
 
