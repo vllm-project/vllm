@@ -8,6 +8,7 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.ubatch_utils import (UBatchSlices, check_ubatch_thresholds,
@@ -18,7 +19,6 @@ logger = init_logger(__name__)
 
 
 def _get_device_and_group():
-    from vllm.distributed.parallel_state import get_dp_group
     device = current_platform.device_type
     group = get_dp_group().device_group
 
@@ -34,9 +34,21 @@ def _get_device_and_group():
     return device, group
 
 
-def _run_ar(should_ubatch: bool, orig_num_tokens_per_ubatch: int,
-            padded_num_tokens_per_ubatch: int, dp_size: int,
-            dp_rank: int) -> torch.Tensor:
+def get_dp_size() -> int:
+    return get_dp_group().world_size
+
+
+def get_dp_rank() -> int:
+    return get_dp_group().rank
+
+
+def _run_ar(
+    should_ubatch: bool,
+    orig_num_tokens_per_ubatch: int,
+    padded_num_tokens_per_ubatch: int,
+) -> torch.Tensor:
+    dp_size = get_dp_size()
+    dp_rank = get_dp_rank()
     device, group = _get_device_and_group()
     tensor = torch.zeros(3, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
@@ -65,12 +77,10 @@ def _post_process_ubatch(tensor: torch.Tensor) -> bool:
     return should_ubatch
 
 
-def synchronize_dp_ranks(
+def _synchronize_dp_ranks(
     num_tokens_unpadded: int,
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
-    dp_size: int,
-    dp_rank: int,
 ) -> tuple[bool, Optional[torch.Tensor]]:
     """
     1. Decides if each DP rank is going to microbatch. Either all ranks
@@ -88,18 +98,15 @@ def synchronize_dp_ranks(
 
     """
     assert num_tokens_padded >= num_tokens_unpadded
-    if dp_size == 1:
-        # Early exit.
-        return False, None
 
     # First we coordinate between the DP ranks via an All Reduce
     # to determine the total number of tokens that each rank
     # will run and if we are using ubatching or not.
-    tensor = _run_ar(should_ubatch=should_attempt_ubatching,
-                     orig_num_tokens_per_ubatch=num_tokens_unpadded,
-                     padded_num_tokens_per_ubatch=num_tokens_padded,
-                     dp_size=dp_size,
-                     dp_rank=dp_rank)
+    tensor = _run_ar(
+        should_ubatch=should_attempt_ubatching,
+        orig_num_tokens_per_ubatch=num_tokens_unpadded,
+        padded_num_tokens_per_ubatch=num_tokens_padded,
+    )
 
     # Ensure that each rank is processing the same nuber of tokens
     num_tokens_across_dp = tensor[1, :]
@@ -134,8 +141,11 @@ def coordinate_batch_across_dp(
     ]
 
     """
-    dp_size = parallel_config.data_parallel_size
-    dp_rank = parallel_config.data_parallel_rank
+    assert get_dp_rank() == parallel_config.data_parallel_rank
+    assert get_dp_size() == parallel_config.data_parallel_size
+    if get_dp_size() == 1:
+        # Early exit.
+        return None, None
 
     # Check preconditions for microbatching
     should_attempt_ubatching = check_ubatch_thresholds(
@@ -148,9 +158,8 @@ def coordinate_batch_across_dp(
     if not allow_microbatching:
         should_attempt_ubatching = False
 
-    (should_ubatch, num_tokens_after_padding) = synchronize_dp_ranks(
-        num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching,
-        dp_size, dp_rank)
+    (should_ubatch, num_tokens_after_padding) = _synchronize_dp_ranks(
+        num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching)
 
     # Don't microbatch unless every other DP worker is also microbatching
     if not should_ubatch:
