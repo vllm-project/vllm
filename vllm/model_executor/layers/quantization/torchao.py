@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib
+from importlib.util import find_spec
 from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
+from packaging import version
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
@@ -15,6 +18,17 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
+
+
+def torchao_version_at_least(torchao_version: str) -> bool:
+    if find_spec("torchao"):
+        try:
+            if version.parse(importlib.metadata.version(
+                    "torchao")) >= version.parse(torchao_version):
+                return True
+        except (ImportError, version.InvalidVersion):
+            return False
+    return False
 
 
 def should_skip(prefix: str, skip_modules: list[str]) -> bool:
@@ -172,7 +186,7 @@ class TorchAOLinearMethod(LinearMethodBase):
     """Linear method for torchao.
 
     Args:
-        quant_config: The torchao quantization config, a string that encodes 
+        quant_config: The torchao quantization config, a string that encodes
             the type of quantization and all relevant arguments.
     """
 
