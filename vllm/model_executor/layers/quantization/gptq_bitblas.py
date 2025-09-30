@@ -9,9 +9,8 @@ from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
-from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import (QuantizationConfig,
+                                                     QuantizationMethods)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     BitBLASLinearKernel, MPLinearLayerConfig)
 from vllm.model_executor.layers.quantization.utils.bitblas_utils import (

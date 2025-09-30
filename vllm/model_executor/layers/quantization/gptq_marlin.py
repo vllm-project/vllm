@@ -43,7 +43,7 @@ logger = init_logger(__name__)
 
 
 def get_moe_quant_method(
-    config: QuantizationConfig,
+    config: "GPTQMarlinConfig",
     layer: torch.nn.Module,
     prefix: str,
     moe_method_cls: type,
