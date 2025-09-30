@@ -2753,49 +2753,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return draft_token_ids
 
-    def propose_suffix_draft_token_ids(
-        self,
-        sampled_token_ids: list[list[int]],
-    ) -> list[list[int]]:
-        from arctic_inference.suffix_decoding import SuffixDecodingDraft
-        req_ids = self.input_batch.req_ids
-        config = self.speculative_config
-        draft_token_ids = []
-        for i, sampled_ids in enumerate(sampled_token_ids):
-            num_sampled_ids = len(sampled_ids)
-            if not num_sampled_ids:
-                # Skip speculative decoding.
-                draft_token_ids.append([])
-                continue
-
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
-            req_id = req_ids[i]
-            if req_id in self.input_batch.spec_decode_unsupported_reqs:
-                draft_token_ids.append([])
-                continue
-
-            num_tokens = self.input_batch.num_tokens_no_spec[i]
-            if num_tokens >= self.max_model_len:
-                # Skip requests that have already reached the max model length.
-                draft_token_ids.append([])
-                continue
-
-            start = max(0, num_tokens - config.suffix_decoding_max_tree_depth)
-            pattern = self.input_batch.token_ids_cpu[i, start:num_tokens]
-            pattern = pattern.tolist()
-            draft = self.suffix_cache.speculate(
-                req_id,
-                pattern,
-                max_spec_tokens=min(config.num_speculative_tokens,
-                                    self.max_model_len - num_tokens - 1),
-                max_spec_factor=config.suffix_decoding_max_spec_factor,
-                min_token_prob=config.suffix_decoding_min_token_prob)
-
-            draft_token_ids.append(draft.token_ids)
-
-        return draft_token_ids
-
     def update_config(self, overrides: dict[str, Any]) -> None:
         allowed_config_names = {"load_config", "model_config"}
         for config_name, config_overrides in overrides.items():

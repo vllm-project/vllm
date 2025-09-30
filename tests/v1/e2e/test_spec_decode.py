@@ -109,21 +109,21 @@ def test_ngram_and_suffix_correctness(
     torch.cuda.empty_cache()
     cleanup_dist_env_and_memory()
 
-        spec_llm = LLM(
-            model=model_name,
-            speculative_config=speculative_config,
-            max_model_len=1024,
-        )
-        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-        matches = 0
-        misses = 0
-        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-            if ref_output.outputs[0].text == spec_output.outputs[0].text:
-                matches += 1
-            else:
-                misses += 1
-                print(f"ref_output: {ref_output.outputs[0].text}")
-                print(f"spec_output: {spec_output.outputs[0].text}")
+    spec_llm = LLM(
+        model=model_name,
+        speculative_config=speculative_config,
+        max_model_len=1024,
+    )
+    spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+    matches = 0
+    misses = 0
+    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+        if ref_output.outputs[0].text == spec_output.outputs[0].text:
+            matches += 1
+        else:
+            misses += 1
+            print(f"ref_output: {ref_output.outputs[0].text}")
+            print(f"spec_output: {spec_output.outputs[0].text}")
 
     # Heuristic: expect at least 66% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
@@ -142,57 +142,55 @@ def test_suffix_decoding_acceptance(
     Check that suffix decoding caching takes effect and improves acceptance
     lengths and acceptance rates over multiple runs of the same prompts.
     '''
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        test_prompts = get_test_prompts(mm_enabled=False)
+    test_prompts = get_test_prompts(mm_enabled=False)
 
-        spec_llm = LLM(
-            model=model_name,
-            speculative_config={
-                "method": "suffix",
-                "suffix_decoding_max_spec_factor": 2.0,
-                "suffix_decoding_max_cached_requests": 1000,
-            },
-            max_model_len=1024,
-            disable_log_stats=False,
-        )
+    spec_llm = LLM(
+        model=model_name,
+        speculative_config={
+            "method": "suffix",
+            "suffix_decoding_max_spec_factor": 2.0,
+            "suffix_decoding_max_cached_requests": 1000,
+        },
+        max_model_len=1024,
+        disable_log_stats=False,
+    )
 
-        # Run several times and check that the accepted tokens increase.
+    # Run several times and check that the accepted tokens increase.
+    spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+    num_draft = []
+    num_accept = []
+    for i in range(10):  # Run multiple times to warm up the cache.
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-        num_draft = []
-        num_accept = []
-        for i in range(10):  # Run multiple times to warm up the cache.
-            spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-            # Collect draft and acceptance stats.
-            metrics = spec_llm.get_metrics()
-            for metric in metrics:
-                if metric.name == "vllm:spec_decode_num_draft_tokens":
-                    num_draft.append(metric.value)
-                if metric.name == "vllm:spec_decode_num_accepted_tokens":
-                    num_accept.append(metric.value)
+        # Collect draft and acceptance stats.
+        metrics = spec_llm.get_metrics()
+        for metric in metrics:
+            if metric.name == "vllm:spec_decode_num_draft_tokens":
+                num_draft.append(metric.value)
+            if metric.name == "vllm:spec_decode_num_accepted_tokens":
+                num_accept.append(metric.value)
 
-        # Calculate the acceptance rates for the first and last runs.
-        first_accept_tokens = num_accept[0]
-        first_draft_tokens = num_draft[0]
-        first_accept_rate = first_accept_tokens / first_draft_tokens
+    # Calculate the acceptance rates for the first and last runs.
+    first_accept_tokens = num_accept[0]
+    first_draft_tokens = num_draft[0]
+    first_accept_rate = first_accept_tokens / first_draft_tokens
 
-        # Take the diff since the stats are cumulative.
-        last_accept_tokens = num_accept[-1] - num_accept[-2]
-        last_draft_tokens = num_draft[-1] - num_draft[-2]
-        last_accept_rate = last_accept_tokens / last_draft_tokens
+    # Take the diff since the stats are cumulative.
+    last_accept_tokens = num_accept[-1] - num_accept[-2]
+    last_draft_tokens = num_draft[-1] - num_draft[-2]
+    last_accept_rate = last_accept_tokens / last_draft_tokens
 
-        # Expect the acceptance length to improve.
-        assert first_accept_tokens < last_accept_tokens
+    # Expect the acceptance length to improve.
+    assert first_accept_tokens < last_accept_tokens
 
-        # Expect the acceptance rate to improve.
-        assert first_accept_rate < last_accept_rate
+    # Expect the acceptance rate to improve.
+    assert first_accept_rate < last_accept_rate
 
-        # Heuristic: expect at least 85% acceptance rate at the end.
-        assert last_accept_rate > 0.85
+    # Heuristic: expect at least 85% acceptance rate at the end.
+    assert last_accept_rate > 0.85
 
-        del spec_llm
-        torch.cuda.empty_cache()
-        cleanup_dist_env_and_memory()
+    del spec_llm
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize(["model_setup", "mm_enabled"], [
