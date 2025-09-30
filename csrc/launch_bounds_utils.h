@@ -12,18 +12,18 @@
 // Families: 1024, 1536, 2048 threads/SM.
 #ifndef VLLM_MAX_THREADS_PER_SM
   #ifdef __CUDA_ARCH__
- 
+
     /* 1024 thr/SM: Turing (sm_75) */
     #if (__CUDA_ARCH__ == 750)
       #define VLLM_MAX_THREADS_PER_SM 1024
- 
+
     /* 1536 thr/SM: Ampere GA10x (sm_86/87), Ada (sm_89),
         GB20x consumer (sm_120/121) */
     #elif (__CUDA_ARCH__ == 860) || (__CUDA_ARCH__ == 870) || \
         (__CUDA_ARCH__ == 890) || (__CUDA_ARCH__ == 1200) ||  \
         (__CUDA_ARCH__ == 1210)
       #define VLLM_MAX_THREADS_PER_SM 1536
- 
+
     /* 2048 thr/SM: Volta (sm_70/72), Ampere GA100 (sm_80),
         Hopper (sm_90), Blackwell (sm_100/103), Thor (sm_110) */
     #elif (__CUDA_ARCH__ == 700) || (__CUDA_ARCH__ == 720) || \
@@ -31,17 +31,17 @@
         (__CUDA_ARCH__ == 1000) || (__CUDA_ARCH__ == 1030) || \
         (__CUDA_ARCH__ == 1100)
       #define VLLM_MAX_THREADS_PER_SM 2048
- 
+
     /* Fallback: use 2048 for unknown future CCs */
-     #else
+    #else
       #define VLLM_MAX_THREADS_PER_SM 2048
-     #endif
+    #endif
 
   #else
   /* Host pass (no __CUDA_ARCH__): neutral default */
     #define VLLM_MAX_THREADS_PER_SM 2048
   #endif
- #endif
+#endif
 
 // compute the number of blocks per SM to request in __launch_bounds__
 #define VLLM_BLOCKS_DIV(VAL) (VLLM_MAX_THREADS_PER_SM / (VAL))
