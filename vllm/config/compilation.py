@@ -77,6 +77,9 @@ class CUDAGraphMode(enum.Enum):
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         ]
 
+    def __str__(self) -> str:
+        return self.name
+
 
 @config
 @dataclass
@@ -383,6 +386,7 @@ class CompilationConfig:
         "vllm.linear_attention",
         "vllm.plamo2_mamba_mixer",
         "vllm.gdn_attention",
+        "vllm.sparse_attn_indexer",
     ]
 
     def compute_hash(self) -> str:
@@ -430,10 +434,11 @@ class CompilationConfig:
         if pass_config_exclude:
             exclude["pass_config"] = pass_config_exclude
 
-        return TypeAdapter(CompilationConfig).dump_json(
-            self,
-            exclude=exclude,  # type: ignore[arg-type]
-            exclude_unset=True).decode()
+        config = TypeAdapter(CompilationConfig).dump_python(self,
+                                                            exclude=exclude,
+                                                            exclude_unset=True)
+
+        return str(config)
 
     __str__ = __repr__
 
