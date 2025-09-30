@@ -272,6 +272,10 @@ class SpecDecodeBaseProposer:
         with set_forward_context(**forward_ctx_kwargs):
             ret_hidden_states = self.model(**model_kwargs)
             self.runner.log_toks("Draft forward", model_kwargs["input_ids"])
+            if self.runner.do_log:
+                logger.info("Draft forward positions: %s",
+                            model_kwargs["positions"].tolist())
+                logger.info("Draft attn_metadata: %s", attn_metadata)
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
@@ -442,6 +446,10 @@ class SpecDecodeBaseProposer:
                 ret_hidden_states = self.model(**model_kwargs)
                 self.runner.log_toks("Draft forward",
                                      model_kwargs["input_ids"])
+                if self.runner.do_log:
+                    logger.info("Draft forward positions: %s",
+                                model_kwargs["positions"].tolist())
+                    logger.info("Draft attn_metadata: %s", attn_metadata)
                 if not self.model_returns_tuple():
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states

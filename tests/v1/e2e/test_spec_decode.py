@@ -363,8 +363,7 @@ def test_draft_model_correctness(
     """Compare the outputs using and not using speculative decoding.
     In the greedy decoding case, the outputs must match EXACTLY."""
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    test_prompts = get_test_prompts(
-        mm_enabled=False, quiet=True)[:2]  # success for single prompt
+    test_prompts = get_test_prompts(mm_enabled=False, quiet=True)
 
     spec_llm = LLM(
         model=args.model,

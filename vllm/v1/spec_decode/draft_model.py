@@ -78,15 +78,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             common_attn_metadata: CommonAttentionMetadata):
         cad = common_attn_metadata
         batch_size = common_attn_metadata.batch_size()
-
-        # token_indices is [0, ..., N], extend by batch_size
-        # new_token_indices = \
-        #     self.arange[:len(target_token_ids) + len(next_token_ids)]
-        # token indices to sample must be increased
-        # by [+1, +2, ..., +batch_size]
-        # new_token_indices_to_sample = last_token_indices + self.arange[
-        #     1:batch_size + 1]
-
         # query start loc mus be increased by [+0, +1, +2, ..., +batch_size]
         new_query_start_loc = cad.query_start_loc + self.arange[:len(
             cad.query_start_loc)]
@@ -104,20 +95,12 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         new_max_seq_len = cad.max_seq_len + 1
         # block table tensor depends on num_requests, which doesn't change
         new_block_table_tensor = cad.block_table_tensor
-        # slot mapping depends on num_scheduled_tokens,
-        # which increased by batch_size
-        assert len(self.runner.input_batch.block_table.block_tables) == 1
-        # kv_cache_group_id = 0
-        # new_slot_mapping = self.runner.input_batch.block_table[
-        #     kv_cache_group_id].slot_mapping.gpu[:new_num_actual_tokens]
-
-        block_numbers = new_positions // self.block_size
-        block_ids = new_block_table_tensor.gather(dim=1,
-                                                  index=block_numbers.view(
-                                                      1, -1))
-        block_ids = block_ids.view(-1)
-        new_slot_mapping = (block_ids * self.block_size +
-                            new_positions % self.block_size)
+        # slot mappings are extended (interleaved) by the next serial id
+        last_slot_mapping_ids = cad.slot_mapping[cad.last_token_indices()]
+        new_slot_mapping, _ = append_new_toks(toks=cad.slot_mapping,
+                                              start_locs=cad.query_start_loc,
+                                              new_toks=last_slot_mapping_ids +
+                                              1)
 
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,

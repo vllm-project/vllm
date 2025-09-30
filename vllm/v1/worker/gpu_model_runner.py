@@ -184,7 +184,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.do_log = True
+        self.do_log = False
         if self.do_log:
             from transformers import AutoTokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -2144,8 +2144,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 bonus_token_ids,
                 sampling_metadata,
             )
-            t0 = output_token_ids[0]
-            self.log_toks("sampled token ids", t0[t0 != -1])
+            if self.do_log:
+                for idx, token_ids in enumerate(output_token_ids):
+                    self.log_toks(f"sampled token ids [{idx}]",
+                                  token_ids[token_ids != -1])
             sampler_output.sampled_token_ids = output_token_ids
             self._update_states_after_model_execute(output_token_ids)
 
@@ -2398,6 +2400,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **model_kwargs,
             )
         self.log_toks("Target forward", input_ids)
+        if self.do_log:
+            logger.info("Target forward positions: %s", positions.tolist())
+            logger.info("Target attn_metadata: %s",
+                        list(attn_metadata.values())[0])
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2477,7 +2483,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                 )
-            self.log_toks("draft token ids [0]", self._draft_token_ids[0])
+            if self.do_log:
+                for idx, draft_token_ids in enumerate(self._draft_token_ids):
+                    self.log_toks(f"draft token ids [{idx}]", draft_token_ids)
 
         use_padded_batch = self.speculative_config and \
             (self.speculative_config.use_eagle()

@@ -86,6 +86,9 @@ class CommonAttentionMetadata:
     def batch_size(self) -> int:
         return self.seq_lens_cpu.shape[0]
 
+    def last_token_indices(self) -> torch.Tensor:
+        return self.query_start_loc[1:] - 1
+
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
