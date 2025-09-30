@@ -571,6 +571,11 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_extend_flat_seqs(device: str):
+    """The extend_flat_seqs() function appends a single new value into multiple
+    sequences that are stored in a flat format. E.g.
+        [x1, x2, y1] and [x3, y2] become [x1, x2, x3, y1, y2]
+    """
+
     # fmt: off
     seqs = torch.tensor([11, 12, 13,
                          21, 22,
