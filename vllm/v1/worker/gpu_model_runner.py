@@ -95,6 +95,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -278,16 +279,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
-        self.suffix_cache = None
         if self.speculative_config and get_pp_group().is_last_rank:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.method == "suffix":
-                from arctic_inference.suffix_decoding import (
-                    SuffixDecodingCache)
-                self.suffix_cache = SuffixDecodingCache(
-                    self.speculative_config.suffix_decoding_max_tree_depth,
-                    self.speculative_config.suffix_decoding_max_cached_requests)
+                self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -2250,8 +2246,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        if self.suffix_cache is not None:
-            self._update_suffix_cache(valid_sampled_token_ids)
+        if isinstance(getattr(self, "drafter", None), SuffixDecodingProposer):
+            self.drafter.update(self.input_batch, valid_sampled_token_ids)
 
         return (
             num_nans_in_logits,
@@ -2277,33 +2273,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             yield
         finally:
             self.prepare_inputs_event.record()
-
-    def _update_suffix_cache(self, sampled_token_ids: list[list[int]]) -> None:
-        seen_req_ids = set()
-        for i, sampled_ids in enumerate(sampled_token_ids):
-            req_id = self.input_batch.req_ids[i]
-            seen_req_ids.add(req_id)
-
-            if not sampled_ids:
-                continue
-
-            index = self.input_batch.req_id_to_index[req_id]
-            if req_id not in self.suffix_cache.active_requests:
-                if req_id in self.suffix_cache.cached_requests:
-                    # Reset the suffix cache for this request.
-                    self.suffix_cache.evict_cached_response(req_id)
-                num_prompt_tokens = self.input_batch.num_prompt_tokens[index]
-                prompt_token_ids = (
-                    self.input_batch.token_ids_cpu[index, :num_prompt_tokens])
-                prompt_token_ids = prompt_token_ids.tolist()
-                self.suffix_cache.start_request(req_id, prompt_token_ids)
-
-            self.suffix_cache.add_active_response(req_id, sampled_ids)
-
-        # Stop requests that are not seen
-        for req_id in list(self.suffix_cache.active_requests):
-            if req_id not in seen_req_ids:
-                self.suffix_cache.stop_request(req_id)
 
     def _model_forward(
         self,
@@ -2596,8 +2565,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.token_ids_cpu,
                 self.input_batch.spec_decode_unsupported_reqs)
         elif self.speculative_config.method == "suffix":
-            draft_token_ids = self.propose_suffix_draft_token_ids(
-                sampled_token_ids)
+            assert isinstance(sampled_token_ids, list)
+            assert isinstance(self.drafter, SuffixDecodingProposer)
+            draft_token_ids = self.drafter.propose(
+                self.input_batch, sampled_token_ids)
         elif self.speculative_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)
@@ -2707,49 +2678,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
             )
-
-        return draft_token_ids
-
-    def propose_suffix_draft_token_ids(
-        self,
-        sampled_token_ids: list[list[int]],
-    ) -> list[list[int]]:
-        from arctic_inference.suffix_decoding import SuffixDecodingDraft
-        req_ids = self.input_batch.req_ids
-        config = self.speculative_config
-        draft_token_ids = []
-        for i, sampled_ids in enumerate(sampled_token_ids):
-            num_sampled_ids = len(sampled_ids)
-            if not num_sampled_ids:
-                # Skip speculative decoding.
-                draft_token_ids.append([])
-                continue
-
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
-            req_id = req_ids[i]
-            if req_id in self.input_batch.spec_decode_unsupported_reqs:
-                draft_token_ids.append([])
-                continue
-
-            num_tokens = self.input_batch.num_tokens_no_spec[i]
-            if num_tokens >= self.max_model_len:
-                # Skip requests that have already reached the max model length.
-                draft_token_ids.append([])
-                continue
-
-            start = max(0, num_tokens - config.suffix_decoding_max_tree_depth)
-            pattern = self.input_batch.token_ids_cpu[i, start:num_tokens]
-            pattern = pattern.tolist()
-            draft = self.suffix_cache.speculate(
-                req_id,
-                pattern,
-                max_spec_tokens=min(config.num_speculative_tokens,
-                                    self.max_model_len - num_tokens - 1),
-                max_spec_factor=config.suffix_decoding_max_spec_factor,
-                min_token_prob=config.suffix_decoding_min_token_prob)
-
-            draft_token_ids.append(draft.token_ids)
 
         return draft_token_ids
 
