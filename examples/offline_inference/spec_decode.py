@@ -134,6 +134,7 @@ def main():
         ]
     else:
         prompts = get_custom_mm_prompts(args.num_prompts)
+    ic(len(prompts))
 
     if args.spec_token_tree is not None:
         assert args.spec_token_tree_depth is None and args.spec_token_tree_branching is None, \
@@ -160,7 +161,7 @@ def main():
     # vanilla inference if num_spec_tokens == 0
     if args.num_spec_tokens == 0:
         speculative_config = None
-        print('No speculative decoding here because `args.num_spec_tokens == 0`.')
+        print('Ignore speculative decoding when `args.num_spec_tokens == 0`.')
     elif args.method == "eagle":
         eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B" if args.eagle_dir is None else args.eagle_dir
         speculative_config = {
@@ -283,7 +284,7 @@ def main():
     output_throughput = output_tokens / output_time if output_time > 0 else 0
     total_throughput = tokens / total_time
 
-    acceptance_length = 1 + (accepted_tokens / drafts) if drafts > 0 else 1
+    mean_acceptance_length = 1 + (accepted_tokens / drafts) if drafts > 0 else 1
     draft_utilization_rate = accepted_tokens / draft_tokens * 100 if draft_tokens > 0 else 0
 
     drafter_forward_times, _ = read_stats(outputs_dir / "drafter.csv")
@@ -309,7 +310,7 @@ def main():
         # "drafter_decode_forward_time": drafter_decode_forward_time, "target_decode_forward_time": target_decode_forward_time, "decode_forward_ratio": decode_forward_ratio,
         "input_throughput": input_throughput, "output_throughput": output_throughput, "total_throughput": total_throughput,
         "drafts": drafts, "draft_tokens": draft_tokens, "draft_utilization_rate": draft_utilization_rate,
-        "accepted_tokens": accepted_tokens, "acceptance_length": acceptance_length
+        "accepted_tokens": accepted_tokens, "mean_acceptance_length": mean_acceptance_length
     }
 
     # print stats to stdout
