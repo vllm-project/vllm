@@ -1228,7 +1228,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if (self.speculative_config
                     and spec_decode_common_attn_metadata is None):
-                if isinstance(getattr(self, "drafter", None), EagleProposer):
+                if isinstance(self.drafter, EagleProposer):
                     if (self.drafter.attn_layer_names[0]
                             in kv_cache_group_spec.layer_names):
                         spec_decode_common_attn_metadata = common_attn_metadata
@@ -2246,7 +2246,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        if isinstance(getattr(self, "drafter", None), SuffixDecodingProposer):
+        if (self.speculative_config and
+                isinstance(self.drafter, SuffixDecodingProposer)):
             self.drafter.update(self.input_batch, valid_sampled_token_ids)
 
         return (
