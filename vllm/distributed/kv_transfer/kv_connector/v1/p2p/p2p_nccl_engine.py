@@ -598,7 +598,22 @@ class P2pNcclEngine:
             if all_layers_recv_done:
                 logger.debug("request_id:%s all layers recv done", request_id)
                 finished_recving.add(request_id)
+        
+        # Clean up memory pool addresses for finished requests
         for request_id in finished_recving:
+            for layer_name in no_compile_layers:
+                tensor_id = request_id + "#" + layer_name
+                if tensor_id in self.recv_store:
+                    with self.recv_store_cv:
+                        logger.debug("pop tensor_id:%s from recv_store", tensor_id)
+                        tensor = self.recv_store.pop(tensor_id, None)
+                    if isinstance(tensor, tuple):
+                        addr, _, _ = tensor
+                        self.pool.free(addr)
+                        logger.debug(
+                            "Freed memory pool address %d for tensor_id:%s", 
+                            addr, tensor_id)
+            
             self.recv_request_id_to_done_tensor_ids.pop(request_id, None)
             self.recv_request_id_to_tensor_ids.pop(request_id, None)
 

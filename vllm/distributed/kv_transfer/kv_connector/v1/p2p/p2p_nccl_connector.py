@@ -147,27 +147,49 @@ class P2pNcclConnector(KVConnectorBase_V1):
             """
             if (self._use_mla or layer.shape[1] == 2):  # MLA or FlashInfer
                 num_block = kv_cache.shape[0]
-                self.check_tensors_except_dim(layer, kv_cache, 0)
-                if len(block_ids) == num_block:
+                num_available_blocks = len(block_ids)
+                
+                if num_available_blocks == num_block:
+                    # Perfect match - no truncation needed
+                    self.check_tensors_except_dim(layer, kv_cache, 0)
                     layer[block_ids, ...] = kv_cache
                 else:
-                    layer[block_ids[:num_block], ...] = kv_cache
+                    # Mismatch - truncate to the smaller size
+                    min_blocks = min(num_available_blocks, num_block)
+                    truncated_block_ids = block_ids[:min_blocks]
+                    truncated_kv_cache = kv_cache[:min_blocks, ...]
+                    
+                    # Check compatibility after truncation
+                    self.check_tensors_except_dim(layer, truncated_kv_cache, 0)
+                    layer[truncated_block_ids, ...] = truncated_kv_cache
+                    
                     logger.warning(
-                        "🚧kv_cache does not match, block_ids:%d, "
-                        "num_block:%d, request_id:%s", len(block_ids),
-                        num_block, request_id)
+                        "🚧kv_cache size mismatch - truncated to %d blocks. "
+                        "block_ids:%d, kv_cache_blocks:%d, request_id:%s", 
+                        min_blocks, num_available_blocks, num_block, request_id)
 
             elif layer.shape[0] == 2:  # FlashAttention
                 num_block = kv_cache.shape[1]
-                self.check_tensors_except_dim(layer, kv_cache, 1)
-                if len(block_ids) == num_block:
+                num_available_blocks = len(block_ids)
+                
+                if num_available_blocks == num_block:
+                    # Perfect match - no truncation needed
+                    self.check_tensors_except_dim(layer, kv_cache, 1)
                     layer[:, block_ids, ...] = kv_cache
                 else:
-                    layer[:, block_ids[:num_block], ...] = kv_cache
+                    # Mismatch - truncate to the smaller size
+                    min_blocks = min(num_available_blocks, num_block)
+                    truncated_block_ids = block_ids[:min_blocks]
+                    truncated_kv_cache = kv_cache[:, :min_blocks, ...]
+                    
+                    # Check compatibility after truncation
+                    self.check_tensors_except_dim(layer, truncated_kv_cache, 1)
+                    layer[:, truncated_block_ids, ...] = truncated_kv_cache
+                    
                     logger.warning(
-                        "🚧kv_cache does not match, block_ids:%d, "
-                        "num_block:%d, request_id:%s", len(block_ids),
-                        num_block, request_id)
+                        "🚧kv_cache size mismatch - truncated to %d blocks. "
+                        "block_ids:%d, kv_cache_blocks:%d, request_id:%s", 
+                        min_blocks, num_available_blocks, num_block, request_id)
             self.p2p_nccl_engine.have_injected_tensor_id(tensor_id)
 
         # Get the metadata
@@ -471,7 +493,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self.chunked_prefill.pop(request.request_id, None)
 
-        return self._async_transfer, None
+        return self._async_transfer and self.is_producer, None
 
     # ==============================
     # Static methods
