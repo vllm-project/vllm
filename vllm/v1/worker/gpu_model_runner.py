@@ -2367,7 +2367,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        logger.info(f"========= FWD: {ubatch_slices=}, {cudagraph_runtime_mode=}, {num_tokens_across_dp=}")
+        logger.info(f"========= FWD: {ubatch_slices=}, {cudagraph_runtime_mode=}, {num_tokens_across_dp=}, {attn_metadata=}")
         with (set_forward_context(
                 attn_metadata,
                 self.vllm_config,
