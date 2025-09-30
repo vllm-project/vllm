@@ -350,6 +350,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
                                                  dtype=torch.int32)
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        if self.dcp_world_size > 1:
+            self.cp_seq_lens = self._make_buffer(self.max_num_reqs,
+                                                 dtype=torch.int32)
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
@@ -1222,6 +1225,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                cp_seq_lens=self.cp_seq_lens.gpu[:num_reqs]
+                if self.dcp_world_size > 1 else None,
             )
 
             if (self.speculative_config
@@ -3129,7 +3134,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     block_table[kv_cache_group_id].get_device_tensor(num_reqs),
                     slot_mapping=self.input_batch.block_table[
                         kv_cache_group_id].slot_mapping.gpu[:num_tokens],
-                    causal=True)
+                    causal=True,
+                    cp_seq_lens=self.cp_seq_lens.gpu[:num_reqs]
+                    if self.dcp_world_size > 1 else None,
+                )
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     if ubatch_slices is not None:
                         common_attn_metadata_list = split_attn_metadata(

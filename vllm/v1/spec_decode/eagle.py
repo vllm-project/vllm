@@ -558,6 +558,7 @@ class EagleProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
+            cp_seq_lens=common_attn_metadata.cp_seq_lens,
         )
 
         token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1 \
@@ -831,6 +832,7 @@ class EagleProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
+            cp_seq_lens=common_attn_metadata.cp_seq_lens,
         )
 
         return spec_common_attn_metadata, token_indices
