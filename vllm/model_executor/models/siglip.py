@@ -476,8 +476,8 @@ class SiglipVisionModel(nn.Module):
         return self.vision_model.embeddings.patch_embedding
 
     @property
-    def device(self):
-        return next(self.parameters()).device
+    def dtype(self):
+        return self.get_input_embeddings().weight.dtype
 
     def forward(
         self,
