@@ -16,7 +16,7 @@ import torch
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.transformers_utils.processor import cached_processor_from_config, DYNAMIC_KEYS
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
 from vllm.utils import (flatten_2d_lists, full_groupby,
@@ -1287,6 +1287,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _to_mm_items(
         self,
         mm_data: MultiModalDataDict,
+        *,
+        io_overrides: Optional[dict[str, dict[str, object]]] = None,
     ) -> MultiModalDataItems:
         """
         Normalize
@@ -1295,7 +1297,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before passing them to
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
         """
-        mm_items = self.data_parser.parse_mm_data(mm_data)
+        mm_items = self.data_parser.parse_mm_data(mm_data, io_overrides=io_overrides or {})
         for modality, items in mm_items.items():
             self.validate_num_items(modality, len(items))
 
@@ -2024,7 +2026,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        mm_items = self._to_mm_items(mm_data)
+        # get IO overrides pre request
+        io_overrides = self._get_io_overrides(hf_processor_mm_kwargs)
+        # parse mm_data to mm_items with io_overrides
+        mm_items = self._to_mm_items(mm_data, io_overrides=io_overrides)
 
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
@@ -2063,6 +2068,24 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_hashes=mm_info.hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
+    
+    def _get_io_overrides(
+        self,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> dict[str, dict[str, object]]:
+        """
+        Get IO overrides for parsing `mm_data` in `self.apply`.
+        By default, no overrides are applied.
+        Example:
+            return {"video": {"fps": 2.0}}
+        """
+        try:
+            proc = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        except Exception:
+            return {}
+        dynamic_overrides = getattr(proc, "_vllm_dynamic_mm_kwargs", {}) or {}
+        dynamic_overrides = {k: v for k, v in dynamic_overrides.items() if k in DYNAMIC_KEYS}
+        return  {"video": dynamic_overrides} if dynamic_overrides else {}
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):

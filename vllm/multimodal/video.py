@@ -272,13 +272,29 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         video_loader_backend = envs.VLLM_VIDEO_LOADER_BACKEND
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
-    def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
-        return self.video_loader.load_bytes(data,
-                                            num_frames=self.num_frames,
-                                            **self.kwargs)
+    def load_bytes(self,
+                   data:bytes,
+                   *,
+                   request_overrides:Optional[dict[str,Any]]=None
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        # request_overrides: 仅本次调用生效（例如 {'fps': 2.0, 'max_duration': 120}）
+        effective = dict(self.kwargs)
+        if request_overrides:
+            effective.update(request_overrides)
+        frames, metadata = self.video_loader.load_bytes(
+            data,
+            num_frames=self.num_frames,
+            **effective)
+        if request_overrides:
+            metadata = dict(metadata)
+            metadata.setdefault('request_overrides', {})
+            metadata['request_overrides'].update(request_overrides)
+        return frames, metadata
 
     def load_base64(self, media_type: str,
-                    data: str) -> tuple[npt.NDArray, dict[str, Any]]:
+                    data: str,
+                    request_overrides: Optional[dict[str, Any]] = None
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         if media_type.lower() == "video/jpeg":
             load_frame = partial(
                 self.image_io.load_base64,
@@ -290,13 +306,13 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
                 for frame_data in data.split(",")
             ]), {}
 
-        return self.load_bytes(base64.b64decode(data))
+        return self.load_bytes(base64.b64decode(data), request_overrides=request_overrides)
 
-    def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_file(self, filepath: Path, request_overrides: Optional[dict[str, Any]] = None) -> tuple[npt.NDArray, dict[str, Any]]:
         with filepath.open("rb") as f:
             data = f.read()
 
-        return self.load_bytes(data)
+        return self.load_bytes(data, request_overrides=request_overrides)
 
     def encode_base64(
         self,
