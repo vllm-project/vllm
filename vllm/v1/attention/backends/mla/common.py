@@ -359,7 +359,7 @@ class CudnnPrefillMetadata(MLACommonPrefillMetadata):
 class MLACommonDecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
-    cp_tot_seq_lens: torch.Tensor
+    cp_tot_seq_lens: Optional[torch.Tensor]
 
 
 D = TypeVar("D", bound=MLACommonDecodeMetadata)
@@ -626,10 +626,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         prefill.prefill_chunks = self._fi_prefill_chunks
 
     def _build_decode(
-            self, block_table_tensor: torch.Tensor, seq_lens_cpu: torch.Tensor,
-            seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
-            query_start_loc_device: torch.Tensor, num_decode_tokens: int,
-            cp_tot_seq_lens_device: torch.Tensor) -> MLACommonDecodeMetadata:
+        self,
+        block_table_tensor: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        seq_lens_device: torch.Tensor,
+        query_start_loc_cpu: torch.Tensor,
+        query_start_loc_device: torch.Tensor,
+        num_decode_tokens: int,
+        cp_tot_seq_lens_device: Optional[torch.Tensor],
+    ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,

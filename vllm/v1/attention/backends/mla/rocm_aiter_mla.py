@@ -104,12 +104,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                                           dtype=torch.int32,
                                           device=device)
 
-    def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens_cpu: torch.Tensor,
-                      seq_lens_device: torch.Tensor,
-                      query_start_loc_cpu: torch.Tensor,
-                      query_start_loc_device: torch.Tensor,
-                      num_decode_tokens: int) -> AiterMLADecodeMetadata:
+    def _build_decode(
+        self,
+        block_table_tensor: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        seq_lens_device: torch.Tensor,
+        query_start_loc_cpu: torch.Tensor,
+        query_start_loc_device: torch.Tensor,
+        num_decode_tokens: int,
+        cp_tot_seq_lens_device: Optional[torch.Tensor],
+    ) -> AiterMLADecodeMetadata:
         page_size = self.kv_cache_spec.block_size
         block_table_bounds = (seq_lens_device + page_size - 1) // page_size
         device = self.device
@@ -164,7 +168,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             paged_kv_indptr=paged_kv_indptr,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len,
-            qo_indptr=qo_indptr)
+            qo_indptr=qo_indptr,
+            cp_tot_seq_lens=cp_tot_seq_lens_device,
+        )
 
         return attn_metadata
 
