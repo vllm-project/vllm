@@ -1117,6 +1117,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                  client_count: int = 1,
                  client_index: int = 0):
 
+
         self.client_count = client_count
 
         # To route aborts to the correct engine.
@@ -1155,7 +1156,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine
+
         return chosen_engine
+
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
