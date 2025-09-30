@@ -119,6 +119,8 @@ class CudaPlatformBase(Platform):
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing
         if model_config is not None and model_config.use_mla:
+            use_sparse = hasattr(vllm_config.model_config.hf_config,
+                                 "index_topk")
             # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
             # then we default to FlashMLA backend for non-blackwell GPUs,
             # else we default to CutlassMLA. For each case, we force the
@@ -165,6 +167,12 @@ class CudaPlatformBase(Platform):
                     "Forcing kv cache block size to 64 for FlashInferMLA "
                     "backend.")
 
+            # TODO(Chen): remove this hacky code
+            if use_sparse and cache_config.block_size != 64:
+                cache_config.block_size = 64
+                logger.info(
+                    "Forcing kv cache block size to 64 for FlashMLASparse "
+                    "backend.")
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
@@ -221,7 +229,7 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla,
-                             has_sink) -> str:
+                             has_sink, use_sparse) -> str:
         if use_mla:
             if not use_v1:
                 raise RuntimeError(
@@ -230,6 +238,11 @@ class CudaPlatformBase(Platform):
 
             from vllm.attention.ops.flashmla import is_flashmla_supported
             from vllm.attention.utils.fa_utils import flash_attn_supports_mla
+
+            if use_sparse:
+                logger.info_once("Using Sparse MLA backend on V1 engine.")
+                return ("vllm.v1.attention.backends.mla.flashmla_sparse."
+                        "FlashMLASparseBackend")
 
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None and cls.is_device_capability(100)
