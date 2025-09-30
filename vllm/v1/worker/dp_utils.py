@@ -6,7 +6,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
@@ -18,7 +17,7 @@ from vllm.v1.worker.ubatch_utils import (UBatchSlices, check_ubatch_thresholds,
 logger = init_logger(__name__)
 
 
-def _get_device_and_group():
+def _get_device_and_group(parallel_config: ParallelConfig):
     device = current_platform.device_type
     group = get_dp_group().device_group
 
@@ -26,7 +25,7 @@ def _get_device_and_group():
     # point that could adversely affect performance of vllm with asynch
     # scheduling. This environment variable exists to quickly disable
     # this optimization if we run into this case.
-    if envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION:
+    if parallel_config.disable_nccl_for_dp_synchronization:
         logger.info_once(
             "Using CPU all reduce to syncronize DP padding between ranks.")
         device = "cpu"
@@ -46,10 +45,11 @@ def _run_ar(
     should_ubatch: bool,
     orig_num_tokens_per_ubatch: int,
     padded_num_tokens_per_ubatch: int,
+    parallel_config: ParallelConfig,
 ) -> torch.Tensor:
     dp_size = get_dp_size()
     dp_rank = get_dp_rank()
-    device, group = _get_device_and_group()
+    device, group = _get_device_and_group(parallel_config)
     tensor = torch.zeros(3, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
@@ -81,6 +81,7 @@ def _synchronize_dp_ranks(
     num_tokens_unpadded: int,
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
+    parallel_config: ParallelConfig,
 ) -> tuple[bool, Optional[torch.Tensor]]:
     """
     1. Decides if each DP rank is going to microbatch. Either all ranks
@@ -106,6 +107,7 @@ def _synchronize_dp_ranks(
         should_ubatch=should_attempt_ubatching,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
+        parallel_config=parallel_config,
     )
 
     # Ensure that each rank is processing the same nuber of tokens
@@ -159,7 +161,8 @@ def coordinate_batch_across_dp(
         should_attempt_ubatching = False
 
     (should_ubatch, num_tokens_after_padding) = _synchronize_dp_ranks(
-        num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching)
+        num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching,
+        parallel_config)
 
     # Don't microbatch unless every other DP worker is also microbatching
     if not should_ubatch:
