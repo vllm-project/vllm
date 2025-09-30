@@ -238,6 +238,10 @@ class Olmo3ReasoningParser(ReasoningParser):
         self.buffer = Olmo3ReasoningBuffer(think_start=self.think_start,
                                            think_end=self.think_end)
 
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        text = self.model_tokenizer.decode(input_ids)
+        return self.think_end in text
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # for Olmo 3 streaming reason parsing, the stream parse
         # will call first, and the same token will be called in
