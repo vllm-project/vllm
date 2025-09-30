@@ -86,10 +86,11 @@ def is_git_installation() -> bool:
     """Check if vllm is being installed from git (e.g., pip install git+https://...)"""
     try:
         # Check if we're in a git repository
-        if not os.path.exists('.git') and not subprocess.run(
+        result = subprocess.run(
             ['git', 'rev-parse', '--git-dir'], 
             capture_output=True, text=True
-        ).returncode == 0:
+        )
+        if result.returncode != 0:
             return False
         
         # Check if repository is clean (no uncommitted changes)
@@ -675,29 +676,8 @@ package_data = {
     ]
 }
 
-# If using precompiled, extract and patch package_data (in advance of setup)
-if envs.VLLM_USE_PRECOMPILED:
-    assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
-    wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
-    if wheel_location is not None:
-        wheel_url = wheel_location
-    else:
-        base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
-        wheel_url = precompiled_wheel_utils.build_wheel_url(base_commit)
-        nightly_wheel_url = precompiled_wheel_utils.build_wheel_url("nightly")
-        from urllib.request import urlopen
-        try:
-            with urlopen(wheel_url) as resp:
-                if resp.status != 200:
-                    wheel_url = nightly_wheel_url
-        except Exception as e:
-            print(f"[warn] Falling back to nightly wheel: {e}")
-            wheel_url = nightly_wheel_url
-
-    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
-        wheel_url)
-    for pkg, files in patch.items():
-        package_data.setdefault(pkg, []).extend(files)
+# Note: precompiled wheel extraction is now handled later, 
+# after auto-detection logic runs
 
 if _no_device():
     ext_modules = []
@@ -705,46 +685,83 @@ if _no_device():
 if not ext_modules:
     cmdclass = {}
 else:
+    # Will be updated later if auto-detection enables precompiled wheels
     cmdclass = {
         "build_ext":
         precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
     }
 
-# Auto-enable precompiled wheels for git installations if conditions are met
+# Auto-detect and enable precompiled wheels for git installations when VLLM_USE_PRECOMPILED is not explicitly set
 auto_use_precompiled = False
-if (not envs.VLLM_USE_PRECOMPILED and envs.VLLM_AUTO_USE_PRECOMPILED and 
-    _is_cuda() and is_git_installation()):
+selected_commit_for_wheels = None
+
+# If VLLM_USE_PRECOMPILED is None (not explicitly set), try to auto-detect
+if envs.VLLM_USE_PRECOMPILED is None and _is_cuda() and is_git_installation():
     try:
-        current_commit = subprocess.check_output(
-            ['git', 'rev-parse', 'HEAD'], text=True
+        # Get the last 10 commits to check for precompiled wheels
+        # Sometimes the latest commit doesn't have wheels built yet
+        commits_output = subprocess.check_output(
+            ['git', 'log', '-10', '--pretty=format:%H'], text=True
         ).strip()
+        commits = commits_output.split('\n')
         
-        if precompiled_wheel_utils.check_precompiled_wheels_available(current_commit):
-            auto_use_precompiled = True
-            print("✓ Detected git installation with available precompiled wheels")
-            print(f"  Using precompiled wheels for commit: {current_commit}")
-            print("  This will significantly speed up installation!")
-            print("  To disable: export VLLM_AUTO_USE_PRECOMPILED=0")
+        for commit in commits:
+            if precompiled_wheel_utils.check_precompiled_wheels_available(commit):
+                selected_commit_for_wheels = commit
+                auto_use_precompiled = True
+                break
+        
+        if auto_use_precompiled:
+            current_commit = subprocess.check_output(
+                ['git', 'rev-parse', 'HEAD'], text=True
+            ).strip()
             
-            # Update cmdclass to use precompiled build
-            if ext_modules:
-                cmdclass["build_ext"] = precompiled_build_ext
-                
-            # Extract wheels if not already done
-            wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
-            if wheel_location is not None:
-                wheel_url = wheel_location
+            print("✓ Detected git installation with available precompiled wheels")
+            if selected_commit_for_wheels == current_commit:
+                print(f"  Using precompiled wheels for commit: {selected_commit_for_wheels}")
             else:
-                wheel_url = precompiled_wheel_utils.build_wheel_url(current_commit)
-                
-            patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(wheel_url)
-            for pkg, files in patch.items():
-                package_data.setdefault(pkg, []).extend(files)
+                print(f"  Using precompiled wheels for commit: {selected_commit_for_wheels}")
+                print(f"  (Current commit {current_commit[:8]} does not have wheels yet)")
+            print("  This will significantly speed up installation!")
+            print("  To disable: export VLLM_USE_PRECOMPILED=0")
         else:
             print("ⓘ Git installation detected, but no precompiled wheels available")
-            print("  Falling back to building from source")
+            print("  Checked last 10 commits, falling back to building from source")
     except Exception as e:
         logger.debug(f"Auto-precompiled wheel detection failed: {e}")
+
+# Handle explicit VLLM_USE_PRECOMPILED=1 or auto-detected case
+if envs.VLLM_USE_PRECOMPILED or auto_use_precompiled:
+    assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+    
+    # Update cmdclass to use precompiled build
+    if ext_modules:
+        cmdclass["build_ext"] = precompiled_build_ext
+        
+    # Extract wheels
+    wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
+    if wheel_location is not None:
+        wheel_url = wheel_location
+    else:
+        # Use selected commit from auto-detection, or get base commit for explicit mode
+        if selected_commit_for_wheels:
+            wheel_url = precompiled_wheel_utils.build_wheel_url(selected_commit_for_wheels)
+        else:
+            base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+            wheel_url = precompiled_wheel_utils.build_wheel_url(base_commit)
+            nightly_wheel_url = precompiled_wheel_utils.build_wheel_url("nightly")
+            from urllib.request import urlopen
+            try:
+                with urlopen(wheel_url) as resp:
+                    if resp.status != 200:
+                        wheel_url = nightly_wheel_url
+            except Exception as e:
+                print(f"[warn] Falling back to nightly wheel: {e}")
+                wheel_url = nightly_wheel_url
+            
+    patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(wheel_url)
+    for pkg, files in patch.items():
+        package_data.setdefault(pkg, []).extend(files)
 
 setup(
     # static metadata should rather go in pyproject.toml
