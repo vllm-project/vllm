@@ -675,11 +675,13 @@ class ModelConfig:
         # Overwrite with user-specified values
         if self.runner != "auto":
             runner = self.runner
-        if self.convert not in ("auto", "none"):
+        if self.convert not in {"auto", "none"}:
             convert = self.convert
         # Fall back to default values if still not set
-        runner = runner or "generate"
-        convert = convert or "embed"
+        if runner is None:
+            runner = "generate"
+        if convert in {None, "none"}:
+            convert = "embed"
         # Resolve Transformers backend pooling classes
         if runner == "pooling":
             if convert == "embed":
