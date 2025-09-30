@@ -311,6 +311,7 @@ class DeepseekV2Attention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        topk_indices_buffer: Optional[torch.Tensor] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -328,6 +329,8 @@ class DeepseekV2Attention(nn.Module):
         self.scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
+        assert topk_indices_buffer is None, "topk_indices_buffer is not \
+        supported for DeepseekV2Attention"
 
         if self.q_lora_rank is not None:
             self.q_a_proj = ReplicatedLinear(self.hidden_size,
@@ -984,8 +987,10 @@ class DeepseekV2MLAAttention(nn.Module):
 
 class DeepseekV2DecoderLayer(nn.Module):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str,
-                 topk_indices_buffer: Optional[torch.Tensor]) -> None:
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str,
+                 topk_indices_buffer: Optional[torch.Tensor] = None) -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
