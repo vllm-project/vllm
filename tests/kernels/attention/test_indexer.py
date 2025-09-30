@@ -2,14 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 
+import pytest
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.utils import cdiv
+from vllm.utils import cdiv, has_tilelang
 from vllm.utils.deep_gemm import (calc_diff, fp8_mqa_logits,
                                   fp8_paged_mqa_logits, get_num_sms,
                                   get_paged_mqa_logits_metadata)
-from vllm.utils.tile_lang_kernels import act_quant, fp8_index
+
+if not has_tilelang():
+    pytest.skip(
+        "tilelang not found, skipping all related tests",
+        allow_module_level=True,
+    )
+
+from vllm.utils.tilelang_kernels import act_quant, fp8_index
 from vllm.v1.attention.backends.mla.indexer import kv_spans_from_batches
 
 
