@@ -97,8 +97,9 @@ class DeepseekV32IndexerMetadata:
 
 
 # TODO (zyongye) optimize this, this is now vibe coded
-def kv_spans_from_batches(start_seq_loc: torch.Tensor,
-                          seq_len_per_batch: torch.Tensor):
+def kv_spans_from_batches(
+        start_seq_loc: torch.Tensor,
+        seq_len_per_batch: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
       start_seq_loc: 1D long tensor [B+1], cumulative counts of 
