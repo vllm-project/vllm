@@ -415,9 +415,9 @@ class Scheduler(SchedulerInterface):
                                            global_cache_hit_threshold)
 
                     # Check if cache hit is above threshold
-                    prompt_len = len(request.prompt_token_ids)
-                    cache_hit_percent = num_computed_tokens / prompt_len \
-                        if prompt_len > 0 else 0.0
+                    cache_hit_percent = \
+                        num_computed_tokens / request.num_prompt_tokens \
+                        if request.num_prompt_tokens > 0 else 0.0
                     if cache_hit_percent < cache_hit_threshold:
                         threshold_source = ("request"
                                             if request.cache_hit_threshold
@@ -1028,8 +1028,11 @@ class Scheduler(SchedulerInterface):
         # Handle requests that were rejected due to low cache hit rate.
         if self.cache_hit_below_threshold_request_ids:
             for req_id in self.cache_hit_below_threshold_request_ids:
+                req = self.requests.get(req_id)
+                if req is None:
+                    # The request is already finished, e.g. aborted.
+                    continue
                 # Add EngineCoreOutput for this Request.
-                req = self.requests[req_id]
                 req.status = RequestStatus.FINISHED_CACHE_HIT_BELOW_THRESHOLD
                 outputs[req.client_index].append(
                     EngineCoreOutput(
