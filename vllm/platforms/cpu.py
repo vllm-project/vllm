@@ -93,11 +93,14 @@ class CpuPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
+                             has_sink: bool, use_sparse: bool) -> str:
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
             raise NotImplementedError("MLA is not supported on CPU.")
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on CPU.")
         logger.info("Using Torch SDPA backend.")
         if not use_v1:
             raise ValueError("CPU backend only supports V1.")
@@ -327,23 +330,6 @@ class CpuPlatform(Platform):
     @classmethod
     def supports_structured_output(cls) -> bool:
         return True
-
-    @classmethod
-    def supports_v1(cls, model_config) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
-        return True
-
-    @classmethod
-    def default_v1(cls, model_config) -> bool:
-        """Returns whether the current platform can use v1 by default for the
-        supplied model configuration.
-        """
-        arch = cls.get_cpu_architecture()
-        return (cls.supports_v1(model_config)
-                and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC,
-                             CpuArchEnum.ARM, CpuArchEnum.S390X))
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

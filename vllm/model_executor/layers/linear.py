@@ -22,6 +22,7 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
+                                           ModelWeightParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
@@ -34,6 +35,7 @@ from vllm.utils import GiB_bytes
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
+    "UnquantizedLinearMethod",
     "CompressedTensorsLinearMethod",
     "CompressedTensorsLinearTransformMethod",
     "BitBLASLinearMethod",
@@ -196,10 +198,14 @@ class UnquantizedLinearMethod(LinearMethodBase):
         # The amount of memory allocated for the weights is
         # sum(output_partition_sizes) * input_size_per_partition.
         try:
-            weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                           input_size_per_partition,
-                                           dtype=params_dtype),
-                               requires_grad=False)
+            weight_loader = extra_weight_attrs.pop("weight_loader")
+            weight = ModelWeightParameter(data=torch.empty(
+                sum(output_partition_sizes),
+                input_size_per_partition,
+                dtype=params_dtype),
+                                          input_dim=1,
+                                          output_dim=0,
+                                          weight_loader=weight_loader)
         except torch.cuda.OutOfMemoryError as e:
             logger.error("Failed to create unquantized linear weights: %s", e)
             if torch.cuda.is_available():
@@ -212,7 +218,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 "Failed to create unquantized linear weights. "
                 "This may be caused by insufficient memory to allocate "
                 "the weight.") from e
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
+
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
@@ -377,24 +383,13 @@ class ReplicatedLinear(LinearBase):
     def forward(
         self,
         x: torch.Tensor,
-        x_quant_scales: torch.Tensor = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
-        from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
-            QuarkLinearMethod)
-        if isinstance(self.quant_method, QuarkLinearMethod):
-            output = self.quant_method.apply(self,
-                                             x,
-                                             bias,
-                                             x_quant_scales=x_quant_scales)
-        else:
-            assert x_quant_scales is None, f"x_quant_scales input \
-                is not supported for {self.quant_method.__class__}"
 
-            output = self.quant_method.apply(self, x, bias)
-
+        output = self.quant_method.apply(self, x, bias)
         output_bias = self.bias if self.skip_bias_add else None
+
         if not self.return_bias:
             return output
         return output, output_bias
@@ -552,22 +547,12 @@ class ColumnParallelLinear(LinearBase):
     def forward(
         self,
         input_,
-        x_quant_scales: torch.Tensor = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
         assert self.quant_method is not None
-        from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
-            QuarkLinearMethod)
-        if isinstance(self.quant_method, QuarkLinearMethod):
-            output_parallel = self.quant_method.apply(
-                self, input_, bias, x_quant_scales=x_quant_scales)
-        else:
-            assert x_quant_scales is None, f"x_quant_scales input \
-                is not supported for {self.quant_method.__class__}"
-
-            output_parallel = self.quant_method.apply(self, input_, bias)
+        output_parallel = self.quant_method.apply(self, input_, bias)
 
         if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
@@ -1355,7 +1340,6 @@ class RowParallelLinear(LinearBase):
     def forward(
         self,
         input_,
-        x_quant_scales=None
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.input_is_parallel:
             input_parallel = input_
@@ -1369,17 +1353,7 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
-            QuarkLinearMethod)
-        if isinstance(self.quant_method, QuarkLinearMethod):
-            output_parallel = self.quant_method.apply(
-                self, input_parallel, bias_, x_quant_scales=x_quant_scales)
-        else:
-            assert x_quant_scales is None, f"x_quant_scales input \
-                is not supported for {self.quant_method.__class__}"
-
-            output_parallel = self.quant_method.apply(self, input_parallel,
-                                                      bias_)
+        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)

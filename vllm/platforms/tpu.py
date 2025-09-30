@@ -49,9 +49,11 @@ class TpuPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink) -> str:
-        if (selected_backend != _Backend.PALLAS
-                and selected_backend != _Backend.PALLAS_VLLM_V1):
+                             has_sink, use_sparse) -> str:
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on TPU.")
+        if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if not use_v1:
@@ -172,11 +174,6 @@ class TpuPlatform(Platform):
 
     @classmethod
     def use_all_gather(cls) -> bool:
-        return True
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        # V1 support on TPU is experimental
         return True
 
     @classmethod

@@ -36,9 +36,9 @@ try:
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: Optional[torch.dtype] = torch.bfloat16,
+        x_scales: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         M = x.shape[0]
         if rocm_use_aiter_fp4_asm_gemm:
@@ -236,5 +236,5 @@ class QuarkW4A4MXFP4(QuarkScheme):
             return F.linear(x, dq_w, bias)
         else:
             return torch.ops.vllm.gemm_with_dynamic_quant(
-                x, layer.weight, layer.weight_scale, x_quant_scales,
+                x, layer.weight, layer.weight_scale,
                 self.rocm_use_aiter_fp4_asm_gemm, self.out_dtype)
