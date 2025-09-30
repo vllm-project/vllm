@@ -208,9 +208,9 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             self.text_experts_gate = ReplicatedLinear(
                 config.hidden_size,
                 config.moe_num_experts[0],
-                params_dtype=torch.float32,
                 bias=False,
-                quant_config=quant_config,
+                params_dtype=torch.float32,
+                quant_config=None,
                 prefix=f"{prefix}.text_experts_gate")
 
             self.text_experts = FusedMoE(
@@ -240,7 +240,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 config.moe_num_experts[1],
                 bias=False,
                 params_dtype=torch.float32,
-                quant_config=quant_config,
+                quant_config=None,
                 prefix=f"{prefix}.vision_experts_gate")
 
             self.vision_experts = FusedMoE(
