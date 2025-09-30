@@ -6,7 +6,6 @@ import requests
 
 from tests.utils import RemoteOpenAIServer
 
-pytestmark = pytest.mark.cpu_test
 # Prometheus metrics utilities for testing
 
 

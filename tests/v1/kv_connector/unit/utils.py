@@ -4,7 +4,6 @@ import tempfile
 from collections import defaultdict
 from typing import Any, Callable, Optional
 
-import pytest
 import torch
 
 from vllm import SamplingParams
@@ -24,8 +23,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
-
-pytestmark = pytest.mark.cpu_test
 
 EOS_TOKEN_ID = 50256
 

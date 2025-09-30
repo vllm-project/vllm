@@ -12,8 +12,6 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.config import ModelDType, TokenizerMode
 
-pytestmark = pytest.mark.cpu_test
-
 
 @dataclass(frozen=True)
 class _HfExamplesInfo:
