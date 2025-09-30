@@ -2104,9 +2104,9 @@ class ResponseInProgressEvent(OpenAIResponseInProgressEvent):
 
 
 StreamingResponsesResponse: TypeAlias = Union[
-    ResponseCreatedEvent,
-    ResponseInProgressEvent,
-    ResponseCompletedEvent,
+    "ResponseCreatedEvent",
+    "ResponseInProgressEvent",
+    "ResponseCompletedEvent",
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseContentPartAddedEvent,
