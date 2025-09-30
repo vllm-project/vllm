@@ -51,9 +51,9 @@ class RejectionSampler(nn.Module):
     def __init__(self, sampler: Sampler):
         super().__init__()
         self.sampler = sampler
-        self.return_processed_logprobs = self.sampler.logprobs_mode.startswith(
-            "processed"
-        )
+        logprobs_mode = self.sampler.logprobs_mode
+        self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
+        self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
 
     def forward(
         self,
@@ -107,10 +107,9 @@ class RejectionSampler(nn.Module):
             # Override the logprobs mode to return logits because they are
             # needed later to compute the accepted token logprobs.
             logprobs_mode_override="processed_logits"
-            if self.return_processed_logprobs
+            if self.is_processed_logprobs_mode
             else "raw_logits",
         )
-        bonus_logits = bonus_sampler_output.logprobs_tensors.logprobs
         bonus_token_ids = bonus_sampler_output.sampled_token_ids
 
         # Just like `bonus_logits`, `target_logits` is a new tensor with
@@ -144,30 +143,31 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
         )
 
-        return SamplerOutput(
-            sampled_token_ids=output_token_ids,
-            logprobs_tensors=self._get_logprobs_tensors(
-                sampling_metadata,
+        logprobs_tensors = None
+        if sampling_metadata.max_num_logprobs:
+            logprobs_tensors = self._get_logprobs_tensors(
+                sampling_metadata.max_num_logprobs,
                 metadata,
                 logits,
-                target_logits if self.return_processed_logprobs else raw_target_logits,
-                bonus_logits,
+                target_logits if self.is_processed_logprobs_mode else raw_target_logits,
+                bonus_sampler_output.logprobs_tensors.logprobs,
                 output_token_ids,
-            ),
+            )
+
+        return SamplerOutput(
+            sampled_token_ids=output_token_ids,
+            logprobs_tensors=logprobs_tensors,
         )
 
     def _get_logprobs_tensors(
         self,
-        sampling_metadata: SamplingMetadata,
+        max_num_logprobs: int,
         metadata: SpecDecodeMetadata,
         logits: torch.Tensor,
         target_logits: torch.Tensor,
         bonus_logits: torch.Tensor,
         sampled_token_ids: torch.Tensor,
-    ) -> LogprobsTensors | None:
-        if not sampling_metadata.max_num_logprobs:
-            return None
-
+    ) -> LogprobsTensors:
         cu_num_sampled_tokens = torch.zeros_like(metadata.cu_num_sampled_tokens)
         cu_num_sampled_tokens[1:] = metadata.cu_num_sampled_tokens[:-1]
 
@@ -190,13 +190,13 @@ class RejectionSampler(nn.Module):
         accepted_logits = final_logits[accepted_logit_indices]
         accepted_logprobs = (
             accepted_logits
-            if self.logprobs_mode.endswith("logits")
+            if self.is_logits_logprobs_mode
             else self.sampler.compute_logprobs(accepted_logits)
         )
         accepted_tokens = sampled_token_ids[accepted_mask]
         return self.sampler.gather_logprobs(
             accepted_logprobs,
-            sampling_metadata.max_num_logprobs,
+            max_num_logprobs,
             accepted_tokens.to(torch.int64),
         )
 

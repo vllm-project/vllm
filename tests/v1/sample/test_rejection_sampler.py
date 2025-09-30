@@ -21,6 +21,7 @@ DEVICE = current_platform.device_type
 @pytest.fixture
 def rejection_sampler():
     mock_sampler = Mock(spec=Sampler)
+    mock_sampler.logprobs_mode = "raw_logprobs"
     return RejectionSampler(mock_sampler)
 
 
@@ -469,8 +470,8 @@ def estimate_rejection_sampling_pdf(
     Returns:
         Estimated probability distribution of the output tokens.
     """
-    # Mock the sampler that TreeRejectionSampler uses
     mock_sampler = Mock(spec=Sampler)
+    mock_sampler.logprobs_mode = "raw_logprobs"
     rejection_sampler = RejectionSampler(mock_sampler)
     num_tokens = num_samples * k
     # Repeat draft probs num_samples * k times.
@@ -674,11 +675,11 @@ def test_frequency_penalties(rejection_sampler):
     spec_decode_metadata = SpecDecodeMetadata.make_dummy(
         spec_tokens, device=logits.device
     )
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
     output = rejection_sampler(
         spec_decode_metadata,
         draft_probs=None,
-        target_logits=logits,
-        bonus_token_ids=bonus_token_tensor,
+        logits=logits,
         sampling_metadata=metadata,
     )
     expected = torch.tensor(
@@ -686,7 +687,7 @@ def test_frequency_penalties(rejection_sampler):
         dtype=torch.int,
         device=logits.device,
     )
-    assert torch.equal(output, expected)
+    assert torch.equal(output.sampled_token_ids, expected)
 
 
 def test_bad_words(rejection_sampler):
@@ -716,14 +717,12 @@ def test_bad_words(rejection_sampler):
     bonus_token_tensor = torch.tensor(
         [output_tokens[i][-1] for i in range(len(output_tokens))], device=logits.device
     )
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-        spec_tokens, device=logits.device
-    )
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
     output = rejection_sampler(
         spec_decode_metadata,
         draft_probs=None,
-        target_logits=logits,
-        bonus_token_ids=bonus_token_tensor,
+        logits=logits,
         sampling_metadata=metadata,
     )
 
@@ -732,7 +731,7 @@ def test_bad_words(rejection_sampler):
         dtype=torch.int,
         device=logits.device,
     )
-    assert torch.equal(output, expected)
+    assert torch.equal(output.sampled_token_ids, expected)
 
 
 def test_allowed_token_ids(rejection_sampler):
@@ -765,14 +764,12 @@ def test_allowed_token_ids(rejection_sampler):
     bonus_token_tensor = torch.tensor(
         [output_tokens[i][-1] for i in range(len(output_tokens))], device=logits.device
     )
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-        spec_tokens, device=logits.device
-    )
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    mock_sampler_output(rejection_sampler, bonus_token_tensor)
     output = rejection_sampler(
         spec_decode_metadata,
         draft_probs=None,
-        target_logits=logits,
-        bonus_token_ids=bonus_token_tensor,
+        logits=logits,
         sampling_metadata=metadata,
     )
 
@@ -781,4 +778,4 @@ def test_allowed_token_ids(rejection_sampler):
         dtype=torch.int,
         device=logits.device,
     )
-    assert torch.equal(output, expected)
+    assert torch.equal(output.sampled_token_ids, expected)

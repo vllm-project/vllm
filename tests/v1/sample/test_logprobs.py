@@ -9,6 +9,7 @@ from typing import get_args
 import pytest
 import torch
 
+from tests.utils import large_gpu_mark
 from tests.v1.sample.utils import (
     BatchLogprobsComposition,
     BatchLogprobsSpecType,
@@ -18,6 +19,7 @@ from tests.v1.sample.utils import (
 )
 from vllm import SamplingParams
 from vllm.config.model import LogprobsMode
+from vllm.distributed import cleanup_dist_env_and_memory
 
 from ...conftest import HfRunner, VllmRunner
 
@@ -515,11 +517,14 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
 @pytest.mark.parametrize(
     "model_setup",
     [
-        (
-            "eagle",
-            "meta-llama/Llama-3.1-8B-Instruct",
-            "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
-        )
+        pytest.param(
+            (
+                "eagle",
+                "meta-llama/Llama-3.1-8B-Instruct",
+                "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+            ),
+            marks=large_gpu_mark(min_gb=32),
+        ),
     ],
 )
 def test_spec_decode_logprobs(
@@ -543,17 +548,27 @@ def test_spec_decode_logprobs(
             temperature=0, logprobs=3, max_tokens=10, ignore_eos=False
         )
         method, model_name, spec_model_name = model_setup
+        max_model_len = 256
 
         # Run base LLM.
         ref_llm = LLM(
             model=model_name,
             max_logprobs=5,
-            max_model_len=2048,
+            max_model_len=max_model_len,
             seed=42,
             logprobs_mode=logprobs_mode,
+            gpu_memory_utilization=0.4,
         )
         ref_results = ref_llm.generate([prompt], sampling_params)
+        # Collect logprobs outputs from reference LLM.
+        ref_logprobs = []
+        for output in ref_results[0].outputs:
+            for logprobs in output.logprobs:
+                for token_id in logprobs:
+                    ref_logprobs.append(logprobs[token_id])
         del ref_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
 
         # Run spec decode LLM.
         spec_llm = LLM(
@@ -562,27 +577,24 @@ def test_spec_decode_logprobs(
                 "method": method,
                 "model": spec_model_name,
                 "num_speculative_tokens": 3,
-                "max_model_len": 2048,
+                "max_model_len": max_model_len,
             },
             max_logprobs=5,
-            max_model_len=2048,
+            max_model_len=max_model_len,
             seed=42,
             logprobs_mode=logprobs_mode,
+            gpu_memory_utilization=0.4,
         )
         spec_results = spec_llm.generate([prompt], sampling_params)
-        del spec_llm
-
-        # Collect logprobs outputs from reference and spec decode LLMs.
-        ref_logprobs = []
-        for output in ref_results[0].outputs:
-            for logprobs in output.logprobs:
-                for token_id in logprobs:
-                    ref_logprobs.append(logprobs[token_id])
+        # Collect logprobs outputs from spec decode LLM.
         spec_logprobs = []
         for output in spec_results[0].outputs:
             for logprobs in output.logprobs:
                 for token_id in logprobs:
                     spec_logprobs.append(logprobs[token_id])
+        del spec_llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
 
         # Per-token logprobs are expected to be the same.
         assert len(ref_logprobs) == len(spec_logprobs)
