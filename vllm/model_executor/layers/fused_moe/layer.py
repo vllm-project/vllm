@@ -1941,6 +1941,10 @@ class FusedMoE(CustomOp):
                     full_shared_final_hidden_states[
                         chunk_start:chunk_end, :].copy_(final_hidden_states[0],
                                                         non_blocking=True)
+                    #print('ff'*10)
+                    #print(f"fffhd:{full_fused_final_hidden_states.shape}")
+                    #print(f"st,end:{chunk_start},{chunk_end}")
+                    #print(f"final_hidden_states[1]:{final_hidden_states[1].shape}")
                     full_fused_final_hidden_states[
                         chunk_start:chunk_end, :].copy_(final_hidden_states[1],
                                                         non_blocking=True)

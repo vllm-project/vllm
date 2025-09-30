@@ -910,7 +910,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             # support async prepare/finalize
             # TODO(lucas): enable in follow-up
             assert not dbo_enabled()
-
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = self.prepare_finalize.prepare(
                  a1,
@@ -922,6 +921,8 @@ class FusedMoEModularKernel(torch.nn.Module):
                  self.fused_experts.quant_config,
              )
         else:
+            #print('yy'*100)
+            #print(f"before prepare_async, a1 shape:{a1.shape}")
             # Overlap shared expert compute with all2all dispatch.
             dbo_maybe_run_recv_hook()
             prepare_ret = self.prepare_finalize.prepare_async(
@@ -933,7 +934,9 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
             )
-
+            import traceback
+            # traceback.print_stack()
+            #print(f"after prepare_async, prepare_ret:{prepare_ret}")
             # TODO(lucas): refactor this in the alternative schedules followup
             # currently unpack if we have hook + receiver pair or just
             # receiver (see finalize_async docstring)
@@ -952,6 +955,8 @@ class FusedMoEModularKernel(torch.nn.Module):
 
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = receiver()
+            #print('modular_kernel.py'*100)
+            #print(f"after receiver(), a1q shape:{a1q.shape}")
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids

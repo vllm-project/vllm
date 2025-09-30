@@ -1539,8 +1539,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 workspace=layer.workspace)
 
         elif self.fused_experts is not None:
-            assert self.allow_flashinfer and \
-               self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+            assert self.allow_flashinfer
+            assert self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS or self.flashinfer_moe_backend == FlashinferMoeBackend.CUTEDSL
 
             assert is_valid_flashinfer_cutlass_fused_moe(
                 x, layer.w13_weight, layer.w2_weight), (
@@ -1558,6 +1558,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
+
         elif (self.allow_flashinfer
               and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS):
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
