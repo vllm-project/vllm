@@ -122,9 +122,9 @@ def list_local_repo_files(repo_id: str, revision: Optional[str]) -> list[str]:
 
 
 def find_tokenizer_file(files: list[str]):
-    # Accept both versioned (tokenizer.model.v3) and unversioned (tokenizer.model) forms,
-    # plus tekken.json and tokenizer.mm.model variants.
-    # Previous pattern only matched the versioned variants.
+    # Accept both versioned (tokenizer.model.v3) and unversioned
+    # (tokenizer.model) forms, plus tekken.json and tokenizer.mm.model
+    # variants. Previous pattern only matched the versioned variants.
     file_pattern = re.compile(
         r"^tokenizer\.model(\.v.*)?|tekken\.json|tokenizer\.mm\.model(\.v.*)?$"
     )
