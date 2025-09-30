@@ -35,7 +35,6 @@ def test_chunked_local_attention_possible_cached_prefix():
         head_size=1,
         dtype=torch.float32,
         attention_chunk_size=4,
-        use_mla=False,
     )
 
     block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
@@ -100,7 +99,6 @@ def test_sliding_window_possible_cached_prefix():
         head_size=1,
         dtype=torch.float32,
         sliding_window=4,
-        use_mla=False,
     )
 
     block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
@@ -165,7 +163,6 @@ def test_chunked_local_attention_remove_skipped_blocks():
         head_size=1,
         dtype=torch.float32,
         attention_chunk_size=4,
-        use_mla=False,
     )
 
     block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True)
@@ -217,7 +214,6 @@ def test_sliding_window_remove_skipped_blocks():
         head_size=1,
         dtype=torch.float32,
         sliding_window=4,
-        use_mla=False,
     )
 
     block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True)
@@ -285,7 +281,6 @@ def test_get_num_blocks_to_allocate():
         head_size=1,
         dtype=torch.float32,
         sliding_window=4,  # Placeholder value, not related to test result
-        use_mla=False,
     )
 
     block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
@@ -308,7 +303,6 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
         head_size=1,
         dtype=torch.float32,
         attention_chunk_size=4,  # Placeholder value, not related to test result
-        use_mla=False,
     )
 
     block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
