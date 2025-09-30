@@ -22,7 +22,7 @@ TRL supports **two modes** for integrating vLLM during training: **server mode**
 
 ### Server mode
 
-Example configuration:
+In **server mode**, vLLM runs as an independent process on dedicated GPUs and communicates with the trainer through HTTP requests. This configuration is ideal when you have separate GPUs for inference, as it isolates generation workloads from training, ensuring stable performance and easier scaling.
 
 ```python
 from trl import GRPOConfig
@@ -36,7 +36,7 @@ training_args = GRPOConfig(
 
 ### Colocate mode
 
-Example configuration:
+In **colocate mode**, vLLM runs inside the trainer process and shares GPU memory with the training model. This avoids launching a separate server and can improve GPU utilization, but may lead to memory contention on the training GPUs.
 
 ```python
 from trl import GRPOConfig
