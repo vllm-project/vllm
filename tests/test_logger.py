@@ -501,3 +501,20 @@ def test_streaming_complete_logs_full_text_content():
         assert call_args[1] == "test-streaming-full-text"
         assert call_args[2] == " (streaming complete)"
         assert call_args[5] == "streaming_complete"
+
+
+test_logger = init_logger("vllm.test_logger")
+# https://docs.python.org/3/howto/logging-cookbook.html#sending-and-receiving-logging-events-across-a-network
+
+
+def mp_function(**kwargs):
+    # This function runs in a subprocess
+
+    test_logger.warning("This is a subprocess: %s", kwargs.get("a"))
+    test_logger.error("This is a subprocess error.")
+    test_logger.debug("This is a subprocess debug message: %s.", kwargs.get("b"))
+
+
+def test_caplog_mp_fork(caplog_vllm, caplog_mp_fork):
+    pass
+    # TODO
