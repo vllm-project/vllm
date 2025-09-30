@@ -4,7 +4,7 @@ import abc
 import enum
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass, fields, make_dataclass
+from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional,
                     Protocol, TypeVar, Union, get_args)
 
@@ -383,8 +383,8 @@ class PerLayerParameters:
     sm_scale: float
     has_sinks: bool = False
     # has same params for all layers
-    has_same_window_lefts: Optional[bool] = None
-    has_same_all_params: Optional[bool] = None
+    has_same_window_lefts: Optional[bool] = field(default=None, compare=False)
+    has_same_all_params: Optional[bool] = field(default=None, compare=False)
 
 
 def get_per_layer_parameters(
@@ -911,9 +911,9 @@ def create_fast_prefill_custom_backend(
 
                 def __init__(self, metadata, common_attn_metadata):
                     # Shallow copy all fields in metadata cls
-                    for field in fields(metadata.__class__):
-                        setattr(self, field.name,
-                                getattr(metadata, field.name))
+                    for _field in fields(metadata.__class__):
+                        setattr(self, _field.name,
+                                getattr(metadata, _field.name))
 
                     # Set additional fields that will be used in model code
                     assert (common_attn_metadata.logits_indices_padded
