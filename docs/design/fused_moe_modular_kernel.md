@@ -242,30 +242,8 @@ Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kern
 
 ## FusedMoEPrepareAndFinalize Implementations
 
-The following table lists the `FusedMoEPrepareAndFinalize` implementations at the time of writing,
-
-| Implementation | Type | Comments |
-| :--- | :--- | :--- |
-| DeepEPHTPrepareAndFinalize | Contiguous / Non-Batched | Uses the DeepEP High-Throughput all2all kernels. |
-| DeepEPLLPrepareAndFinalize | Batched | Uses the DeepEP Low-Latency all2all kernels. |
-| PplxPrepareAndFinalize | Batched | Uses the Perplexity all2all kernels. |
-| FlashInferCutlassMoEPrepareAndFinalize | Contiguous | |
-| MoEPrepareAndFinalizeNoEP | Contiguous | This implementation is used when there is no EP. i.e. no all2all kernels are invoked. |
-| BatchedPrepareAndFinalize | Batched | A reference prepare/finalize class that reorganizes the tokens into expert batched format, i.e. E x max_num_tokens x K. (Doesn’t use any all2all kernels. This is primarily used in unit testing) |
+See [Fused MoE Kernel features](./moe_kernel_features.md#fused-moe-modular-all2all-backends) for a list of all the available modular prepare and finalize subclasses.
 
 ## FusedMoEPermuteExpertsUnpermute
 
-The following table lists the `FusedMoEPermuteExpertsUnpermute` implementations at the time of writing,
-
-| Implementation | Type | Comment |
-| :--- | :--- | :--- |
-| BatchedDeepGemmExperts | Batched | Uses the DeepGemm’s Masked Grouped Gemm kernels for the fused_moe operation. |
-| BatchedTritonExperts | Batched | Uses a Triton Kernel for the Batched matmuls. |
-| BatchedTritonOrDeepGemmExperts | Batched | Chooses either the `BatchedDeepGemmExperts` or `BatchedTritonExperts` based on environment settings. |
-| DeepGemmExperts | Contiguous / Non-Batched | Uses DeepGemm’s Grouped Gemm kernels for fused_moe operation. |
-| TritonExperts | Contiguous / Non-Batched | Uses a Triton Kernel for fused_moe matmuls. |
-| TritonOrDeepGemmExperts | Contiguous / Non-Batched | Chooses either the `DeepGemmExperts` or `TritonExperts` based on fused_moe inputs. |
-| CutlassExpertsFP8 | Supports both Batched and Contiguous formats | Uses Cutlass Grouped Gemm implementations for the fp8 matmuls. |
-| CutlassExpertsFP4 | Supports both Batched and Contiguous formats | Uses Cutlass Grouped Gemm implementations for the fp4 matmuls. |
-| FlashInferExperts | Contiguous | Uses fused_moe operation from FlashInfer |
-| NaiveBatchedExperts | Batched | Reference Batched Experts implementation. Primarily used in unit tests. |
+See [Fused MoE Kernel features](./moe_kernel_features.md#fused-moe-experts-kernels) for a list of all the available modular experts.
