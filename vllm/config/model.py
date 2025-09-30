@@ -669,25 +669,24 @@ class ModelConfig:
         `model_impl` is set to `transformers` or `auto`."""
         # Check if the architecture we're wrapping has defaults
         runner = None
-        convert = "embed"
+        convert = None
         if defaults := try_match_architecture_defaults(self.architectures[0]):
             _, (runner, convert) = defaults
-        # If the user didn't specify runner, use architecture default
-        if self.runner == "auto" and runner is not None:
-            self.runner = runner
-        # If the user didn't specify convert, use architecture default
-        if self.runner == "pooling" and self.convert == "auto":
-            logger.info("Resolved `--convert auto` to `--convert none`. "
-                        "Pass the value explicitly to silence this message.")
-            self.convert = "none"
+        # Overwrite with user-specified values
+        if self.runner != "auto":
+            runner = self.runner
+        if self.convert not in ("auto", "none"):
+            convert = self.convert
+        # Fall back to default values if still not set
+        runner = runner or "generate"
+        convert = convert or "embed"
         # Resolve Transformers backend pooling classes
-        if self.runner == "pooling":
+        if runner == "pooling":
             if convert == "embed":
                 return "TransformersEmbeddingModel"
             if convert == "classify":
                 return "TransformersForSequenceClassification"
-            if convert == "reward":
-                return "TransformersForReward"
+            raise ValueError(f"Unsupported convert type: {convert}")
         # Resolve Transformers backend generate classes
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
