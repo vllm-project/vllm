@@ -1,0 +1,7 @@
+model_name: "/mnt/weka/data/llm/aidc-ai/ovis2.5-9b"
+dtype: "bfloat16"
+max_model_len: 32768
+max_num_seqs: 32
+num_prompts: 4
+limit_mm_per_prompt_image: 5
+trust_remote_code: True

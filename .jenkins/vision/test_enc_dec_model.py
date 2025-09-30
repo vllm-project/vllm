@@ -24,6 +24,7 @@ def fail_on_exit():
 def launch_enc_dec_model(config, question, images):
     model_name = config.get('model_name')
     dtype = config.get('dtype', 'bfloat16')
+    trust_remote_code = config.get('trust_remote_code', False)
     max_num_seqs = config.get('max_num_seqs', 128)
     max_model_len = config.get('max_model_len', 4096)
     enforce_eager = config.get('enforce_eager', False)
@@ -41,6 +42,7 @@ def launch_enc_dec_model(config, question, images):
         enable_expert_parallel=enable_expert_parallel,
         enforce_eager=enforce_eager,
         limit_mm_per_prompt={"image": limit_mm_per_prompt_image},
+        trust_remote_code=trust_remote_code,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)

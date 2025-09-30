@@ -87,6 +87,10 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
+_CONFIG_ATTRS_MAPPING: dict[str, str] = {
+    "llm_config": "text_config",
+}
+
 
 class ConfigFormat(str, enum.Enum):
     AUTO = "auto"
@@ -240,6 +244,17 @@ def _uses_mrope(config: PretrainedConfig) -> bool:
     return "mrope_section" in rope_scaling
 
 
+def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
+    """Remap config attributes to match the expected names."""
+    for old_attr, new_attr in _CONFIG_ATTRS_MAPPING.items():
+        if hasattr(config, old_attr):
+            if not hasattr(config, new_attr):
+                config.update({new_attr: getattr(config, old_attr)})
+            logger.debug("Remapped config attribute '%s' to '%s'", old_attr,
+                         new_attr)
+    return config
+
+
 def uses_mrope(config: PretrainedConfig) -> bool:
     """Detect if the model with this config uses M-ROPE."""
     return _uses_mrope(config) or thinker_uses_mrope(config)
@@ -357,6 +372,7 @@ def get_config(
                     raise RuntimeError(err_msg) from e
                 else:
                     raise e
+            config = _maybe_remap_hf_config_attrs(config)
 
     elif config_format == ConfigFormat.MISTRAL:
         config = load_params_config(model, revision, **kwargs)

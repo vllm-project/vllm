@@ -1,0 +1,12 @@
+model_name: "/mnt/weka/data/llm/aidc-ai/ovis2.5-9b"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.700
+  - name: "exact_match,flexible-extract"
+    value: 0.700
+limit: 256
+num_fewshot: 8
+dtype: "bfloat16"
+trust_remote_code: True
