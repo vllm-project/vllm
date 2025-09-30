@@ -116,9 +116,10 @@ class LoRAModelRunnerMixin:
                 self.lora_manager.remove_all_adapters()
 
     @contextmanager
-    def maybe_select_dummy_loras(self, lora_config: Optional[LoRAConfig],
+    def maybe_select_dummy_loras(self,
+                                 lora_config: Optional[LoRAConfig],
                                  num_scheduled_tokens: np.ndarray,
-                                 with_lora: bool):
+                                 with_lora: bool = True):
         if lora_config is None:
             yield
         else:
