@@ -1064,6 +1064,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
         self.flashinfer_moe_backend = None
+        self._cache_permute_indices = {}
 
         if self.allow_flashinfer:
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
@@ -1468,6 +1469,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if self.allow_flashinfer and \
             self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             # Prepare static weights for TRT-LLM kernel
+            # alternate: prepare_static_weight_layouts_for_trtllm_moe
             (gemm1_weights_fp4_shuffled, gemm1_scales_fp4_shuffled,
              gemm2_weights_fp4_shuffled, gemm2_scales_fp4_shuffled
              ) = self.prepare_static_weights_for_trtllm_fp4_moe(
@@ -1479,6 +1481,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                  layer.w13_weight.size(-2) // 2,  # intermediate_size
                  layer.w13_weight.size(0),  # num_experts
              )
+            logger.info_once(f"Finished shuffling weights for TRT-LLM MOE")
 
             layer.gemm1_weights_fp4_shuffled = Parameter(
                 gemm1_weights_fp4_shuffled, requires_grad=False)
