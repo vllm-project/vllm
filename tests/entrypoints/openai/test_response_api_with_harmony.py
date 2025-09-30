@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 import time
 
 import pytest
@@ -771,31 +772,35 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str,
 
 @pytest.fixture(scope="module")
 def server_with_mock(monkeypatch_module: pytest.MonkeyPatch, tmp_path_factory):
-    import tempfile
     import textwrap
 
     args = ["--enforce-eager", "--tool-server", "demo"]
 
-    # Create a temporary startup script that patches render_for_completion
+    # Create a sitecustomize.py that patches render_for_completion
+    # Python automatically imports sitecustomize on startup if it's in sys.path
     tmp_dir = tmp_path_factory.mktemp("test_setup")
-    startup_script = tmp_dir / "mock_startup.py"
-    startup_script.write_text(textwrap.dedent("""
-        import sys
-        from unittest.mock import patch
+    sitecustomize = tmp_dir / "sitecustomize.py"
+    sitecustomize.write_text(textwrap.dedent("""
+        import os
+        if os.environ.get('VLLM_TEST_MOCK_LARGE_PROMPT') == '1':
+            from unittest.mock import patch
 
-        # Mock render_for_completion to return a large token list
-        def mock_render_for_completion(messages):
-            return list(range(1000000))  # Return 1M tokens for testing
+            # Mock render_for_completion to return a large token list
+            def mock_render_for_completion(messages):
+                return list(range(1000000))  # Return 1M tokens for testing
 
-        # Patch it at module level before it's imported
-        patch('vllm.entrypoints.harmony_utils.render_for_completion',
-              mock_render_for_completion).start()
+            # Patch it at module level before it's imported
+            patch('vllm.entrypoints.harmony_utils.render_for_completion',
+                  mock_render_for_completion).start()
     """))
 
     with monkeypatch_module.context() as m:
         m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
-        # Use PYTHONSTARTUP to run our mock setup before the server starts
-        m.setenv("PYTHONSTARTUP", str(startup_script))
+        m.setenv("VLLM_TEST_MOCK_LARGE_PROMPT", "1")
+        # Add tmp_dir to PYTHONPATH so sitecustomize.py is found
+        current_pythonpath = os.environ.get("PYTHONPATH", "")
+        new_pythonpath = f"{tmp_dir}:{current_pythonpath}" if current_pythonpath else str(tmp_dir)
+        m.setenv("PYTHONPATH", new_pythonpath)
         with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
             yield remote_server
 
