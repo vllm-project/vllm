@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-import asyncio
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -90,9 +89,7 @@ class ECMooncakeStorageConnector(ECConnectorBase):
         mm_hash = kwargs.get("mm_hash")
         assert encoder_cache is not None
         assert mm_hash is not None
-        asyncio.run(
-            self.store.batch_put([mm_hash], [encoder_cache[mm_hash]])
-        )
+        self.store.batch_put([mm_hash], [encoder_cache[mm_hash]])
     
     def wait_for_save(self):
         self.store.wait_for_put()

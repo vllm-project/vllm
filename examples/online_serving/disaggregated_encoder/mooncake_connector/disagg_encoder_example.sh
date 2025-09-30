@@ -5,7 +5,7 @@ set -euo pipefail
 ###############################################################################
 # Configuration -- override via env before running
 ###############################################################################
-MODEL="${MODEL:-/workspace/vllm/Qwen2.5-VL-3B-Instruct/}"
+MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 
 LOG_PATH="${LOG_PATH:-./logs}"
 ENCODE_PORT="${ENCODE_PORT:-19534}"
@@ -22,7 +22,7 @@ MOONCAKE_MASTER_PORT=50051
 MOONCAKE_METADATA_PORT=8080
 MOONCAKE_REPLICA_NUM=1
 MOONCAKE_FAST_TRANSFER=true
-MOONCAKE_FAST_TRANSFER_BUFFER_SIZE=1 # GB
+MOONCAKE_FAST_TRANSFER_BUFFER_SIZE=3 # GB
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
@@ -105,8 +105,8 @@ mooncake_master \
   --enable_http_metadata_server=true \
   --http_metadata_server_host=0.0.0.0 \
   --http_metadata_server_port=$MOONCAKE_METADATA_PORT \
-  --rpc_thread_num 4 \
-  --default_kv_lease_ttl 1000 \
+  --rpc_thread_num 8 \
+  --default_kv_lease_ttl 0 \
   --eviction_ratio 0.05 \
   --eviction_high_watermark_ratio 0.9 \
   >"$MOONCAKE_MASTER_LOG" 2>&1 &
@@ -131,7 +131,7 @@ sed -e "s/\${MOONCAKE_MASTER_PORT}/$MOONCAKE_MASTER_PORT/"\
 # Encoder worker
 ###############################################################################
 CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
-  --gpu-memory-utilization 0.7 \
+  --gpu-memory-utilization 0.0 \
   --port "$ENCODE_PORT" \
   --enable-request-id-headers \
   --no-enable-prefix-caching \
@@ -142,7 +142,7 @@ CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
         "ec_role":"ec_producer",
         "ec_connector_extra_config": {
             "ec_mooncake_config_file_path":"'${SCRIPT_DIR}'/producer.json",
-            "ec_max_num_scheduled_tokens": "4096"
+            "ec_max_num_scheduled_tokens": "1000000000000000000"
         }
     }' \
   >"$ENC_LOG" 2>&1 &
@@ -176,7 +176,7 @@ wait_for_server "$PREFILL_DECODE_PORT"
 ###############################################################################
 # Proxy
 ###############################################################################
-python disagg_encoder_proxy_old.py \
+python disagg_encoder_proxy.py \
   --host "127.0.0.1" \
   --port "$PROXY_PORT" \
   --encode-servers-urls "http://localhost:$ENCODE_PORT" \
@@ -198,9 +198,9 @@ python benchmark_serving.py \
   --dataset-path      /workspace/lmarena-ai/VisionArena-Chat \
   --seed              40 \
   --endpoint          /v1/chat/completions \
-  --num-prompts       10 \
+  --num-prompts       100 \
   --port              $PROXY_PORT \
   --host              127.0.0.1 \
-  --request-rate      10
+  --request-rate      100 \
 ###############################################################################
 cleanup

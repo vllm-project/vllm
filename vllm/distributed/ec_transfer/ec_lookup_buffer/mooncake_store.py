@@ -16,6 +16,7 @@ import numpy as np
 import asyncio
 import math
 import threading
+import re
 
 from vllm.distributed.ec_transfer.utils.tensor_memory_pool import (
     InsufficientMemoryError, TensorMemoryPool)
@@ -176,13 +177,21 @@ class ECMooncakeStore:
         
         # Put async init
         self.put_queue = set()
-        self.put_queue_cv = threading.Condition()
+        self.put_queue_cv = asyncio.Condition()
+        self.put_loop = asyncio.new_event_loop()
+        self.put_thread = threading.Thread(target=self.put_loop.run_forever,
+                                           daemon=True)
+        self.put_thread.start()
 
     def close(self):
         if self.config.fast_transfer:
             self.store.unregister_buffer(
                 self.tensor_pool.base_address, DEFAULT_TENSOR_POOL_SIZE)
             self.tensor_pool.cleanup()
+      
+        self.put_loop.call_soon_threadsafe(self.put_loop.stop)
+        self.put_thread.join()
+        self.put_loop.close()
 
         self.store.close()
         logger.info("Closed the mooncake store connection")
@@ -301,18 +310,36 @@ class ECMooncakeStore:
         )
     
     def wait_for_put(self):
-        with self.put_queue_cv:
-            while self.put_queue:
-                self.put_queue_cv.wait()
+        future = asyncio.run_coroutine_threadsafe(self._wait_for_put_async(), self.put_loop)
+        future.result() # wait until complete
 
-    async def batch_put(self, keys: List[str], tensors: List[torch.Tensor]) -> None:
-        with self.put_queue_cv:
+    async def _wait_for_put_async(self):
+        async with self.put_queue_cv:
+            while self.put_queue:
+                await self.put_queue_cv.wait()
+    
+    def batch_put(self, keys: List[str], tensors: List[torch.Tensor]) -> None:
+        self.put_loop.call_soon_threadsafe(
+            lambda: self.put_loop.create_task(
+                self._batch_put_async(keys, tensors)
+            )
+        )
+
+    async def _batch_put_async(self, keys: List[str], tensors: List[torch.Tensor]) -> None:
+        async with self.put_queue_cv:
             self.put_queue.update(keys)
 
-        if self.config.fast_transfer:
-            return await self._zero_copy_batch_put(keys, tensors)
-        return await self._batch_put(keys, tensors)
-
+        try:
+            if self.config.fast_transfer:
+                await self._zero_copy_batch_put(keys, tensors)
+            else:
+                await self._batch_put(keys, tensors)
+        finally:
+            async with self.put_queue_cv:
+                self.put_queue.difference_update(keys)
+                if not self.put_queue:
+                    self.put_queue_cv.notify()
+    
     async def _zero_copy_batch_put(self, keys: List[str], tensors: List[torch.Tensor]) -> None:
         if not keys:
             return
@@ -374,11 +401,6 @@ class ECMooncakeStore:
                 f"Failed to put keys {",".join(keys)} using batch_put_from: "
                 f"{type(e).__name__}: {str(e)}"
             )
-                
-        with self.put_queue_cv:
-            self.put_queue.difference_update(keys)
-            if not self.put_queue:
-                self.put_queue_cv.notify()
 
     async def _batch_put(self, keys: List[str], tensors: List[torch.Tensor]) -> None:
         bytes_list = []
@@ -420,11 +442,6 @@ class ECMooncakeStore:
                 f"Failed to put keys {",".join(keys)} using put_batch: "
                 f"{type(e).__name__}: {str(e)}"
             )
-        
-        with self.put_queue_cv:
-            self.put_queue.difference_update(keys)
-            if not self.put_queue:
-                self.put_queue_cv.notify()
     
     # ==============================
     # Tensor pool helper functions
@@ -433,13 +450,12 @@ class ECMooncakeStore:
     def _pool_eviction(self) -> None:
         evicted_buffer = self.fifo_pool_queue.popleft()
         self.tensor_pool.free(evicted_buffer.addr)
-        self.store.remove(evicted_buffer.key)
-        self.store.remove(self.metadata_key(evicted_buffer.key))
-        # Currently stall the process with mooncake 0.3.6
-        # count = self.store.remove_by_regex(
-        #     f"^(?:{evicted_buffer.key}|{self.metadata_key(evicted_buffer.key)})$"
-        # )
-        # assert count == 2
+        key = re.escape(evicted_buffer.key)
+        meta_key = re.escape(self.metadata_key(evicted_buffer.key))
+        count = self.store.remove_by_regex(
+            f"^(?:{key}|{meta_key})$"
+        )
+        assert count <= 2
 
     def _pool_allocate(self, size: int) -> int:
         while True:
@@ -457,6 +473,6 @@ class ECMooncakeStore:
                 return self.tensor_pool.store_tensor(tensor)
             except InsufficientMemoryError:
                 if not self.fifo_pool_queue:
-                    raise
+                    raise InsufficientMemoryError("Insufficient Memory")
 
                 self._pool_eviction()
