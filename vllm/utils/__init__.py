@@ -2075,20 +2075,6 @@ class FlexibleArgumentParser(ArgumentParser):
         return processed_args
 
 
-def _is_benchmark_command() -> bool:
-    """Check if we're running a vLLM benchmark command, """
-    """such as `vllm bench *`"""
-    # Minimal "peek" parser, only cares about which subcommand was chosen.
-    p = ArgumentParser(add_help=False)
-    sp = p.add_subparsers(dest="subcmd")
-    sp.add_parser("bench", add_help=False)
-    try:
-        ns, _ = p.parse_known_args(sys.argv[1:])
-    except SystemExit:
-        return False
-    return ns.subcmd == "bench"
-
-
 async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
                               **kwargs):
     """Utility function to run async task in a lock"""

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+import sys
 import traceback
 from itertools import chain
 from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
 from vllm.plugins import load_plugins_by_group
-from vllm.utils import (_is_benchmark_command, resolve_obj_by_qualname,
-                        supports_xccl)
+from vllm.utils import resolve_obj_by_qualname, supports_xccl
 
 from .interface import _Backend  # noqa: F401
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -216,7 +216,7 @@ def resolve_current_platform_cls_qualname() -> str:
             activated_builtin_plugins[0]]()
         logger.info("Automatically detected platform %s.",
                     activated_builtin_plugins[0])
-    elif _is_benchmark_command():
+    elif sys.argv and len(sys.argv) >= 2 and sys.argv[1] == "bench":
         # For 'vllm bench *' commands: use CPU instead of UnspecifiedPlatform
         # to avoid errors during CLI init
         platform_cls_qualname = "vllm.platforms.cpu.CpuPlatform"
@@ -266,6 +266,24 @@ def __getattr__(name: str):
     else:
         raise AttributeError(
             f"No attribute named '{name}' exists in {__name__}.")
+
+
+def default_current_platform_to_cpu():
+    """Set current platform with CpuPlatform as default """
+    """instead of UnspecifiedPlatform."""
+    global _current_platform
+
+    if _current_platform is None:
+        _current_platform = resolve_obj_by_qualname(
+            resolve_current_platform_cls_qualname())()
+
+    if _current_platform.is_unspecified():
+        logger.info("Unspecified platform detected, "
+                    "switching to CPU platform by default instead")
+        _current_platform = resolve_obj_by_qualname(
+            "vllm.platforms.cpu.CpuPlatform")()
+
+    return _current_platform
 
 
 __all__ = [
