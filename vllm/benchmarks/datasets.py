@@ -714,7 +714,7 @@ class RandomMultiModalDataset(RandomDataset):
             dtype=np.uint8,
         )
 
-        logger.info("Generated random video {random_pixels.shape}")
+        print(f"Generated random video {random_pixels.shape}")
 
         # Create a temporary video file in memory
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
