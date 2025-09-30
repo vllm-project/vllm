@@ -634,7 +634,7 @@ See [this page](../features/multimodal_inputs.md) on how to pass multi-modal inp
     from peft import PeftConfig, PeftModel
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
-    def merge_and_save(model_id: str):
+    def merge_and_save(model_id: str, output_dir: str):
         base_model = AutoModelForImageTextToText.from_pretrained(model_id)
         lora_model = PeftModel.from_pretrained(
             base_model,

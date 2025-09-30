@@ -291,11 +291,16 @@ and passing a list of `messages` in the request. Refer to the examples below for
     ??? code
 
         ```python
+        from openai import OpenAI
+        client = OpenAI(
+            base_url="http://localhost:8000/v1",
+            api_key="EMPTY",
+        )
         image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
         response = create_chat_embeddings(
             client,
-            model,
+            model="TIGER-Lab/VLM2Vec-Full",
             messages=[
                 {
                     "role": "user",
@@ -308,7 +313,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
             encoding_format="float",
         )
 
-        print("Embedding output:", response.data[0].embedding)
+        print("Image embedding output:", response.data[0].embedding)
         ```
 
 === "DSE-Qwen2-MRL"
