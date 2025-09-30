@@ -486,6 +486,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
+    # TODO (EVS): this method should get the number of tokens (AKA feature size) per frame, ant not assume it is equal across frames
     @classmethod
     def get_video_repl(
         cls,
@@ -788,7 +789,7 @@ class NanoNemotronVLMultiModalProcessor(
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            # # EVS-specific code
+            # # TODO: EVS-specific code here. This is basically copied from Qwen2-VL. Need to validate it.
             # video_pruning_rate = \
             #   self.info.ctx.get_mm_config().video_pruning_rate
             # if video_pruning_rate is not None and video_pruning_rate > 0.0:
@@ -1067,6 +1068,13 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
         # their feature size (AKA tokens per frame))
         # TODO: Maybe this can be optimized to avoid the loop?
         for i, single_video_embeddings in enumerate(video_embeddings):
+
+            # TODO (EVS): Add EVS code here. This is only a suggestion and maybe there's a better way to do it.
+            # Compute retention mask and prune the video embeddings.
+            # Then, pass number of retained tokens per frame to the _create_final_video_embeddings function,
+            # which will use it to create the video_repl_text with correct number of tokens per frame.
+            # EVS compute_retention_mask will need to change a bit, since we don't have here any THW data (although maybe it can be computed from num_patches and feature_size... I'm not sure)
+
             num_patches = video_input["num_patches"][i].item()
             assert single_video_embeddings.shape[0] % num_patches == 0
             feature_size = single_video_embeddings.shape[0] // num_patches
