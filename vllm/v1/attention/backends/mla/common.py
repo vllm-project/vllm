@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import Generic, Optional, TypeVar, Union
+from typing import ClassVar, Generic, Optional, TypeVar, Union
 
 import torch
 from tqdm import tqdm
@@ -436,6 +436,26 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    # Whether the backend supports reordering the batch such that
+    # short sequences (i.e. verification for speculative decoding) are
+    # classified as decode requests.
+    # If True, this will increase `reorder_batch_threshold` (below) when
+    # speculative decoding is enabled.
+    supports_spec_as_decode: ClassVar[bool] = False
+
+    # Whether the backend supports grouping decode requests with
+    # different query lengths in the same batch. If False, when
+    # `reorder_batch_threshold > 1`, any decode requests which do not
+    # have the same query length as the first decode request will
+    # fall back to the prefill kernel.
+    supports_nonuniform_decode: ClassVar[bool] = False
+
+    # The threshold for reordering the batch into decode and prefill requests.
+    # If > 1, the batch will be reordered such that requests with
+    # query length <= threshold are classified as decode requests.
+    # Use `supports_spec_as_decode` (above) to set this automatically
+    # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
 
     @staticmethod
@@ -479,6 +499,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.compilation_config = vllm_config.compilation_config
+        self.vllm_config = vllm_config
         self.device = device
 
         self.num_heads = self.model_config.get_num_attention_heads(
@@ -550,6 +571,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dtype=torch.int8,
                 device=device,
             )
+
+        supports_spec_as_decode = self.supports_spec_as_decode
+        self._init_reorder_batch_threshold(self.reorder_batch_threshold,
+                                           supports_spec_as_decode)
 
     def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
         qo_indptr = prefill.query_start_loc
@@ -680,8 +705,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                                    query_seq_lens_cpu)
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=self.reorder_batch_threshold)
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold,
+                require_uniform=not self.supports_nonuniform_decode)
 
         # Note(hc): update seq_lens of decode reqs under DCP.
         if self.dcp_world_size > 1:

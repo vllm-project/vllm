@@ -260,7 +260,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
             if (speculative_config is not None
                     and speculative_config.num_speculative_tokens is not None):
                 self.reorder_batch_threshold = \
-                    1 + speculative_config.num_speculative_tokens
+                    max(self.reorder_batch_threshold,
+                        1 + speculative_config.num_speculative_tokens)
 
     @abstractmethod
     def build(self,
