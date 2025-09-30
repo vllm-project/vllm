@@ -18,43 +18,43 @@ This is the easiest way to get started with vLLM on Hugging Face Inference Endpo
 
 1. Go to [Endpoints Catalog](https://endpoints.huggingface.co/catalog) and in the **Inference Server** options, select `vLLM`.This will display the current list of models with optimized preconfigured options.
 
-![Endpoints Catalog](../../assets/deployment/hf-inference-endpoints-catalog.png)
+    ![Endpoints Catalog](../../assets/deployment/hf-inference-endpoints-catalog.png)
 
 1. Select the desired model and click **Create Endpoint**.
 
-![Create Endpoint](../../assets/deployment/hf-inference-endpoints-create-endpoint.png)
+    ![Create Endpoint](../../assets/deployment/hf-inference-endpoints-create-endpoint.png)
 
 1. Once the deployment is ready, you can use the endpoint. Update the `DEPLOYMENT_URL` with the URL provided in the console, remembering to append `/v1` as required.
 
-```python
-# pip install openai
-from openai import OpenAI
-import os
+    ```python
+    # pip install openai
+    from openai import OpenAI
+    import os
 
-client = OpenAI(
-    base_url = DEPLOYMENT_URL,
-    api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
-)
+    client = OpenAI(
+        base_url = DEPLOYMENT_URL,
+        api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
+    )
 
-chat_completion = client.chat.completions.create(
-    model = "HuggingFaceTB/SmolLM3-3B",
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Give me a brief explanation of gravity in simple terms."
-                }
-            ]
-        }
-    ],
-    stream = True
-)
+    chat_completion = client.chat.completions.create(
+        model = "HuggingFaceTB/SmolLM3-3B",
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Give me a brief explanation of gravity in simple terms."
+                    }
+                ]
+            }
+        ],
+        stream = True
+    )
 
-for message in chat_completion:
-    print(message.choices[0].delta.content, end = "")
-```
+    for message in chat_completion:
+        print(message.choices[0].delta.content, end = "")
+    ```
 
 !!! note
     The catalog provides models optimized for vLLM, including GPU settings and inference engine configurations. You can monitor the endpoint and update the **container or its configuration** from the Inference Endpoints UI.
@@ -68,53 +68,53 @@ This method applies to models with the `transformers` library tag in their metad
 
 2. Locate the **Deploy** button. The button appears for models tagged with `transformers` at the top right of the [model card](https://huggingface.co/ibm-granite/granite-docling-258M).
 
-   ![Locate deploy button](../../assets/deployment/hf-inference-endpoints-locate-deploy-button.png)
+    ![Locate deploy button](../../assets/deployment/hf-inference-endpoints-locate-deploy-button.png)
 
 3. Click to **Deploy** button > **HF Inference Endpoints**. You will be taken to the Inference Endpoints interface to configure the deployment.
 
-   ![Click deploy button](../../assets/deployment/hf-inference-endpoints-click-deploy-button.png)
+    ![Click deploy button](../../assets/deployment/hf-inference-endpoints-click-deploy-button.png)
 
 4. Select the Hardware (we choose AWS>GPU>T4 for the example) and Container Configuration. Choose `vLLM` as the container type and finalize the deployment pressing **Create Endpoint**.
 
-   ![Select Hardware](../../assets/deployment/hf-inference-endpoints-select-hardware.png)
+    ![Select Hardware](../../assets/deployment/hf-inference-endpoints-select-hardware.png)
 
 5. Use the deployed endpoint. Update the `DEPLOYMENT_URL` with the URL provided in the console (remember to add `/v1` needed). You can then use your endpoint programmatically or via the SDK.
 
-```python
-# pip install openai
-from openai import OpenAI
-import os
+    ```python
+    # pip install openai
+    from openai import OpenAI
+    import os
 
-client = OpenAI(
-    base_url = DEPLOYMENT_URL,
-    api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
-)
+    client = OpenAI(
+        base_url = DEPLOYMENT_URL,
+        api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
+    )
 
-chat_completion = client.chat.completions.create(
-    model = "ibm-granite/granite-docling-258M",
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png"
+    chat_completion = client.chat.completions.create(
+        model = "ibm-granite/granite-docling-258M",
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png"
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": "Convert this page to docling."
                     }
-                },
-                {
-                    "type": "text",
-                    "text": "Convert this page to docling."
-                }
-            ]
-        }
-    ],
-    stream = True
-)
+                ]
+            }
+        ],
+        stream = True
+    )
 
-for message in chat_completion:
-    print(message.choices[0].delta.content, end = "")
-```
+    for message in chat_completion:
+        print(message.choices[0].delta.content, end = "")
+    ```
 
 !!! note
     This method uses best-guess defaults. You may need to adjust the configuration to fit your specific requirements.
@@ -132,24 +132,24 @@ In this guide, we demonstrate manual deployment using the [rednote-hilab/dots.oc
 
 1. Start a new deployment. Go to [Inference Endpoints](https://endpoints.huggingface.co/) and click `New`.
 
-   ![New Endpoint](../../assets/deployment/hf-inference-endpoints-new-endpoint.png)
+    ![New Endpoint](../../assets/deployment/hf-inference-endpoints-new-endpoint.png)
 
 2. Search the model in the Hub. In the dialog, switch to **Hub** and search for the desired model.
 
-   ![Select model](../../assets/deployment/hf-inference-endpoints-select-model.png)
+    ![Select model](../../assets/deployment/hf-inference-endpoints-select-model.png)
 
 3. Choosing infrastructure. On the configuration page, select the cloud provider and hardware from the available options.  
    For this demo, we choose AWS and L4 GPU. Adjust according to your hardware needs.
 
-   ![Choose Infra](../../assets/deployment/hf-inference-endpoints-choose-infra.png)
+    ![Choose Infra](../../assets/deployment/hf-inference-endpoints-choose-infra.png)
 
 4. Configure the container. Scroll to the **Container Configuration** and select `vLLM` as the container type.
 
-   ![Configure Container](../../assets/deployment/hf-inference-endpoints-configure-container.png)
+    ![Configure Container](../../assets/deployment/hf-inference-endpoints-configure-container.png)
 
 5. Create the endpoint. Click **Create Endpoint** to deploy the model.
 
-Once the endpoint is ready, you can use it with the OpenAI Completion API, cURL, or other SDKs. Remember to append `/v1` to the deployment URL if needed.
+    Once the endpoint is ready, you can use it with the OpenAI Completion API, cURL, or other SDKs. Remember to append `/v1` to the deployment URL if needed.
 
 !!! note
     You can adjust the **container settings** (Container URI, Container Arguments) from the Inference Endpoints UI and press **Update Endpoint**. This redeploys the endpoint with the updated container configuration. Changes to the model itself require creating a new endpoint or redeploying with a different model. For example, for this demo, you may need to update the Container URI to the nightly image (`vllm/vllm-openai:nightly`) and add the `--trust-remote-code` flag in the container arguments.
