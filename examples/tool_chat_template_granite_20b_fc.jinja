@@ -108,7 +108,7 @@ If none of the functions are relevant or the given question lacks the parameters
 
 
 
-{% for message in messages %}
+{% for message in loop_messages %}
     {% if message['role'] == 'user' %}
         {{- '\nUSER: ' + message['content'] }}
     {% elif message['role'] == 'assistant' and message.tool_calls is defined %}
