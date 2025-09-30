@@ -56,11 +56,13 @@ class RobertaEmbedding(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
         token_type_ids = _decode_token_type_ids(input_ids)
 
-        inputs_embeds = self.word_embeddings(input_ids)
+        if inputs_embeds is None:
+            inputs_embeds = self.word_embeddings(input_ids)
+
         position_embeddings = self.position_embeddings(position_ids)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
