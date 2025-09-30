@@ -79,10 +79,3 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
         key: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         return self.forward_native(query, key)
-
-    def forward_hip(
-        self,
-        query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        return self.forward_cuda(query, key)

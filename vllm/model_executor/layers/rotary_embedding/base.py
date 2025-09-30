@@ -115,7 +115,6 @@ class RotaryEmbedding(CustomOp):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         if self.use_flashinfer:
             torch.ops.vllm.flashinfer_rotary_embedding(positions, query, key,

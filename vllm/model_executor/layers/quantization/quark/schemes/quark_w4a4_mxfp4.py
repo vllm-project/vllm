@@ -227,8 +227,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None,
-                      x_quant_scales: torch.Tensor = None) -> torch.Tensor:
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         if self.emulate:
             dq_w = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
