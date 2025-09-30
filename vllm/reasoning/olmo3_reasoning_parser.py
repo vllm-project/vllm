@@ -1,19 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
 import dataclasses as dt
-from typing import Optional, Union
 import enum
+from collections.abc import Sequence
+from typing import Optional, Union
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    DeltaMessage,
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaMessage, ResponsesRequest)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
@@ -26,6 +23,58 @@ class Olmo3ReasoningState(enum.Enum):
     CONTENT = 2
 
 
+@dt.dataclass(frozen=True)
+class Indices:
+    start: int
+    end: int
+
+    def __len__(self):
+        return self.end - self.start
+
+
+def string_overlap(a: str,
+                   b: str) -> tuple[Optional[Indices], Optional[Indices]]:
+    """
+    Find the longest overlap where the end of string a matches the start
+    of string b.
+
+    Args:
+        a: First string
+        b: Second string
+
+    Returns:
+        Tuple of IndicesTuples representing the overlapping portions in each
+        string, or a tuple of None if no overlap exists
+    """
+
+    # swap so a is always the shorter string
+    a, b, swap = (a, b, False) if len(a) < len(b) else (b, a, True)
+
+    # first check: is a fully contained in b?
+    if a in b:
+        ind_a = Indices(0, len(a))
+        ind_b = Indices(b.index(a), b.index(a) + len(a))
+        return (ind_b, ind_a) if swap else (ind_a, ind_b)
+
+    # second check: does the end of a overlap with the
+    #               beginning of b?
+    for i in range(len(a) - 1, 1, -1):
+        if a[-i:] == b[:i]:
+            ind_a = Indices(len(a) - i, len(a))
+            ind_b = Indices(0, i)
+            return (ind_b, ind_a) if swap else (ind_a, ind_b)
+
+    # third check: does the beginning of a overlap with
+    #              the end of b?
+    for i in range(len(a) - 1, 1, -1):
+        if b[-i:] == a[:i]:
+            ind_a = Indices(0, i)
+            ind_b = Indices(len(b) - i, len(b))
+            return (ind_b, ind_a) if swap else (ind_a, ind_b)
+
+    return None, None
+
+
 @dt.dataclass
 class Olmo3ReasoningBuffer:
     think_start: str = "<think>"
@@ -33,52 +82,14 @@ class Olmo3ReasoningBuffer:
     text_buffer: str = ""
     state: Olmo3ReasoningState = Olmo3ReasoningState.IDLE
 
-    @staticmethod
-    def _check_string_overlap(s1: str, s2: str) -> bool:
-        # fast check; containing
-        if s1 in s2 or s2 in s1:
-            return True
-
-        # slower check that checks if there's any overlap between
-        # prefixes and suffixes
-        min_len = min(len(s1), len(s2))
-
-        # Check if s1 suffix matches s2 prefix
-        for i in range(1, min_len + 1):
-            if s1[-i:] == s2[:i]:
-                return True
-
-        # Check if s2 suffix matches s1 prefix
-        for i in range(1, min_len + 1):
-            if s2[-i:] == s1[:i]:
-                return True
-
-        return False
-
-    def _update_buffer_and_maybe_emit(self, delta_text: str) -> bool:
-        if self._check_string_overlap(delta_text, self.think_start):
-            # the delta_text **might** be a start thinking tag;
-            # in doubt, we wait till the next delta_text to emit
-            self.text_buffer += delta_text
-            return False
-
-        elif self._check_string_overlap(delta_text, self.think_end):
-            # the delta_text **might** be a end thinking tag;
-            # in doubt, we wait till the next delta_text to emit
-            self.text_buffer += delta_text
-            return False
-
-        self.text_buffer += delta_text
-        return True
-
-    def _process_buffer(self) -> Optional[DeltaMessage]:
+    def process_buffer(self) -> Optional[DeltaMessage]:
         start_think_idx = self.text_buffer.find(self.think_start)
 
         if start_think_idx >= 0:
             self.state = Olmo3ReasoningState.REASONING
             pretext, self.text_buffer = (
                 self.text_buffer[:start_think_idx],
-                self.text_buffer[start_think_idx + len(self.think_start) :],
+                self.text_buffer[start_think_idx + len(self.think_start):],
             )
             if start_think_idx > 0:
                 # this covers the case there's content before
@@ -91,7 +102,7 @@ class Olmo3ReasoningBuffer:
             self.state = Olmo3ReasoningState.CONTENT
             pretext, self.text_buffer = (
                 self.text_buffer[:end_think_idx],
-                self.text_buffer[end_think_idx + len(self.think_end) :],
+                self.text_buffer[end_think_idx + len(self.think_end):],
             )
             if end_think_idx > 0:
                 # this covers the case there's content before
@@ -123,16 +134,57 @@ class Olmo3ReasoningBuffer:
         # is the length of the text buffer
         return len(self.text_buffer)
 
-    def process(self, delta_text: str) -> Optional[DeltaMessage]:
-        maybe_emit = self._update_buffer_and_maybe_emit(delta_text)
+    def add_text(self, delta_text: str) -> Optional[DeltaMessage]:
+        # we start by adding the delta text to the buffer
+        self.text_buffer += delta_text
 
-        if not maybe_emit:
+        # setting this to empty before starting
+        delta_message: Optional[DeltaMessage] = None
+
+        # we start by computing the overlap between the delta_text
+        # and start/end of think tokens.
+        _, overlap_think_start = string_overlap(delta_text, self.think_start)
+        _, overlap_think_end = string_overlap(delta_text, self.think_end)
+
+        partial_overlap_start = overlap_think_start is not None and len(
+            overlap_think_start) < len(self.think_start)
+        partial_overlap_end = overlap_think_end is not None and len(
+            overlap_think_end) < len(self.think_end)
+
+        if (partial_overlap_start and self.think_start in self.text_buffer
+                and not partial_overlap_end):
+            # we can only process the buffer if partial overlap
+            # is the last part of think token (thus causing
+            # text_buffer to contain the start of think token)
+            # and there are no partial overlaps with end think
+            delta_message = self.process_buffer()
+
+        elif partial_overlap_end and self.think_end in self.text_buffer:
+            # same as before (partial overlap only allowed)
+            # if the buffer contains the end think token,
+            # but we don't have to check for partial overlap
+            # with start think token because they are handled
+            # by the previous condition
+            delta_message = self.process_buffer()
+
+        elif partial_overlap_start or partial_overlap_end:
+            # in general, if there are overlaps, we don't
+            # process the buffer because we want to wait until
+            # the think token is fully completed.
             return None
+        else:
+            # we process the buffer as normal
+            delta_message = self.process_buffer()
 
-        elif maybe_emit and len(self) > 0:
-            return self._process_buffer()
+        # one final throughput improvement; sometimes the delta message
+        # is None, because process_buffer() processed some of the buffer
+        # w/o emitting a message (e.g., `<think></think>` -> `</think>`)
+        # in this case, we keep advancing till delta message is not None
+        # or the text buffer is empty
+        while delta_message is None and len(self) > 0:
+            delta_message = self.process_buffer()
 
-        return None
+        return delta_message
 
 
 @ReasoningParserManager.register_module("olmo3")
@@ -183,9 +235,8 @@ class Olmo3ReasoningParser(ReasoningParser):
             re.DOTALL,
         )
 
-        self.buffer = Olmo3ReasoningBuffer(
-            think_start=self.think_start, think_end=self.think_end
-        )
+        self.buffer = Olmo3ReasoningBuffer(think_start=self.think_start,
+                                           think_end=self.think_end)
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # for Olmo 3 streaming reason parsing, the stream parse
@@ -205,7 +256,8 @@ class Olmo3ReasoningParser(ReasoningParser):
 
         Args:
             model_output (str): Output of the model to be parsed.
-            request (ChatCompletionRequest | ResponsesRequest): Request being processed.
+            request (ChatCompletionRequest | ResponsesRequest): Request being
+                processed.
 
         Returns:
             tuple[Optional[str], Optional[str]]: Tuple pair containing the
@@ -230,32 +282,17 @@ class Olmo3ReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
-        print()
-        print("delta_text:", repr(delta_text))
-        print("previous_text:", repr(previous_text))
-        print("current_text:", repr(current_text))
-
-        response = self._extract_reasoning_content_streaming(
-            previous_text=previous_text,
-            current_text=current_text,
-            delta_text=delta_text,
-            previous_token_ids=previous_token_ids,
-            current_token_ids=current_token_ids,
-            delta_token_ids=delta_token_ids,
-        )
-        print("response:", response)
-        print("=======")
-        return response
-
-    def _extract_reasoning_content_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
         """Extract content using token ID sequence state machine"""
 
-        return self.buffer.process(delta_text)
+        delta_message = self.buffer.add_text(delta_text)
+        if (delta_message is None
+                and self.buffer.think_end in self.buffer.text_buffer):
+            # this is a bit hacky, but, because of how the buffer is
+            # constructed, if the last delta_text contains characters that
+            # marks the end of thinking tokens, then messages in the buffer
+            # would never be processed because we get no other turn.to get
+            # around that, we check if the text buffer contains the end of
+            # thinking tokens, and, if so, we reprocess the buffer again.
+            delta_message = self.buffer.process_buffer()
+
+        return delta_message
