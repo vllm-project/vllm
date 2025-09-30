@@ -165,8 +165,9 @@ def dispatch_cpu_unquantized_gemm(
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0),
                                               requires_grad=False)
-    elif (ops._supports_onednn
-          and current_platform.get_cpu_architecture() == CpuArchEnum.X86):
+    elif ops._supports_onednn and (current_platform.get_cpu_architecture()
+                                   == CpuArchEnum.X86
+                                   or ops.is_onednn_acl_supported()):
         origin_weight = layer.weight
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0),
