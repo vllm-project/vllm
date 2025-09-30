@@ -435,8 +435,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.block_quant = self.weight_block_size is not None
 
         self.flashinfer_moe_backend: Optional[FlashinferMoeBackend] = None
-        self.fused_experts: Optional[
-            mk.FusedMoEModularKernel] = None  # type: ignore
         if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
