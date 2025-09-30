@@ -14,8 +14,7 @@ from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
-from .ssd_chunk_state import (_chunk_cumsum_fwd, _chunk_state_fwd,
-                              chunk_state_varlen)
+from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd
 from .ssd_state_passing import _state_passing_fwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
@@ -37,9 +36,9 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    dt_bias=None,
                                    initial_states=None,
                                    seq_idx=None,
-                                   chunk_indices=None,
-                                   chunk_offsets=None,
                                    cu_seqlens=None,
+                                   cu_chunk_seqlens=None,
+                                   last_chunk_indices=None,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    state_dtype=None):
@@ -56,7 +55,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     if D is not None:
         assert D.shape == (nheads, headdim) or D.shape == (nheads, )
     if seq_idx is not None:
-        assert seq_idx.shape == (seqlen, )
+        assert seq_idx.shape == (cu_chunk_seqlens.shape[0] - 1, )
     if B.stride(-1) != 1:
         B = B.contiguous()
     if C.stride(-1) != 1:
@@ -89,6 +88,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     dA_cumsum, dt = _chunk_cumsum_fwd(dt,
                                       A,
                                       chunk_size,
+                                      cu_chunk_seqlens,
                                       dt_bias=dt_bias,
                                       dt_softplus=dt_softplus,
                                       dt_limit=dt_limit)
@@ -99,36 +99,31 @@ def _mamba_chunk_scan_combined_fwd(x,
                               x,
                               dt,
                               dA_cumsum,
-                              seq_idx=seq_idx,
+                              cu_chunk_seqlens,
                               states_in_fp32=True)
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
-    # - for handling chunked prefill, this requires i) initial_states
-    #   ii) seq_idx iii) is_cont_batched and (iv) chunk_offsets to be all specified.
+    # - for handling chunked prefill, this requires i) initial_states and
+    #   ii) seq_idx to be all specified.
     # - When a new seq_idx is detected, we will stop passing the prev_state
     #   and switch accordingly to the init_state corresponding to the new seq_idx.
-    # - We will also make sure that the dA_cumsum is taken only from the start of the
-    #   sequence (hence we need the full dA_cumsum tensor and not just the values at chunk boundaries)
-    # - this will ensure that states will be updated with the rightmost flushed seq_idx
-    #   of the previous chunk. This implies that the first chunk of states is either 0
-    #   or equal to init_states of the first example.
     states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,  # (nheads, nchunks, chunk_size)
+        cu_chunk_seqlens,
         initial_states=rearrange(initial_states, "... p n -> ... (p n)")
         if initial_states is not None else
         None,  # (batch, nheads, headdim*dstate)
         seq_idx=seq_idx,
-        out_dtype=state_dtype if state_dtype is not None else C.dtype,
-        chunk_offsets=chunk_offsets)
+        out_dtype=state_dtype if state_dtype is not None else C.dtype)
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C,
                         B,
                         chunk_size,
-                        seq_idx=seq_idx,
+                        cu_chunk_seqlens,
                         output_dtype=torch.float32)
 
     # 5. Scan and compute the diagonal blocks, taking into
@@ -148,26 +143,15 @@ def _mamba_chunk_scan_combined_fwd(x,
         dA_cumsum,
         C,
         states,
+        cu_chunk_seqlens,
         out,  # in-place update
         seq_idx,
         D=D,
         z=z,
-        chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
         initial_states=initial_states,
     )
 
-    varlen_states = chunk_state_varlen(
-        B,
-        x,
-        dt,
-        dA_cumsum,
-        cu_seqlens,
-        states,
-        initial_states=initial_states,
-    )
-
-    return varlen_states
+    return states[last_chunk_indices]
 
 
 def mamba_chunk_scan_combined_varlen(
@@ -178,14 +162,14 @@ def mamba_chunk_scan_combined_varlen(
         C,
         chunk_size,
         cu_seqlens,
+        cu_chunk_seqlens,
+        last_chunk_indices,
         seq_idx,
         out,
         D=None,
         z=None,
         dt_bias=None,
         initial_states=None,
-        chunk_indices=None,
-        chunk_offsets=None,
         dt_softplus=False,
         dt_limit=(0.0, float("inf")),
         state_dtype=None,
@@ -198,8 +182,10 @@ def mamba_chunk_scan_combined_varlen(
         B: (seqlen, ngroups, dstate)
         C: (seqlen, ngroups, dstate)
         chunk_size: int
-        seq_idx: (seqlen)
-        cu_seqlens: (batch + 1)
+        cu_seqlens: (batch + 1,)
+        cu_chunk_seqlens: (nchunks + 1,)
+        last_chunk_indices: (batch,)
+        seq_idx: (nchunks,)
         out: (seqlen, nheads, headdim) preallocated output tensor
         D: (nheads, headdim) or (nheads,)
         z: (seqlen, nheads, headdim)
@@ -228,9 +214,9 @@ def mamba_chunk_scan_combined_varlen(
         dt_bias=dt_bias,
         initial_states=initial_states,
         seq_idx=seq_idx,
-        chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
         cu_seqlens=cu_seqlens,
+        cu_chunk_seqlens=cu_chunk_seqlens,
+        last_chunk_indices=last_chunk_indices,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
         state_dtype=state_dtype)
