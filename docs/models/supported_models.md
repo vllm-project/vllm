@@ -626,7 +626,29 @@ See [this page](../features/multimodal_inputs.md) on how to pass multi-modal inp
     For hybrid-only models such as Llama-4, Step3 and Mistral-3, a text-only mode can be enabled by setting all supported multimodal modalities to 0 (e.g, `--limit-mm-per-prompt '{"image":0}`) so that their multimodal modules will not be loaded to free up more GPU memory for KV cache.
 
 !!! note
-    vLLM currently only supports adding LoRA to the language backbone of multimodal models.
+    vLLM currently only supports dynamic LoRA adapters on the language backbone of multimodal models.
+    If you wish to use a model with LoRA in the multi-modal encoder,
+    please merge the weights into the base model first before running it in vLLM like a regular model.
+
+    ```python
+    from peft import PeftConfig, PeftModel
+    from transformers import AutoModelForImageTextToText, AutoProcessor
+
+    def merge_and_save(model_id: str, output_dir: str):
+        base_model = AutoModelForImageTextToText.from_pretrained(model_id)
+        lora_model = PeftModel.from_pretrained(
+            base_model,
+            model_id,
+            config=PeftConfig.from_pretrained(model_id),
+        )
+        model = lora_model.merge_and_unload().to(dtype=base_model.dtype)
+        model._hf_peft_config_loaded = False  # Needed to save the merged model
+
+        processor = AutoProcessor.from_pretrained(model_id)
+
+        model.save_pretrained(output_dir)
+        processor.save_pretrained(output_dir)
+    ```
 
 ### Generative Models
 
@@ -805,8 +827,8 @@ The following table lists those that are tested in vLLM.
 
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|--------|-------------------|----------------------|---------------------------|---------------------|
-| `LlavaNextForConditionalGeneration`<sup>C</sup> | LLaVA-NeXT-based | T / I | `royokong/e5-v` | | | |
-| `Phi3VForCausalLM`<sup>C</sup> | Phi-3-Vision-based | T + I | `TIGER-Lab/VLM2Vec-Full` | 🚧 | ✅︎ | |
+| `LlavaNextForConditionalGeneration`<sup>C</sup> | LLaVA-NeXT-based | T / I | `royokong/e5-v` | | ✅︎ | ✅︎ |
+| `Phi3VForCausalLM`<sup>C</sup> | Phi-3-Vision-based | T + I | `TIGER-Lab/VLM2Vec-Full` | | ✅︎ | ✅︎ |
 | `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* | \* |
 
 <sup>C</sup> Automatically converted into an embedding model via `--convert embed`. ([details](./pooling_models.md#model-conversion))  
