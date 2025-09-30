@@ -678,6 +678,10 @@ def test_propose_tree(spec_token_tree):
     proposer.runner.attn_groups.append([mock.MagicMock()])
     proposer.runner.attn_groups[0][0].get_metadata_builder.return_value = \
         attn_metadata_builder
+    # Mock the new metadata_builders API introduced in the commit
+    proposer.runner.attn_groups[0][0].metadata_builders = {
+        0: attn_metadata_builder
+    }
     proposer._get_attention_metadata_builder = mock.MagicMock(
         return_value=attn_metadata_builder)
 

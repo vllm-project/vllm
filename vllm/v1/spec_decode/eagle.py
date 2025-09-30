@@ -74,6 +74,9 @@ class EagleProposer:
             vllm_config.model_config)
 
         self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
+        self.draft_indexer_metadata_builder: Optional[
+            AttentionMetadataBuilder] = None
+        self.indexer_layer_names: list[str] = []
 
         self.use_cuda_graph = (not current_platform.is_xpu()
                                and self.vllm_config.compilation_config.level
