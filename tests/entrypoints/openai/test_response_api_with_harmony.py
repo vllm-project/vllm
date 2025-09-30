@@ -379,6 +379,14 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             if event.type == "response.created":
                 resp_id = event.response.id
 
+            # test vllm custom types are in the response
+            if event.type in [
+                    "response.completed", "response.in_progress",
+                    "response.created"
+            ]:
+                assert 'input_messages' in event.response.model_extra
+                assert 'output_messages' in event.response.model_extra
+
             if current_event_mode != event.type:
                 current_event_mode = event.type
                 print(f"\n[{event.type}] ", end="", flush=True)
