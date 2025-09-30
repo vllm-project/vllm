@@ -33,6 +33,7 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, VllmConfig)
+from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
@@ -495,10 +496,13 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         # Input embeddings
         if not isinstance(self.model.get_input_embeddings(), PPMissingLayer):
+            names = ("embedding_size", "hidden_size")
+            embedding_dim = getattr_iter(self.text_config, names, None)
+            assert embedding_dim is not None
             self.model.set_input_embeddings(
                 VocabParallelEmbedding(
                     self.text_config.vocab_size,
-                    self.text_config.hidden_size,
+                    embedding_dim=embedding_dim,
                     org_num_embeddings=self.text_config.vocab_size,
                     quant_config=self.quant_config,
                 ))
@@ -660,7 +664,9 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 attn_type=attn_type)
         return attention_instances
 
-    def init_parameters(self, module: nn.Module):
+    def init_parameters(self,
+                        module: nn.Module,
+                        dtype: Optional[torch.dtype] = None):
         """
         If a `parameter` is on the `meta` device, then its parent
         `module` is the original module created by:
@@ -674,11 +680,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             if param.device == torch.device("meta"):
                 new_param = nn.Parameter(
                     torch.empty_like(param.data,
-                                     dtype=self.model_config.dtype,
+                                     dtype=dtype or self.model_config.dtype,
                                      device=self.device_config.device))
                 setattr(module, name, new_param)
         for child in module.children():
-            self.init_parameters(child)
+            self.init_parameters(child, dtype)
 
     def forward(
         self,
@@ -735,66 +741,6 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             raise ImportError(
                 f"Transformers backend requires transformers>={required} "
                 f"for {feature}, but got {installed}")
-
-
-@support_torch_compile(enable_if=can_enable_torch_compile)
-class TransformersModel(TransformersBase):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            # Handle BERT-like models
-            "bert": "model",
-            # Add `model.` prefix for base model checkpoints
-            "": "model.",
-            # Remove `model.` prefix if it was already there
-            "model.model.": "model.",
-            # Pooling adapters will be adjacent to `model`
-            "model.pooler": "pooler",
-            "model.score": "score",
-            # Classifier adapter's classifier layer is renamed to score
-            "model.classifier": "score",
-        },
-        orig_to_new_suffix={
-            # Replace legacy suffixes used for norms
-            ".gamma": ".weight",
-            ".beta": ".bias",
-        })
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-
-        # After creating a pooling model, `pooler` will be duplicated.
-        # The one inside `model` comes from the Transformers modelling code.
-        # The one after `model` is an adapter from vLLM.
-        # We want to use the adapter so we nullify the original pooler.
-        if getattr(self.model, "pooler", None) is not None:
-            self.skip_prefixes.append("pooler.")
-            self.model.pooler = torch.nn.Identity()
-
-        # Some encoder models have the position_ids buffer in the checkpoint.
-        # vLLM will always pass position_ids as an argument, so we skip loading
-        # the buffer if it exists
-        self.skip_substrs.append("position_ids")
-
-        # Some encoder models have the bias of the final classifier layer
-        # in the checkpoint. vLLM does not use this bias, so we skip loading
-        # it if it exists
-        self.skip_substrs.append("score.bias")
-
-    def create_attention_instances(
-            self, attn_type: AttentionType = AttentionType.DECODER):
-        # TODO(hmellor): Better way to detect encoder models
-        # In encoder models, the attention layers will have `is_causal=False`
-        is_encoder = lambda m: not getattr(m, "is_causal", True)
-        # vLLM does not support encoder-decoder models, so if any encoder layer
-        # is found, we assume the whole model is an encoder model
-        if any(is_encoder(m) for m in self.model.modules()):
-            attn_type = AttentionType.ENCODER_ONLY
-
-        # Check minimum transformers version for encoder models support
-        if attn_type == AttentionType.ENCODER_ONLY:
-            self.check_version("4.57.0.dev0", "encoder models support")
-
-        return super().create_attention_instances(attn_type)
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
