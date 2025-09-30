@@ -255,8 +255,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         time.sleep(self._hand_shake_latency)
         # These should've been done in register_kv_caches(), called by
         # gpu_model_runner. Here we just hardcode some dummy values.
-        self.slot_size_bytes = 4096
-        self.block_len = self.slot_size_bytes * self.block_size
+        slot_size_bytes = 4096
+        self.slot_size_per_layer = [slot_size_bytes]
+        self.block_len_per_layer = [slot_size_bytes * self.block_size]
         self.num_blocks = 1
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
@@ -268,7 +269,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
                 num_blocks=1,
-                block_len=self.block_len,
+                block_lens=self.block_len_per_layer,
                 attn_backend_name=self.backend_name,
                 # `self.kv_cache_layout` is only forced to HND when vllm engine
                 # is started. We mock HND here.
@@ -485,8 +486,8 @@ class TestNixlHandshake:
             worker = connector.connector_worker
 
             # Minimal local registration params used by add_remote_agent
-            worker.slot_size_bytes = 4096
-            worker.block_len = worker.slot_size_bytes * worker.block_size
+            worker.slot_size_per_layer = [4096]
+            worker.block_len_per_layer = [4096 * worker.block_size]
             worker.num_blocks = 1
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
 
@@ -498,7 +499,7 @@ class TestNixlHandshake:
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
                 num_blocks=1,
-                block_len=worker.block_len,
+                block_lens=worker.block_len_per_layer,
                 attn_backend_name=worker.backend_name,
                 kv_cache_layout=mismatched_layout,
             )
