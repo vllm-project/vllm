@@ -117,7 +117,8 @@ class LoRAModelRunnerMixin:
 
     @contextmanager
     def maybe_select_dummy_loras(self, lora_config: Optional[LoRAConfig],
-                                 num_scheduled_tokens: np.ndarray):
+                                 num_scheduled_tokens: np.ndarray,
+                                 with_lora: bool):
         if lora_config is None:
             yield
         else:
@@ -129,8 +130,11 @@ class LoRAModelRunnerMixin:
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
-            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
-                                   num_loras) + 1
+            if with_lora:
+                prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
+                                       num_loras) + 1
+            else:
+                prompt_lora_mapping = np.zeros(num_reqs, dtype=np.int32)
 
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping,
@@ -153,11 +157,12 @@ class LoRAModelRunnerMixin:
     def maybe_dummy_run_with_lora(self,
                                   lora_config: Optional[LoRAConfig],
                                   num_scheduled_tokens: np.ndarray,
+                                  with_lora: bool = True,
                                   remove_lora: bool = True):
         with (
                 self.maybe_setup_dummy_loras(lora_config, remove_lora),
                 self.maybe_select_dummy_loras(lora_config,
-                                              num_scheduled_tokens),
+                                              num_scheduled_tokens, with_lora),
         ):
             yield
 

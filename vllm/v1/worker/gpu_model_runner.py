@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
+from itertools import product
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union, cast
 
 import numpy as np
@@ -2364,8 +2365,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                               == self.uniform_decode_query_len) and (
                                   num_scheduled_tokens
                                   == self.input_batch.num_reqs * max_query_len)
-            batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                               uniform_decode=uniform_decode)
+            batch_descriptor = BatchDescriptor(
+                num_tokens=num_input_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+            )
             cudagraph_runtime_mode, batch_descriptor = \
                 self.cudagraph_dispatcher.dispatch(batch_descriptor,
                                                    use_cascade_attn)
@@ -3009,6 +3013,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         is_profile: bool = False,
         create_mixed_batch: bool = False,
         remove_lora: bool = True,
+        with_lora: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -3031,6 +3036,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             create_mixed_batch: If True, create a mixed batch with both decode
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
+            with_lora: If False, dummy_run is performed without LoRAs.
         """
         assert cudagraph_runtime_mode is None or \
             cudagraph_runtime_mode.valid_runtime_modes()
@@ -3185,7 +3191,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
-                                            num_scheduled_tokens, remove_lora):
+                                            num_scheduled_tokens, with_lora,
+                                            remove_lora):
             model_kwargs = self._init_model_kwargs(num_tokens)
             if (self.supports_mm_inputs
                     and not self.model_config.is_encoder_decoder):
@@ -3223,9 +3230,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # filter out the valid batch descriptor
             _cg_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
-                BatchDescriptor(num_tokens=num_tokens_after_padding,
-                                uniform_decode=uniform_decode)) \
-                if not is_profile else (CUDAGraphMode.NONE, None)
+                BatchDescriptor(
+                    num_tokens=num_tokens_after_padding,
+                    uniform_decode=uniform_decode,
+                    has_lora=with_lora and self.lora_config
+                    is not None)) if not is_profile else (CUDAGraphMode.NONE,
+                                                          None)
             if cudagraph_runtime_mode is not None:
                 # we allow forcing NONE when the dispatcher disagrees to support
                 # warm ups for cudagraph capture
@@ -3545,7 +3555,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
 
-                compilation_cases = list(reversed(self.cudagraph_batch_sizes))
+                compilation_cases = list(
+                    product(reversed(self.cudagraph_batch_sizes),
+                            [False, True] if self.lora_config else [False]))
                 self._capture_cudagraphs(
                     compilation_cases,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -3562,7 +3574,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     x <= max_num_tokens and x >= self.uniform_decode_query_len
                 ]
                 compilation_cases_decode = list(
-                    reversed(decode_cudagraph_batch_sizes))
+                    product(reversed(decode_cudagraph_batch_sizes),
+                            [False, True] if self.lora_config else [False]))
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
@@ -3584,7 +3597,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     elapsed_time, cuda_graph_size / (1 << 30))
         return cuda_graph_size
 
-    def _capture_cudagraphs(self, compilation_cases: list[int],
+    def _capture_cudagraphs(self, compilation_cases: list[tuple[int, bool]],
                             cudagraph_runtime_mode: CUDAGraphMode,
                             uniform_decode: bool):
         assert cudagraph_runtime_mode != CUDAGraphMode.NONE and \
@@ -3601,7 +3614,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cudagraph_runtime_mode.name))
 
         # We skip EPLB here since we don't want to record dummy metrics
-        for num_tokens in compilation_cases:
+        for num_tokens, with_lora in compilation_cases:
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens
             # is above the threshold. Otherwise we just capture a non-ubatched
@@ -3629,13 +3642,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 uniform_decode=uniform_decode,
                                 allow_microbatching=allow_microbatching,
                                 skip_eplb=True,
-                                remove_lora=False)
+                                remove_lora=False,
+                                with_lora=with_lora)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_mode=cudagraph_runtime_mode,
                             uniform_decode=uniform_decode,
                             allow_microbatching=allow_microbatching,
                             skip_eplb=True,
-                            remove_lora=False)
+                            remove_lora=False,
+                            with_lora=with_lora)
         self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
