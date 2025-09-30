@@ -29,7 +29,7 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 from .transformers import (TransformersBase, TransformersForCausalLM,
-                           TransformersForMultimodalLM, TransformersModel,
+                           TransformersForMultimodalLM,
                            can_enable_torch_compile, log_replacement)
 from .utils import maybe_prefix
 
@@ -253,11 +253,6 @@ class TransformersMoEBase(TransformersBase):
                     _fused_moe(child_module, prefix=qual_name)
 
         _fused_moe(self.model, prefix="model")
-
-
-@support_torch_compile(enable_if=can_enable_torch_compile)
-class TransformersMoEModel(TransformersMoEBase, TransformersModel):
-    pass
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)

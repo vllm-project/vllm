@@ -29,6 +29,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces_base import VllmModelForPooling
 from .transformers import TransformersBase, can_enable_torch_compile
+from .transformers_moe import TransformersMoEBase
 from .utils import WeightsMapper
 
 
@@ -191,3 +192,15 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
                     vllm_config.model_config),
             ),
         })
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersMoEEmbeddingModel(TransformersMoEBase,
+                                    TransformersEmbeddingModel):
+    pass
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersMoEForSequenceClassification(
+        TransformersMoEBase, TransformersForSequenceClassification):
+    pass
