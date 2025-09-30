@@ -263,7 +263,7 @@ class W8A8BlockFp8LinearOp:
 
         if should_use_deepgemm_for_fp8_linear(output_dtype, weight,
                                               self.is_deep_gemm_supported):
-            output = self._run_deepgemm(input, weight, weight_scale)
+            output = self._run_deepgemm(input_2d, weight, weight_scale)
             if bias is not None:
                 output = output + bias
             return output.to(dtype=input.dtype).view(*output_shape)
