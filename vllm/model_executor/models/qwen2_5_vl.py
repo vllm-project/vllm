@@ -47,6 +47,8 @@ from vllm.attention.layer import (
     check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
 )
+from vllm.attention.ops.vit_attn_wrappers import (vit_flash_attn_wrapper,
+                                                  vit_xformers_attn_wrapper)
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -412,95 +414,36 @@ class Qwen2_5_VisionAttention(nn.Module):
             qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
-        context_layer = torch.ops.mylib.custom_vision_attention(
-            q, k, v, cu_seqlens, max_seqlen, seqlens, batch_size,
-            self.is_flash_attn_backend,
-            self.attn_backend == _Backend.ROCM_AITER_FA,
-            self.attn_backend == _Backend.TORCH_SDPA,
-            self.attn_backend == _Backend.XFORMERS, self.use_upstream_fa)
+        if self.is_flash_attn_backend:
+            context_layer = vit_flash_attn_wrapper(
+                q, k, v, cu_seqlens, max_seqlen, batch_size,
+                self.attn_backend == _Backend.ROCM_AITER_FA,
+                self.use_upstream_fa)
+        elif self.attn_backend == _Backend.TORCH_SDPA:
+            # Execute attention entry by entry for speed & less VRAM.
+            outputs = []
+            for i in range(1, len(cu_seqlens)):
+                start_idx = cu_seqlens[i - 1]
+                end_idx = cu_seqlens[i]
+                q_i = q[:, start_idx:end_idx]
+                k_i = k[:, start_idx:end_idx]
+                v_i = v[:, start_idx:end_idx]
+                q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
+                                 for x in [q_i, k_i, v_i])
+                output_i = F.scaled_dot_product_attention(q_i,
+                                                          k_i,
+                                                          v_i,
+                                                          dropout_p=0.0)
+                output_i = rearrange(output_i, "b h s d -> b s h d ")
+                outputs.append(output_i)
+            context_layer = torch.cat(outputs, dim=1)
+            context_layer = rearrange(context_layer,
+                                      "b s h d -> s b (h d)").contiguous()
+        elif self.attn_backend == _Backend.XFORMERS:
+            context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
 
         output, _ = self.proj(context_layer)
         return output
-
-
-@torch.library.custom_op("mylib::custom_vision_attention", mutates_args=())
-def custom_vision_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                            cu_seqlens: torch.Tensor, max_seqlen: torch.Tensor,
-                            seqlens: torch.Tensor, batch_size: int,
-                            is_flash_attn: bool, is_rocm_aiter: bool,
-                            is_sdpa: bool, is_xformers: bool,
-                            use_upstream_fa: bool) -> torch.Tensor:
-    if is_flash_attn:
-        if is_rocm_aiter:
-            from aiter import flash_attn_varlen_func
-        else:
-            if use_upstream_fa:
-                from flash_attn import flash_attn_varlen_func
-            else:
-                from vllm.vllm_flash_attn import flash_attn_varlen_func
-        q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-
-        output = flash_attn_varlen_func(q,
-                                        k,
-                                        v,
-                                        cu_seqlens_q=cu_seqlens,
-                                        cu_seqlens_k=cu_seqlens,
-                                        max_seqlen_q=max_seqlen.item(),
-                                        max_seqlen_k=max_seqlen.item(),
-                                        dropout_p=0.0,
-                                        causal=False)
-
-        context_layer = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
-    elif is_sdpa:
-        # Execute attention entry by entry for speed & less VRAM.
-        outputs = []
-        for i in range(1, len(cu_seqlens)):
-            start_idx = cu_seqlens[i - 1]
-            end_idx = cu_seqlens[i]
-            q_i = q[:, start_idx:end_idx]
-            k_i = k[:, start_idx:end_idx]
-            v_i = v[:, start_idx:end_idx]
-            q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
-                             for x in [q_i, k_i, v_i])
-            output_i = F.scaled_dot_product_attention(q_i,
-                                                      k_i,
-                                                      v_i,
-                                                      dropout_p=0.0)
-            output_i = rearrange(output_i, "b h s d -> b s h d ")
-            outputs.append(output_i)
-        context_layer = torch.cat(outputs, dim=1)
-    elif is_xformers:
-        from xformers import ops as xops
-        from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-        attn_bias = BlockDiagonalMask.from_seqlens(q_seqlen=seqlens.tolist(),
-                                                   kv_seqlen=None,
-                                                   device=q.device)
-
-        context_layer = xops.memory_efficient_attention_forward(
-            q, k, v, attn_bias=attn_bias, p=0, scale=None)
-    else:
-        raise NotImplementedError("Attention type is not supported")
-    context_layer = rearrange(context_layer,
-                              "b s h d -> s b (h d)").contiguous()
-    return context_layer
-
-
-@torch.library.register_fake("mylib::custom_vision_attention")
-def custom_vision_attention_fake(q: torch.Tensor, k: torch.Tensor,
-                                 v: torch.Tensor, cu_seqlens: torch.Tensor,
-                                 max_seqlen: torch.Tensor,
-                                 seqlens: torch.Tensor, batch_size: int,
-                                 is_flash_attn: bool, is_rocm_aiter: bool,
-                                 is_sdpa: bool, is_xformers: bool,
-                                 use_upstream_fa: bool) -> torch.Tensor:
-    return torch.empty((
-        q.shape[1],
-        batch_size,
-        q.shape[2] * q.shape[3],
-    ),
-                       dtype=q.dtype,
-                       device=q.device)
 
 
 @set_model_tag("Qwen2_5_VisionBlock")
@@ -871,13 +814,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             cu_seqlens_thw,
         )
 
-    @staticmethod
-    def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
-        # building the inverse permutation in O(n) time
-        inv = torch.empty_like(perm, pin_memory=is_pin_memory_available())
-        inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
-        return inv
-
     def compute_attn_mask_seqlen(
         self,
         cu_seqlens: torch.Tensor,
@@ -891,6 +827,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1])
         return max_seqlen, seqlens
+
+    @staticmethod
+    def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
+        # building the inverse permutation in O(n) time
+        inv = torch.empty_like(perm, pin_memory=is_pin_memory_available())
+        inv[perm] = torch.arange(perm.numel(),
+                                 device=perm.device,
+                                 dtype=perm.dtype)
+        return inv
 
     def forward(
         self,
@@ -1385,13 +1330,14 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-
-            if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
-                )
-            else:
-                with set_forward_context(None, self.vllm_config):
+            with set_forward_context(None, self.vllm_config):
+                if self.use_data_parallel:
+                    return run_dp_sharded_mrope_vision_model(
+                        self.visual,
+                        pixel_values,
+                        grid_thw_list,
+                        rope_type="rope_3d")
+                else:
                     image_embeds = self.visual(pixel_values,
                                                grid_thw=grid_thw_list)
 
@@ -1447,12 +1393,14 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values_videos, grid_thw_list, rope_type="rope_3d"
-                )
-            else:
-                with set_forward_context(None, self.vllm_config):
+            with set_forward_context(None, self.vllm_config):
+                if self.use_data_parallel:
+                    return run_dp_sharded_mrope_vision_model(
+                        self.visual,
+                        pixel_values_videos,
+                        grid_thw_list,
+                        rope_type="rope_3d")
+                else:
                     video_embeds = self.visual(pixel_values_videos,
                                                grid_thw=grid_thw_list)
 
