@@ -2055,7 +2055,6 @@ def test_priority_scheduling_preemption_when_out_of_kv():
     assert len(scheduler.running) == 1
 
 
-
 @pytest.mark.parametrize(
     ("enable_chunked_prefill", "is_encoder_decoder", "expect_enabled"),
     [
