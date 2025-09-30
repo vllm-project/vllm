@@ -297,6 +297,8 @@ class EngineArgs:
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
+    allowed_media_domains: Optional[
+        list[str]] = ModelConfig.allowed_media_domains
     download_dir: Optional[str] = LoadConfig.download_dir
     safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
     load_format: Union[str, LoadFormats] = LoadConfig.load_format
@@ -391,6 +393,7 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
+    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -530,6 +533,8 @@ class EngineArgs:
                                  **model_kwargs["hf_config_path"])
         model_group.add_argument("--allowed-local-media-path",
                                  **model_kwargs["allowed_local_media_path"])
+        model_group.add_argument("--allowed-media-domains",
+                                 **model_kwargs["allowed_media_domains"])
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision",
                                  **model_kwargs["code_revision"])
@@ -813,6 +818,9 @@ class EngineArgs:
         multimodal_group.add_argument("--skip-mm-profiling",
                                       **multimodal_kwargs["skip_mm_profiling"])
 
+        multimodal_group.add_argument(
+            "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"])
+
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
         lora_group = parser.add_argument_group(
@@ -993,6 +1001,7 @@ class EngineArgs:
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
+            allowed_media_domains=self.allowed_media_domains,
             dtype=self.dtype,
             seed=self.seed,
             revision=self.revision,
@@ -1032,6 +1041,7 @@ class EngineArgs:
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
+            video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
         )
 
@@ -1150,11 +1160,12 @@ class EngineArgs:
 
         # Set default arguments for V1 Engine.
         self._set_default_args(usage_context, model_config)
-        # Disable chunked prefill for POWER (ppc64le)/ARM/s390x CPUs in V1
+        # Disable chunked prefill for POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture(
-        ) in (CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM):
-            logger.info("Chunked prefill is not supported for ARM and POWER "
-                        "and S390X CPUs; "
+        ) in (CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM,
+              CpuArchEnum.RISCV):
+            logger.info("Chunked prefill is not supported for ARM and POWER, "
+                        "S390X and RISC-V CPUs; "
                         "disabling it for V1 backend.")
             self.enable_chunked_prefill = False
         assert self.enable_chunked_prefill is not None
@@ -1357,6 +1368,7 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
+            is_encoder_decoder=model_config.is_encoder_decoder,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
@@ -1476,7 +1488,7 @@ class EngineArgs:
                 raise NotImplementedError(
                     "Draft model speculative decoding is not supported yet. "
                     "Please consider using other speculative decoding methods "
-                    "such as ngram, medusa, eagle, or deepseek_mtp.")
+                    "such as ngram, medusa, eagle, or mtp.")
 
         V1_BACKENDS = [
             "FLASH_ATTN",
