@@ -14,7 +14,6 @@ from pydantic import (ConfigDict, SkipValidation, field_validator,
                       model_validator)
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
@@ -64,13 +63,12 @@ ConvertType = Literal["none", "embed", "classify", "reward"]
 ConvertOption = Literal["auto", ConvertType]
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription", "draft"]
-_ResolvedTask = Literal["generate", "transcription", "encode", "embed",
-                        "classify", "reward", "draft"]
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal["raw_logits", "raw_logprobs", "processed_logits",
                        "processed_logprobs"]
-HfOverrides = Union[dict[str, Any], Callable[[type], type]]
+HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
+                                             PretrainedConfig]]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 
 _RUNNER_TASKS: dict[RunnerType, list[TaskOption]] = {
@@ -139,6 +137,9 @@ class ModelConfig:
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
+    allowed_media_domains: Optional[list[str]] = None
+    """If set, only media URLs that belong to this domain can be used for 
+    multi-modal inputs. """
     revision: Optional[str] = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
@@ -177,11 +178,6 @@ class ModelConfig:
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
-    max_seq_len_to_capture: int = 8192
-    """Maximum sequence len covered by CUDA graphs. When a sequence has context
-    length larger than this, we fall back to eager mode. Additionally for
-    encoder-decoder models, if the sequence length of the encoder input is
-    larger than this, we fall back to the eager mode."""
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -290,6 +286,7 @@ class ModelConfig:
     mm_encoder_tp_mode: InitVar[Optional[MMEncoderTPMode]] = None
     interleave_mm_strings: InitVar[Optional[bool]] = None
     skip_mm_profiling: InitVar[Optional[bool]] = None
+    video_pruning_rate: InitVar[Optional[float]] = None
 
     def compute_hash(self) -> str:
         """
@@ -318,6 +315,7 @@ class ModelConfig:
         factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
+        factors.append(self.video_pruning_rate)
 
         # hf_config can control how the model looks!
         try:
@@ -345,17 +343,19 @@ class ModelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(
-            self,
-            # Multimodal config init vars
-            limit_mm_per_prompt: Optional[dict[str, int]],
-            media_io_kwargs: Optional[dict[str, dict[str, Any]]],
-            mm_processor_kwargs: Optional[dict[str, Any]],
-            mm_processor_cache_gb: Optional[float],
-            mm_processor_cache_type: Optional[MMCacheType],
-            mm_shm_cache_max_object_size_mb: Optional[int],
-            mm_encoder_tp_mode: Optional[MMEncoderTPMode],
-            interleave_mm_strings: Optional[bool],
-            skip_mm_profiling: Optional[bool]) -> None:
+        self,
+        # Multimodal config init vars
+        limit_mm_per_prompt: Optional[dict[str, int]],
+        media_io_kwargs: Optional[dict[str, dict[str, Any]]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+        mm_processor_cache_gb: Optional[float],
+        mm_processor_cache_type: Optional[MMCacheType],
+        mm_shm_cache_max_object_size_mb: Optional[int],
+        mm_encoder_tp_mode: Optional[MMEncoderTPMode],
+        interleave_mm_strings: Optional[bool],
+        skip_mm_profiling: Optional[bool],
+        video_pruning_rate: Optional[float],
+    ) -> None:
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
@@ -509,9 +509,14 @@ class ModelConfig:
                 else:  # task == "auto"
                     pass
             else:
+                debug_info = {
+                    "architectures": architectures,
+                    "is_generative_model": is_generative_model,
+                    "is_pooling_model": is_pooling_model,
+                }
                 raise AssertionError("The model should be a generative or "
                                      "pooling model when task is set to "
-                                     f"{self.task!r}.")
+                                     f"{self.task!r}. Found: {debug_info}")
 
             self.runner = runner
             self.convert = convert
@@ -538,9 +543,6 @@ class ModelConfig:
                     "This model does not support `--runner pooling`. "
                     f"You can pass `--convert {convert_option} to adapt "
                     "it into a pooling model.")
-
-        self.supported_tasks = self._get_supported_tasks(
-            architectures, self.runner_type, self.convert_type)
 
         # Note: Initialize these attributes early because transformers fallback
         # may fail to load dynamic modules in child processes
@@ -622,6 +624,7 @@ class ModelConfig:
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
+                video_pruning_rate=video_pruning_rate,
             )
 
             mm_config_kwargs = {
@@ -839,27 +842,6 @@ class ModelConfig:
 
         return convert_type
 
-    def _get_supported_generation_tasks(
-        self,
-        architectures: list[str],
-        convert_type: ConvertType,
-    ) -> list[_ResolvedTask]:
-        registry = self.registry
-
-        if registry.is_transcription_only_model(architectures, self):
-            return ["transcription"]
-
-        # TODO: Use get_supported_generation_tasks once V0 is removed
-        supported_tasks = list[_ResolvedTask]()
-        if (registry.is_text_generation_model(architectures, self)
-                or convert_type in _RUNNER_CONVERTS["generate"]):
-            supported_tasks.append("generate")
-
-        if registry.is_transcription_model(architectures, self):
-            supported_tasks.append("transcription")
-
-        return supported_tasks
-
     def _get_default_pooling_task(
         self,
         architectures: list[str],
@@ -876,42 +858,6 @@ class ModelConfig:
                 return convert_type
 
         return "embed"
-
-    def _get_supported_pooling_tasks(
-        self,
-        architectures: list[str],
-        convert_type: ConvertType,
-    ) -> list[_ResolvedTask]:
-        registry = self.registry
-
-        # TODO: Use get_supported_pooling_tasks once V0 is removed
-        supported_tasks = list[_ResolvedTask]()
-        if (registry.is_pooling_model(architectures, self)
-                or convert_type in _RUNNER_CONVERTS["pooling"]):
-            supported_tasks.append("encode")
-
-            extra_task = (self._get_default_pooling_task(architectures)
-                          if convert_type == "none" else convert_type)
-            supported_tasks.append(extra_task)
-
-        return supported_tasks
-
-    def _get_supported_tasks(
-        self,
-        architectures: list[str],
-        runner_type: RunnerType,
-        convert_type: ConvertType,
-    ) -> list[_ResolvedTask]:
-        if runner_type == "generate":
-            return self._get_supported_generation_tasks(
-                architectures, convert_type)
-        if runner_type == "pooling":
-            return self._get_supported_pooling_tasks(architectures,
-                                                     convert_type)
-        if runner_type == "draft":
-            return ["draft"]
-
-        assert_never(runner_type)
 
     def _parse_quant_hf_config(self, hf_config: PretrainedConfig):
         quant_cfg = getattr(hf_config, "quantization_config", None)
@@ -1024,21 +970,8 @@ class ModelConfig:
             current_platform.verify_quantization(self.quantization)
 
     def _verify_cuda_graph(self) -> None:
-        # The `max_seq_len_to_capture` was incorrectly
-        # based on the encoder's input length (448)
-        # but not the decoder's larger input length (1500).
-        # This change ensures the CUDA Graph captures the correct,
-        # larger sequence length, allowing it to work as intended.
-        effective_max_seq_len = self.max_model_len
-        if self.is_encoder_decoder:
-            effective_max_seq_len = max(
-                effective_max_seq_len,
-                getattr(self.hf_config, "max_source_positions", 0))
-        self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
-                                          effective_max_seq_len)
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
         unsupported_rocm = self.is_encoder_decoder
-
         if (unsupported_rocm and not self.enforce_eager
                 and current_platform.is_rocm()):
             logger.warning(
@@ -1149,7 +1082,8 @@ class ModelConfig:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp', 'kimi_k2'):
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp',
+              'kimi_k2', 'longcat_flash'):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
@@ -1275,6 +1209,9 @@ class ModelConfig:
                 or self.hf_config.model_type == "qwen3_next_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
+        elif (self.hf_config.model_type == "longcat_flash_mtp"):
+            total_num_hidden_layers = getattr(self.hf_text_config,
+                                              "num_nextn_predict_layers", 1)
         else:
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_hidden_layers", 0)

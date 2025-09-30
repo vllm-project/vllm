@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 import torch
 
@@ -63,6 +63,11 @@ class LogprobsTensors(NamedTuple):
             logprobs=logprobs,
             selected_token_ranks=selected_token_ranks,
         )
+
+
+# [num_reqs, <dynamic>]
+# The shape of each element depends on the pooler used
+PoolerOutput = Union[torch.Tensor, list[torch.Tensor]]
 
 
 @dataclass
