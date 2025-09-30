@@ -11,6 +11,8 @@ from vllm.v1.utils import ConstantList
 
 from .utils import create_requests, create_scheduler
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _make_model_runner_output(
     scheduler_output: SchedulerOutput, ) -> ModelRunnerOutput:

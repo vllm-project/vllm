@@ -7,7 +7,6 @@ from typing import Optional
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
@@ -38,6 +37,7 @@ logger = init_logger(__name__)
 class FlashAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
+    supports_quant_query_input: bool = True
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
@@ -60,7 +60,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN_VLLM_V1"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
@@ -80,6 +80,7 @@ class FlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
@@ -506,16 +507,11 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         if self.kv_cache_dtype.startswith("fp8"):
+            # queries are quantized in the attention layer
             dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                 self.kv_cache_dtype)
             key_cache = key_cache.view(dtype)
             value_cache = value_cache.view(dtype)
-            num_tokens, num_heads, head_size = query.shape
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape(
-                    (num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale)
-            query = query.reshape((num_tokens, num_heads, head_size))
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc

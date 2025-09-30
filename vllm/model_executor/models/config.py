@@ -346,8 +346,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             block_size=1,
             num_kv_heads=model_config.get_num_kv_heads(parallel_config),
             head_size=model_config.get_head_size(),
-            dtype=kv_cache_dtype,
-            use_mla=model_config.use_mla).page_size_bytes
+            dtype=kv_cache_dtype).page_size_bytes
 
         model_cls, _ = ModelRegistry.resolve_model_cls(
             model_config.architecture,
@@ -401,6 +400,31 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 "exactly equal.", mamba_padding_pct)
 
 
+class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
+
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Updated fp8 cache to custom "fp8_ds_mla" format for DeepSeekV32
+        """
+        hf_config = vllm_config.model_config.hf_config
+
+        is_v32 = hasattr(hf_config, "index_topk")
+
+        if is_v32:
+            # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
+            #   "auto")
+            cache_config = vllm_config.cache_config
+            if cache_config.cache_dtype == "auto" or \
+                cache_config.cache_dtype.startswith("fp8"):
+                cache_config.cache_dtype = "fp8_ds_mla"
+                logger.info(
+                    "Using custom fp8 kv-cache format for DeepSeekV3.2")
+            if cache_config.cache_dtype == "bfloat16":
+                cache_config.cache_dtype = "auto"
+                logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -417,4 +441,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "MambaForCausalLM": MambaModelConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
+    "DeepseekV3ForCausalLM": DeepseekV3ForCausalLM,
 }

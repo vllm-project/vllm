@@ -117,6 +117,9 @@ class MiMoMultiTokenPredictor(nn.Module):
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -157,6 +160,9 @@ class MiMoMTP(nn.Module):
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
                                       prefix=maybe_prefix(prefix, "lm_head"))
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,

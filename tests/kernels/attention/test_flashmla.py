@@ -97,18 +97,16 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
         descale_k = None
 
     def flash_mla():
-        return flash_mla_with_kvcache(
-            q,
-            blocked_k,
-            block_table,
-            cache_seqlens,
-            dv,
-            tile_scheduler_metadata,
-            num_splits,
-            causal=causal,
-            descale_q=descale_q,
-            descale_k=descale_k,
-        )
+        return flash_mla_with_kvcache(q,
+                                      blocked_k,
+                                      block_table,
+                                      cache_seqlens,
+                                      dv,
+                                      tile_scheduler_metadata,
+                                      num_splits,
+                                      causal=causal,
+                                      descale_q=descale_q,
+                                      descale_k=descale_k)
 
     def scaled_dot_product_attention(query, key, value, is_causal=False):
         query = query.float()

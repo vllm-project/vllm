@@ -26,6 +26,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker, NixlKVConnectorStats)
+from vllm.distributed.kv_transfer.kv_transfer_state import (
+    ensure_kv_transfer_shutdown, has_kv_transfer_group)
 from vllm.forward_context import ForwardContext
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
@@ -33,6 +35,26 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
+
+@pytest.fixture(scope="module", autouse=True)
+def clear_kv_transfer():
+    """
+    The test cases in this file use `VLLM_ENABLE_V1_MULTIPROCESSING=0`,
+    causing the global variable `_KV_CONNECTOR_AGENT` 
+    to be assigned but never deleted.
+
+    Since the current pytest process does not terminate and instead 
+    continues running tests from other files,
+    this global variable remains in memory and interferes 
+    with test cases in other modules.
+    
+    So we use this fixture to ensure that the global variable
+    `_KV_CONNECTOR_AGENT` is properly cleaned up after each test.
+    """
+    yield
+    if has_kv_transfer_group():
+        ensure_kv_transfer_shutdown()
 
 
 class FakeNixlWrapper:
@@ -233,8 +255,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         time.sleep(self._hand_shake_latency)
         # These should've been done in register_kv_caches(), called by
         # gpu_model_runner. Here we just hardcode some dummy values.
-        self.slot_size_bytes = 4096
-        self.block_len = self.slot_size_bytes * self.block_size
+        slot_size_bytes = 4096
+        self.slot_size_per_layer = [slot_size_bytes]
+        self.block_len_per_layer = [slot_size_bytes * self.block_size]
         self.num_blocks = 1
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
@@ -246,7 +269,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
                 num_blocks=1,
-                block_len=self.block_len,
+                block_lens=self.block_len_per_layer,
                 attn_backend_name=self.backend_name,
                 # `self.kv_cache_layout` is only forced to HND when vllm engine
                 # is started. We mock HND here.
@@ -463,8 +486,8 @@ class TestNixlHandshake:
             worker = connector.connector_worker
 
             # Minimal local registration params used by add_remote_agent
-            worker.slot_size_bytes = 4096
-            worker.block_len = worker.slot_size_bytes * worker.block_size
+            worker.slot_size_per_layer = [4096]
+            worker.block_len_per_layer = [4096 * worker.block_size]
             worker.num_blocks = 1
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
 
@@ -476,7 +499,7 @@ class TestNixlHandshake:
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
                 num_blocks=1,
-                block_len=worker.block_len,
+                block_lens=worker.block_len_per_layer,
                 attn_backend_name=worker.backend_name,
                 kv_cache_layout=mismatched_layout,
             )

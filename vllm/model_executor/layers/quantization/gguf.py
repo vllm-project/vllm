@@ -555,7 +555,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
                 "Apply router weight on input is not supported for"
                 "fused GGUF MoE method.")
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,

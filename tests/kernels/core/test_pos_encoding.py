@@ -60,7 +60,7 @@ TENSORS_SHAPES_FN = [
 @torch.inference_mode()
 def test_rotary_embedding(
     is_neox_style: bool,
-    tensor_shape_fn: Callable[[int, int, int, int], tuple[int]],
+    tensor_shape_fn: Callable[[int, int, int, int], tuple[int, ...]],
     batch_size: int,
     seq_len: int,
     num_heads: int,

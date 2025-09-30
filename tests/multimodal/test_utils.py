@@ -5,7 +5,6 @@ import base64
 import mimetypes
 import os
 from tempfile import NamedTemporaryFile, TemporaryDirectory
-from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import pytest
@@ -14,9 +13,6 @@ from PIL import Image, ImageChops
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import MediaConnector, argsort_mm_positions
-
-if TYPE_CHECKING:
-    from vllm.multimodal.inputs import MultiModalPlaceholderDict
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
@@ -70,7 +66,12 @@ async def test_fetch_image_http(image_url: str):
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
 async def test_fetch_image_base64(url_images: dict[str, Image.Image],
                                   raw_image_url: str, suffix: str):
-    connector = MediaConnector()
+    connector = MediaConnector(
+        # Domain restriction should not apply to data URLs.
+        allowed_media_domains=[
+            "www.bogotobogo.com",
+            "github.com",
+        ])
     url_image = url_images[raw_image_url]
 
     try:
@@ -218,18 +219,13 @@ async def test_fetch_video_http_with_dynamic_loader(
         assert metadata_sync["video_backend"] == "opencv_dynamic"
 
 
-# Used for `test_argsort_mm_positions`.
-class TestCase(NamedTuple):
-    mm_positions: "MultiModalPlaceholderDict"
-    expected_modality_idxs: list[tuple[str, int]]
-
-
-def test_argsort_mm_positions():
-
-    test_cases = [
+# yapf: disable
+@pytest.mark.parametrize(
+    "case",
+    [
         # Single modality
         ## Internally sorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=0, length=2),
@@ -242,7 +238,7 @@ def test_argsort_mm_positions():
             ],
         ),
         ## Internally unsorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=3, length=2),
@@ -257,7 +253,7 @@ def test_argsort_mm_positions():
 
         # Two modalities
         ## Internally sorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=7, length=4),
@@ -276,7 +272,7 @@ def test_argsort_mm_positions():
             ],
         ),
         ## Interleaved, internally sorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=0, length=4),
@@ -295,7 +291,7 @@ def test_argsort_mm_positions():
             ],
         ),
         ## Interleaved, internally unsorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=8, length=2),
@@ -316,7 +312,7 @@ def test_argsort_mm_positions():
 
         # Three modalities
         ## Internally sorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=15, length=7),
@@ -341,7 +337,7 @@ def test_argsort_mm_positions():
             ],
         ),
         ## Interleaved, internally sorted
-        TestCase(
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=0, length=2),
@@ -363,8 +359,8 @@ def test_argsort_mm_positions():
                 ("image", 2),
             ],
         ),
-        ## Interleaved, internally sunorted
-        TestCase(
+        ## Interleaved, internally unsorted
+        dict(
             mm_positions={
                 "image": [
                     PlaceholderRange(offset=0, length=2),
@@ -386,9 +382,39 @@ def test_argsort_mm_positions():
                 ("image", 1),
             ],
         ),
-    ]
+    ],
+)
+# yapf: enable
+def test_argsort_mm_positions(case):
+    mm_positions = case["mm_positions"]
+    expected_modality_idxs = case["expected_modality_idxs"]
 
-    for mm_positions, expected_modality_idxs in test_cases:
-        modality_idxs = argsort_mm_positions(mm_positions)
+    modality_idxs = argsort_mm_positions(mm_positions)
 
-        assert modality_idxs == expected_modality_idxs
+    assert modality_idxs == expected_modality_idxs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
+@pytest.mark.parametrize("num_frames", [-1, 32, 1800])
+async def test_allowed_media_domains(video_url: str, num_frames: int):
+    connector = MediaConnector(
+        media_io_kwargs={"video": {
+            "num_frames": num_frames,
+        }},
+        allowed_media_domains=[
+            "www.bogotobogo.com",
+            "github.com",
+        ])
+
+    video_sync, metadata_sync = connector.fetch_video(video_url)
+    video_async, metadata_async = await connector.fetch_video_async(video_url)
+    assert np.array_equal(video_sync, video_async)
+    assert metadata_sync == metadata_async
+
+    disallowed_url = "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png"
+    with pytest.raises(ValueError):
+        _, _ = connector.fetch_video(disallowed_url)
+
+    with pytest.raises(ValueError):
+        _, _ = await connector.fetch_video_async(disallowed_url)

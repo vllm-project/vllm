@@ -25,6 +25,8 @@ from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, SlidingWindowSpec)
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.fixture(autouse=True)
 def _auto_init_hash_fn(request):
@@ -76,7 +78,7 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer"],
-                FullAttentionSpec(block_size, 1, 1, torch.float32, False),
+                FullAttentionSpec(block_size, 1, 1, torch.float32),
             )
         ],
     )
@@ -90,7 +92,7 @@ def make_kv_cache_config_hybrid_model(block_size: int,
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer1"],
-                FullAttentionSpec(block_size, 1, 1, torch.float32, False),
+                FullAttentionSpec(block_size, 1, 1, torch.float32),
             ),
             KVCacheGroupSpec(
                 ["layer2"],
@@ -98,7 +100,6 @@ def make_kv_cache_config_hybrid_model(block_size: int,
                                   1,
                                   1,
                                   torch.float32,
-                                  False,
                                   sliding_window=2 * block_size),
             ),
             KVCacheGroupSpec(
@@ -107,7 +108,6 @@ def make_kv_cache_config_hybrid_model(block_size: int,
                                   1,
                                   1,
                                   torch.float32,
-                                  False,
                                   sliding_window=2 * block_size),
             ),
         ],
@@ -1269,7 +1269,7 @@ def test_kv_cache_events(blocks_to_cache: int):
 
 
 def test_eagle_enabled_removes_last_block():
-    """Verify Eagle does NOT remove blocks when request 
+    """Verify Eagle does NOT remove blocks when request
     length is divisible by block size."""
     block_size = 16
     manager = KVCacheManager(
@@ -1338,7 +1338,6 @@ def test_eagle_with_sliding_window():
         head_size=1,
         dtype=torch.float32,
         sliding_window=block_size,
-        use_mla=False,
     )
     manager = KVCacheManager(
         KVCacheConfig(

@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
                     cast)
 
+import jinja2
+import jinja2.ext
+import jinja2.meta
 import jinja2.nodes
+import jinja2.parser
+import jinja2.sandbox
 import transformers.utils.chat_template_utils as hf_chat_utils
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -50,7 +55,7 @@ from vllm.transformers_utils.chat_templates import (
 # yapf: enable
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import random_uuid
+from vllm.utils import random_uuid, supports_kw
 
 logger = init_logger(__name__)
 
@@ -633,6 +638,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self._model_config.allowed_local_media_path
 
     @property
+    def allowed_media_domains(self):
+        return self._model_config.allowed_media_domains
+
+    @property
     def mm_registry(self):
         return MULTIMODAL_REGISTRY
 
@@ -832,6 +841,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._connector = MediaConnector(
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
+            allowed_media_domains=tracker.allowed_media_domains,
         )
 
     def parse_image(
@@ -916,6 +926,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._connector = MediaConnector(
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
+            allowed_media_domains=tracker.allowed_media_domains,
         )
 
     def parse_image(
@@ -1548,6 +1559,46 @@ def parse_chat_messages_futures(
     return conversation, mm_tracker.all_mm_data(), mm_tracker.all_mm_uuids()
 
 
+# adapted from https://github.com/huggingface/transformers/blob/v4.56.2/src/transformers/utils/chat_template_utils.py#L398-L412
+# only preserve the parse function used to resolve chat template kwargs
+class AssistantTracker(jinja2.ext.Extension):
+    tags = {"generation"}
+
+    def parse(self, parser: jinja2.parser.Parser) -> jinja2.nodes.CallBlock:
+        lineno = next(parser.stream).lineno
+        body = parser.parse_statements(["name:endgeneration"], drop_needle=True)
+        call = self.call_method("_generation_support")
+        call_block = jinja2.nodes.CallBlock(call, [], [], body)
+        return call_block.set_lineno(lineno)
+
+
+def resolve_chat_template_kwargs(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    chat_template: str,
+    chat_template_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    fn_kw = {
+        k for k in chat_template_kwargs
+        if supports_kw(tokenizer.apply_chat_template, k, allow_var_kwargs=False)
+    }
+
+    env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+        trim_blocks=True,
+        lstrip_blocks=True,
+        extensions=[AssistantTracker, jinja2.ext.loopcontrols],
+    )
+    parsed_content = env.parse(chat_template)
+    template_vars = jinja2.meta.find_undeclared_variables(parsed_content)
+
+    # We exclude chat_template from kwargs here, because
+    # chat template has been already resolved at this stage
+    unexpected_vars = {"chat_template"}
+    accept_vars = (fn_kw | template_vars) - unexpected_vars
+    return {
+        k: v for k, v in chat_template_kwargs.items() if k in accept_vars
+    }
+
+
 def apply_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     conversation: list[ConversationMessage],
@@ -1573,12 +1624,17 @@ def apply_hf_chat_template(
         )
 
     try:
+        resolved_kwargs = resolve_chat_template_kwargs(
+            tokenizer=tokenizer,
+            chat_template=hf_chat_template,
+            chat_template_kwargs=kwargs,
+        )
         return tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
             chat_template=hf_chat_template,
             tokenize=tokenize,
-            **kwargs,
+            **resolved_kwargs,
         )
 
     # External library exceptions can sometimes occur despite the framework's

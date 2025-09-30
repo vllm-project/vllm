@@ -28,8 +28,8 @@ class KVTransferConfig:
     """The engine id for KV transfers."""
 
     kv_buffer_device: Optional[str] = "cuda"
-    """The device used by kv connector to buffer the KV cache.
-    Currently only support 'cuda'."""
+    """The device used by kv connector to buffer the KV cache. Choices are 
+    'cuda' and 'cpu'."""
 
     kv_buffer_size: float = 1e9
     """The buffer size for TorchDistributedConnector. Measured in number of

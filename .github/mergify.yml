@@ -239,7 +239,6 @@ pull_request_rules:
   conditions:
     - or:
       - files~=^tests/tool_use/
-      - files~=^tests/mistral_tool_use/
       - files~=^tests/entrypoints/openai/tool_parsers/
       - files=tests/entrypoints/openai/test_chat_with_tool_reasoning.py
       - files~=^vllm/entrypoints/openai/tool_parsers/
@@ -274,7 +273,7 @@ pull_request_rules:
       - files~=^vllm/model_executor/model_loader/tensorizer.py
       - files~=^vllm/model_executor/model_loader/tensorizer_loader.py
       - files~=^tests/entrypoints/openai/test_tensorizer_entrypoint.py
-      - files~=^tests/tensorizer_loader/
+      - files~=^tests/model_executor/model_loader/tensorizer_loader/
   actions:
     assign:
       users:

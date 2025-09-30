@@ -322,6 +322,8 @@ class precompiled_wheel_utils:
                     "vllm/_C.abi3.so",
                     "vllm/_moe_C.abi3.so",
                     "vllm/_flashmla_C.abi3.so",
+                    "vllm/_flashmla_extension_C.abi3.so",
+                    "vllm/_sparse_flashmla_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                     "vllm/cumem_allocator.abi3.so",
@@ -589,6 +591,8 @@ if _is_cuda():
         # not targeting a hopper system
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_C", optional=True))
+        ext_modules.append(
+            CMakeExtension(name="vllm._flashmla_extension_C", optional=True))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
@@ -654,10 +658,7 @@ setup(
         "bench": ["pandas", "datasets"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
-        "runai": [
-            "runai-model-streamer >= 0.14.0", "runai-model-streamer-gcs",
-            "google-cloud-storage", "runai-model-streamer-s3", "boto3"
-        ],
+        "runai": ["runai-model-streamer[s3,gcs] >= 0.14.0"],
         "audio": ["librosa", "soundfile",
                   "mistral_common[audio]"],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility

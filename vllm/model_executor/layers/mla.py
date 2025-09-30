@@ -24,6 +24,9 @@ class MLAModules:
     q_a_layernorm: Optional[torch.nn.Module]
     q_b_proj: Optional[torch.nn.Module]
     q_proj: Optional[torch.nn.Module]
+    indexer: Optional[torch.nn.Module]
+    is_sparse: bool
+    topk_indices_buffer: Optional[torch.Tensor]
 
 
 @CustomOp.register("multi_head_latent_attention")
@@ -76,6 +79,13 @@ class MultiHeadLatentAttention(CustomOp):
         self.kv_b_proj = mla_modules.kv_b_proj
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
+        self.indexer = mla_modules.indexer
+        self.is_sparse = mla_modules.is_sparse
+
+        if self.indexer is not None:
+            assert hasattr(self.indexer, "topk_tokens")
+            self.topk_tokens = self.indexer.topk_tokens
+            self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
         # In the MLA backend, kv_cache includes both k_c and
         # pe (i.e. decoupled position embeddings). In particular,
@@ -92,6 +102,7 @@ class MultiHeadLatentAttention(CustomOp):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_mla=True,
+            use_sparse=mla_modules.is_sparse,
             # MLA Args
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
@@ -100,10 +111,10 @@ class MultiHeadLatentAttention(CustomOp):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             kv_b_proj=self.kv_b_proj,
+            indexer=self.indexer,
         )
 
         self.prefix = prefix
-        self.debug_layer_idx = int(self.prefix.split(".")[-2])
 
     def forward_native(
         self,
@@ -145,6 +156,10 @@ class MultiHeadLatentAttention(CustomOp):
 
         q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
             positions, q[..., self.qk_nope_head_dim:], k_pe)
+
+        if self.indexer and self.is_sparse:
+            _topk_indices = self.indexer(hidden_states, q_c, positions,
+                                         self.rotary_emb)
 
         attn_out = self.mla_attn(
             q,
