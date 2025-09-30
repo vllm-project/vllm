@@ -990,10 +990,11 @@ class DeepseekV2DecoderLayer(nn.Module):
     def __init__(self,
                  vllm_config: VllmConfig,
                  prefix: str,
+                 config: Optional[DeepseekV2Config] = None,
                  topk_indices_buffer: Optional[torch.Tensor] = None) -> None:
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = config or vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
