@@ -198,18 +198,3 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
                     vllm_config.model_config),
             ),
         })
-
-
-@support_torch_compile(enable_if=can_enable_torch_compile)
-class TransformersForReward(TransformersPoolingBase):
-    default_pooling_type = "ALL"
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-
-        pooler_config = vllm_config.model_config.pooler_config
-        assert pooler_config is not None
-
-        self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
-        })
