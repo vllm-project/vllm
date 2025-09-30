@@ -907,6 +907,7 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
             second_per_grid_ts=MultiModalFieldConfig.batched("video"),
         )
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,

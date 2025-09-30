@@ -16,7 +16,8 @@ import torch
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.processor import cached_processor_from_config, DYNAMIC_KEYS
+from vllm.transformers_utils.processor import (DYNAMIC_KEYS,
+                                               cached_processor_from_config)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
 from vllm.utils import (flatten_2d_lists, full_groupby,
@@ -2040,7 +2041,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 dynamic_mm_processor_kwargs[k] = v
             else:
                 static_mm_processor_kwargs[k] = v
-        
+
         # parse mm_data to mm_items with io_overrides
         mm_items = self._to_mm_items(mm_data)
 
@@ -2057,7 +2058,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             hf_processor_mm_kwargs=static_mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
-            hashed_mm_processor_mm_kwargs=full_mm_processor_kwargs,
+            hashed_mm_processor_kwargs=full_mm_processor_kwargs,
         )
 
         # NOTE: tokenization_kwargs are not required to init processor
@@ -2082,7 +2083,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_hashes=mm_info.hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
-    
+
     def _get_io_overrides(
         self,
         hf_processor_mm_kwargs: Mapping[str, object],
@@ -2098,8 +2099,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         except Exception:
             return {}
         dynamic_overrides = getattr(proc, "_vllm_dynamic_mm_kwargs", {}) or {}
-        dynamic_overrides = {k: v for k, v in dynamic_overrides.items() if k in DYNAMIC_KEYS}
-        return  {"video": dynamic_overrides} if dynamic_overrides else {}
+        dynamic_overrides = {
+            k: v
+            for k, v in dynamic_overrides.items() if k in DYNAMIC_KEYS
+        }
+        return {"video": dynamic_overrides} if dynamic_overrides else {}
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):

@@ -100,7 +100,7 @@ class MediaConnector:
             msg = "Only base64 data URLs are supported for now."
             raise NotImplementedError(msg)
 
-        return media_io.load_base64(media_type, data, request_overrides)
+        return media_io.load_base64(media_type, data, request_overrides=request_overrides)
 
     def _load_file_url(
         self,
@@ -119,7 +119,8 @@ class MediaConnector:
                 f"The file path {filepath} must be a subpath "
                 f"of `--allowed-local-media-path` {allowed_local_media_path}.")
 
-        return media_io.load_file(filepath, request_overrides=request_overrides)
+        return media_io.load_file(filepath,
+                                  request_overrides=request_overrides)
 
     def _assert_url_in_allowed_media_domains(self, url_spec) -> None:
         if self.allowed_media_domains and url_spec.hostname not in \
@@ -149,10 +150,14 @@ class MediaConnector:
                 media_io.load_bytes(data, request_overrides=request_overrides)
 
         if url_spec.scheme == "data":
-            return self._load_data_url(url_spec, media_io, request_overrides=request_overrides)
+            return self._load_data_url(url_spec,
+                                       media_io,
+                                       request_overrides=request_overrides)
 
         if url_spec.scheme == "file":
-            return self._load_file_url(url_spec, media_io, request_overrides=request_overrides)
+            return self._load_file_url(url_spec,
+                                       media_io,
+                                       request_overrides=request_overrides)
 
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
