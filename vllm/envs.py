@@ -174,7 +174,7 @@ if TYPE_CHECKING:
                                                  "NONE"] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
-    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
@@ -205,6 +205,7 @@ if TYPE_CHECKING:
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
     VLLM_USE_FBGEMM: bool = False
+    VLLM_GC_DEBUG: str = ""
 
 
 def get_default_cache_root():
@@ -1329,7 +1330,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # consumer. This is only applicable when using NixlConnector in a
     # disaggregated decode-prefill setup.
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
-    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120")),
+    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")),
 
     # Controls whether or not to use cudnn prefill
     "VLLM_USE_CUDNN_PREFILL":
@@ -1475,6 +1476,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
     # Flag to enable FBGemm kernels on model execution
     "VLLM_USE_FBGEMM": lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
+
+    # GC debug config
+    # - VLLM_GC_DEBUG=0: disable GC debugger
+    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+    # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
+    #                                      top 5 collected objects
+    "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
 }
 
 # --8<-- [end:env-vars-definition]
