@@ -582,6 +582,8 @@ class VllmConfig:
             cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
             if len(cuda_graph_sizes) == 1:
                 max_graph_size = cuda_graph_sizes[0]
+                assert max_graph_size >= 1, "Maximum cudagraph size should be" \
+                                            " greater than or equal to 1."
                 batch_size_capture_list = [
                     i for i in [1, 2, 4] if i <= max_graph_size
                 ] + list(range(8, max_graph_size + 1, 8))
