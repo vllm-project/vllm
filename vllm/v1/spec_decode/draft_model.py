@@ -9,7 +9,8 @@ from vllm.attention.layer import Attention
 from vllm.config import ModelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (append_new_toks,
+                                              extend_all_queries_by_1)
 from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
 
 
@@ -50,8 +51,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                                                   start_locs=start_locs,
                                                   new_toks=positions_to_append)
         # update common_attn_metadata
-        new_common_attn_metadata = self.update_common_attn_metadata(
-            new_target_positions, common_attn_metadata)
+        new_common_attn_metadata = extend_all_queries_by_1(
+            common_attn_metadata, arange=self.arange)
         # update token_indices_to_sample
         new_token_indices_to_sample = new_common_attn_metadata.query_start_loc[
             1:] - 1
@@ -64,50 +65,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             common_attn_metadata=new_common_attn_metadata,
         )
         return propose_kwargs | new_propose_kwargs
-
-    def update_common_attn_metadata(
-            self, new_positions: torch.Tensor,
-            common_attn_metadata: CommonAttentionMetadata):
-        cad = common_attn_metadata
-        batch_size = common_attn_metadata.batch_size()
-        # query start loc mus be increased by [+0, +1, +2, ..., +batch_size]
-        new_query_start_loc = cad.query_start_loc + self.arange[:len(
-            cad.query_start_loc)]
-        # seq lens must be increased by [+1, +1, ..., +1] size batch_size
-        new_seq_lens = cad.seq_lens + torch.ones_like(cad.seq_lens)
-        # num requests stays unchanged
-        new_num_reqs = cad.num_reqs
-        # num computed tokens are increased by [+1, +1, ..., +1] size batch_size
-        new_num_computed_tokens_cpu = cad.num_computed_tokens_cpu \
-            + torch.ones_like(cad.num_computed_tokens_cpu)
-        # num actual tokens increases by batch_size
-        new_num_actual_tokens = cad.num_actual_tokens + batch_size
-        # max query len and max seq len increases by 1
-        new_max_query_len = cad.max_query_len + 1
-        new_max_seq_len = cad.max_seq_len + 1
-        # block table tensor depends on num_requests, which doesn't change
-        new_block_table_tensor = cad.block_table_tensor
-        # slot mappings are extended (interleaved) by the next serial id
-        last_slot_mapping_ids = cad.slot_mapping[cad.last_token_indices()]
-        new_slot_mapping, _ = append_new_toks(toks=cad.slot_mapping,
-                                              start_locs=cad.query_start_loc,
-                                              new_toks=last_slot_mapping_ids +
-                                              1)
-
-        new_cad = CommonAttentionMetadata(
-            query_start_loc=new_query_start_loc,
-            query_start_loc_cpu=new_query_start_loc.to("cpu"),
-            seq_lens=new_seq_lens,
-            seq_lens_cpu=new_seq_lens.to("cpu"),
-            num_reqs=new_num_reqs,
-            num_computed_tokens_cpu=new_num_computed_tokens_cpu,
-            num_actual_tokens=new_num_actual_tokens,
-            max_query_len=new_max_query_len,
-            max_seq_len=new_max_seq_len,
-            block_table_tensor=new_block_table_tensor,
-            slot_mapping=new_slot_mapping,
-        )
-        return new_cad
 
     def _raise_if_multimodal(self):
         if self.supports_mm_inputs:
@@ -169,29 +126,3 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
         self.attn_layer_names = list(draft_attn_layer_names)
-
-
-def append_new_toks(
-        toks: torch.Tensor, start_locs: torch.Tensor,
-        new_toks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    long_len = toks.shape[0] + new_toks.shape[0]
-    long_toks = torch.zeros(long_len, device=toks.device, dtype=toks.dtype)
-
-    # compute indices for previous toks
-    toks_idxs = torch.ones_like(toks)
-    toks_idxs[start_locs[1:-1]] += 1
-    toks_idxs = toks_idxs.cumsum(0) - 1
-
-    # compute indices for new toks
-    new_toks_idxs = start_locs[1:] + torch.arange(new_toks.shape[0],
-                                                  device=toks.device)
-
-    # assign toks and new toks
-    long_toks[toks_idxs] = toks
-    long_toks[new_toks_idxs] = new_toks
-
-    # compute new start locs
-    new_start_locs = torch.zeros_like(start_locs)
-    new_start_locs[1:] = new_toks_idxs + 1
-
-    return long_toks, new_start_locs

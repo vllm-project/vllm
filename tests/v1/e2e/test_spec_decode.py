@@ -16,7 +16,6 @@ from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
-from vllm.v1.spec_decode.draft_model import append_new_toks
 from vllm.v1.spec_decode.metrics import (compute_acceptance_len,
                                          compute_acceptance_rate)
 
@@ -430,18 +429,3 @@ def compute_exact_matches(ref_outputs: list[RequestOutput],
             print(f"ref_output: {ref_output.outputs[0].text}")
             print(f"spec_output: {spec_output.outputs[0].text}")
     return matches / len(ref_outputs)
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_append_new_toks(device: str):
-    toks = torch.tensor([11, 12, 13, 21, 22, 31], device=device)
-    start_locs = torch.tensor([0, 3, 5, 6], device=device)
-    new_toks = torch.tensor([13, 23, 32], device=device)
-
-    expected_toks = torch.tensor([11, 12, 13, 13, 21, 22, 23, 31, 32],
-                                 device=device)
-    expected_start_locs = torch.tensor([0, 4, 7, 9], device=device)
-    actual_toks, actual_start_locs = append_new_toks(toks, start_locs,
-                                                     new_toks)
-    assert torch.all(actual_toks == expected_toks)
-    assert torch.all(actual_start_locs == expected_start_locs)

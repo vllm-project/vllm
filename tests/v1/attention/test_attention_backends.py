@@ -17,6 +17,7 @@ from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
+                                              append_new_toks,
                                               set_kv_cache_layout)
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -566,3 +567,18 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
                                   LARGE_BLOCK_BACKENDS,
                                   sliding_window_mask_mod_fn,
                                   block_size=128)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_append_new_toks(device: str):
+    toks = torch.tensor([11, 12, 13, 21, 22, 31], device=device)
+    start_locs = torch.tensor([0, 3, 5, 6], device=device)
+    new_toks = torch.tensor([13, 23, 32], device=device)
+
+    expected_toks = torch.tensor([11, 12, 13, 13, 21, 22, 23, 31, 32],
+                                 device=device)
+    expected_start_locs = torch.tensor([0, 4, 7, 9], device=device)
+    actual_toks, actual_start_locs = append_new_toks(toks, start_locs,
+                                                     new_toks)
+    assert torch.all(actual_toks == expected_toks)
+    assert torch.all(actual_start_locs == expected_start_locs)

@@ -105,6 +105,69 @@ def slice_query_start_locs(
         query_start_loc[request_slice.start]
 
 
+def extend_all_queries_by_1(common_attn_metadata: CommonAttentionMetadata,
+                            arange: torch.Tensor) -> CommonAttentionMetadata:
+    """
+    Creates a new CommonAttentionMetadata with all query lengths increased by 1.
+    Also all seq lens are increased by 1.
+    This is useful e.g. in speculative decoding with draft models, where we
+    extend each sequence by 1 token.
+    """
+    cad = common_attn_metadata
+    # query start loc must be increased by [+0, +1, +2, ..., +batch_size]
+    new_query_start_loc = cad.query_start_loc \
+        + arange[:len(cad.query_start_loc)]
+    new_seq_lens = cad.seq_lens + 1
+    # slot mappings are extended (interleaved) by the next serial id
+    last_slot_mapping_ids = cad.slot_mapping[cad.last_token_indices()]
+    new_slot_mapping, _ = append_new_toks(toks=cad.slot_mapping,
+                                          start_locs=cad.query_start_loc,
+                                          new_toks=last_slot_mapping_ids + 1)
+    new_cad = CommonAttentionMetadata(
+        query_start_loc=new_query_start_loc,
+        query_start_loc_cpu=new_query_start_loc.to("cpu"),
+        seq_lens=new_seq_lens,
+        seq_lens_cpu=new_seq_lens.to("cpu"),
+        num_reqs=cad.num_reqs,  # num requests stays unchanged
+        num_computed_tokens_cpu=cad.num_computed_tokens_cpu + 1,
+        # each request is extended by 1 token -> batch_size tokens are added
+        num_actual_tokens=cad.num_actual_tokens + cad.batch_size(),
+        # All query lens increase by 1, so max query len increases by 1
+        max_query_len=cad.max_query_len + 1,
+        max_seq_len=cad.max_seq_len + 1,
+        # block table tensor depends on num requests, which stays constant
+        block_table_tensor=cad.block_table_tensor,
+        slot_mapping=new_slot_mapping,
+    )
+    return new_cad
+
+
+def append_new_toks(
+        toks: torch.Tensor, start_locs: torch.Tensor,
+        new_toks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    long_len = toks.shape[0] + new_toks.shape[0]
+    long_toks = torch.zeros(long_len, device=toks.device, dtype=toks.dtype)
+
+    # compute indices for previous toks
+    toks_idxs = torch.ones_like(toks)
+    toks_idxs[start_locs[1:-1]] += 1
+    toks_idxs = toks_idxs.cumsum(0) - 1
+
+    # compute indices for new toks
+    new_toks_idxs = start_locs[1:] + torch.arange(new_toks.shape[0],
+                                                  device=toks.device)
+
+    # assign toks and new toks
+    long_toks[toks_idxs] = toks
+    long_toks[new_toks_idxs] = new_toks
+
+    # compute new start locs
+    new_start_locs = torch.zeros_like(start_locs)
+    new_start_locs[1:] = new_toks_idxs + 1
+
+    return long_toks, new_start_locs
+
+
 def _make_metadata_with_slice(
         ubatch_slice: UBatchSlice,
         attn_metadata: CommonAttentionMetadata) -> CommonAttentionMetadata:
