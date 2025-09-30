@@ -24,7 +24,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         super().__init__(vllm_config=vllm_config,
                          device=device,
                          pass_hidden_states_to_model=False,
-                         pass_cudagraph_args_to_forward_ctx=False,
+                         pass_cudagraph_args_to_forward_ctx=True,
                          runner=runner)
         self._raise_if_multimodal()
         self._raise_if_mrope()
@@ -140,15 +140,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
     def set_input_ids_first_pass(self, target_token_ids: torch.Tensor,
                                  next_token_ids: torch.Tensor, num_tokens: int,
                                  last_token_indices: torch.Tensor) -> None:
-        # start_locs = torch.zeros(last_token_indices.shape[0] + 1,
-        #                          device=last_token_indices.device,
-        #                          dtype=torch.int32)
-        # start_locs[1:] = last_token_indices + 1
-        # input_ids, _ = append_new_toks(toks=target_token_ids,
-        #                                start_locs=start_locs,
-        #                                new_toks=next_token_ids)
-        # num_tokens = input_ids.shape[0]
-        # self.input_ids[:num_tokens] = input_ids
         self.input_ids[:num_tokens] = target_token_ids
 
     def load_model(self, target_model: Any) -> None:

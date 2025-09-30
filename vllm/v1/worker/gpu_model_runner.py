@@ -92,7 +92,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
-from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.eagle import CudaGraphArgs, EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -2688,7 +2688,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             else:
                 mm_embed_inputs = None
-            cudagraph_args = dict(
+            cudagraph_args: CudaGraphArgs = dict(
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_descriptor,
             )
