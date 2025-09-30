@@ -66,6 +66,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
         layer.weight_block_size = None
+        layer.orig_dtype = params_dtype
 
         if self.strategy == QuantizationStrategy.BLOCK:
             assert self.weight_block_size is not None
