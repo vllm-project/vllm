@@ -220,6 +220,7 @@ class LoRAModel(AdapterModel):
                 if "base_layer" in lora_module:
                     continue
                 part_name = module_name.split(".")[-1]
+                print(lora_module)
                 if part_name not in expected_lora_modules:
                     unexpected_modules.append(module_name)
             if unexpected_modules:
@@ -422,7 +423,7 @@ class LoRAModelManager(AdapterModelManager):
                     gate_up_proj_lora = self._get_lora_layer_weights(lora_model, module_name + ".base_layer")
                     down_proj_lora = module_lora
                     num_experts = module_lora.lora_a.shape[-1] // module_lora.rank
-                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=1)
+                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=-1)
                     up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=-1)
 
                     gate_proj_b = gate_up_proj_lora.lora_b[..., ::2].chunk(num_experts, dim=0)
