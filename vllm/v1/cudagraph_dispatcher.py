@@ -73,10 +73,13 @@ class CudagraphDispatcher:
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
             for bs in self.compilation_config.cudagraph_capture_sizes:
-                self.add_cudagraph_key(
-                    cudagraph_mode.mixed_mode(),
-                    BatchDescriptor(num_tokens=bs, uniform_decode=False),
-                )
+                for has_lora in [True, False]:
+                    self.add_cudagraph_key(
+                        cudagraph_mode.mixed_mode(),
+                        BatchDescriptor(
+                            num_tokens=bs, uniform_decode=False, has_lora=has_lora
+                        ),
+                    )
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.
@@ -94,10 +97,13 @@ class CudagraphDispatcher:
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
             for bs in cudagraph_capture_sizes_for_decode:
-                self.add_cudagraph_key(
-                    CUDAGraphMode.FULL,
-                    BatchDescriptor(num_tokens=bs, uniform_decode=True),
-                )
+                for has_lora in [True, False]:
+                    self.add_cudagraph_key(
+                        CUDAGraphMode.FULL,
+                        BatchDescriptor(
+                            num_tokens=bs, uniform_decode=True, has_lora=has_lora
+                        ),
+                    )
         self.keys_initialized = True
 
     def dispatch(
