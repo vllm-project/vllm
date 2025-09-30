@@ -112,11 +112,11 @@ class UBatchContext:
 
     def _restore_context(self):
         forward_context._forward_context = self.forward_context
-        torch.cuda.set_stream(self.current_stream)
 
     def update_stream(self, stream):
         self.current_stream = stream
-        torch.cuda.set_stream(self.current_stream)
+        if current_stream() != self.current_stream:
+            torch.cuda.set_stream(self.current_stream)
 
     def _signal_comm_done(self):
         self.gpu_comm_done_event.record(self.comm_stream)
@@ -271,9 +271,10 @@ def dbo_register_recv_hook(recv_hook: Callable[[], None],
         assert ctx is not None
         if all_schedules or ctx.schedule in schedules:
             next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % 2]
-            assert next_ctx is not None
-            next_ctx.recv_hook = recv_hook
-            return True
+            # Next context may have already exited
+            if next_ctx is not None:
+                next_ctx.recv_hook = recv_hook
+                return True
     return False
 
 

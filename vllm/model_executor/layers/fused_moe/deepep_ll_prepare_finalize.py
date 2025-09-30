@@ -220,7 +220,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         _, _, recv_hook = self.buffer.low_latency_combine(
             fused_expert_output,
-            topk_weights,
             topk_ids,
             combine_topk_weights,
             handle,
