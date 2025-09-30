@@ -28,7 +28,7 @@ def test_extract_tool_calls_simple(parser):
     assert result.tool_calls[0].type == "function"
     assert result.tool_calls[0].function.name == "getOpenIncidentsTool"
     assert result.tool_calls[0].function.arguments == "{}"
-    assert result.content is None
+    assert result.content == "Here is the result: Would you like to know more?"
 
 
 def test_extract_tool_calls_with_arguments(parser):
@@ -130,3 +130,26 @@ def test_extract_tool_calls_multiple_json_with_surrounding_text(parser):
     assert result.tool_calls[0].function.name == "searchTool"
     assert result.tool_calls[1].function.name == "getOpenIncidentsTool"
     assert result.tool_calls[2].function.name == "searchTool"
+    expected_content = "Here are the results: Would you like to know more?"
+    assert result.content == expected_content
+
+
+def test_extract_tool_calls_whitespace_only(parser):
+    # Test with whitespace-only prefix/suffix
+    model_output = (
+        '   {"name": "searchTool", "parameters": {"query": "test"}}   ')
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.content is None  # Whitespace-only treated as empty
+
+
+def test_extract_tool_calls_no_surrounding_text(parser):
+    # Test with no surrounding text
+    model_output = '{"name": "searchTool", "parameters": {"query": "test"}}'
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.content is None  # No text outside JSON

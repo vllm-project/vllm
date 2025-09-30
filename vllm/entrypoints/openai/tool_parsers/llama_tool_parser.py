@@ -33,7 +33,7 @@ class Llama3JsonToolParser(ToolParser):
     Tool call parser for Llama 3.x and 4 models intended for use with the
     examples/tool_chat_template_llama.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser llama3_json or 
+    Used when --enable-auto-tool-choice --tool-call-parser llama3_json or
     llama4_json are set.
     """
 
@@ -61,7 +61,7 @@ class Llama3JsonToolParser(ToolParser):
             request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
-        Only extracts JSON content and ignores any surrounding plain text.
+        Extracts JSON tool calls and preserves surrounding plain-text content.
         Supports both single JSON and multiple JSONs separated by semicolons.
         """
         # Quick check before running regex
@@ -79,6 +79,20 @@ class Llama3JsonToolParser(ToolParser):
 
         try:
             json_str = match.group(0)
+
+            # Extract surrounding text
+            prefix = model_output[:match.start()]
+            suffix = model_output[match.end():]
+
+            # Combine and clean context
+            context_parts = [prefix.strip(), suffix.strip()]
+            context: Union[str, None] = ' '.join(part for part in context_parts
+                                                 if part)
+
+            # Treat whitespace-only as empty
+            if not context or context.isspace():
+                context = None
+
             # Split by semicolon and strip whitespace
             json_objects = [obj.strip() for obj in json_str.split(';')]
 
@@ -100,7 +114,7 @@ class Llama3JsonToolParser(ToolParser):
 
             return ExtractedToolCallInformation(tools_called=True,
                                                 tool_calls=tool_calls,
-                                                content=None)
+                                                content=context)
 
         except Exception:
             logger.exception("Error in extracting tool call from response.")
