@@ -33,7 +33,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
@@ -476,30 +475,16 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         raise AssertionError("This line should be unreachable.")
 
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
-        if strategy == "default":
-            return image_features[:, 1:]
-        elif strategy == "full":
-            return image_features
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
-
     def _image_pixels_to_features(
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
         pixel_values: Union[torch.Tensor, list[torch.Tensor]],
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         # From vLLM LLaVA, vision tower output handling
-        image_hidden_states: Union[torch.Tensor, tuple[torch.Tensor, ...]] = \
-            vision_tower(pixel_values)
-
-        def select_features_fn(leaf: torch.Tensor):
-            return self._select_image_features(
-                leaf,
-                strategy=self.config.vision_feature_select_strategy,
-            )
-
-        return json_map_leaves(select_features_fn, image_hidden_states)
+        return vision_tower(
+            pixel_values,
+            feature_select_strategy=self.config.vision_feature_select_strategy,
+        )
 
     def _add_tarsier_split_tokens(
             self, projected_image_features: torch.Tensor) -> torch.Tensor:
