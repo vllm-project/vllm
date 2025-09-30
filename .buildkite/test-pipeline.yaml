@@ -615,8 +615,7 @@ steps:
   - tests/models/test_vision.py
   no_gpu: true
   commands:
-    - pytest -v -s models/test_utils.py
-    - pytest -v -s models/test_vision.py
+    - pytest -v -s models/test_utils.py models/test_vision.py
 
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
