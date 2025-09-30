@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
-import sys
 import traceback
 from itertools import chain
 from typing import TYPE_CHECKING, Optional
@@ -216,16 +215,6 @@ def resolve_current_platform_cls_qualname() -> str:
             activated_builtin_plugins[0]]()
         logger.info("Automatically detected platform %s.",
                     activated_builtin_plugins[0])
-    elif sys.argv and len(sys.argv) >= 2 and sys.argv[1] == "bench":
-        # For 'vllm bench *' commands: use CPU instead of UnspecifiedPlatform
-        # to avoid errors during CLI init
-        platform_cls_qualname = "vllm.platforms.cpu.CpuPlatform"
-        logger.warning(
-            "No platform detected while running benchmark commands, "
-            "but defaults to CPU Platform instead of UnspecifiedPlatform "
-            "to avoid errors during CLI init. "
-            "This may be expected when running your benchmark commands on "
-            "CPU-only machines (Ray cluster head node for example) ")
     else:
         platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"
         logger.info(
