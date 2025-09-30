@@ -774,7 +774,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         # Delegate to underlying language model (Llama4ForCausalLM)
         assert hasattr(self.language_model,
                        'get_eagle3_aux_hidden_state_layers')
-        self.language_model.get_eagle3_aux_hidden_state_layers()
+        return self.language_model.get_eagle3_aux_hidden_state_layers()
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Llama4ImagePatchInputs]:
