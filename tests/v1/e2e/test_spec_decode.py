@@ -79,18 +79,16 @@ def model_name():
     return "meta-llama/Llama-3.1-8B-Instruct"
 
 
-@pytest.mark.parametrize("speculative_config", [
-    {
-        "method": "ngram",
-        "prompt_lookup_max": 5,
-        "prompt_lookup_min": 3,
-        "num_speculative_tokens": 3,
-    },
-    {
-        "method": "suffix",
-        "suffix_decoding_max_spec_factor": 2.0,
-    }
-])
+@pytest.mark.parametrize("speculative_config",
+                         [{
+                             "method": "ngram",
+                             "prompt_lookup_max": 5,
+                             "prompt_lookup_min": 3,
+                             "num_speculative_tokens": 3,
+                         }, {
+                             "method": "suffix",
+                             "suffix_decoding_max_spec_factor": 2.0,
+                         }])
 def test_ngram_and_suffix_correctness(
     speculative_config: dict,
     monkeypatch: pytest.MonkeyPatch,
@@ -156,11 +154,11 @@ def test_suffix_decoding_acceptance(
     )
 
     # Run several times and check that the accepted tokens increase.
-    spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+    spec_llm.chat(test_prompts, sampling_config)
     num_draft = []
     num_accept = []
     for i in range(10):  # Run multiple times to warm up the cache.
-        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+        spec_llm.chat(test_prompts, sampling_config)
         # Collect draft and acceptance stats.
         metrics = spec_llm.get_metrics()
         for metric in metrics:

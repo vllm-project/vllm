@@ -13,7 +13,7 @@ import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils import LazyLoader
+from vllm.utils import LazyLoader, has_arctic_inference
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -295,10 +295,7 @@ class SpeculativeConfig:
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
-            try:
-                from arctic_inference.suffix_decoding import (
-                    SuffixDecodingCache)
-            except ImportError:
+            if not has_arctic_inference():
                 raise ImportError(
                     "Arctic Inference is required for suffix decoding. "
                     "Please install via `pip install arctic-inference`.")
@@ -317,8 +314,8 @@ class SpeculativeConfig:
                 raise ValueError(
                     f"suffix_decoding_max_spec_factor="
                     f"{self.suffix_decoding_max_spec_factor} must be >= 0")
-            if (self.suffix_decoding_min_token_prob < 0 or
-                    self.suffix_decoding_min_token_prob > 1):
+            if (self.suffix_decoding_min_token_prob < 0
+                    or self.suffix_decoding_min_token_prob > 1):
                 raise ValueError(
                     f"suffix_decoding_min_token_prob="
                     f"{self.suffix_decoding_min_token_prob} must be in [0, 1]")

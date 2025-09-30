@@ -283,7 +283,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.method == "suffix":
-                self.drafter = SuffixDecodingProposer(self.vllm_config)
+                self.drafter = SuffixDecodingProposer(
+                    self.vllm_config)  # type: ignore
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -2246,8 +2247,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        if (self.speculative_config and
-                isinstance(self.drafter, SuffixDecodingProposer)):
+        if (self.speculative_config
+                and isinstance(self.drafter, SuffixDecodingProposer)):
             self.drafter.update(self.input_batch, valid_sampled_token_ids)
 
         return (
@@ -2568,8 +2569,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         elif self.speculative_config.method == "suffix":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, SuffixDecodingProposer)
-            draft_token_ids = self.drafter.propose(
-                self.input_batch, sampled_token_ids)
+            draft_token_ids = self.drafter.propose(self.input_batch,
+                                                   sampled_token_ids)
         elif self.speculative_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)

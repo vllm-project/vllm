@@ -58,7 +58,7 @@ class SuffixDecodingProposer:
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
         req_ids = input_batch.req_ids
-        draft_token_ids = []
+        draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
