@@ -53,9 +53,11 @@ def _extract_data_from_fused_moe_module(
     """
     assert isinstance(m, FusedMoE)
     w13 = m.w13_weight
-    w13_s = m.w13_weight_scale_inv
+    w13_s = m.w13_weight_scale_inv if hasattr(
+        m, "w13_weight_scale_inv") else m.w13_weight_scale
     w2 = m.w2_weight
-    w2_s = m.w2_weight_scale_inv
+    w2_s = m.w2_weight_scale_inv if hasattr(
+        m, "w2_weight_scale_inv") else m.w2_weight_scale
     num_topk = m.top_k
 
     assert isinstance(w13, torch.Tensor)

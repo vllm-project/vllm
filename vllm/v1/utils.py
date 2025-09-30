@@ -117,7 +117,7 @@ class CpuGpuBuffer:
                                dtype=dtype,
                                device="cpu",
                                pin_memory=pin_memory)
-        self.gpu = self.cpu.to(device)
+        self.gpu = torch.zeros_like(self.cpu, device=device)
         self.np: np.ndarray
         # To keep type hints simple (avoiding generics and subclasses), we
         # only conditionally create the numpy array attribute. This can cause
@@ -375,8 +375,22 @@ def report_usage_stats(
         })
 
 
+_PROFILER_FUNC = None
+
+
 def record_function_or_nullcontext(name: str) -> AbstractContextManager:
+    global _PROFILER_FUNC
+
+    # fast path assume it is set
+    if _PROFILER_FUNC is not None:
+        return _PROFILER_FUNC(name)
+
+    func = contextlib.nullcontext
     if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
-        return record_function(name)
-    else:
-        return contextlib.nullcontext()
+        func = record_function
+    elif envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
+        import nvtx
+        func = nvtx.annotate
+
+    _PROFILER_FUNC = func
+    return func(name)

@@ -22,8 +22,8 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            PerTensorScaleParameter)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv, direct_register_custom_op
-from vllm.utils.deep_gemm import (is_deep_gemm_e8m0_used,
+from vllm.utils import direct_register_custom_op
+from vllm.utils.deep_gemm import (fp8_gemm_nt, is_deep_gemm_e8m0_used,
                                   should_use_deepgemm_for_fp8_linear)
 
 logger = init_logger(__name__)
@@ -85,9 +85,7 @@ if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_aiter_gemm_w8a8_blockscale",
         op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
-        mutates_args=[],
         fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
     if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
             and current_platform.is_fp8_fnuz()):
@@ -143,17 +141,10 @@ def apply_w8a8_block_fp8_linear(
             block_size[1],
             column_major_scales=True,
         )
-
-        # ensure DeepGEMM-backed custom op is registered before use
-        import vllm.model_executor.layers.quantization.deepgemm  # noqa: F401
-
-        output = torch.ops.vllm.w8a8_block_fp8_matmul_deepgemm(
-            q_input,
-            weight,
-            x_scale,
-            weight_scale,
-            block_size,
-            output_dtype=output_dtype)
+        output = torch.empty((q_input.shape[0], weight.shape[0]),
+                             dtype=torch.bfloat16,
+                             device=q_input.device)
+        fp8_gemm_nt((q_input, x_scale), (weight, weight_scale), output)
         if bias is not None:
             output += bias
         return output.to(dtype=output_dtype).view(*output_shape)
@@ -677,70 +668,6 @@ def w8a8_block_fp8_matmul(
     return C
 
 
-# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/0c88cd01392c1073c7049a97d6328c7bba9b3947
-# TODO(wentao): remove this function when DeepGEMM exposes this function
-def get_tma_aligned_size(x: int, element_size: int) -> int:
-    """
-    Global memory address of TMA must be 16-byte aligned.
-    Since we use column-major layout for the LHS scaling tensor,
-        the M-axis of the LHS scaling tensor needs to be padded to a multiple of
-        16 bytes.
-
-    Arguments:
-        x: original M-axis shape of the LHS scaling tensor.
-        element_size: element size of the LHS scaling tensor.
-
-    Returns:
-        M-axis shape of the LHS scaling tensor after padding.
-    """
-    tma_alignment_bytes = 16
-    assert tma_alignment_bytes % element_size == 0
-    alignment = tma_alignment_bytes // element_size
-    return cdiv(x, alignment) * alignment
-
-
-# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/0c88cd01392c1073c7049a97d6328c7bba9b3947
-# TODO(wentao): remove this function when DeepGEMM exposes this function
-def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
-    """
-    Returns TMA-aligned transposed format of the input tensor. `torch.transpose`
-        will be called if necessary.
-    If the input tensor is already column-major layout and 16-byte aligned along
-        the M axis (thus meets the requirement of LHS scaling tensor in
-        DeepGEMM), this function will do nothing.
-
-    Arguments:
-        x: usually the LHS scaling tensor in GEMM.
-
-    Returns:
-        The LHS scaling tensor of TMA-aligned transposed format.
-    """
-    # NOTES: for the extreme performance, you may rewrite/fuse this function in
-    # CUDA
-    assert x.dim() in (2, 3)
-    remove_dim = False
-    m, n = x.shape[-2], x.shape[-1]
-    aligned_m = get_tma_aligned_size(m, x.element_size())
-    if x.dim() == 2:
-        if x.stride(0) == 1 and x.stride(1) == aligned_m:
-            return x
-        x, remove_dim = x.unsqueeze(0), True
-
-    b = x.shape[0]
-
-    # The last kernel gives a column-major TMA aligned layout
-    if x.stride(0) == aligned_m * n and x.stride(1) == 1 and x.stride(
-            2) == aligned_m:
-        return x.squeeze(0) if remove_dim else x
-
-    # Normal layout requires transposing
-    aligned_x = torch.transpose(
-        torch.empty((b, n, aligned_m), device=x.device, dtype=x.dtype), 1, 2)
-    aligned_x[:, :m, :] = x
-    aligned_x = aligned_x[:, :m, :]
-    return aligned_x.squeeze(0) if remove_dim else aligned_x
-
-
 def requant_weight_ue8m0_inplace(
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
@@ -984,15 +911,15 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module,
     # On Blackwell or Hopper, if E8M0 for DeepGemm is used, we need to
     # requantize the weight and input to the specific scale
     # at the same time.
-    if is_deep_gemm_e8m0_used():
+    should_use_deepgemm = should_use_deepgemm_for_fp8_linear(
+        layer.orig_dtype, layer.weight)
+    if is_deep_gemm_e8m0_used() and should_use_deepgemm:
         block_sz = tuple(layer.weight_block_size)
         requant_weight_ue8m0_inplace(layer.weight.data,
                                      layer.weight_scale.data, block_sz)
     # SM90 Block FP8 CUTLASS requires row-major weight scales
     elif (current_platform.is_device_capability(90)
-          and cutlass_block_fp8_supported
-          and not should_use_deepgemm_for_fp8_linear(torch.bfloat16,
-                                                     layer.weight)):
+          and cutlass_block_fp8_supported and not should_use_deepgemm):
         layer.weight_scale = torch.nn.Parameter(
             layer.weight_scale.data.T.contiguous(), requires_grad=False)
 
@@ -1014,3 +941,9 @@ def apply_fp8_block_linear(layer: torch.nn.Module, input: torch.Tensor,
         cutlass_block_fp8_supported=cutlass_block_fp8_supported,
         use_aiter_and_is_supported=use_aiter_and_is_supported,
     )
+
+
+def expert_weight_is_col_major(x: torch.Tensor) -> bool:
+    assert x.dim() == 3
+    b, m, n = x.shape
+    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
