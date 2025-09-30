@@ -814,8 +814,9 @@ class ModelOptNvFp4Config(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
+        skip_layer = self.is_layer_excluded(prefix)
         if isinstance(layer, LinearBase):
-            if self.is_layer_excluded(prefix):
+            if skip_layer:
                 return UnquantizedLinearMethod()
             # Check if this is a vision model layer that should not be quantized
             if ("vision_tower" in prefix or "vision_model" in prefix):
@@ -824,6 +825,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
+            if skip_layer:
+                return None
             return ModelOptNvFp4FusedMoE(self, layer.moe_config, layer)
         return None
 

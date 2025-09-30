@@ -1102,6 +1102,8 @@ class FusedMoE(CustomOp):
         quant_method: Optional[QuantizeMethodBase] = None
         quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
+        if quant_method is None:
+            quant_method = UnquantizedFusedMoEMethod(moe)
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
