@@ -1399,7 +1399,6 @@ def fused_experts(
         (is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2))):
         assert quant_config is not None
         assert apply_router_weight_on_input is False
-        logger.info_once("Fp8MoE runtime selected DeepGemm path")
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
             w1=w1,
@@ -1421,8 +1420,6 @@ def fused_experts(
               w1, w2, inplace, activation, apply_router_weight_on_input,
               expert_map)):
         assert quant_config is not None
-        logger.info_once(
-            "Fp8MoE runtime selected Cutlass BlockScaled GroupedGemm path")
         return run_cutlass_block_scaled_fused_experts(
             a=hidden_states,
             w1=w1,
@@ -1432,7 +1429,6 @@ def fused_experts(
             topk_weights=topk_weights,
             topk_ids=topk_ids)
     else:
-        logger.info_once("Fp8MoE runtime selected Triton path")
         return dispatch_fused_experts_func(inplace)(
             hidden_states=hidden_states,
             w1=w1,
