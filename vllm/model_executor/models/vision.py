@@ -16,7 +16,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather)
 from vllm.logger import init_logger
 from vllm.platforms import _Backend, current_platform
-from vllm.utils.jsontree import json_map_leaves
 
 logger = init_logger(__name__)
 
@@ -136,14 +135,15 @@ def resolve_visual_encoder_outputs(
         feature_select_strategy: Defines how to select the hidden states
             from each layer.
     """
-    if feature_select_strategy is not None:
-        select_features = _get_vision_feature_selector(feature_select_strategy)
-        encoder_outputs = json_map_leaves(select_features, encoder_outputs)
-
     if select_layers is None:
         if not isinstance(encoder_outputs, torch.Tensor):
             raise ValueError("Expected only a single encoder output when "
                              "`select_layers` is not provided")
+
+        if feature_select_strategy is not None:
+            select_features = _get_vision_feature_selector(
+                feature_select_strategy)
+            encoder_outputs = select_features(encoder_outputs)
 
         if post_layer_norm is not None:
             return post_layer_norm(encoder_outputs)
@@ -167,6 +167,10 @@ def resolve_visual_encoder_outputs(
         if layer_idx >= 0 else encoder_outputs[layer_idx + offset]
         for layer_idx in select_layers
     ]
+
+    if feature_select_strategy is not None:
+        select_features = _get_vision_feature_selector(feature_select_strategy)
+        hs_pool = [select_features(hs) for hs in hs_pool]
 
     # Apply post-norm on the final hidden state if we are using it
     uses_last_layer = select_layers[-1] in (max_possible_layers - 1, -1)
