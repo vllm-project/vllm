@@ -127,6 +127,9 @@ def flash_mla_with_kvcache(
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)
     if indices is not None:
+        # NOTE (zyongye): sparse attention is also causal
+        # since it only attend to the tokens before
+        # but here `causal` should not be specified
         assert not causal, \
             "causal must be `false` if sparse attention is enabled."
     assert (descale_q is None) == (

@@ -80,12 +80,11 @@ class MultiHeadLatentAttention(CustomOp):
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
-        self.use_sparse = mla_modules.is_sparse
+        self.is_sparse = mla_modules.is_sparse
 
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
-            self.topk_tokens = self.indexer.topk_tokens \
-                if self.indexer else None
+            self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
         # In the MLA backend, kv_cache includes both k_c and
@@ -158,7 +157,7 @@ class MultiHeadLatentAttention(CustomOp):
         q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
             positions, q[..., self.qk_nope_head_dim:], k_pe)
 
-        if self.indexer and self.use_sparse:
+        if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(hidden_states, q_c, positions,
                                          self.rotary_emb)
 
