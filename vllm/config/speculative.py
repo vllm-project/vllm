@@ -274,6 +274,13 @@ class SpeculativeConfig:
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
+            try:
+                from arctic_inference.suffix_decoding import (
+                    SuffixDecodingCache)
+            except ImportError:
+                raise ImportError(
+                    "Arctic Inference is required for suffix decoding. "
+                    "Please install via `pip install arctic-inference`.")
             if self.num_speculative_tokens is None:
                 self.num_speculative_tokens = 32
             # Validate values

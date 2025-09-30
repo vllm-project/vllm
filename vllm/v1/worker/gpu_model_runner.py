@@ -273,13 +273,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.method == "suffix":
-                try:
-                    from arctic_inference.suffix_decoding import (
-                        SuffixDecodingCache)
-                except ImportError:
-                    raise ImportError(
-                        "Arctic Inference is required for suffix decoding. "
-                        "Please install via `pip install arctic-inference`.")
+                from arctic_inference.suffix_decoding import (
+                    SuffixDecodingCache)
                 self.suffix_cache = SuffixDecodingCache(
                     self.speculative_config.suffix_decoding_max_tree_depth,
                     self.speculative_config.suffix_decoding_max_cached_requests)
