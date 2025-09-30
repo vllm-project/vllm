@@ -16,6 +16,8 @@ from vllm.model_executor.models.vision import (
 from vllm.platforms import current_platform
 from vllm.utils import get_open_port, update_environment_variables
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.mark.parametrize(
     ("select_layers", "num_layers_loaded", "max_possible_layers",
