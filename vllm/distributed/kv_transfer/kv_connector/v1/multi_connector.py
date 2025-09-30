@@ -189,6 +189,12 @@ class MultiConnector(KVConnectorBase_V1):
 
         return finished_sending or None, finished_recving or None
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        agg_block_ids: set[int] = set()
+        for c in self._connectors:
+            agg_block_ids |= c.get_block_ids_with_load_errors()
+        return agg_block_ids
+
     # ==============================
     # Scheduler-side methods
     # ==============================
