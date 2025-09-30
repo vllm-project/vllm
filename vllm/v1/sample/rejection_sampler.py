@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from typing import Optional
 
 import torch
@@ -7,8 +8,10 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 logger = init_logger(__name__)
@@ -43,17 +46,22 @@ class RejectionSampler(nn.Module):
         output tokens = accepted tokens + recovered tokens + bonus tokens
     """
 
+    def __init__(self, sampler: Sampler):
+        super().__init__()
+        self.sampler = sampler
+        self.logprobs_mode = self.sampler.logprobs_mode
+        self.bonus_logprobs_mode = "processed_logits" \
+        if self.logprobs_mode.startswith("processed") else "raw_logits"
+
     def forward(
         self,
         metadata: SpecDecodeMetadata,
         # [num_tokens, vocab_size]
         draft_probs: Optional[torch.Tensor],
-        # [num_tokens, vocab_size]
-        target_logits: torch.Tensor,
-        # [batch_size, 1]
-        bonus_token_ids: torch.Tensor,
+        # [num_tokens + batch_size, vocab_size]
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
+    ) -> SamplerOutput:
         '''
         Args:
             metadata:
@@ -62,35 +70,59 @@ class RejectionSampler(nn.Module):
                 Probability distribution for the draft tokens. Shape is
                 [num_tokens, vocab_size]. Can be None if probabilities are
                 not provided, which is the case for ngram spec decode.
-            target_logits (torch.Tensor):
+            logits (torch.Tensor):
                 Target model's logits probability distribution.
-                Shape is [num_tokens, vocab_size]. Here, probabilities from
-                different requests are flattened into a single tensor because
-                this is the shape of the output logits.
-                NOTE: `target_logits` can be updated in place to save memory.
-            bonus_token_ids (torch.Tensor):
-                A tensor containing bonus tokens. Shape is [batch_size, 1].
-                Bonus tokens are added to the end of the sequence if all
-                proposed tokens are accepted. We generate the bonus tokens
-                outside of the rejection sampler with the default sampling
-                strategy. It allows for more flexibility in the sampling
-                process such as top_p, top_k sampling.
+                Shape is [num_tokens + batch_size, vocab_size]. Here,
+                probabilities from different requests are flattened into a
+                single tensor because this is the shape of the output logits.
+                NOTE: `logits` can be updated in place to save memory.
             sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
         Returns:
-            output_token_ids (torch.Tensor):
-                A tensor containing the final output token IDs.
+            SamplerOutput:
+                Contains the final output token IDs and their logprobs if
+                requested.
         '''
         assert metadata.max_spec_len <= MAX_SPEC_LEN
+
+        bonus_logits_indices = metadata.bonus_logits_indices
+        target_logits_indices = metadata.target_logits_indices
+
+        # When indexing with a tensor (bonus_logits_indices), PyTorch
+        # creates a new tensor with separate storage from the original
+        # logits tensor. This means any in-place operations on bonus_logits
+        # won't affect the original logits tensor.
+        assert logits is not None
+        bonus_logits = logits[bonus_logits_indices]
+        # Temporarily override the logprobs mode to return logits because
+        # they may be needed later to compute the accepted token logprobs.
+        self.sampler.logprobs_mode = self.bonus_logprobs_mode
+        bonus_sampler_output = self.sampler(
+            logits=bonus_logits,
+            sampling_metadata=replace(
+                sampling_metadata,
+                max_num_logprobs=-1,
+            ),
+        )
+        self.sampler.logprobs_mode = self.logprobs_mode
+        bonus_token_ids = bonus_sampler_output.sampled_token_ids
+
+        # Just like `bonus_logits`, `target_logits` is a new tensor with
+        # separate storage from the original `logits` tensor. Therefore,
+        # it is safe to update `target_logits` in place.
+        target_logits = logits[target_logits_indices]
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
-        # `compute_probs` function.
-        target_probs = compute_probs(
+        # `process_logits` function.
+        processed_target_logits = process_logits(
             target_logits,
             metadata.cu_num_draft_tokens,
             sampling_metadata,
         )
+        # Compute probability distribution from target logits.
+        target_probs = processed_target_logits.softmax(dim=-1,
+                                                       dtype=torch.float32)
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
@@ -102,7 +134,50 @@ class RejectionSampler(nn.Module):
             bonus_token_ids,
             sampling_metadata,
         )
-        return output_token_ids
+
+        if sampling_metadata.max_num_logprobs:
+            cu_num_sampled_tokens = torch.zeros_like(
+                metadata.cu_num_sampled_tokens)
+            cu_num_sampled_tokens[1:] = metadata.cu_num_sampled_tokens[:-1]
+            # Collect target and bonus processed logits.
+            processed_logits = torch.zeros_like(logits, dtype=torch.float32)
+            processed_logits[target_logits_indices] = (
+                processed_target_logits.to(torch.float32))
+            processed_logits[bonus_logits_indices] = (
+                bonus_sampler_output.logprobs_tensors.logprobs.to(
+                    torch.float32))
+            # Compute accepted token indices.
+            accepted_mask = output_token_ids != PLACEHOLDER_TOKEN_ID
+            num_accepted_tokens = accepted_mask.sum(dim=-1)
+            accepted_logit_indices = accepted_mask.nonzero(as_tuple=True)[1]
+            accepted_logit_indices += (
+                cu_num_sampled_tokens.repeat_interleave(num_accepted_tokens))
+            # Compute logprobs for accepted tokens.
+            logprobs_tensors = self.compute_logprobs(
+                processed_logits[accepted_logit_indices],
+                sampling_metadata.max_num_logprobs,
+                output_token_ids[accepted_mask],
+            )
+        else:
+            logprobs_tensors = None
+
+        return SamplerOutput(
+            sampled_token_ids=output_token_ids,
+            logprobs_tensors=logprobs_tensors,
+        )
+
+    def compute_logprobs(
+        self,
+        logits: torch.Tensor,
+        num_logprobs: int,
+        token_ids: torch.Tensor,
+    ) -> LogprobsTensors:
+        if self.logprobs_mode.endswith("logits"):
+            logprobs = logits
+        else:
+            logprobs = self.sampler.compute_logprobs(logits)
+        return self.sampler.gather_logprobs(logprobs, num_logprobs,
+                                            token_ids.to(dtype=torch.int64))
 
     @staticmethod
     def parse_output(
@@ -110,14 +185,12 @@ class RejectionSampler(nn.Module):
         vocab_size: int,
     ) -> list[list[int]]:
         """Parse the output of the rejection sampler.
-
         Args:
             output_token_ids: The sampled token IDs in shape
                 [batch_size, max_spec_len + 1]. The rejected tokens are
                 replaced with `PLACEHOLDER_TOKEN_ID` by the rejection sampler
                 and will be filtered out in this function.
             vocab_size: The size of the vocabulary.
-
         Returns:
             A list of lists of token IDs.
         """
@@ -232,27 +305,25 @@ def rejection_sample(
     return output_token_ids
 
 
-def compute_probs(
+def process_logits(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
     cu_num_draft_tokens: torch.Tensor,  # [batch_size]
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    """Compute probability distribution from logits based on sampling metadata.
+    """Compute processed logits based on sampling metadata.
 
-    This function applies temperature scaling to the logits and converts
-    them to probabilities using softmax. For greedy decoding, it returns
-    the original logits.
+    This function applies temperature scaling to the logits.
+    For greedy decoding, it returns the original logits.
 
     Args:
-        logits: Input logits tensor to be converted to probabilities.
+        logits: Input logits tensor to be processed.
         cu_num_draft_tokens: Cumulative number of draft tokens.
         sampling_metadata: Metadata containing sampling parameters such as
             temperature and whether greedy sampling is used.
 
     Returns:
-        torch.Tensor: Probability distribution (softmax of scaled logits)
-            if non-greedy sampling is used, otherwise returns the
-            original logits.
+        torch.Tensor: Processed logits if non-greedy sampling is used,
+        otherwise returns the original logits.
     """
     assert logits.ndim == 2
     assert cu_num_draft_tokens.ndim == 1
@@ -288,9 +359,7 @@ def compute_probs(
 
     # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
     # which is slow for large vocab sizes. This may cause performance issues.
-    logits = apply_top_k_top_p(logits, top_k, top_p)
-    output_prob = logits.softmax(dim=-1, dtype=torch.float32)
-    return output_prob
+    return apply_top_k_top_p(logits, top_k, top_p)
 
 
 def expand_batch_to_tokens(
