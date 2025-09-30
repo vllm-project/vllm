@@ -477,8 +477,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
-        # MQA 576/512 approach for both prefill and decode (see:
-        #  https://vllm-dev.slack.com/archives/C09GKA1D4LR/p1758506094148479)
+        # MQA 576/512 approach for both prefill and decode
 
         assert output is not None, "Output tensor must be provided."
 
