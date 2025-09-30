@@ -16,8 +16,7 @@ from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils import supports_kw
 
 from .interfaces_base import VllmModel, is_pooling_model

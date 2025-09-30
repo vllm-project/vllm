@@ -29,8 +29,7 @@ from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.aimv2 import AIMv2Model
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.utils import (AutoWeightsLoader, flatten_bn,
