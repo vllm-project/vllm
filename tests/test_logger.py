@@ -504,7 +504,6 @@ def test_streaming_complete_logs_full_text_content():
 
 
 test_logger = init_logger("vllm.test_logger")
-# https://docs.python.org/3/howto/logging-cookbook.html#sending-and-receiving-logging-events-across-a-network
 
 
 def mp_function(**kwargs):

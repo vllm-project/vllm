@@ -1123,7 +1123,8 @@ def caplog_mp_spawn(tmp_path, monkeypatch):
 
     By default, subprocess logs do not go through the parent process.
     We instead add a FileHandler to the config so the spawned child process
-    writes its logs to a temp file and then return the contents.
+    writes its logs to a temp file.
+    In the parent, we read the file and return the contents.
 
     Note: this method could be extended to fork by either reconfiguring logging
     in the parent or using a SocketHandler:
