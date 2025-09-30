@@ -4,7 +4,7 @@ The purpose of this document is to provide an overview of the various MoE kernel
 
 ## Fused MoE Modular All2All backends
 
-There are a number of All2All communication backends that are used to implement expert parallelism (EP) for the FusedMoE layer. The different `FusedMoEPrepareAndFinalize` sub-classes provide an interface for each all2all backend.
+There are a number of all2all communication backends that are used to implement expert parallelism (EP) for the `FusedMoE` layer. The different `FusedMoEPrepareAndFinalize` sub-classes provide an interface for each all2all backend.
 
 The following table describes the relevant features of each backend, i.e. activation format, supported quantization schemes and async support.
 
