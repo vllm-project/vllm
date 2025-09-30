@@ -32,34 +32,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self._raise_if_mrope()
 
     def update_propose_kwargs(self, propose_kwargs: dict):
-        cad: CommonAttentionMetadata = propose_kwargs["common_attn_metadata"]
-        target_token_ids = propose_kwargs["target_token_ids"]
-        next_token_ids = propose_kwargs["next_token_ids"]
-        target_positions = propose_kwargs["target_positions"]
-        token_indices_to_sample = cad.last_token_indices()
-
-        # update target_token_ids
-        end_locs = cad.last_token_indices()
-        new_target_token_ids = extend_flat_seqs(seqs=target_token_ids,
-                                                end_locs=end_locs,
-                                                new_vals=next_token_ids)
-        # update positions
-        positions_to_append = target_positions[token_indices_to_sample] + 1
-        new_target_positions = extend_flat_seqs(seqs=target_positions,
-                                                end_locs=end_locs,
-                                                new_vals=positions_to_append)
-
-        new_cad: CommonAttentionMetadata = extend_all_queries_by_1(
-            cad, arange=self.arange)
-
-        new_propose_kwargs = dict(
-            target_token_ids=new_target_token_ids,
-            target_positions=new_target_positions,
-            next_token_ids=None,
-            last_token_indices=None,
-            common_attn_metadata=new_cad,
-        )
-        return propose_kwargs | new_propose_kwargs
+        return update_propose_kwargs(arange=self.arange,
+                                     propose_kwargs=propose_kwargs)
 
     def _raise_if_multimodal(self):
         if self.supports_mm_inputs:
@@ -121,3 +95,42 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
         self.attn_layer_names = list(draft_attn_layer_names)
+
+
+def update_propose_kwargs(arange: torch.Tensor, propose_kwargs: dict):
+    """
+    This function:
+    - Merges the target_token_ids and the next_token_ids into a 
+    single flat tensor.
+    - Appends new positions for these next_token_ids.
+    - Updates the common_attn_metadata to reflect that all query lengths are +1.
+    """
+    cad: CommonAttentionMetadata = propose_kwargs["common_attn_metadata"]
+    target_token_ids = propose_kwargs["target_token_ids"]
+    next_token_ids = propose_kwargs["next_token_ids"]
+    target_positions = propose_kwargs["target_positions"]
+    token_indices_to_sample = cad.last_token_indices()
+
+    # merge target_token_ids and next_token_ids
+    end_locs = cad.last_token_indices()
+    new_target_token_ids = extend_flat_seqs(seqs=target_token_ids,
+                                            end_locs=end_locs,
+                                            new_vals=next_token_ids)
+    # append new positions
+    positions_to_append = target_positions[token_indices_to_sample] + 1
+    new_target_positions = extend_flat_seqs(seqs=target_positions,
+                                            end_locs=end_locs,
+                                            new_vals=positions_to_append)
+
+    # update common_attn_metadata
+    new_cad: CommonAttentionMetadata = extend_all_queries_by_1(cad,
+                                                               arange=arange)
+
+    new_propose_kwargs = dict(
+        target_token_ids=new_target_token_ids,
+        target_positions=new_target_positions,
+        next_token_ids=None,
+        last_token_indices=None,
+        common_attn_metadata=new_cad,
+    )
+    return propose_kwargs | new_propose_kwargs
