@@ -32,6 +32,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   #define stride_tag
 #endif
 
+  ops.def("arg_topk_impl(Tensor input, int k, bool sorted) -> (Tensor, Tensor)");
+  ops.impl("arg_topk_impl", torch::kCUDA, &arg_topk_impl);
+  
   ops.def(
       "silu_mul_fp8_quant_deep_gemm_cuda(Tensor input, Tensor counts, Tensor! "
       "y_q, Tensor! y_s, int group_size, "
