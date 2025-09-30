@@ -116,6 +116,15 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.request_finished(request)
+        return False, None
+
 
 class DecodeBenchConnectorScheduler:
     """Scheduler-side implementation for DecodeBenchConnector."""
@@ -210,6 +219,12 @@ class DecodeBenchConnectorScheduler:
         self._pending_fills.clear()
 
         return meta
+
+    def request_finished(self, request: "Request"):
+        """
+        Called when a request has finished. Clean up any state.
+        """
+        self._filled_requests.discard(request.request_id)
 
 
 class DecodeBenchConnectorWorker:
