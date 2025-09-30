@@ -174,21 +174,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
-    def log_toks(self, msg: str, toks):
-        if not self.do_log:
-            return
-        logger.info("%s: %s", msg, [self.tokenizer.decode(t) for t in toks])
-
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.do_log = False
-        if self.do_log:
-            from transformers import AutoTokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                vllm_config.model_config.model)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -2144,10 +2134,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 bonus_token_ids,
                 sampling_metadata,
             )
-            if self.do_log:
-                for idx, token_ids in enumerate(output_token_ids):
-                    self.log_toks(f"sampled token ids [{idx}]",
-                                  token_ids[token_ids != -1])
             sampler_output.sampled_token_ids = output_token_ids
             self._update_states_after_model_execute(output_token_ids)
 
@@ -2327,8 +2313,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
-        if self.do_log:
-            logger.info("=======BEGIN STEP=======")
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
@@ -2399,11 +2383,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
-        self.log_toks("Target forward", input_ids)
-        if self.do_log:
-            logger.info("Target forward positions: %s", positions.tolist())
-            logger.info("Target attn_metadata: %s",
-                        list(attn_metadata.values())[0])
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2483,9 +2462,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                 )
-            if self.do_log:
-                for idx, draft_token_ids in enumerate(self._draft_token_ids):
-                    self.log_toks(f"draft token ids [{idx}]", draft_token_ids)
 
         use_padded_batch = self.speculative_config and \
             (self.speculative_config.use_eagle()
