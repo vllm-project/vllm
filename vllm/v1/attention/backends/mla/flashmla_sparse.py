@@ -389,6 +389,36 @@ class FlashMLASparseMetadataBuilder(
         return metadata
 
 
+def ref_forward_bfp16_kv(q, kv_cache, topk_indices_global):
+    def log2sumexp2(a: torch.Tensor, dim: int) -> torch.Tensor:
+        return torch.logsumexp(a * math.log(2), dim=dim) * math.log2(math.e)
+    """
+    assert p.b == 1
+    indices = t.indices[0, :, 0, :] # [s_q, topk]
+    invalid_indices_mask = (indices < 0) | (indices >= p.s_kv)
+    qs = t.q[0, :, :, :].float()  # [s_q, h_q, d_qk]
+    kvs = t.kv[0, :, 0, :].float()  # [s_kv, d_qk]
+    """
+    print("kv shape:", kv_cache.shape)
+    return q
+    qs = q
+    kvs = kv_cache
+    indices = topk_indices_global
+    invalid_indices_mask = (indices < 0)
+    
+    # kvs = torch.index_select(kvs, 0, indices.masked_fill(invalid_indices_mask, 0).flatten()).view(p.s_q, p.topk, p.d_qk)  # [s_q, topk, d_qk]
+    kvs = torch.index_select(kvs, 0, indices.masked_fill(invalid_indices_mask, 0).flatten()).view(qs.shape[0],indices.shape[-1], qs.shape[-1])  # [s_q, topk, d_qk]
+    attn_score = qs @ kvs.transpose(1, 2)    # [s_q, h_q, topk]
+    attn_score.masked_fill_(invalid_indices_mask.unsqueeze(1), float('-inf'))
+    # attn_score *= sm_scale * math.log2(math.e)
+    attn_score *= math.log2(math.e)
+    max_logits = torch.max(attn_score, dim=-1)[0]   # [s_q, h_q]
+    lse = log2sumexp2(attn_score, dim=-1)   # [s_q, h_q]
+    attn_score = torch.exp2(attn_score - lse.unsqueeze(-1))   # [s_q, h_q, topk]
+    # result = attn_score @ kvs[:, :, :p.d_v]
+    result = attn_score @ kvs[:, :, :512]
+    return (max_logits, lse, result)
+
 class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
     def __init__(
@@ -436,6 +466,8 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
+        # output = flash_mla_sparse_prefill(q, kv_c_and_k_pe_cache, topk_indices,
+        #                                   self.softmax_scale)[0]
         output = flash_mla_sparse_prefill(q, kv_c_and_k_pe_cache, topk_indices,
                                           self.softmax_scale)[0]
         output = output[:, :self.num_heads, :]
@@ -532,13 +564,23 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 kv_cache_dtype=self.kv_cache_dtype,
                 scale=layer._k_scale,
             )
-
+        """
         if self.kv_cache_dtype != "fp8_ds_mla":
             attn_out = self._forward_bf16_kv(q, kv_cache, topk_indices_global,
                                              attn_metadata)
         else:
             attn_out = self._forward_fp8_kv(q, kv_cache, topk_indices_global,
                                             attn_metadata)
-
+        """
+        if self.kv_cache_dtype != "fp8_ds_mla":
+            attn_out = ref_forward_bfp16_kv(q, kv_cache, topk_indices_global,
+                                             )[2]
+        else:
+            attn_out = ref_forward_bfp16_kv(q, kv_cache, topk_indices_global,
+                                            )[2]
+        
+        # attn_out = q[..., 0:head_dim_v]
+        # attn_out = q[..., 0:128]
+        # attn_out = torch.randn(q.shape[0], self.num_heads, self.kv_lora_rank).cuda().to(q.dtype)
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
         return output

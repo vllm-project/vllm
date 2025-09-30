@@ -153,6 +153,54 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
         *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs)
 
 
+def ref_fp8_mqa_logits(q: torch.Tensor, kv: torch.Tensor, weights: torch.Tensor,
+                       cu_seqlen_ks: torch.Tensor, cu_seqlen_ke: torch.Tensor, cost_only: bool = False):
+    seq_len_kv = kv.shape[0]
+
+    if cost_only:
+        start = cu_seqlen_ks.clamp(min=0, max=seq_len_kv)
+        end   = cu_seqlen_ke.clamp(min=0, max=seq_len_kv)
+        count_ones_per_row = (end - start).clamp(min=0)
+        return count_ones_per_row.sum()
+
+    k = kv
+    q = q.float()
+    k = k.float()
+
+    mask_lo = torch.arange(0, seq_len_kv, device='cuda')[None, :] >= cu_seqlen_ks[:, None]
+    mask_hi = torch.arange(0, seq_len_kv, device='cuda')[None, :] < cu_seqlen_ke[:, None]
+    mask = mask_lo & mask_hi
+
+    score = torch.einsum('mhd,nd->hmn', q, k)
+    logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
+    logits = logits.masked_fill(~mask, float('-inf'))
+
+    cost = mask.sum()
+    return logits, cost
+
+def ref_fp8_paged_mqa_logits(q: torch.Tensor, kv_cache: torch.Tensor,
+                             weights: torch.Tensor, context_lens: torch.Tensor, block_tables: torch.Tensor,
+                             max_model_len: int):
+    batch_size, next_n, heads, dim = q.size()
+    num_block, block_size, _, dim = kv_cache.size()
+    logits = torch.full([batch_size * next_n, max_model_len], float('-inf'), device=q.device, dtype=torch.float32)
+    context_lens = context_lens.tolist()
+    for i in range(batch_size):
+        context_len = context_lens[i]
+        q_offsets = torch.arange(context_len - next_n, context_len, device='cuda')
+        weight_slice = weights[i * next_n:(i + 1) * next_n, :].transpose(0, 1).contiguous()
+        for block_rk in range(ceil_div(context_len, block_size)):
+            block_idx = block_tables[i][block_rk]
+            qx, kx = q[i], kv_cache[block_idx]
+            k_offsets = torch.arange(block_rk * block_size, (block_rk + 1) * block_size, device='cuda')
+            mask = (k_offsets[None, :] < context_len) & (k_offsets[None, :] <= q_offsets[:, None])
+            s = torch.where(mask[None, :, :], (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(logits.dtype), float('-inf'))
+            s = torch.relu(s) * weight_slice[..., None]
+            s = s.sum(dim=0)
+            logits[i * next_n:(i + 1) * next_n, block_rk * block_size: (block_rk + 1) * block_size] = torch.where(k_offsets[None, :] <= q_offsets[:, None], s, float('-inf'))
+    return logits
+
+
 def fp8_mqa_logits(
     q: torch.Tensor,
     kv: tuple[torch.Tensor, torch.Tensor],
@@ -179,7 +227,8 @@ def fp8_mqa_logits(
     """
     _lazy_init()
     if _fp8_mqa_logits_impl is None:
-        return _missing()
+        # return _missing()
+        return ref_fp8_mqa_logits(q, kv[0], weights, cu_seqlen_ks, cu_seqlen_ke)[0]
     return _fp8_mqa_logits_impl(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
@@ -236,7 +285,13 @@ def fp8_paged_mqa_logits(
     """
     _lazy_init()
     if _fp8_paged_mqa_logits_impl is None:
-        return _missing()
+        # return _missing()
+        return ref_fp8_paged_mqa_logits(q_fp8,
+                                      kv_cache_fp8,
+                                      weights,
+                                      context_lens,
+                                      block_tables,
+                                      max_model_len)
     return _fp8_paged_mqa_logits_impl(q_fp8,
                                       kv_cache_fp8,
                                       weights,

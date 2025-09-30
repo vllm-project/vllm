@@ -196,9 +196,13 @@ class RocmPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink, use_sparse) -> str:
+        # if use_sparse:
+        #    raise NotImplementedError(
+        #        "Sparse Attention is not supported on ROCm.")
         if use_sparse:
-            raise NotImplementedError(
-                "Sparse Attention is not supported on ROCm.")
+            logger.info_once("Using Sparse MLA backend on V1 engine.")
+            return ("vllm.v1.attention.backends.mla.flashmla_sparse."
+                    "FlashMLASparseBackend")
         if use_mla:
             if not use_v1:
                 raise RuntimeError(

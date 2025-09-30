@@ -1012,6 +1012,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             attn_cls = DeepseekV2MLAAttention
         else:
             attn_cls = DeepseekV2Attention
+        
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
             config=config,
@@ -1031,6 +1032,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
         )
+        
 
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
@@ -1068,10 +1070,12 @@ class DeepseekV2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+        
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
+        
 
         if hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
