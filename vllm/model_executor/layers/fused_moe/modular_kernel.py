@@ -1017,8 +1017,9 @@ class FusedMoEModularKernel(torch.nn.Module):
             self.fused_experts.finalize_weight_and_reduce_impl(),
         )
 
+        finalize_ops.prepare()
+
         if isinstance(finalize_ops, SyncOps):
-            finalize_ops.prepare()
             dbo_yield_and_switch_from_compute_to_comm()
             finalize_ops.send_recv()
 
@@ -1031,7 +1032,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             finalize_ops.finish()
         else:
             assert isinstance(finalize_ops, AsyncOps)
-            finalize_ops.prepare()
             dbo_maybe_run_recv_hook()
             finalize_ops.send()
 
