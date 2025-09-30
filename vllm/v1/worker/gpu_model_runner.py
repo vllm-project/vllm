@@ -2478,7 +2478,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             effective_drafter_max_model_len = (
                 self.speculative_config.draft_model_config.max_model_len)
         input_fits_in_drafter = spec_decode_common_attn_metadata and (
-            spec_decode_common_attn_metadata.seq_lens.max() +
+            spec_decode_common_attn_metadata.max_seq_len +
             self.speculative_config.num_speculative_tokens
             <= effective_drafter_max_model_len)
         if use_padded_batch_for_eagle and input_fits_in_drafter:
