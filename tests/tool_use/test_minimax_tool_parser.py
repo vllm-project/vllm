@@ -12,6 +12,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionToolsParam,
 from vllm.entrypoints.openai.tool_parsers import MinimaxToolParser
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+pytestmark = pytest.mark.cpu_test
+
 # Use a common model that is likely to be available
 MODEL = "MiniMaxAi/MiniMax-M1-40k"
 

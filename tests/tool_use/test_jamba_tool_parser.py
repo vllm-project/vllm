@@ -15,6 +15,8 @@ from vllm.entrypoints.openai.tool_parsers import JambaToolParser
 from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
+pytestmark = pytest.mark.cpu_test
+
 MODEL = "ai21labs/Jamba-tiny-dev"
 
 

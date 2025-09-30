@@ -16,6 +16,8 @@ from vllm.multimodal.inputs import (MultiModalBatchedField,
                                     MultiModalSharedField, NestedTensors)
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
+pytestmark = pytest.mark.cpu_test
+
 
 class UnrecognizedType(UserDict):
 
