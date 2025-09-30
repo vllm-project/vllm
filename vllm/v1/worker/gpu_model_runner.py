@@ -2351,6 +2351,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.cudagraph_dispatcher.dispatch(batch_descriptor,
                                                    use_cascade_attn)
 
+        # Set cudagraph mode to none if calc_kv_scales is true.
+        if attn_metadata is not None:
+            metadata_list = (attn_metadata.values() if isinstance(
+                attn_metadata, dict) else [attn_metadata])
+            if any(
+                    getattr(m, 'enable_kv_scales_calculation', False)
+                    for m in metadata_list):
+                cudagraph_runtime_mode = CUDAGraphMode.NONE
+
         # This is currently to get around the assert in the DPMetadata
         # where it wants `num_tokens_across_dp` to align with `num_tokens`
         if ubatch_slices is not None:
@@ -3066,13 +3075,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         if self.parallel_config.enable_dbo and allow_microbatching:
-            ubatch_slices, num_tokens_after_padding = ubatch_split(
+            ubatch_slices, ubatch_num_tokens_after_padding = ubatch_split(
                 num_scheduled_tokens,
                 total_num_scheduled_tokens,
                 total_num_scheduled_tokens,
                 uniform_decode=uniform_decode,
                 vllm_config=self.vllm_config,
             )
+            # Currently when DBO is enabled `ubatch_split` returns
+            # the num_tokens_after_padding for a single ubatch, but we have 2
+            # TODO(sage,lucas): this is cruft that should be addressed in the
+            # padding refactor.
+            if ubatch_num_tokens_after_padding is not None:
+                num_tokens_after_padding = ubatch_num_tokens_after_padding * 2
 
         # If we failed to microbatch, currently need to resynchronize
         # TODO(lucas,sage): we should be able to avoid this second sync by
@@ -3189,7 +3204,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # filter out the valid batch descriptor
             _cg_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
-                BatchDescriptor(num_tokens=num_tokens,
+                BatchDescriptor(num_tokens=num_tokens_after_padding,
                                 uniform_decode=uniform_decode)) \
                 if not is_profile else (CUDAGraphMode.NONE, None)
             if cudagraph_runtime_mode is not None:
@@ -3203,7 +3218,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_runtime_mode = _cg_mode
 
             if ubatch_slices is not None:
-                num_tokens = num_tokens // 2
+                # Adjust values to reflect a single ubatch.
+                # TODO(sage,lucas): this is cruft that should be addressed in
+                #  the padding refactor.
+                num_tokens_after_padding = ubatch_slices[0].num_tokens
+                if num_tokens_across_dp is not None:
+                    num_tokens_across_dp[:] = num_tokens_after_padding
+
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -4059,10 +4080,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
 
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(kv_caches)
-            if self.device.type == 'xpu':
-                get_kv_transfer_group().set_host_xfer_buffer_ops(
-                    copy_kv_blocks)
+            kv_transfer_group = get_kv_transfer_group()
+            kv_transfer_group.register_kv_caches(kv_caches)
+            kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         if self.dcp_world_size > 1:
             layer_names = self.attn_groups[0][0].layer_names
