@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import base64
+import math
 from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -104,10 +104,12 @@ class OpenCVVideoBackend(VideoLoader):
         return api_pref
 
     @classmethod
-    def load_bytes(cls,
-                   data: bytes,
-                   num_frames: int = -1,
-                   **kwargs) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -119,6 +121,7 @@ class OpenCVVideoBackend(VideoLoader):
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
+        # resample video to target num_frames
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
             num_frames = total_frames_num
@@ -149,11 +152,100 @@ class OpenCVVideoBackend(VideoLoader):
                                  f"but only loaded {i} frames from video.")
 
         # Use transformers transformers.video_utils.VideoMetadata format
+        # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
+        # can cause incorrect timestamp calculation without num_frames=-1.
+        metadata = {
+            "total_num_frames": num_frames,
+            "fps": num_frames / duration,
+            "duration": duration,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            # extra field used to control hf processor's video
+            # sampling behavior
+            "do_sample_frames": num_frames == total_frames_num,
+        }
+
+        return frames, metadata
+
+
+@VIDEO_LOADER_REGISTRY.register("opencv_dynamic")
+class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        import cv2
+
+        backend = cls().get_cv2_video_api()
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        if not cap.isOpened():
+            raise ValueError("Could not open video stream")
+
+        total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        duration = total_frames_num / original_fps if original_fps > 0 else 0
+
+        # resample video to target num_frames
+        max_frame_idx = total_frames_num - 1
+        duration = duration or round(max_frame_idx / original_fps) + 1
+
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
+        frame_indices: Union[range, list[int]]
+        if duration <= max_duration:
+            n = int(math.floor(duration * fps))
+            frame_indices = sorted({
+                min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
+                for i in range(n)
+            })
+        else:
+            num_samples = int(max_duration * fps)
+            if num_samples >= total_frames_num:
+                frame_indices = range(total_frames_num)
+            else:
+                target_seconds = np.linspace(0,
+                                             duration,
+                                             num_samples,
+                                             endpoint=True)
+                frame_indices = sorted({
+                    min(max_frame_idx, int(math.ceil(t * original_fps)))
+                    for t in target_seconds
+                })
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.empty((len(frame_indices), height, width, 3),
+                          dtype=np.uint8)
+
+        i = 0
+        for idx in range(total_frames_num):
+            ok = cap.grab()
+            if not ok:
+                break
+            if idx in frame_indices:
+                ret, frame = cap.retrieve()
+                if ret:
+                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    i += 1
+
+        assert i == len(frame_indices), (
+            f"Expected reading {len(frame_indices)} frames, "
+            f"but only loaded {i} frames from video.")
+
+        # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
             "total_num_frames": total_frames_num,
             "fps": original_fps,
             "duration": duration,
-            "video_backend": "opencv"
+            "video_backend": "opencv_dynamic",
+            "frames_indices": list(frame_indices),
+            "do_sample_frames": False,
         }
 
         return frames, metadata

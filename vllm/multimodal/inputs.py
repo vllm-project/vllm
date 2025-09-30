@@ -14,7 +14,7 @@ import numpy as np
 from typing_extensions import NotRequired, TypeAlias, TypeVar, deprecated
 
 from vllm.utils import LazyLoader, full_groupby, is_list_of
-from vllm.utils.jsontree import JSONTree, json_map_leaves
+from vllm.utils.jsontree import json_map_leaves
 
 if TYPE_CHECKING:
     import torch
@@ -85,9 +85,10 @@ which are treated as audio embeddings;
 these are directly passed to the model without HF processing.
 """
 
-ModalityData: TypeAlias = Union[_T, list[_T]]
+ModalityData: TypeAlias = Union[_T, list[Optional[_T]], None]
 """
-Either a single data item, or a list of data items.
+Either a single data item, or a list of data items. Can only be None if UUID
+is provided.
 
 The number of data items allowed per modality is restricted by
 `--limit-mm-per-prompt`.
@@ -202,7 +203,7 @@ def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
     return a == b
 
 
-BatchedTensorInputs: TypeAlias = Mapping[str, NestedTensors]
+BatchedTensorInputs: TypeAlias = dict[str, NestedTensors]
 """
 A dictionary containing nested tensors which have been batched via
 [`MultiModalKwargs.batch`][vllm.multimodal.inputs.MultiModalKwargs.batch].
@@ -376,6 +377,7 @@ class MultiModalBatchedField(BaseMultiModalField):
         pin_memory: bool,
     ) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
+            batch = cast(list[torch.Tensor], batch)
             if len(batch) == 1:
                 # An optimization when `batch` contains only one tensor:
                 # - produce exactly same result as `torch.stack(batch)`
@@ -421,6 +423,7 @@ class MultiModalFlatField(BaseMultiModalField):
         pin_memory: bool,
     ) -> NestedTensors:
         if len(batch) > 0 and is_list_of(batch, torch.Tensor, check="all"):
+            batch = cast(list[torch.Tensor], batch)
             if len(batch) == 1:
                 # An optimization when `batch` contains only one tensor:
                 # - produce exactly same result as `torch.concat(batch)`
@@ -568,8 +571,8 @@ class MultiModalFieldConfig:
         Args:
             modality: The modality of the multi-modal item that uses this
                 keyword argument.
-            slices: For each multi-modal item, the size of the slice that
-                is used to extract the data corresponding to it.
+            size_per_item: For each multi-modal item, the size of the slice
+                that is used to extract the data corresponding to it.
             dim: The dimension to slice, default to 0.
 
         Example:
@@ -589,7 +592,7 @@ class MultiModalFieldConfig:
 
         ```
         Given:
-            slices: [3, 4, 2]
+            size_per_item: [3, 4, 2]
             dim: 1
 
         Input:
@@ -763,6 +766,15 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
 
         return super().__getitem__(modality)  # type: ignore[return-value]
 
+    def require_data(self) -> "MultiModalKwargsItems[MultiModalKwargsItem]":
+        for modality, items in self.items():
+            for i, item in enumerate(items):
+                if item is None:
+                    raise RuntimeError(
+                        f"Found empty mm_items[{modality}][{i}]")
+
+        return self  # type: ignore[return-value]
+
     def get_data(self, *, pin_memory: bool = False) -> "MultiModalKwargs":
         elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
         for modality, items in self.items():
@@ -896,14 +908,10 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         *,
         device: torch.types.Device,
     ) -> BatchedTensorInputs:
-        json_inputs = cast(JSONTree[torch.Tensor], batched_inputs)
-
-        json_mapped = json_map_leaves(
+        return json_map_leaves(
             lambda x: x.to(device=device, non_blocking=True),
-            json_inputs,
+            batched_inputs,
         )
-
-        return cast(BatchedTensorInputs, json_mapped)
 
     def __getitem__(self, key: str):
         if key not in self:

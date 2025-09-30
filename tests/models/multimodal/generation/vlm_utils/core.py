@@ -42,7 +42,7 @@ def run_test(
     tensor_parallel_size: int = 1,
     vllm_embeddings: Optional[torch.Tensor] = None,
 ):
-    """Modality agnostic test test executor for comparing HF/vLLM outputs."""
+    """Modality agnostic test executor for comparing HF/vLLM outputs."""
     # In the case of embeddings, vLLM takes separate input tensors
     vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
 
@@ -69,6 +69,9 @@ def run_test(
         vllm_runner_kwargs_["tokenizer_mode"] = model_info.tokenizer_mode
     if model_info.hf_overrides:
         vllm_runner_kwargs_["hf_overrides"] = model_info.hf_overrides
+    if model_info.skip_tokenizer_init:
+        vllm_runner_kwargs_[
+            "skip_tokenizer_init"] = model_info.skip_tokenizer_init
 
     if vllm_runner_kwargs:
         vllm_runner_kwargs_.update(vllm_runner_kwargs)

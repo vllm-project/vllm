@@ -6,8 +6,13 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+
+if current_platform.is_cuda_alike():
+    from vllm import _custom_ops as ops
+elif current_platform.is_xpu():
+    from vllm._ipex_ops import ipex_ops as ops
 
 if HAS_TRITON:
     from vllm.attention.ops.prefix_prefill import context_attention_fwd
@@ -45,6 +50,7 @@ class PagedAttention:
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> Tuple[int, ...]:
         return (2, num_blocks, block_size * num_kv_heads * head_size)
 

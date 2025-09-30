@@ -10,7 +10,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
-                                         get_kv_cache_config)
+                                         get_kv_cache_configs)
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.worker.tpu_model_runner import (
@@ -64,9 +64,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                mm_kwargs=[],
-                mm_hashes=[],
-                mm_positions=[],
+                mm_features=[],
                 sampling_params=SamplingParams(),
                 pooling_params=PoolingParams(),
                 block_ids=([0], ),  # block_ids should be tuple[list[int]]
@@ -127,7 +125,7 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
         return False
 
     num_blocks = block_table.num_blocks_per_row[req_index]
-    block_table_values = block_table.block_table_np[req_index, :num_blocks]
+    block_table_values = block_table.block_table.np[req_index, :num_blocks]
     return (block_table_values == req_block_ids).all()
 
 
@@ -479,8 +477,8 @@ def test_init_kv_cache_without_kv_sharing():
     # 2 (non-MLA) * 8 (num_heads) * 128 (head_dim)
     # * 2 (bfloat16, kv_cache dtype) * 128 (block_size) = 512KB
     num_expected_blocks = 20480  # 20GB / 512KB / 2 (num layers)
-    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                          available_memory)
+    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec],
+                                           [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 2
     assert kv_cache_config.kv_cache_tensors[0].size == available_memory // 2
@@ -552,8 +550,8 @@ def test_init_kv_cache_with_kv_sharing_valid():
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
     num_expected_blocks = 2 * 20480  # 20GB / 512KB
-    kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
-                                          available_memory)
+    kv_cache_config = get_kv_cache_configs(vllm_config, [kv_cache_spec],
+                                           [available_memory])[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
     assert len(kv_cache_config.kv_cache_tensors) == 1
     # Each layer now has twice the available memory for KV cache

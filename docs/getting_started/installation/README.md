@@ -12,7 +12,6 @@ vLLM supports the following hardware platforms:
     - [Apple silicon](cpu.md#apple-silicon)
     - [IBM Z (S390X)](cpu.md#ibm-z-s390x)
 - [Google TPU](google_tpu.md)
-- [AWS Neuron](aws_neuron.md)
 
 ## Hardware Plugins
 
@@ -26,3 +25,4 @@ The backends below live **outside** the main `vllm` repository and follow the
 | MetaX MACA GPU | N/A, install from source | <https://github.com/MetaX-MACA/vLLM-metax> |
 | Rebellions ATOM / REBEL NPU | `vllm-rbln` | <https://github.com/rebellions-sw/vllm-rbln> |
 | IBM Spyre AIU | `vllm-spyre` | <https://github.com/vllm-project/vllm-spyre> |
+| Cambricon MLU | `vllm-mlu` | <https://github.com/Cambricon/vllm-mlu> |

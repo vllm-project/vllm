@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from itertools import product
 from math import ceil, sqrt
 from typing import Any, Literal, Optional, TypedDict, Union
@@ -16,33 +15,30 @@ from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
-                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItems, NestedTensors)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.multimodal.utils import run_dp_sharded_vision_model
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Step3VisionEncoderConfig
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
+from .vision import run_dp_sharded_vision_model
 
 
 class Step3VLImagePixelInputs(TypedDict):
@@ -667,39 +663,25 @@ class Step3VisionAttention(nn.Module):
 
         self.q_size = self.num_heads * self.head_dim
 
-        if use_data_parallel:
-            self.qkv_proj = ReplicatedLinear(
-                self.embed_dim,
-                3 * self.q_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.out_proj = ReplicatedLinear(
-                self.total_num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-        else:
-            self.qkv_proj = QKVParallelLinear(
-                self.embed_dim,
-                self.head_dim,
-                self.total_num_heads,
-                bias=True,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.out_proj = RowParallelLinear(self.embed_dim,
-                                              self.embed_dim,
-                                              bias=True,
-                                              quant_config=quant_config,
-                                              prefix=prefix)
+        self.qkv_proj = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            self.total_num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.out_proj = RowParallelLinear(self.embed_dim,
+                                          self.embed_dim,
+                                          bias=True,
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.out_proj",
+                                          disable_tp=use_data_parallel)
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads,
-                           self.head_dim).transpose(1, 2).contiguous()
+        # Use unified MultiHeadAttention with automatic backend selection
+        self.attn = MultiHeadAttention(self.num_heads, self.head_dim,
+                                       self.scale)
 
     def forward(
         self,
@@ -711,19 +693,9 @@ class Step3VisionAttention(nn.Module):
         # get query proj
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        q = q.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        k = k.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        v = v.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        attn_output = F.scaled_dot_product_attention(q,
-                                                     k,
-                                                     v,
-                                                     scale=self.scale,
-                                                     is_causal=False)
-        attn_output = attn_output.transpose(1, 2).reshape(
-            bsz, tgt_len, self.num_heads * self.head_dim)
+
+        # Use unified MultiHeadAttention with automatic backend selection
+        attn_output = self.attn(q, k, v)
 
         attn_output, _ = self.out_proj(attn_output)
 
@@ -740,20 +712,18 @@ class Step3VisionMLP(nn.Module):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        cls_fc1 = (ReplicatedLinear
-                   if use_data_parallel else ColumnParallelLinear)
-        self.fc1 = cls_fc1(config.hidden_size,
-                           config.intermediate_size,
-                           bias=True,
-                           quant_config=quant_config,
-                           prefix=prefix)
-        cls_fc2 = (ReplicatedLinear
-                   if use_data_parallel else RowParallelLinear)
-        self.fc2 = cls_fc2(config.intermediate_size,
-                           config.hidden_size,
-                           bias=True,
-                           quant_config=quant_config,
-                           prefix=prefix)
+        self.fc1 = ColumnParallelLinear(config.hidden_size,
+                                        config.intermediate_size,
+                                        bias=True,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.fc1",
+                                        disable_tp=use_data_parallel)
+        self.fc2 = RowParallelLinear(config.intermediate_size,
+                                     config.hidden_size,
+                                     bias=True,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.fc2",
+                                     disable_tp=use_data_parallel)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -923,13 +893,6 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     @property
     def device(self):
         return next(self.parameters()).device
@@ -1032,10 +995,13 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 1 else cur_feature[0])
         return merged_image_features
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
+    def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
@@ -1043,24 +1009,21 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        # Multi-modal token ID may exceed vocab size
+        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
-        if multimodal_embeddings is None:
-            inputs_embeds = self.language_model.model.get_input_embeddings(
-                input_ids)
-        else:
-            is_text = input_ids != self.config.image_token_id
-            text_ids = input_ids[is_text]
-            text_embeds = self.language_model.model.get_input_embeddings(
-                text_ids)
-            inputs_embeds = torch.empty(input_ids.shape[0],
-                                        text_embeds.shape[-1],
-                                        dtype=text_embeds.dtype,
-                                        device=text_embeds.device)
-            inputs_embeds[is_text] = text_embeds
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.image_token_id)
-        return inputs_embeds
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
+
+        return super().get_input_embeddings(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
 
     def forward(
         self,
@@ -1074,10 +1037,11 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = None
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            # always pass the input via `inputs_embeds`
-            # to make sure the computation graph is consistent
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                vision_embeddings,
+                is_multimodal=input_ids == self.config.image_token_id,
+            )
             input_ids = None
 
         hidden_states = self.language_model(input_ids,
@@ -1090,17 +1054,8 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 

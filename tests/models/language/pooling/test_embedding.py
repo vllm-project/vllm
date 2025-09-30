@@ -7,7 +7,7 @@ import pytest
 from vllm.config import PoolerConfig
 from vllm.platforms import current_platform
 
-from ...utils import check_embeddings_close, check_transformers_version
+from ...utils import check_embeddings_close
 
 
 @pytest.mark.parametrize(
@@ -19,7 +19,7 @@ from ...utils import check_embeddings_close, check_transformers_version
         # model code with bidirectional attention.
         # [Decoder-only]
         pytest.param("BAAI/bge-multilingual-gemma2",
-                     marks=[pytest.mark.core_model]),
+                     marks=[pytest.mark.core_model, pytest.mark.slow_test]),
         pytest.param(
             "intfloat/e5-mistral-7b-instruct",
             # CPU v1 doesn't support sliding window
@@ -27,12 +27,20 @@ from ...utils import check_embeddings_close, check_transformers_version
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base",
                      marks=[pytest.mark.cpu_model]),
         # [Encoder-only]
-        pytest.param("BAAI/bge-base-en-v1.5", marks=[pytest.mark.core_model]),
+        pytest.param(
+            "BAAI/bge-base-en-v1.5",
+            marks=[
+                pytest.mark.core_model, pytest.mark.cpu_model,
+                pytest.mark.slow_test
+            ],
+        ),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-small"),
-        pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
         # [Cross-Encoder]
-        pytest.param("sentence-transformers/stsb-roberta-base-v2"),
+        pytest.param(
+            "sentence-transformers/stsb-roberta-base-v2",
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
     ],
 )
 def test_models(
@@ -42,8 +50,6 @@ def test_models(
     model,
     monkeypatch,
 ) -> None:
-    if model == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
-        check_transformers_version(model, max_transformers_version="4.53.2")
 
     if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
@@ -52,7 +58,7 @@ def test_models(
 
     vllm_extra_kwargs = {}
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
-        vllm_extra_kwargs["override_pooler_config"] = \
+        vllm_extra_kwargs["pooler_config"] = \
             PoolerConfig(pooling_type="MEAN", normalize=False)
 
     max_model_len: Optional[int] = 512

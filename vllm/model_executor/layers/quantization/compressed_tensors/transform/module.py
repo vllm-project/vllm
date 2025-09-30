@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Hashable
-from typing import Callable, Optional
+from typing import Callable
 
 import torch
-from compressed_tensors.transform import TransformLocation, TransformScheme
+from compressed_tensors.transform import (TransformArgs, TransformLocation,
+                                          TransformScheme)
 from torch import Tensor
 
+import vllm._custom_ops as ops
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.linear import LinearBase
@@ -28,16 +30,12 @@ class HadamardTransform(torch.nn.Module):
     transforms: dict[int, TransformTuple]  # info parsed from transforms config
     weight: SharedWeightParameter  # container for shared tensors
 
-    kernel: Callable  # function used during application
     scales: dict[int, float]  # hadamard scale, usually sqrt(matrix.size(0))
 
-    def __init__(self,
-                 transforms: dict[int, TransformTuple],
-                 layer: torch.nn.Module,
-                 weight_loader: Callable,
+    def __init__(self, transforms: dict[int, TransformTuple],
+                 layer: torch.nn.Module, weight_loader: Callable,
                  input_size_per_partition: int,
-                 output_partition_sizes: list[int],
-                 kernel: Optional[Callable] = None):
+                 output_partition_sizes: list[int]):
         super().__init__()
         self.transforms = transforms
         self.scales = {}
@@ -55,7 +53,7 @@ class HadamardTransform(torch.nn.Module):
         for part_index, (_scheme_name, scheme,
                          args) in self.transforms.items():
             output_size = output_partition_sizes[part_index]
-            weight_size = self._get_weight_size(layer, args.location,
+            weight_size = self._get_weight_size(layer, scheme, args,
                                                 input_size, output_size)
 
             data_key = self._get_data_key(scheme, weight_size)
@@ -69,9 +67,6 @@ class HadamardTransform(torch.nn.Module):
         # validate that shared tensors and schemes are correct
         self._validate_input_transforms()
 
-        # select kernel based on transform schemes
-        self.kernel = self._infer_kernel() if kernel is None else kernel
-
     def process_weights_after_loading(self):
         for part_id in self.weight.partitions:
             data = self.weight.partitions[part_id].data
@@ -83,39 +78,66 @@ class HadamardTransform(torch.nn.Module):
             # do not fold into weight in order to utilize FWHT
             self.scales[part_id] = 1 / math.sqrt(data.size(0))
 
-            # FUTURE: avoid runtime tranpose by processing weights
+            # FUTURE: avoid runtime transpose by processing weights
             # prior to apply
 
     def forward(self, value: Tensor, part_id: int = 0) -> Tensor:
         if part_id not in self.weight.partitions:
             return value
 
-        weight = self.weight.partitions[part_id]
-        weight = weight if self.transforms[
-            part_id].args.inverse else weight.T  # linear := x(W.T)
-        scale = self.scales[part_id]
-        return self.kernel(self, value.to(weight.dtype), weight, None).to(
-            value.dtype) * scale
+        # use hadacore if possible
+        if self.transforms[part_id].scheme.type == "hadamard":
+            if self.transforms[part_id].scheme.head_dim is not None:
+                weight_size = self.transforms[part_id].scheme.head_dim
+                value = value.unflatten(-1, (-1, weight_size))
+                value = ops.hadacore_transform(value)
+                value = value.flatten(-2, -1)
+
+                return value
+
+            # sylvester transforms are symmetric, inv => transpose => original
+            return ops.hadacore_transform(value)
+
+        # fall back to dense
+        else:
+            weight = self.weight.partitions[part_id]
+            weight = weight if self.transforms[
+                part_id].args.inverse else weight.T  # linear := x(W.T)
+            scale = self.scales[part_id]
+
+            if self.transforms[part_id].scheme.head_dim is not None:
+                value = value.unflatten(-1, (-1, weight.size(0)))
+                value = dispatch_unquantized_gemm()(self, value.to(
+                    weight.dtype), weight, None).to(value.dtype) * scale
+                value = value.flatten(-2, -1)
+
+                return value
+
+            return dispatch_unquantized_gemm()(self, value.to(
+                weight.dtype), weight, None).to(value.dtype) * scale
 
     def _get_data_key(self, scheme: TransformScheme,
                       weight_size: int) -> Hashable:
         return (id(scheme), weight_size)
 
-    def _get_weight_size(self, layer: torch.nn.Module,
-                         location: TransformLocation, input_size: int,
+    def _get_weight_size(self, layer: torch.nn.Module, scheme: TransformScheme,
+                         args: TransformArgs, input_size: int,
                          output_size: int) -> int:
+        if scheme.head_dim is not None:
+            return scheme.head_dim
+
         if isinstance(layer, LinearBase):
-            if location == TransformLocation.INPUT:
+            if args.location == TransformLocation.INPUT:
                 return input_size
 
-            elif location == TransformLocation.OUTPUT:
+            elif args.location == TransformLocation.OUTPUT:
                 return output_size
 
         elif isinstance(layer, VocabParallelEmbedding):
-            if location == TransformLocation.INPUT:
+            if args.location == TransformLocation.INPUT:
                 return output_size
 
-            elif location == TransformLocation.OUTPUT:
+            elif args.location == TransformLocation.OUTPUT:
                 return input_size
 
         raise ValueError()
@@ -129,7 +151,3 @@ class HadamardTransform(torch.nn.Module):
             for partition in self.weight.partitions.values():
                 if partition.data.data_ptr() != first_data.data_ptr():
                     raise ValueError("")
-
-    def _infer_kernel(self) -> Callable:
-        # TODO (@ksayers): use fwht, hadacore
-        return dispatch_unquantized_gemm()

@@ -52,6 +52,9 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: list[int]
     """A list of token IDs to pass to the model."""
 
+    prompt: NotRequired[str]
+    """The prompt text corresponding to the token IDs, if available."""
+
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
@@ -284,8 +287,8 @@ class EncoderDecoderInputs(TypedDict):
 
 SingletonInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
-A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be 
-passed to [`vllm.sequence.Sequence`][].
+A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be
+passed to [`Sequence`][collections.abc.Sequence].
 """
 
 ProcessorInputs = Union[DecoderOnlyInputs, EncoderDecoderInputs]

@@ -178,6 +178,7 @@ def _compare_sp(
     trust_remote_code = model_info.trust_remote_code
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
+    skip_tokenizer_init = model_info.skip_tokenizer_init
 
     if load_format == "dummy":
         # Avoid OOM
@@ -227,12 +228,13 @@ def _compare_sp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
+    if skip_tokenizer_init:
+        common_args.append("--skip-tokenizer-init")
 
     compilation_config = {
         'level': 3,
         'custom_ops': ["+rms_norm"],
         'compile_sizes': [4, 8],
-        'splitting_ops': [],
         'pass_config': {
             'enable_sequence_parallelism': True,
             'enable_fusion': enable_fusion,
@@ -248,6 +250,8 @@ def _compare_sp(
         *common_args,
         "--tensor-parallel-size",
         str(tp_size),
+        "--pipeline-parallel-size",
+        str(pp_size),
         "--distributed-executor-backend",
         distributed_backend,
         "--compilation_config",

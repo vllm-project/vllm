@@ -24,12 +24,11 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (EmbeddingServeContext,
                                                     OpenAIServing,
-                                                    RequestPrompt,
                                                     ServeContext,
                                                     TextTokensPrompt)
 # yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
@@ -77,13 +76,13 @@ class EmbeddingMixin(OpenAIServing):
         try:
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
-            tokenizer = await self.engine_client.get_tokenizer(ctx.lora_request
-                                                               )
+            tokenizer = await self.engine_client.get_tokenizer()
+            renderer = self._get_renderer(tokenizer)
 
             if isinstance(ctx.request, EmbeddingChatRequest):
                 (
                     _,
-                    ctx.request_prompts,
+                    _,
                     ctx.engine_prompts,
                 ) = await self._preprocess_chat(
                     ctx.request,
@@ -93,24 +92,32 @@ class EmbeddingMixin(OpenAIServing):
                     or ctx.chat_template,
                     chat_template_content_format=ctx.
                     chat_template_content_format,
-                    # In embedding requests, we are not generating tokens,
-                    # so there is no need to append extra tokens to the input
-                    add_generation_prompt=False,
+                    add_generation_prompt=ctx.request.add_generation_prompt,
                     continue_final_message=False,
                     add_special_tokens=ctx.request.add_special_tokens,
                 )
             else:
-                (ctx.request_prompts,
-                 ctx.engine_prompts) = await self._preprocess_completion(
-                     ctx.request,
-                     tokenizer,
-                     ctx.request.input,
-                     add_special_tokens=ctx.request.add_special_tokens,
-                 )
+                ctx.engine_prompts = await renderer.render_prompt(
+                    prompt_or_prompts=ctx.request.input,
+                    config=self._build_render_config(ctx.request),
+                )
             return None
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
+
+    def _build_render_config(
+            self, request: EmbeddingCompletionRequest) -> RenderConfig:
+        # Set max_length based on chunked processing capability
+        if self._should_use_chunked_processing(request):
+            max_length = None
+        else:
+            max_length = self.max_embed_len or self.max_model_len
+
+        return RenderConfig(
+            max_length=max_length,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
+            add_special_tokens=request.add_special_tokens)
 
     @override
     def _build_response(
@@ -287,8 +294,7 @@ class EmbeddingMixin(OpenAIServing):
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: Union[EngineTokensPrompt, EngineEmbedsPrompt],
-        request_prompt: RequestPrompt,
+        engine_prompt: EngineTokensPrompt,
         pooling_params: PoolingParams,
         trace_headers: Optional[Mapping[str, str]],
         prompt_index: int,
@@ -297,15 +303,9 @@ class EmbeddingMixin(OpenAIServing):
         request_id_item = f"{ctx.request_id}-{prompt_index}"
 
         self._log_inputs(request_id_item,
-                         request_prompt,
+                         engine_prompt,
                          params=pooling_params,
                          lora_request=ctx.lora_request)
-
-        # Mypy has an existing bug related to inferring the variance
-        # of TypedDicts with `builtins.enumerate`:
-        # https://github.com/python/mypy/issues/8586#issuecomment-2867698435
-        engine_prompt = cast(Union[EngineTokensPrompt, EngineEmbedsPrompt],
-                             engine_prompt)
 
         # Return the original generator without wrapping
         return self.engine_client.encode(
@@ -355,20 +355,14 @@ class EmbeddingMixin(OpenAIServing):
                 return self.create_error_response(
                     "Engine prompts not available")
 
-            if ctx.request_prompts is None:
-                return self.create_error_response(
-                    "Request prompts not available")
-
             max_pos_embeddings = self._get_max_position_embeddings()
 
             for i, engine_prompt in enumerate(ctx.engine_prompts):
-                request_prompt = ctx.request_prompts[i]
-
                 # Check if this specific prompt needs chunked processing
-                if self._is_text_tokens_prompt(request_prompt):
+                if self._is_text_tokens_prompt(engine_prompt):
                     # Cast to TextTokensPrompt since we've verified
                     # prompt_token_ids
-                    text_tokens_prompt = cast(TextTokensPrompt, request_prompt)
+                    text_tokens_prompt = cast(TextTokensPrompt, engine_prompt)
                     if (len(text_tokens_prompt["prompt_token_ids"])
                             > max_pos_embeddings):
                         # Use chunked processing for this prompt
@@ -379,13 +373,8 @@ class EmbeddingMixin(OpenAIServing):
                         continue
 
                 # Normal processing for short prompts or non-token prompts
-                # Cast engine_prompt to the expected type for mypy
-                engine_prompt_typed = cast(
-                    Union[EngineTokensPrompt, EngineEmbedsPrompt],
-                    engine_prompt)
                 generator = await self._create_single_prompt_generator(
-                    ctx, engine_prompt_typed, request_prompt, pooling_params,
-                    trace_headers, i)
+                    ctx, engine_prompt, pooling_params, trace_headers, i)
                 generators.append(generator)
 
             from vllm.utils import merge_async_iterators
@@ -404,8 +393,8 @@ class EmbeddingMixin(OpenAIServing):
     ) -> Optional[ErrorResponse]:
         """Collect and aggregate batch results
         with support for chunked processing.
-        
-        For chunked requests, performs online aggregation to 
+
+        For chunked requests, performs online aggregation to
         minimize memory usage.
         For regular requests, collects results normally.
         """
@@ -420,10 +409,6 @@ class EmbeddingMixin(OpenAIServing):
 
             if not use_chunked:
                 return await super()._collect_batch(ctx=ctx)
-
-            if ctx.request_prompts is None:
-                return self.create_error_response(
-                    "Request prompts not available")
 
             if ctx.result_generator is None:
                 return self.create_error_response(
@@ -540,7 +525,7 @@ class EmbeddingMixin(OpenAIServing):
                             data=final_embedding)
 
                         # Get original prompt token IDs for this prompt
-                        original_prompt = ctx.request_prompts[prompt_idx]
+                        original_prompt = ctx.engine_prompts[prompt_idx]
                         if not self._is_text_tokens_prompt(original_prompt):
                             return self.create_error_response(
                                 f"Chunked prompt {prompt_idx} is not a "
@@ -613,7 +598,7 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
         """
-        model_name = self._get_model_name(request.model)
+        model_name = self.models.model_name()
         request_id = (
             f"{self.request_id_prefix}-"
             f"{self._base_request_id(raw_request, request.request_id)}")

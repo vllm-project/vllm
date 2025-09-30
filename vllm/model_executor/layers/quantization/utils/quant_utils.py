@@ -34,6 +34,15 @@ class GroupShape(_GroupShape):
     PER_TENSOR: ClassVar['GroupShape']
     PER_TOKEN: ClassVar['GroupShape']
 
+    def is_per_tensor(self) -> bool:
+        return self.row == -1 and self.col == -1
+
+    def is_per_token(self) -> bool:
+        return self.row == 1 and self.col == -1
+
+    def is_per_group(self) -> bool:
+        return self.row == 1 and self.col >= 1
+
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
 GroupShape.PER_TOKEN = GroupShape(1, -1)
@@ -116,7 +125,7 @@ def _normalize_quant_group_shape(x: torch.Tensor, group_shape: GroupShape):
 # then we would expand a to:
 #       a = [[1, 1, 2, 2],
 #            [3, 3, 4, 4]]
-# NOTE this function this function does not explicitly broadcast dimensions
+# NOTE this function does not explicitly broadcast dimensions
 # with an extent of 1, since this can be done implicitly by pytorch
 def group_broadcast(t, shape):
     for i, s in enumerate(shape):
@@ -283,6 +292,11 @@ def is_layer_skipped(
                     f"Detected some but not all shards of {prefix} "
                     "are quantized. All shards of fused layers "
                     "to have the same precision.")
+    elif "experts" in prefix:
+        return any([
+            prefix in layer_name for layer_name in ignored_layers
+            if "experts" in layer_name
+        ])
     else:
         is_skipped = prefix in ignored_layers
 

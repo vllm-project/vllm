@@ -29,7 +29,10 @@ ARG VLLM_BRANCH="main"
 ONBUILD RUN git clone ${VLLM_REPO} \
 	    && cd vllm \
 	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
-	    && git checkout FETCH_HEAD
+	    && git checkout FETCH_HEAD \
+        && if [ ${VLLM_REPO} != "https://github.com/vllm-project/vllm.git" ] ; then \
+               git remote add upstream "https://github.com/vllm-project/vllm.git" \
+               && git fetch upstream ; fi
 FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
 # -----------------------
@@ -47,6 +50,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements /requirements
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 
 # -----------------------
@@ -71,7 +75,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
 RUN cd /vllm-workspace \
     && rm -rf vllm \
     && python3 -m pip install -e tests/vllm_test_utils \
-    && python3 -m pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api] \
+    && python3 -m pip install lm-eval[api]==0.4.4 \
     && python3 -m pip install pytest-shard
 
 # -----------------------
@@ -100,8 +104,10 @@ ARG COMMON_WORKDIR
 # Copy over the benchmark scripts as well
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
+COPY --from=export_vllm /docker ${COMMON_WORKDIR}/vllm/docker
 
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+ENV RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false
 
 # ENV that can improve safe tensor loading, and end-to-end time

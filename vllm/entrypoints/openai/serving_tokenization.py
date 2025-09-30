@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
@@ -64,14 +65,15 @@ class OpenAIServingTokenization(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            tokenizer = await self.engine_client.get_tokenizer()
+            renderer = self._get_renderer(tokenizer)
 
             if isinstance(request, TokenizeChatRequest):
                 tool_dicts = (None if request.tools is None else
                               [tool.model_dump() for tool in request.tools])
                 (
                     _,
-                    request_prompts,
+                    _,
                     engine_prompts,
                 ) = await self._preprocess_chat(
                     request,
@@ -87,21 +89,18 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                (request_prompts,
-                 engine_prompts) = await self._preprocess_completion(
-                     request,
-                     tokenizer,
-                     request.prompt,
-                     add_special_tokens=request.add_special_tokens,
-                 )
+                engine_prompts = await renderer.render_prompt(
+                    prompt_or_prompts=request.prompt,
+                    config=self._build_render_config(request),
+                )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
 
         input_ids: list[int] = []
-        for i, engine_prompt in enumerate(engine_prompts):
+        for engine_prompt in engine_prompts:
             self._log_inputs(request_id,
-                             request_prompts[i],
+                             engine_prompt,
                              params=None,
                              lora_request=lora_request)
 
@@ -131,7 +130,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine_client.get_tokenizer(lora_request)
+        tokenizer = await self.engine_client.get_tokenizer()
 
         self._log_inputs(request_id,
                          request.tokens,
@@ -157,6 +156,9 @@ class OpenAIServingTokenization(OpenAIServing):
         except Exception as e:
             return self.create_error_response(
                 f"Failed to get tokenizer info: {str(e)}")
+
+    def _build_render_config(self, request: TokenizeRequest) -> RenderConfig:
+        return RenderConfig(add_special_tokens=request.add_special_tokens)
 
 
 @dataclass

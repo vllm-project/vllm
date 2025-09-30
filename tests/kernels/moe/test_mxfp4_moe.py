@@ -1,35 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
 import importlib.metadata
 from dataclasses import dataclass
+from importlib.util import find_spec
 from typing import Optional
 
 import pytest
 import torch
 from packaging import version
 
+from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+    QuarkLinearMethod, QuarkW4A4MXFP4)
+from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkW4A4MXFp4MoEMethod)
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 
-QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
-    "quark") is not None and version.parse(
-        importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
+QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
+    importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
 
 TRTLLM_GEN_MXFP4_AVAILABLE = current_platform.is_cuda(
 ) and current_platform.is_device_capability(100)
+
+HOPPER_MXFP4_BF16_AVAILABLE = (current_platform.is_cuda()
+                               and current_platform.is_device_capability(90)
+                               and has_flashinfer())
 
 if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer import (fp4_quantize, mxfp8_quantize,
                             next_positive_power_of_2,
                             reorder_rows_for_gated_act_gemm, shuffle_matrix_a,
                             shuffle_matrix_sf_a, trtllm_fp4_block_scale_moe)
+    from flashinfer.fp4_quantization import nvfp4_block_scale_interleave
+    from flashinfer.fused_moe.core import _maybe_get_cached_w2_permute_indices
 
 
 @dataclass
 class ModelCase:
     model_id: str
     tp: int
+
+
+@pytest.fixture(scope="function", autouse=True)
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 @pytest.mark.parametrize('model_case', [
@@ -48,21 +64,19 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
                      tensor_parallel_size=model_case.tp,
                      load_format="dummy") as llm:
 
-        # TODO: llm.apply_model(check_model) currently relies on V0 internals.
-        # Re-enable this later.
-        # def check_model(model):
-        #     layer = model.model.layers[0]
+        def check_model(model):
+            layer = model.model.layers[0]
 
-        #     qkv_proj = layer.self_attn.qkv_proj
+            qkv_proj = layer.self_attn.qkv_proj
 
-        #     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-        #     assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
+            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+            assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
 
-        #     assert isinstance(layer.mlp.experts.quant_method,
-        #                       QuarkW4A4MXFp4MoEMethod)
+            assert isinstance(layer.mlp.experts.quant_method,
+                              QuarkW4A4MXFp4MoEMethod)
 
-        # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
-        #     llm.apply_model(check_model)
+        if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
+            llm.apply_model(check_model)
 
         output = llm.generate_greedy("Today I am in the French Alps and",
                                      max_tokens=20)
@@ -204,6 +218,7 @@ def tg_mxfp4_moe(
     alpha,
     beta,
     limit,
+    transpose_optimized: bool = False,
 ) -> torch.Tensor:
     sf_block_size = 32
     assert (w13_weight.dim() == 3 and w13_weight.shape[0] == num_experts
@@ -224,7 +239,7 @@ def tg_mxfp4_moe(
     assert (w2_bias.dim() == 2 and w2_bias.shape[0] == num_experts
             and w2_bias.shape[1] == hidden_size)
 
-    # Swap w1 and w3 as the defenition of
+    # Swap w1 and w3 as the definition of
     # swiglu is different in the trtllm-gen
     w13_weight_scale_ = w13_weight_scale.clone()
     w13_weight_ = w13_weight.clone()
@@ -267,22 +282,85 @@ def tg_mxfp4_moe(
     gemm1_bias_shuffled = []
     gemm2_bias_shuffled = []
     epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
-    for i in range(num_experts):
-        gemm1_weights_shuffled.append(
-            shuffle_matrix_a(w13_weight[i].view(torch.uint8), epilogue_tile_m))
-        gemm1_scales_shuffled.append(
-            shuffle_matrix_sf_a(w13_weight_scale[i].view(torch.uint8),
-                                epilogue_tile_m))
+    _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+    if transpose_optimized:
+        for i in range(num_experts):
+            # w13 weight shuffling
+            permute_indices = _maybe_get_cached_w2_permute_indices(
+                _cache_permute_indices,
+                w13_weight[i].view(torch.uint8),
+                epilogue_tile_m,
+            )
+            gemm1_weights_shuffled.append(w13_weight[i].view(
+                torch.uint8)[permute_indices.to(
+                    w13_weight.device)].contiguous())
+            # w13 scale shuffling
+            permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+                _cache_permute_indices,
+                w13_weight_scale[i].view(torch.uint8),
+                epilogue_tile_m,
+                num_elts_per_sf=16,
+            )
+            gemm1_scales_shuffled.append(
+                nvfp4_block_scale_interleave(w13_weight_scale[i].view(
+                    torch.uint8)[permute_sf_indices.to(
+                        w13_weight_scale.device)].contiguous()))
+            # w13 bias shuffling
+            permute_bias_indices = _maybe_get_cached_w2_permute_indices(
+                _cache_permute_indices,
+                w13_bias[i].clone().reshape(-1, 1),
+                epilogue_tile_m,
+            )
+            gemm1_bias_shuffled.append(w13_bias[i].clone().reshape(
+                -1, 1)[permute_bias_indices.to(w13_bias.device)].contiguous())
+            # w2 weight shuffling
+            permute_indices = _maybe_get_cached_w2_permute_indices(
+                _cache_permute_indices,
+                w2_weight[i].view(torch.uint8),
+                epilogue_tile_m,
+            )
+            gemm2_weights_shuffled.append(w2_weight[i].view(
+                torch.uint8)[permute_indices.to(
+                    w2_weight.device)].contiguous())
+            # w2 scale shuffling
+            permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+                _cache_permute_indices,
+                w2_weight_scale[i].view(torch.uint8),
+                epilogue_tile_m,
+                num_elts_per_sf=16,
+            )
+            gemm2_scales_shuffled.append(
+                nvfp4_block_scale_interleave(w2_weight_scale[i].view(
+                    torch.uint8)[permute_sf_indices.to(
+                        w2_weight_scale.device)].contiguous()))
+            # w2 bias shuffling
+            permute_indices = _maybe_get_cached_w2_permute_indices(
+                _cache_permute_indices,
+                w2_bias[i].clone().reshape(-1, 1),
+                epilogue_tile_m,
+            )
+            gemm2_bias_shuffled.append(w2_bias[i].clone().reshape(
+                -1, 1)[permute_indices.to(w2_bias.device)].contiguous())
 
-        gemm2_weights_shuffled.append(
-            shuffle_matrix_a(w2_weight[i].view(torch.uint8), epilogue_tile_m))
-        gemm2_scales_shuffled.append(
-            shuffle_matrix_sf_a(w2_weight_scale[i].view(torch.uint8),
-                                epilogue_tile_m))
-        gemm1_bias_shuffled.append(
-            shuffle_matrix_a(w13_bias[i].reshape(-1, 1), epilogue_tile_m))
-        gemm2_bias_shuffled.append(
-            shuffle_matrix_a(w2_bias[i].reshape(-1, 1), epilogue_tile_m))
+    else:
+        for i in range(num_experts):
+            gemm1_weights_shuffled.append(
+                shuffle_matrix_a(w13_weight[i].view(torch.uint8),
+                                 epilogue_tile_m))
+            gemm1_scales_shuffled.append(
+                shuffle_matrix_sf_a(w13_weight_scale[i].view(torch.uint8),
+                                    epilogue_tile_m))
+
+            gemm2_weights_shuffled.append(
+                shuffle_matrix_a(w2_weight[i].view(torch.uint8),
+                                 epilogue_tile_m))
+            gemm2_scales_shuffled.append(
+                shuffle_matrix_sf_a(w2_weight_scale[i].view(torch.uint8),
+                                    epilogue_tile_m))
+            gemm1_bias_shuffled.append(
+                shuffle_matrix_a(w13_bias[i].reshape(-1, 1), epilogue_tile_m))
+            gemm2_bias_shuffled.append(
+                shuffle_matrix_a(w2_bias[i].reshape(-1, 1), epilogue_tile_m))
 
     w13_weight = torch.stack(gemm1_weights_shuffled)
     w13_weight_scale = torch.stack(gemm1_scales_shuffled).reshape(
@@ -356,6 +434,7 @@ def check_accuracy(a, b, atol, rtol, percent):
 @pytest.mark.parametrize("alpha,beta,limit", [(1.0, 1.0, None),
                                               (1.702, 1.0, 7.0)])
 @pytest.mark.parametrize("act_type", ['mxfp8', 'bf16'])
+@pytest.mark.parametrize("transpose_optimized", [False, True])
 @pytest.mark.skipif(
     not TRTLLM_GEN_MXFP4_AVAILABLE,
     reason="nvidia gpu and compute capability sm100 is required for this test")
@@ -369,6 +448,7 @@ def test_trtllm_gen_mxfp4_fused_moe(
     beta: float,
     limit: Optional[float],
     act_type: str,
+    transpose_optimized: bool,
 ):
     seed = 42
     torch.manual_seed(seed)
@@ -470,6 +550,321 @@ def test_trtllm_gen_mxfp4_fused_moe(
                              act_type,
                              alpha=alpha,
                              beta=beta,
-                             limit=limit)
+                             limit=limit,
+                             transpose_optimized=transpose_optimized)
     # relatively loose check since the mxfp4 quantization is less accurate
     check_accuracy(ref_result, tg_result, atol=0, rtol=0.3, percent=0.8)
+
+
+def _interleave_scales_lastdim_by4(scales: torch.Tensor) -> torch.Tensor:
+    """Interleave scales on the last dimension by groups of 4, matching
+    the transformation in mxfp4.py's BF16 (Hopper) path."""
+    s = scales.to(torch.uint8)
+    s_shape = s.shape
+    assert s_shape[-1] % 4 == 0
+    s = s.reshape(*s_shape[:-1], s_shape[-1] // 4, 4)
+    # Move the 4-group dimension before the row dimension
+    permuted = s.permute(0, 2, 1, 3)
+    # Merge the row dim with the 4-group dim
+    return permuted.reshape(s_shape[0], s_shape[-1] // 4, s_shape[1] * 4)
+
+
+@pytest.mark.parametrize("topk", [1, 4])
+@pytest.mark.parametrize("num_experts", [32])
+@pytest.mark.parametrize("num_tokens", [1, 128])
+@pytest.mark.parametrize("intermediate_size,hidden_size", [(3072, 3072)])
+@pytest.mark.parametrize("alpha,beta,limit", [(1.0, 1.0, None),
+                                              (1.702, 1.0, 7.0)])
+@pytest.mark.skipif(
+    not HOPPER_MXFP4_BF16_AVAILABLE,
+    reason="nvidia gpu sm90 and flashinfer are required for this test",
+)
+def test_flashinfer_cutlass_mxfp4_fused_moe(
+    topk: int,
+    num_experts: int,
+    num_tokens: int,
+    intermediate_size: int,
+    hidden_size: int,
+    alpha: float,
+    beta: float,
+    limit: Optional[float],
+):
+    torch.manual_seed(42)
+    device = "cuda:0"
+
+    # Inputs
+    hidden_states = torch.randn(num_tokens,
+                                hidden_size,
+                                device=device,
+                                dtype=torch.bfloat16)
+    # Random MXFP4 weights and scales (uint8), contiguous [w1; w3]
+    w13_q = torch.randint(
+        0,
+        256, (num_experts, 2 * intermediate_size, hidden_size // 2),
+        device=device,
+        dtype=torch.uint8)
+    w13_scale = torch.randint(
+        118,
+        123, (num_experts, 2 * intermediate_size, hidden_size // 32),
+        device=device,
+        dtype=torch.uint8)
+
+    w2_q = torch.randint(0,
+                         256,
+                         (num_experts, hidden_size, intermediate_size // 2),
+                         device=device,
+                         dtype=torch.uint8)
+    w2_scale = torch.randint(
+        118,
+        123, (num_experts, hidden_size, intermediate_size // 32),
+        device=device,
+        dtype=torch.uint8)
+    # Bias contiguous [b1; b3]
+    bias13 = (torch.randn(num_experts,
+                          2 * intermediate_size,
+                          device=device,
+                          dtype=torch.bfloat16) * 10)
+    bias2 = (torch.randn(
+        num_experts, hidden_size, device=device, dtype=torch.bfloat16) * 10)
+    router_logits = torch.rand(num_tokens,
+                               num_experts,
+                               dtype=torch.float32,
+                               device=device)
+
+    w13_ref = mxfp4_dequantize(w13_q.clone(), w13_scale.clone()).reshape(
+        num_experts, 2 * intermediate_size, hidden_size)
+    w2_ref = mxfp4_dequantize(w2_q.clone(), w2_scale.clone()).reshape(
+        num_experts, hidden_size, intermediate_size)
+    ref = reference_moe(router_logits.to(torch.float32), topk, num_experts,
+                        hidden_states.to(torch.float32), w13_ref,
+                        bias13.to(torch.float32), w2_ref,
+                        bias2.to(torch.float32), alpha, beta, limit, 'bf16')
+
+    from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
+
+    # Swap halves to arrange as [w3; w1] (kernel expectation)
+    w1_w, w3_w = torch.chunk(w13_q, 2, dim=1)
+    w13_q_swapped = torch.cat([w3_w, w1_w], dim=1)
+
+    b1, b3 = torch.chunk(bias13.to(torch.float32), 2, dim=-1)
+    w13_b = torch.cat([b3, b1], dim=-1).to(torch.bfloat16)
+
+    w1_s, w3_s = torch.chunk(w13_scale, 2, dim=1)
+    w13_s = torch.cat([w3_s, w1_s], dim=1)
+    w13_s_inter = _interleave_scales_lastdim_by4(w13_s)
+    w2_s_inter = _interleave_scales_lastdim_by4(w2_scale)
+
+    routing_weights = torch.nn.functional.softmax(router_logits,
+                                                  dim=1,
+                                                  dtype=torch.float32)
+    token_final_scales, token_selected_experts = torch.topk(routing_weights,
+                                                            topk,
+                                                            dim=-1)
+    token_final_scales = (token_final_scales /
+                          token_final_scales.sum(dim=-1, keepdim=True))
+    token_selected_experts = token_selected_experts.to(torch.int).contiguous()
+
+    out = torch.empty_like(hidden_states, dtype=torch.bfloat16)
+    if alpha is not None:
+        alpha = torch.full((num_experts, ), alpha, device=hidden_states.device)
+    if beta is not None:
+        beta = torch.full((num_experts, ), beta, device=hidden_states.device)
+    if limit is not None:
+        limit = torch.full((num_experts, ), limit, device=hidden_states.device)
+
+    _ = flashinfer_cutlass_fused_moe(
+        input=hidden_states,
+        token_selected_experts=token_selected_experts,
+        token_final_scales=token_final_scales,
+        fc1_expert_weights=w13_q_swapped,
+        fc2_expert_weights=w2_q,
+        output_dtype=torch.bfloat16,
+        output=out,
+        quant_scales=[w13_s_inter.to(torch.uint8),
+                      w2_s_inter.to(torch.uint8)],
+        fc1_expert_biases=w13_b,
+        fc2_expert_biases=bias2.to(torch.bfloat16),
+        swiglu_alpha=alpha,
+        swiglu_beta=beta,
+        swiglu_limit=limit,
+        tp_size=1,
+        tp_rank=0,
+        ep_size=1,
+        ep_rank=0,
+        use_w4_group_scaling=True,
+    )
+
+    # Allow some mismatch due to MXFP4 quantization
+    check_accuracy(ref, out, atol=0, rtol=0.3, percent=0.8)
+
+
+@pytest.mark.parametrize("topk", [1, 4])
+@pytest.mark.parametrize("num_experts", [32])
+@pytest.mark.parametrize("num_tokens", [1, 128])
+@pytest.mark.parametrize("intermediate_size,hidden_size", [(3072, 3072)])
+@pytest.mark.parametrize("alpha,beta,limit", [(1.0, 1.0, None),
+                                              (1.702, 1.0, 7.0)])
+@pytest.mark.skipif(
+    not (current_platform.is_cuda()
+         and current_platform.is_device_capability(100) and has_flashinfer()),
+    reason="NVIDIA GPU sm100 and flashinfer are required for this test",
+)
+def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
+    topk: int,
+    num_experts: int,
+    num_tokens: int,
+    intermediate_size: int,
+    hidden_size: int,
+    alpha: Optional[float],
+    beta: Optional[float],
+    limit: Optional[float],
+):
+    torch.manual_seed(42)
+    device = "cuda:0"
+
+    # Inputs
+    hidden_states = torch.randn(num_tokens,
+                                hidden_size,
+                                device=device,
+                                dtype=torch.bfloat16)
+    # Float weights in w13 format [w1; w3]
+    w13 = (torch.randn(num_experts,
+                       2 * intermediate_size,
+                       hidden_size,
+                       device=device,
+                       dtype=torch.bfloat16) / 10)
+    w2 = (torch.randn(num_experts,
+                      hidden_size,
+                      intermediate_size,
+                      device=device,
+                      dtype=torch.bfloat16) / 10)
+    # Bias contiguous [b1; b3]
+    bias13 = (torch.randn(num_experts,
+                          2 * intermediate_size,
+                          device=device,
+                          dtype=torch.bfloat16) * 10)
+    bias2 = (torch.randn(
+        num_experts, hidden_size, device=device, dtype=torch.bfloat16) * 10)
+    router_logits = torch.rand(num_tokens,
+                               num_experts,
+                               dtype=torch.float32,
+                               device=device)
+
+    # Quantize weights to MXFP4 per expert (SM100 path)
+    from flashinfer import mxfp4_quantize
+
+    def quant_mxfp4_batches(a: torch.Tensor, e: int):
+        qs, sfs = [], []
+        for i in range(e):
+            q, sf = mxfp4_quantize(a[i].cuda())
+            qs.append(q)
+            sfs.append(sf)
+        return torch.stack(qs), torch.stack(sfs)
+
+    def dequant_mxfp4_batches(mat_fp4: torch.Tensor,
+                              scale_tensor: torch.Tensor):
+        num_batches = mat_fp4.size(0)
+        scale_tensor = scale_tensor.view(num_batches, -1)
+        from flashinfer import mxfp4_dequantize
+        return torch.stack([
+            mxfp4_dequantize(mat_fp4[b, :, :], scale_tensor[b, :])
+            for b in range(num_batches)
+        ])
+
+    w13_q, w13_scale = quant_mxfp4_batches(w13, num_experts)
+    w2_q, w2_scale = quant_mxfp4_batches(w2, num_experts)
+
+    # Reference result using dequantized tensors and reference_moe
+    w13_ref = dequant_mxfp4_batches(
+        w13_q.view(torch.uint8),
+        w13_scale.view(torch.uint8).reshape(-1)).to(torch.float32).reshape(
+            num_experts, 2 * intermediate_size, hidden_size).to(device)
+    w2_ref = dequant_mxfp4_batches(
+        w2_q.view(torch.uint8),
+        w2_scale.view(torch.uint8).reshape(-1)).to(torch.float32).reshape(
+            num_experts, hidden_size, intermediate_size).to(device)
+
+    # Quantize activations for SM100 path and dequantize for reference
+    hidden_states_q, hidden_states_sf = mxfp8_quantize(hidden_states, True, 32)
+    # Reference uses BF16 input but quantizes intermediate activation to MXFP8
+    ref = reference_moe(router_logits.to(torch.float32), topk, num_experts,
+                        hidden_states.to(torch.float32), w13_ref,
+                        bias13.to(torch.float32), w2_ref,
+                        bias2.to(torch.float32), alpha, beta, limit, 'mxfp8')
+
+    # Prepare inputs for FlashInfer CUTLASS fused MoE
+    from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
+
+    # Swap halves to arrange as [w3; w1] (kernel expectation)
+    w1_w, w3_w = torch.chunk(w13_q, 2, dim=1)
+    w13_q_swapped = torch.cat([w3_w, w1_w], dim=1)
+
+    # Swap scales halves to match swapped weights
+    s1, s3 = torch.chunk(w13_scale, 2, dim=1)
+    w13_scale_swapped = torch.cat([s3, s1], dim=1)
+
+    b1, b3 = torch.chunk(bias13.to(torch.float32), 2, dim=-1)
+    w13_b = torch.cat([b3, b1], dim=-1).to(torch.bfloat16)
+
+    # Build routing for kernel
+    routing_weights = torch.nn.functional.softmax(router_logits,
+                                                  dim=1,
+                                                  dtype=torch.float32)
+    token_final_scales, token_selected_experts = torch.topk(routing_weights,
+                                                            topk,
+                                                            dim=-1)
+    token_final_scales = (token_final_scales /
+                          token_final_scales.sum(dim=-1, keepdim=True))
+    token_selected_experts = token_selected_experts.to(torch.int).contiguous()
+
+    out = torch.empty_like(hidden_states, dtype=torch.bfloat16)
+    if alpha is not None:
+        alpha_t = torch.full((num_experts, ),
+                             alpha,
+                             device=hidden_states.device)
+    else:
+        alpha_t = None
+    if beta is not None:
+        beta_t = torch.full((num_experts, ), beta, device=hidden_states.device)
+    else:
+        beta_t = None
+    if limit is not None:
+        limit_t = torch.full((num_experts, ),
+                             limit,
+                             device=hidden_states.device)
+    else:
+        limit_t = None
+
+    # Quant scales for SM100 MXFP8+MXFP4 path
+    fake_input_scale = torch.ones(num_experts, device=device)
+    quant_scales = [
+        w13_scale_swapped.view(torch.int32),
+        fake_input_scale,
+        w2_scale.view(torch.int32),
+        fake_input_scale,
+    ]
+
+    _ = flashinfer_cutlass_fused_moe(
+        input=hidden_states_q,
+        token_selected_experts=token_selected_experts,
+        token_final_scales=token_final_scales,
+        fc1_expert_weights=w13_q_swapped.contiguous().view(torch.long),
+        fc2_expert_weights=w2_q.contiguous().view(torch.long),
+        output_dtype=torch.bfloat16,
+        output=out,
+        quant_scales=quant_scales,
+        fc1_expert_biases=w13_b,
+        fc2_expert_biases=bias2.to(torch.bfloat16),
+        swiglu_alpha=alpha_t,
+        swiglu_beta=beta_t,
+        swiglu_limit=limit_t,
+        tp_size=1,
+        tp_rank=0,
+        ep_size=1,
+        ep_rank=0,
+        use_mxfp8_act_scaling=True,
+        input_sf=hidden_states_sf,
+    )
+
+    # Allow some mismatch due to MXFP4 quantization
+    check_accuracy(ref, out, atol=0, rtol=0.3, percent=0.8)

@@ -46,11 +46,11 @@ def choose_mp_linear_kernel(
      performance.
 
     Args:
-        config (MPLinearLayerConfig): Description of the linear layer to be 
-          implemented.
+        config (MPLinearLayerConfig): Description of the linear layer to be
+            implemented.
         compute_capability (Optional[int], optional): The compute capability of
-          the target device, if None uses `current_platform` to get the compute 
-          capability. Defaults to None.
+            the target device, if None uses `current_platform` to get
+            the compute capability. Defaults to None.
 
     Raises:
         ValueError: If no kernel can implement the given config.

@@ -10,6 +10,7 @@ from tests.kernels.quantization.nvfp4_utils import (FLOAT4_E2M1_MAX,
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
@@ -56,7 +57,7 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
              in_dtype=dtype,
              quant_dtype="nvfp4",
              block_shape=None,  # use quant_blocksize?
-             per_act_token_quant=False,
+             per_out_ch_quant=False,
          )
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
@@ -73,18 +74,22 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
         assert w1_blockscale is not None
         assert w2_blockscale is not None
 
+        quant_config = nvfp4_moe_quant_config(
+            g1_alphas=(1 / w1_gs),
+            g2_alphas=(1 / w2_gs),
+            a1_gscale=a1_gs,
+            a2_gscale=a2_gs,
+            w1_scale=w1_blockscale,
+            w2_scale=w2_blockscale,
+        )
+
         cutlass_output = cutlass_moe_fp4(
             a=a,
-            a1_gscale=a1_gs,
             w1_fp4=w1_q,
-            w1_blockscale=w1_blockscale,
-            g1_alphas=(1 / w1_gs),
-            a2_gscale=a2_gs,
             w2_fp4=w2_q,
-            w2_blockscale=w2_blockscale,
-            g2_alphas=(1 / w2_gs),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            quant_config=quant_config,
             m=m,
             n=n,
             k=k,

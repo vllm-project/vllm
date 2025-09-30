@@ -145,7 +145,8 @@ void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
       }
     }
 
-    float scale_val, azp_val;
+    float scale_val;
+    float azp_val = 0.0f;
     if constexpr (AZP) {
       float max_scalar = max_value.reduce_max();
       float min_scalar = min_value.reduce_min();
@@ -379,6 +380,7 @@ void onednn_scaled_mm(
   exec_args.a_ptr = a.data_ptr<int8_t>();
   exec_args.a_m_size = a.size(0);
   exec_args.bias_ptr = nullptr;
+  exec_args.bias_type = get_dnnl_type<void>();
   exec_args.use_bias = false;
   exec_args.a_scales_ptr = nullptr;
   exec_args.a_zero_points_ptr = nullptr;
@@ -491,4 +493,57 @@ void dynamic_scaled_int8_quant(
               hidden_size);
         }
       });
+}
+
+int64_t create_onednn_mm_handler(const torch::Tensor& b,
+                                 int64_t primitive_cache_size) {
+  TORCH_CHECK(b.dim() == 2);
+
+  MatMulPrimitiveHandler::Args args;
+  args.primitive_cache_size = primitive_cache_size;
+
+  args.b_k_size = b.size(0);
+  args.b_k_stride = b.stride(0);
+  args.b_n_size = b.size(1);
+  args.b_n_stride = b.stride(1);
+  args.b_ptr = b.data_ptr();
+
+  VLLM_DISPATCH_FLOATING_TYPES(b.scalar_type(), "create_onednn_mm_handler",
+                               [&] {
+                                 args.c_type = get_dnnl_type<scalar_t>();
+                                 args.ab_type = get_dnnl_type<scalar_t>();
+                               });
+
+  return reinterpret_cast<int64_t>(new MatMulPrimitiveHandler(args));
+}
+
+void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
+               const torch::Tensor& a,  // [M, IC], row-major
+               const std::optional<torch::Tensor>& bias, int64_t handler) {
+  CPU_KERNEL_GUARD_IN(onednn_mm)
+  TORCH_CHECK(a.dim() == 2);
+  TORCH_CHECK(a.stride(-1) == 1);
+  TORCH_CHECK(c.stride(-1) == 1);
+  MatMulPrimitiveHandler* ptr =
+      reinterpret_cast<MatMulPrimitiveHandler*>(handler);
+
+  MatMulPrimitiveHandler::ExecArgs exec_args;
+  exec_args.a_m_size = a.size(0);
+  exec_args.a_m_stride = a.stride(0);
+
+  VLLM_DISPATCH_FLOATING_TYPES(a.scalar_type(), "onednn_mm", [&] {
+    if (bias.has_value()) {
+      exec_args.use_bias = true;
+      exec_args.bias_type = get_dnnl_type<scalar_t>();
+      exec_args.bias_ptr = bias->data_ptr<scalar_t>();
+    } else {
+      exec_args.use_bias = false;
+      exec_args.bias_type = get_dnnl_type<void>();
+      exec_args.bias_ptr = nullptr;
+    }
+    exec_args.a_ptr = a.data_ptr<scalar_t>();
+    exec_args.c_ptr = c.data_ptr<scalar_t>();
+
+    ptr->execute(exec_args);
+  });
 }

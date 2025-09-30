@@ -4,8 +4,6 @@
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-# downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 
 from ...utils import RemoteOpenAIServer
 
@@ -13,12 +11,6 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # technically this needs Mistral-7B-v0.1 as base, but we're not testing
 # generation quality here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
-
-
-@pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
 
 
 @pytest.fixture(scope="module")
@@ -34,7 +26,6 @@ def server(zephyr_lora_files):
         "--enable-lora",
         "--lora-modules",
         f"zephyr-lora={zephyr_lora_files}",
-        f"zephyr-lora2={zephyr_lora_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -64,4 +55,3 @@ async def test_check_models(client: openai.AsyncOpenAI, zephyr_lora_files):
     assert all(lora_model.root == zephyr_lora_files
                for lora_model in lora_models)
     assert lora_models[0].id == "zephyr-lora"
-    assert lora_models[1].id == "zephyr-lora2"

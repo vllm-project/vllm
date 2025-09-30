@@ -21,16 +21,16 @@ class MoveDirectionality(Enum):
     SWAP = auto()
 
 
+# Batch indices of any removed requests.
+RemovedRequest = int
+
 # (index, params, prompt_tok_ids, output_tok_ids) tuples for new
 # requests added to the batch.
-AddedRequest = tuple[int, SamplingParams, list[int], list[int]]
+AddedRequest = tuple[int, SamplingParams, Optional[list[int]], list[int]]
 
 # (index 1, index 2, directionality) tuples representing
 # one-way moves or two-way swaps of requests in batch
 MovedRequest = tuple[int, int, MoveDirectionality]
-
-# Batch indices of any removed requests.
-RemovedRequest = int
 
 
 @dataclass(frozen=True)

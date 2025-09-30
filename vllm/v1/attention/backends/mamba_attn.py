@@ -16,18 +16,15 @@ M = TypeVar("M")
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
-    reorder_batch_threshold: ClassVar[int] = 1
+    reorder_batch_threshold: int = 1
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        assert isinstance(kv_cache_spec, MambaSpec)
-        self.kv_cache_spec = kv_cache_spec
-        self.device = device
-        self.vllm_config = vllm_config
-        self.layer_names = layer_names
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
+        assert isinstance(kv_cache_spec, MambaSpec)
         self.compilation_config = vllm_config.compilation_config
         self.decode_cudagraph_max_bs = min(
             self.vllm_config.scheduler_config.max_num_seqs,

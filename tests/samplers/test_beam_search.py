@@ -10,13 +10,6 @@ from transformers import AutoModelForSeq2SeqLM
 
 from vllm.assets.audio import AudioAsset
 
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
-
-
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
 #   2. Increase beam_width to 8.
@@ -82,7 +75,7 @@ def test_beam_search_with_concurrency_limit(
     beam_width: int,
 ) -> None:
     # example_prompts[1]&[3]&[7] fails due to unknown reason even without
-    # concurency limit. skip them for now.
+    # concurrency limit. skip them for now.
     example_prompts = (example_prompts[:8])
     concurrency_limit = 2
     assert len(example_prompts) > concurrency_limit
