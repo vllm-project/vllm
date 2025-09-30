@@ -650,6 +650,12 @@ class MambaMixer2(MambaBase, CustomOp):
                 attn_metadata.current_last_token_block_idx,
                 [num_decodes, num_prefills],
                 dim=0)
+        else:
+            current_first_idx_d, current_first_idx_p = None, None
+            current_last_idx_d, current_last_idx_p = None, None
+            last_state_idx_d, last_state_idx_p = None, None
+            seq_lens_completed_d, seq_lens_completed_p = None, None
+
 
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
@@ -685,17 +691,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 mamba2_metadata = update_metadata(x, query_start_loc_p,
                                                   mamba2_metadata)
             assert isinstance(mamba2_metadata.nums_dict, dict)
-            BLOCK_M = list(mamba2_metadata.nums_dict.keys())[0]
-            if cache_enabled:
-                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
-                stride_state_indices = state_indices_tensor_p.shape[-1]
-            else:
-                current_first_idx_p = None
-                current_last_idx_p = None
-                seq_lens_completed_p = None
-                last_state_idx_p = None
-                n_blocks_to_fill = None
-                stride_state_indices = 1
 
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
@@ -705,13 +700,11 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor_p,
-                n_blocks_to_fill=n_blocks_to_fill,
                 current_first_idx=current_first_idx_p,
                 current_last_idx=current_last_idx_p,
                 last_state_idx=last_state_idx_p,
                 seq_lens_completed=seq_lens_completed_p,
-                stride_cache_chunk=mamba_block_size // BLOCK_M,
-                stride_state_indices=stride_state_indices,
+                block_size_to_align=mamba_block_size,
                 metadata=mamba2_metadata,
                 query_start_loc=query_start_loc_p).transpose(
                     0, 1)[:num_prefill_tokens]
@@ -826,8 +819,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
-                current_last_idx_d = None
-                last_state_idx_d = None
 
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(

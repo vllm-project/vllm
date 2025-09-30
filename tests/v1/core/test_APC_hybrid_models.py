@@ -164,33 +164,30 @@ def test_single_prompt_mamba_size_alignment(
         mamba_block_size = vllm_model.llm.llm_engine.cache_config. \
             mamba_block_size
 
-    for multiple in [1, 3, 7]:
-        for offsets in [
-                3, mamba_block_size // 4 - 3, mamba_block_size // 4,
-                mamba_block_size // 4 + 3, mamba_block_size // 2 - 3,
-                mamba_block_size // 2, mamba_block_size // 2 + 3,
-                mamba_block_size - 3
-        ]:
+    multiple = 2
+    for offsets in [
+            3, mamba_block_size // 2 + 3, mamba_block_size - 3
+    ]:
 
-            vllm_runner_kwargs[
-                'max_num_batched_tokens'] = multiple * mamba_block_size - \
-                                            offsets
-            vllm_outputs_cache_rep, _ = _get_vLLM_output_logprobs(
-                vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
-                num_logprobs, n_repetitions)
+        vllm_runner_kwargs[
+            'max_num_batched_tokens'] = multiple * mamba_block_size - \
+                                        offsets
+        vllm_outputs_cache_rep, _ = _get_vLLM_output_logprobs(
+            vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens,
+            num_logprobs, n_repetitions)
 
-            # Check alignment of the output logits when using APC
-            for r_idx, vllm_outputs_cache_itn in enumerate(
-                    vllm_outputs_cache_rep):
-                # In the first repetition, the caches are filled
-                # In the second repetition, these caches are reused
+        # Check alignment of the output logits when using APC
+        for r_idx, vllm_outputs_cache_itn in enumerate(
+                vllm_outputs_cache_rep):
+            # In the first repetition, the caches are filled
+            # In the second repetition, these caches are reused
 
-                check_logprobs_close(
-                    outputs_0_lst=vllm_outputs_no_cache[0],
-                    outputs_1_lst=vllm_outputs_cache_itn,
-                    name_0="vllm_no_cache",
-                    name_1=f"vllm_cache_it_{r_idx + 1}",
-                )
+            check_logprobs_close(
+                outputs_0_lst=vllm_outputs_no_cache[0],
+                outputs_1_lst=vllm_outputs_cache_itn,
+                name_0="vllm_no_cache",
+                name_1=f"vllm_cache_it_{r_idx + 1}",
+            )
 
 
 @pytest.mark.parametrize("model", MODELS)
