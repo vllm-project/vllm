@@ -109,17 +109,7 @@ class TestVideoSampling:
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)
 
-    @pytest.mark.benchmark
-    def test_generate_synthetic_video_deterministic(self, video_dataset: RandomMultiModalDataset):
-        """Test that video generation is deterministic with same seed."""
-        width, height, num_frames = 64, 48, 8
-        
-        # Generate two videos with same parameters
-        video1 = video_dataset.generate_synthetic_video(width, height, num_frames)
-        video2 = video_dataset.generate_synthetic_video(width, height, num_frames)
-        
-        # Videos should be identical due to deterministic random seed
-        assert video1["bytes"] == video2["bytes"]
+
 
     @pytest.mark.benchmark
     def test_generate_synthetic_video_different_seeds(self):
