@@ -966,12 +966,11 @@ class FusedMoEModularKernel(torch.nn.Module):
             dbo_maybe_run_recv_hook()
             prepare_ops.send()
 
-            recv_done = dbo_register_recv_hook(
-                lambda: prepare_ops.recv(),
-                schedules=(Schedule.MLP_SHARED_OVERLAP, ))
-            dbo_yield(all_schedules=True)
-
-            if not recv_done:
+            if dbo_register_recv_hook(
+                    lambda: prepare_ops.recv(),
+                    schedules=(Schedule.MLP_SHARED_OVERLAP, )):
+                dbo_yield(all_schedules=True)
+            else:
                 prepare_ops.recv()
 
         (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
