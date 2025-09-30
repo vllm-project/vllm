@@ -286,6 +286,7 @@ class MLACommonBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,  # assumed to be 1 for MLA
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 
@@ -407,6 +408,7 @@ class MLACommonMetadata(Generic[D]):
 
 
 M = TypeVar("M", bound=MLACommonMetadata)
+A = TypeVar("A")
 
 
 def use_flashinfer_prefill() -> bool:
@@ -930,7 +932,9 @@ def reorg_kvcache(
     return reorganized_kv_c_normed, reorganized_k_pe
 
 
-class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
+# TODO(Lucas): rename MLACommonBaseImpl -> MLACommonImpl,
+# and MLACommonImpl -> MLACommonDenseImpl or somthing like that
+class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -956,6 +960,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
+        indexer=None,
         q_pad_num_heads: Optional[int] = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
@@ -974,7 +979,139 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
+        self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+
+        def get_layer_weight(layer):
+            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
+            for attr in WEIGHT_NAMES:
+                if hasattr(layer, attr):
+                    return getattr(layer, attr)
+            raise AttributeError(
+                f"Layer '{layer}' has no recognized weight attribute:"
+                f" {WEIGHT_NAMES}.")
+
+        def get_and_maybe_dequant_weights(layer: LinearBase):
+            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+                # NOTE: This should only be used offline, since it's O(N^3)
+                eye = torch.eye(layer.input_size_per_partition,
+                                dtype=act_dtype,
+                                device=get_layer_weight(layer).device)
+                dequant_weights = layer.quant_method.apply(layer,
+                                                           eye,
+                                                           bias=None)
+                del eye
+                # standardize to (output, input)
+                return dequant_weights.T
+            return layer.weight
+
+        # we currently do not have quantized bmm's which are needed for
+        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
+        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
+        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+        assert kv_b_proj_weight.shape == (
+            self.kv_lora_rank,
+            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), (
+                f"{kv_b_proj_weight.shape=}, "
+                f"{self.kv_lora_rank=}, "
+                f"{self.num_heads=}, "
+                f"{self.qk_nope_head_dim=}, "
+                f"{self.v_head_dim=}")
+        kv_b_proj_weight = kv_b_proj_weight.view(
+            self.kv_lora_rank,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+
+        W_UK, W_UV = kv_b_proj_weight.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        if is_rocm_aiter_fp8bmm_enabled():
+            W_K = W_UK.transpose(0, 1)  # 16 512 128
+            W_V = W_UV.permute(1, 2, 0)  # 16 128 512
+            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
+                W_K, dtype=current_platform.fp8_dtype())
+            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
+                W_V, dtype=current_platform.fp8_dtype())
+
+            # The kernel operates on non-padded inputs. Hence, pre-compiling
+            # triton kernel to avoid runtime compilation for unseen batch sizes
+            # Pre-compile for batch sizes 1 to 1024 to cover most use-cases.
+            # On DS-R1, this step adds roughly 50s to the model loading time.
+            max_batch_size = 1024  # [ToDo] Find the optimal upper limit
+            pre_compilation_list = list(range(1, max_batch_size + 1))
+            if is_global_first_rank():
+                pre_compilation_list = tqdm(
+                    pre_compilation_list,
+                    desc="[Aiter Triton] Pre-compiling fp8 BMM kernel",
+                    total=max_batch_size,
+                )
+
+            for m in pre_compilation_list:
+                x = torch.empty((self.W_K.shape[0], m, self.W_K.shape[2]),
+                                dtype=torch.bfloat16,
+                                device=self.W_K.device)
+                aiter_triton_fp8_bmm(x,
+                                     self.W_K,
+                                     self.W_K_scale,
+                                     group_size=128,
+                                     transpose_bm=True)
+
+                x = torch.empty((self.W_V.shape[0], m, self.W_V.shape[2]),
+                                dtype=torch.bfloat16,
+                                device=self.W_V.device)
+                aiter_triton_fp8_bmm(x,
+                                     self.W_V,
+                                     self.W_V_scale,
+                                     group_size=128,
+                                     transpose_bm=True)
+        else:
+            # Convert from (L, N, V) to (N, L, V)
+            self.W_UV = W_UV.transpose(0, 1)
+            # Convert from (L, N, P) to (N, P, L)
+            self.W_UK_T = W_UK.permute(1, 2, 0)
+
+    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
+        # Convert from (B, N, L) to (N, B, L)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        if is_rocm_aiter_fp8bmm_enabled():
+            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
+            x = aiter_triton_fp8_bmm(x,
+                                     self.W_V,
+                                     self.W_V_scale,
+                                     group_size=128,
+                                     transpose_bm=True)
+            # Convert from (B, N, V) to (B, N * V)
+            x = x.reshape(-1, self.num_heads * self.v_head_dim)
+            # Copy result
+            out.copy_(x)
+        else:
+            # Convert from (B, N * V) to (N, B, V)
+            out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
+
+            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            torch.bmm(x, self.W_UV, out=out)  # Reuse "out" to make it "hot"
+
+            # Convert from (N, B, V) to (B, N * V)
+            out_new = out.transpose(0, 1).reshape(
+                -1, self.num_heads * self.v_head_dim)
+
+            # Adjust output buffer shape back to the original (B, N * V)
+            N, B, V = out.shape
+            out.resize_((B, N * V))
+            out.copy_(out_new)  # Copy result
+
+
+class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
+    """
+    NOTE: Please read the comment at the top of the file before trying to
+    understand this class
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
 
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
@@ -1153,36 +1290,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             is_cuda_graph_compatible=
             True,  #Indicates actual_seq_lens are on GPU or CPU.
         )
-
-    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
-        # Convert from (B, N, L) to (N, B, L)
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        if is_rocm_aiter_fp8bmm_enabled():
-            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
-            x = aiter_triton_fp8_bmm(x,
-                                     self.W_V,
-                                     self.W_V_scale,
-                                     group_size=128,
-                                     transpose_bm=True)
-            # Convert from (B, N, V) to (B, N * V)
-            x = x.reshape(-1, self.num_heads * self.v_head_dim)
-            # Copy result
-            out.copy_(x)
-        else:
-            # Convert from (B, N * V) to (N, B, V)
-            out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
-
-            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-            torch.bmm(x, self.W_UV, out=out)  # Reuse "out" to make it "hot"
-
-            # Convert from (N, B, V) to (B, N * V)
-            out_new = out.transpose(0, 1).reshape(
-                -1, self.num_heads * self.v_head_dim)
-
-            # Adjust output buffer shape back to the original (B, N * V)
-            N, B, V = out.shape
-            out.resize_((B, N * V))
-            out.copy_(out_new)  # Copy result
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
@@ -1455,6 +1562,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
     ) -> torch.Tensor:
+        # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size is not None
 
