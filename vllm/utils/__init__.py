@@ -130,6 +130,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
     "fp8_inc": torch.float8_e4m3fn,
+    "fp8_ds_mla": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -3431,6 +3432,12 @@ def has_triton_kernels() -> bool:
     """Whether the optional `triton_kernels` package is available."""
 
     return _has_module("triton_kernels")
+
+
+def has_tilelang() -> bool:
+    """Whether the optional `tilelang` package is available."""
+
+    return _has_module("tilelang")
 
 
 def set_process_title(name: str,

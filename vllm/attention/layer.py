@@ -94,6 +94,7 @@ class Attention(nn.Module, AttentionLayerBase):
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
         use_mla: bool = False,
+        use_sparse: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -154,6 +155,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self._o_scale_float: Optional[float] = None
 
         self.use_mla = use_mla
+        self.use_sparse = use_sparse
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -186,7 +188,8 @@ class Attention(nn.Module, AttentionLayerBase):
                                                  kv_cache_dtype,
                                                  block_size,
                                                  use_mla=use_mla,
-                                                 has_sink=self.has_sink)
+                                                 has_sink=self.has_sink,
+                                                 use_sparse=use_sparse)
         else:
             self.attn_backend = attn_backend
 
