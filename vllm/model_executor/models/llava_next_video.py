@@ -349,27 +349,16 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              "w": expected_w,
                                          })
 
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
-        if strategy == "default":
-            return image_features[:, 1:]
-        elif strategy == "full":
-            return image_features
-
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
-
     def _video_pixels_to_features(
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values)
-        image_features = self._select_image_features(
-            image_features,
-            strategy=self.config.vision_feature_select_strategy,
+        image_features = vision_tower(
+            pixel_values,
+            feature_select_strategy=self.config.vision_feature_select_strategy,
         )
         image_features = self.vision_resampler(image_features)
         image_features = self.multi_modal_projector(image_features)

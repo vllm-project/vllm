@@ -19,7 +19,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsQuant
 
-from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
+from .vision import (VisionEncoderInfo, VisionFeatureSelectStrategy,
+                     resolve_visual_encoder_outputs)
 
 
 class CLIPEncoderInfo(VisionEncoderInfo[CLIPVisionConfig]):
@@ -308,24 +309,29 @@ class CLIPVisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        feature_sample_layers: Optional[list[int]] = None,
+        *,
+        select_layers: Optional[list[int]] = None,
+        feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
     ) -> torch.Tensor:
 
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)
 
-        return_all_hidden_states = feature_sample_layers is not None
-
         # Produces either the last layer output or all of the hidden states,
-        # depending on if we have feature_sample_layers or not
+        # depending on if we have select_layers or not
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
-            return_all_hidden_states=return_all_hidden_states)
+            return_all_hidden_states=select_layers is not None,
+        )
 
         # Handle post-norm (if applicable) and stacks feature layers if needed
         encoder_outputs = resolve_visual_encoder_outputs(
-            encoder_outputs, feature_sample_layers, self.post_layernorm,
-            self.config.num_hidden_layers)
+            encoder_outputs,
+            self.post_layernorm,
+            select_layers=select_layers,
+            max_possible_layers=self.config.num_hidden_layers,
+            feature_select_strategy=feature_select_strategy,
+        )
 
         return encoder_outputs
 
@@ -355,9 +361,14 @@ class CLIPVisionModel(nn.Module, SupportsQuant):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        feature_sample_layers: Optional[list[int]] = None,
+        select_layers: Optional[list[int]] = None,
+        feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
     ) -> torch.Tensor:
-        return self.vision_model(pixel_values, feature_sample_layers)
+        return self.vision_model(
+            pixel_values,
+            select_layers=select_layers,
+            feature_select_strategy=feature_select_strategy,
+        )
 
     @property
     def device(self):
