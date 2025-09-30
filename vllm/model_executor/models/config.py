@@ -409,6 +409,7 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         """
         hf_config = vllm_config.model_config.hf_config
 
+        # Mirror the check in vllm/model_executor/models/deepseek_v2.py
         is_v32 = hasattr(hf_config, "index_topk")
         assert is_v32
 
