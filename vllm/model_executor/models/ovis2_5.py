@@ -11,8 +11,7 @@ from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.ovis import (OvisImagePatchInputs,
                                              VisualEmbedding)
 from vllm.model_executor.models.siglip2navit import Siglip2NavitModel

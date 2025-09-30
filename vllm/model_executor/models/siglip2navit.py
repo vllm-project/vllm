@@ -14,13 +14,13 @@ from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention.layer import check_upstream_fa_availability
-from vllm.config import QuantizationConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import _Backend
 
