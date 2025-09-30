@@ -1082,14 +1082,14 @@ class ModelConfig:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp',
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_v32', 'deepseek_mtp',
               'kimi_k2', 'longcat_flash'):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
             # underlying architecture
             return self.hf_text_config.model.model_type in \
-                    ('deepseek_v2', 'deepseek_v3') \
+                    ('deepseek_v2', 'deepseek_v3', 'deepseek_v32') \
                 and self.hf_text_config.kv_lora_rank is not None
         return False
 
@@ -1334,11 +1334,13 @@ class ModelConfig:
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
+                config_format=self.config_format,
             )
         else:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
+                config_format=self.config_format,
             )
 
         if config is None:
