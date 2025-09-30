@@ -659,6 +659,7 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersModel": _HfExamplesInfo("Qwen/Qwen3-Embedding-0.6B"),
     "TransformersForCausalLM": _HfExamplesInfo("hmellor/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
     "TransformersForMultimodalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMoEForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924"),
 }
 
 _EXAMPLE_MODELS = {
