@@ -645,19 +645,17 @@ def sparse_attn_indexer(
             )
             k = min(topk_tokens, logits.shape[-1])
             num_rows = logits.shape[0]
-            topk_indices = torch.zeros(num_rows, topk_tokens, dtype=torch.int32, device=logits.device)
-            topk_values = torch.zeros(num_rows, topk_tokens, dtype=logits.dtype, device=logits.device)
-            torch.ops._C.top_k_per_row(
-                logits,
-                cu_seqlen_ks,
-                cu_seqlen_ke,
-                topk_indices,
-                topk_values,
-                num_rows,
-                k,
-                logits.stride(0),
-                logits.stride(1)
-            )
+            topk_indices = torch.zeros(num_rows,
+                                    topk_tokens,
+                                    dtype=torch.int32,
+                                    device=logits.device)
+            topk_values = torch.zeros(num_rows,
+                                    topk_tokens,
+                                    dtype=logits.dtype,
+                                    device=logits.device)
+            torch.ops._C.top_k_per_row(logits, cu_seqlen_ks, cu_seqlen_ke,
+                                    topk_indices, topk_values, num_rows, k,
+                                    logits.stride(0), logits.stride(1))
 
             topk_indices -= cu_seqlen_ks[:, None]
             topk_indices_buffer[
@@ -708,8 +706,14 @@ def sparse_attn_indexer(
                          next_n_offset + 1).unsqueeze(1)
         k = min(topk_tokens, logits.shape[-1])
         num_rows = logits.shape[0]
-        topk_indices = torch.zeros(num_rows, topk_tokens, dtype=torch.int32, device=logits.device)
-        topk_values = torch.zeros(num_rows, topk_tokens, dtype=logits.dtype, device=logits.device)
+        topk_indices = torch.zeros(num_rows,
+                                   topk_tokens,
+                                   dtype=torch.int32,
+                                   device=logits.device)
+        topk_values = torch.zeros(num_rows,
+                                  topk_tokens,
+                                  dtype=logits.dtype,
+                                  device=logits.device)
         torch.ops._C.top_k_per_row(
             logits,
             torch.zeros(num_rows, dtype=torch.int32, device=logits.device),
