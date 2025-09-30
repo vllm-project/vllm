@@ -56,6 +56,8 @@ try:
 except ImportError:
     librosa = PlaceholderModule("librosa")
 
+import cv2
+
 try:
     from vllm.utils import FlexibleArgumentParser
 except ImportError:
@@ -666,8 +668,7 @@ class RandomMultiModalDataset(RandomDataset):
     """
 
     IS_MULTIMODAL = True
-    # NOTE: video sampling is WIP. Setting it to 0.
-    DEFAULT_LIMIT_MM_PER_PROMPT = {"image": 255, "video": 0}
+    DEFAULT_LIMIT_MM_PER_PROMPT = {"image": 255, "video": 1}
 
     DEFAULT_BASE_ITEMS_PER_REQUEST = 1
     DEFAULT_NUM_MM_ITEMS_RANGE_RATIO = 0.0
@@ -700,12 +701,56 @@ class RandomMultiModalDataset(RandomDataset):
 
     def generate_synthetic_video(self, width: int,
                                     height: int,
-                                    num_frames: int) -> Any:
+                                    num_frames: int) -> dict:
         """Generate synthetic video with random values.
 
-        TODO: Finish this method.
+        Creates a video with random pixel values, encodes it to MP4 format,
+        and returns the content as bytes.
         """
-        raise NotImplementedError("Video sampling is WIP.")
+        random_pixels = self._rng.integers(
+            0,
+            256,
+            (num_frames, height, width, 3),
+            dtype=np.uint8,
+        )
+
+        logger.info("Generated random video {random_pixels.shape}")
+
+        # Create a temporary video file in memory
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fps = 30  # frames per second
+        
+        # We need to write frames one by one since cv2.VideoWriter doesn't work directly with BytesIO
+        # So we'll create a temporary file and then read its content
+        import os
+        import tempfile
+        
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
+            temp_path = temp_file.name
+        
+        try:
+            # Create video writer
+            video_writer = cv2.VideoWriter(temp_path, fourcc, fps, (width, height))
+            
+            if not video_writer.isOpened():
+                raise RuntimeError("Failed to create video writer")
+            
+            for frame in range(num_frames):
+                frame = random_pixels[random_pixels]
+                video_writer.write(frame)
+            
+            video_writer.release()
+
+            # Read the video file content
+            with open(temp_path, 'rb') as f:
+                video_content = f.read()
+            
+            return { "bytes": video_content }
+            
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
 
     def map_config_to_modality(self, config: tuple[int, int, int]) -> str:
         """Map the configuration to the modality."""
@@ -914,13 +959,13 @@ class RandomMultiModalDataset(RandomDataset):
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
         **kwargs,
     ) -> list[SampleRequest]:
-
+        print("bucket_config", bucket_config)
         # NOTE: Video sampling is WIP. Raise error if video is in bucket config
         # and probability is non-zero.
-        if any(self.map_config_to_modality(cfg) == "video" and p > 0
-                for cfg, p in bucket_config.items()):
-            raise NotImplementedError("Video sampling not implemented; "
-                                      "set its probability to 0.")
+        # if any(self.map_config_to_modality(cfg) == "video" and p > 0
+        #         for cfg, p in bucket_config.items()):
+        #     raise NotImplementedError("Video sampling not implemented; "
+        #                               "set its probability to 0.")
 
         # Get the sampling parameters for the dataset
         input_lens, output_lens, offsets = self.get_sampling_params(
