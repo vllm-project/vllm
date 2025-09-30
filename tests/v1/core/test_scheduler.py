@@ -23,6 +23,8 @@ from vllm.v1.structured_output.request import StructuredOutputRequest
 
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler
 
+pytestmark = pytest.mark.cpu_test
+
 
 def test_add_requests():
     scheduler = create_scheduler()

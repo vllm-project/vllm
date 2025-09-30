@@ -3,8 +3,12 @@
 from concurrent.futures import Future
 from typing import Optional
 
+import pytest
+
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+
+pytestmark = pytest.mark.cpu_test
 
 
 class DummyModelRunnerOutput(ModelRunnerOutput):

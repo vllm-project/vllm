@@ -32,6 +32,8 @@ from vllm.v1.request import Request
 
 # yapf: enable
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.fixture(autouse=True)
 def _auto_init_hash_fn(request):

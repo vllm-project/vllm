@@ -16,6 +16,8 @@ from vllm.entrypoints.openai.tool_parsers import SeedOssToolParser
 from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
+pytestmark = pytest.mark.cpu_test
+
 # Use a common model that is likely to be available
 MODEL = "ByteDance-Seed/Seed-OSS-36B-Instruct"
 
