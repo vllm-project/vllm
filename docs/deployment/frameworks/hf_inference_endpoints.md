@@ -1,21 +1,15 @@
----
-title: Hugging Face Inference Endpoints
----
-
-# Deploying Hugging Face Models with vLLM and Inference Endpoints
+# Hugging Face Inference Endpoints
 
 ## Overview
 
 Models compatible with vLLM can be deployed on Hugging Face Inference Endpoints, either starting from the [Hugging Face Hub](https://huggingface.co) or directly from the [Inference Endpoints](https://endpoints.huggingface.co/) interface. This allows you to serve models in a fully managed environment with GPU acceleration, auto-scaling, and monitoring, without managing the infrastructure manually.
 
-Additionally, with the [transformers backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html), vLLM now provides Day 0 support for any model with `transformers` compatibility.
-
-Hugging Face Inference Endpoints provides a managed environment for serving models via vLLM. You can deploy models without configuring servers, installing dependencies, or managing clusters. Endpoints also allows deployment across multiple cloud providers (AWS, Azure, GCP) without needing separate accounts for each. They integrate seamlessly with the Hub: you can deploy any model compatible with vLLM or `transformers`, track usage, and update the inference engine directly. The vLLM engine is available out-of-the-box, allowing you to leverage optimized inference and switch between different models or engines without modifying your code. This simplifies production deployment: endpoints are ready in minutes, provide monitoring and logging, and let you focus on serving models rather than maintaining infrastructure.
+For advanced details on vLLM integration and deployment options, see [Advanced Deployment Details](#advanced-deployment-details).
 
 ## Deployment Methods
 
 - [**Method 1: Deploy from the Catalog.**](#method-1-deploy-from-the-catalog) One-click deploy models from the Hugging Face Hub with ready-made optimized configurations.
-- [**Method 2: One-Click Deployment (Transformers Models).**](#method-2-one-click-deployment-transformers-models) Instantly deploy models tagged with `transformers` from the Hub UI using the **Deploy** button.
+- [**Method 2: Guided Deployment (Transformers Models).**](#method-2-guided-deployment-transformers-models) Instantly deploy models tagged with `transformers` from the Hub UI using the **Deploy** button.
 - [**Method 3: Manual Deployment (Advanced Models).**](#method-3-manual-deployment-advanced-models) For models that either use custom code with the `transformers` tag, or don’t run with standard `transformers` but are supported by vLLM. This method requires manual configuration.
 
 ### Method 1: Deploy from the Catalog
@@ -43,20 +37,14 @@ client = OpenAI(
 )
 
 chat_completion = client.chat.completions.create(
-    model = "openai/gpt-oss-120b",
+    model = "HuggingFaceTB/SmolLM3-3B",
     messages = [
         {
             "role": "user",
             "content": [
                 {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png"
-                    }
-                },
-                {
                     "type": "text",
-                    "text": "Convert this page to docling."
+                    "text": "Give me a brief explanation of gravity in simple terms."
                 }
             ]
         }
@@ -66,13 +54,12 @@ chat_completion = client.chat.completions.create(
 
 for message in chat_completion:
     print(message.choices[0].delta.content, end = "")
-
 ```
 
-> [!NOTE]
-> The catalog provides models optimized for vLLM, including GPU settings and inference engine configurations. You can monitor the endpoint and update the **container or its configuration** from the Inference Endpoints UI.
+!!! note
+    The catalog provides models optimized for vLLM, including GPU settings and inference engine configurations. You can monitor the endpoint and update the **container or its configuration** from the Inference Endpoints UI.
 
-### Method 2: One-Click Deployment (Transformers Models)
+### Method 2: Guided Deployment (Transformers Models)
 
 This method applies to models with the `transformers` library tag in their metadata. It allows you to deploy a model directly from the Hub UI without manual configuration.
 
@@ -129,8 +116,8 @@ for message in chat_completion:
     print(message.choices[0].delta.content, end = "")
 ```
 
-> [!NOTE]
-> This method uses best-guess defaults. You may need to adjust the configuration to fit your specific requirements.
+!!! note
+    This method uses best-guess defaults. You may need to adjust the configuration to fit your specific requirements.
 
 ### Method 3: Manual Deployment (Advanced Models)
 
@@ -164,8 +151,16 @@ In this guide, we demonstrate manual deployment using the [rednote-hilab/dots.oc
 
 Once the endpoint is ready, you can use it with the OpenAI Completion API, cURL, or other SDKs. Remember to append `/v1` to the deployment URL if needed.
 
-> [!NOTE]
-> You can adjust the **container settings** (Container URI, Container Arguments) from the Inference Endpoints UI and press **Update Endpoint**. This redeploys the endpoint with the updated container configuration. Changes to the model itself require creating a new endpoint or redeploying with a different model. For example, for this demo, you may need to update the Container URI to the nightly image (`vllm/vllm-openai:nightly`) and add the `--trust-remote-code` flag in the container arguments.
+!!! note
+    You can adjust the **container settings** (Container URI, Container Arguments) from the Inference Endpoints UI and press **Update Endpoint**. This redeploys the endpoint with the updated container configuration. Changes to the model itself require creating a new endpoint or redeploying with a different model. For example, for this demo, you may need to update the Container URI to the nightly image (`vllm/vllm-openai:nightly`) and add the `--trust-remote-code` flag in the container arguments.
+
+## Advanced Deployment Details
+
+With the [transformers backend integration](https://blog.vllm.ai/2025/04/11/transformers-backend.html), vLLM now offers Day 0 support for any model compatible with `transformers`. This means you can deploy such models immediately, leveraging vLLM’s optimized inference without additional backend modifications.
+
+Hugging Face Inference Endpoints provides a fully managed environment for serving models via vLLM. You can deploy models without configuring servers, installing dependencies, or managing clusters. Endpoints also support deployment across multiple cloud providers (AWS, Azure, GCP) without the need for separate accounts.
+
+The platform integrates seamlessly with the Hugging Face Hub, allowing you to deploy any vLLM- or `transformers`-compatible model, track usage, and update the inference engine directly. The vLLM engine comes preconfigured, enabling optimized inference and easy switching between models or engines without modifying your code. This setup simplifies production deployment: endpoints are ready in minutes, include monitoring and logging, and let you focus on serving models rather than maintaining infrastructure.
 
 ## Next Steps
 
