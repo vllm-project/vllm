@@ -342,8 +342,26 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
         **target_attn_layers, "draft_extra_attn": mock.MagicMock()
     }
 
+    # Setup mocks for indexer layers (DeepseekV32IndexerCache)
+    target_indexer_layers = {
+        "target_indexer_1": mock.MagicMock(),
+        "target_indexer_2": mock.MagicMock()
+    }
+    all_indexer_layers = {
+        **target_indexer_layers, "draft_extra_indexer": mock.MagicMock()
+    }
+
     # Make mock_get_layers return different values for each call
-    mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
+    # The calls to get_layers_from_vllm_config are made in this order
+    # in load_model:
+    # 1. (config, Attention).keys() [target]
+    # 2. (config, DeepseekV32IndexerCache).keys() [target]
+    # 3. (config, Attention).keys() [all/draft]
+    # 4. (config, DeepseekV32IndexerCache) [all/draft]
+    mock_get_layers.side_effect = [
+        target_attn_layers, target_indexer_layers, all_attn_layers,
+        all_indexer_layers
+    ]
 
     # Setup mock for pp group to return the appropriate value for world size
     mock_pp_group = mock.MagicMock()
