@@ -84,6 +84,8 @@ def _ref_fp8_mqa_logits(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
+@pytest.mark.skipif(not current_platform.has_device_capability(90),
+                    reason="SM90 and SM100 only")
 def test_deepgemm_fp8_mqa_logits():
     torch.manual_seed(0)
     random.seed(0)
@@ -188,6 +190,8 @@ def _ref_fp8_paged_mqa_logits(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
+@pytest.mark.skipif(not current_platform.has_device_capability(90),
+                    reason="SM90 and SM100 only")
 def test_deepgemm_fp8_paged_mqa_logits():
     torch.manual_seed(0)
     random.seed(0)
