@@ -45,6 +45,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
+from pathlib import Path
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
                     Optional, TextIO, TypeVar, Union, cast, overload)
@@ -129,6 +130,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
     "fp8_inc": torch.float8_e4m3fn,
+    "fp8_ds_mla": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -3432,6 +3434,12 @@ def has_triton_kernels() -> bool:
     return _has_module("triton_kernels")
 
 
+def has_tilelang() -> bool:
+    """Whether the optional `tilelang` package is available."""
+
+    return _has_module("tilelang")
+
+
 def set_process_title(name: str,
                       suffix: str = "",
                       prefix: str = envs.VLLM_PROCESS_NAME_PREFIX) -> None:
@@ -3536,3 +3544,23 @@ def set_env_var(key, value):
             del os.environ[key]
         else:
             os.environ[key] = old
+
+
+def unique_filepath(fn: Callable[[int], Path]) -> Path:
+    """
+    unique_filepath returns a unique path by trying
+    to include an integer in increasing order.
+
+    fn should be a callable that returns a path that
+    includes the passed int at a fixed location.
+
+    Note: This function has a TOCTOU race condition.
+    Caller should use atomic operations (e.g., open with 'x' mode)
+    when creating the file to ensure thread safety.
+    """
+    i = 0
+    while True:
+        p = fn(i)
+        if not p.exists():
+            return p
+        i += 1
