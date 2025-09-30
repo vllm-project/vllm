@@ -247,11 +247,6 @@ def parse_chat_input(chat_msg) -> list[Message]:
 
 
 def render_for_completion(messages: list[Message]) -> list[int]:
-    # Check for test environment variable to mock large prompts
-    import os
-    if os.environ.get('VLLM_TEST_MOCK_LARGE_PROMPT') == '1':
-        return list(range(1000000))  # Return 1M tokens for testing
-
     conversation = Conversation.from_messages(messages)
     token_ids = get_encoding().render_conversation_for_completion(
         conversation, Role.ASSISTANT)
