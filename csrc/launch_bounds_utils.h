@@ -18,7 +18,7 @@
       #define VLLM_MAX_THREADS_PER_SM 1024
 
     /* 1536 thr/SM: Ampere GA10x (sm_86/87), Ada (sm_89),
-        GB20x consumer (sm_120/121) */
+        GB20x consumer (sm_120/121), Thor (sm_101 or sm_110) */
     #elif (__CUDA_ARCH__ == 860) || (__CUDA_ARCH__ == 870) || \
         (__CUDA_ARCH__ == 890) || (__CUDA_ARCH__ == 1010) ||  \
         (__CUDA_ARCH__ == 1100) || (__CUDA_ARCH__ == 1200) || \
@@ -26,7 +26,7 @@
       #define VLLM_MAX_THREADS_PER_SM 1536
 
     /* 2048 thr/SM: Volta (sm_70/72), Ampere GA100 (sm_80),
-        Hopper (sm_90), Blackwell (sm_100/103), Thor (sm_110) */
+        Hopper (sm_90), Blackwell (sm_100/103) */
     #elif (__CUDA_ARCH__ == 700) || (__CUDA_ARCH__ == 720) || \
         (__CUDA_ARCH__ == 800) || (__CUDA_ARCH__ == 900) ||   \
         (__CUDA_ARCH__ == 1000) || (__CUDA_ARCH__ == 1030)
