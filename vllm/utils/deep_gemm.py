@@ -164,7 +164,7 @@ def fp8_mqa_logits(
 
     Args:
         q: Query tensor of shape [M, H, D]. Casted to
-           `torch.float8_e4m3fn` by caller.
+            `torch.float8_e4m3fn` by caller.
         kv: Tuple `(k_fp8, k_scales)` where `k_fp8` has shape [N, D] with
             dtype `torch.float8_e4m3fn` and `k_scales` has shape [N] (or
             [N, 1]) with dtype `torch.float32`.
@@ -219,13 +219,13 @@ def fp8_paged_mqa_logits(
         q_fp8: Query tensor of shape [B, next_n, H, D]. Casted to
             `torch.float8_e4m3fn` by caller.
         kv_cache_fp8: Paged KV-cache in packed FP8+scale layout with shape
-           [num_blocks, block_size, 1, D+4], dtype `torch.uint8`. The last
-           4 bytes per (block,pos) store the `float` dequant scale.
+            [num_blocks, block_size, 1, D+4], dtype `torch.uint8`. The last
+            4 bytes per (block,pos) store the `float` dequant scale.
         weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
         context_lens: Tensor of shape [B], dtype int32; effective context length
-           for each batch element.
+            for each batch element.
         block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
-           block indices to physical blocks in the paged cache.
+            block indices to physical blocks in the paged cache.
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
