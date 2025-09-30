@@ -464,7 +464,11 @@ __global__ void concat_and_cache_ds_mla_kernel(
   float max_abs = fabsf(src_val);
 #pragma unroll
   for (int offset = 16; offset > 0; offset /= 2) {
+#ifdef USE_ROCM
+    max_abs = fmaxf(max_abs, __shfl_down_sync(UINT64_MAX, max_abs, offset));
+#else
     max_abs = fmaxf(max_abs, __shfl_down_sync(0xFFFFFFFF, max_abs, offset));
+#endif
   }
 
   // The first lane of each warp in each tile writes the max_abs of this part
@@ -536,7 +540,11 @@ __global__ void indexer_k_quant_and_cache_kernel(
 
   // Reduced amax
   for (int mask = 16; mask > 0; mask /= 2) {
+#ifdef USE_ROCM
+    amax = fmaxf(amax, __shfl_xor_sync(uint64_t(-1), amax, mask));
+#else
     amax = fmaxf(amax, __shfl_xor_sync(unsigned(-1), amax, mask));
+#endif
   }
   __syncwarp();
   float scale = fmaxf(amax, 1e-4) / 448.0f;
