@@ -189,11 +189,11 @@ def _pack_seq_kernel(
     tl.store(out_row_ptr, x_vals, mask=valid_row[:, None] & d_mask)
 
 
-def pack_seq_triton(x,
-                    lengths,
-                    pad_value=-float('inf'),
-                    block_t=64,
-                    block_d=64):
+def pack_seq_triton(x: torch.Tensor,
+                    lengths: torch.Tensor,
+                    pad_value: float = -float('inf'),
+                    block_t: int = 64,
+                    block_d: int = 64) -> torch.Tensor:
     """
     Pack sequences of different lengths into a batched tensor.
     
@@ -290,7 +290,10 @@ def _unpack_seq_triton_kernel(
     tl.store(out_row_ptr, packed_vals, mask=valid_row[:, None] & d_mask)
 
 
-def unpack_seq_triton(packed_tensor, lengths, block_t=64, block_d=64):
+def unpack_seq_triton(packed_tensor: torch.Tensor,
+                      lengths: torch.Tensor,
+                      block_t: int = 64,
+                      block_d: int = 64) -> torch.Tensor:
     """
     Unpack a packed decode query tensor back to the original format.
     Efficient Triton implementation.
