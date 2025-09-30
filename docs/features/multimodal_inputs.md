@@ -428,7 +428,7 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
     If no fallback is available, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
 
     For certain models, we provide alternative chat templates inside <gh-dir:examples>.
-    For example, VLM2Vec uses <gh-file:examples/template_vlm2vec.jinja> which is different from the default one for Phi-3-Vision.
+    For example, VLM2Vec uses <gh-file:examples/template_vlm2vec_phi3v.jinja> which is different from the default one for Phi-3-Vision.
 
 ### Image Inputs
 
