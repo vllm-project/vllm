@@ -59,13 +59,10 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
-    use_mla: bool
 
     @property
     def page_size_bytes(self) -> int:
-        # For MLA we only store a single latent vector
-        coef = 1 if self.use_mla else 2
-        return coef * self.block_size * self.num_kv_heads * self.head_size \
+        return 2 * self.block_size * self.num_kv_heads * self.head_size \
                 * get_dtype_size(self.dtype)
 
 
@@ -118,12 +115,13 @@ class FullAttentionSpec(AttentionSpec):
                              if spec.sliding_window is not None)
         attention_chunk_size = set(spec.attention_chunk_size for spec in specs
                                    if spec.attention_chunk_size is not None)
+        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
+            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge")
         merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
-            use_mla=specs[0].use_mla,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -138,6 +136,38 @@ class FullAttentionSpec(AttentionSpec):
         ), ("Model with both sliding window layers and chunked local attention "
             "layers is not supported.")
         return merged_spec
+
+
+@dataclass(frozen=True)
+class MLAAttentionSpec(FullAttentionSpec):
+    # TODO(Lucas/Chen): less hacky way to do this
+    cache_dtype_str: Optional[str] = None
+
+    @property
+    def page_size_bytes(self) -> int:
+        if self.cache_dtype_str == "fp8_ds_mla":
+            # See `vllm/v1/attention/backends/mla/flashmla_sparse.py`
+            #  for details.
+            return self.block_size * 656
+        return self.block_size * self.num_kv_heads * self.head_size \
+                * get_dtype_size(self.dtype)
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be "
+            "MLAAttentionSpec.")
+        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        assert len(cache_dtype_str_set) == 1, (
+            "All attention layers in the same KV cache group must use the same "
+            "quantization method.")
+        return cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            dtype=specs[0].dtype,
+            cache_dtype_str=cache_dtype_str_set.pop(),
+        )
 
 
 @dataclass(frozen=True)
@@ -162,9 +192,6 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 @dataclass(frozen=True)
 class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
-
-    def __post_init__(self):
-        assert not self.use_mla, "MLA is not supported for sliding window"
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         assert vllm_config.parallel_config.decode_context_parallel_size == 1, \
@@ -266,9 +293,13 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             # Different block sizes, not uniform.
             return False
         one_spec = next(iter(kv_cache_specs.values()))
-        if isinstance(one_spec, (FullAttentionSpec, CrossAttentionSpec)):
+        if isinstance(one_spec, FullAttentionSpec):
             return all(
-                isinstance(spec, type(one_spec))
+                isinstance(spec, FullAttentionSpec)
+                for spec in kv_cache_specs.values())
+        elif isinstance(one_spec, CrossAttentionSpec):
+            return all(
+                isinstance(spec, CrossAttentionSpec)
                 for spec in kv_cache_specs.values())
         elif isinstance(one_spec, SlidingWindowSpec):
             return all(

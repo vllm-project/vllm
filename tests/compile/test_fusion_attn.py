@@ -191,7 +191,6 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.kv_cache_dtype,
-                use_mla=False,
             ),
             layer_names=[self.attn.layer_name],
             vllm_config=self.vllm_config,

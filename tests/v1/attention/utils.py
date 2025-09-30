@@ -168,7 +168,6 @@ def create_standard_kv_cache_spec(
             vllm_config.parallel_config),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
-        use_mla=vllm_config.model_config.use_mla,
         sliding_window=vllm_config.model_config.get_sliding_window(),
     )
 

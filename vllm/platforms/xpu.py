@@ -36,7 +36,10 @@ class XPUPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
+                             has_sink: bool, use_sparse) -> str:
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on XPU.")
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
