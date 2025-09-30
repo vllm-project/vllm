@@ -709,47 +709,15 @@ class EagleProposer:
 
             # Update lm_head weights with pruned vocabulary
             if hasattr(self.model, "lm_head"):
-                # ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
-                # print(torch.cuda.memory_summary())
-                # for i in range(torch.cuda.device_count()):
-                #     print(f"Device {i}: {torch.cuda.get_device_name(i)}")
-                #     print(f"  Allocated: {torch.cuda.memory_allocated(i)/1024**2:.2f} MB")
-                #     print(f"  Reserved:  {torch.cuda.memory_reserved(i)/1024**2:.2f} MB")
-
-
-                # # to prune the vocab, the draft lm_head cannot be shared with the target model lm_head
-                # if self.model.lm_head == target_language_model.lm_head:
-                #     self.model.lm_head = copy.deepcopy(self.model.lm_head)
-
-                # self.model.lm_head.weight.data = self.model.lm_head.weight.data[self.pruned_vocab]
-
-                # # # ensure we pruned correctly
-                # # model_vocab_size = self.model.lm_head.weight.shape[0]
-                # # target_vocab_size = target_language_model.lm_head.weight.shape[0]
-                # # print(model_vocab_size, target_vocab_size, keep_threshold, int(target_vocab_size * keep_threshold))
-                # # assert int(target_vocab_size * keep_threshold) == model_vocab_size, f'pruned vocab incorrectly'
-
-                # torch.cuda.empty_cache()
-                # torch.cuda.synchronize()
-                # logger.info("Updated lm_head weights with pruned vocabulary.")
-                # ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
-                # print(torch.cuda.memory_summary())
-                # for i in range(torch.cuda.device_count()):
-                #     print(f"Device {i}: {torch.cuda.get_device_name(i)}")
-                #     print(f"  Allocated: {torch.cuda.memory_allocated(i)/1024**2:.2f} MB")
-                #     print(f"  Reserved:  {torch.cuda.memory_reserved(i)/1024**2:.2f} MB")
-
+                ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
+                ic(torch.cuda.memory_summary())
 
                 # to prune the vocab, the draft lm_head cannot be shared with the target model lm_head
                 if self.model.lm_head == target_language_model.lm_head:
                     self.model.lm_head = copy.deepcopy(self.model.lm_head)
 
                 ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
-                for i in range(torch.cuda.device_count()):
-                    print(f"Device {i}: {torch.cuda.get_device_name(i)}")
-                    print(f"  Allocated: {torch.cuda.memory_allocated(i)/1024**2:.2f} MB")
-                    print(f"  Reserved:  {torch.cuda.memory_reserved(i)/1024**2:.2f} MB")
-                print(torch.cuda.memory_summary())
+                ic(torch.cuda.memory_summary())
 
                 # Keep old weight reference to allow memory release
                 old_weight = self.model.lm_head.weight
@@ -763,10 +731,6 @@ class EagleProposer:
                 torch.cuda.synchronize()
 
                 ic(self.model.lm_head.weight.shape, target_language_model.lm_head.weight.shape)
-                for i in range(torch.cuda.device_count()):
-                    print(f"Device {i}: {torch.cuda.get_device_name(i)}")
-                    print(f"  Allocated: {torch.cuda.memory_allocated(i)/1024**2:.2f} MB")
-                    print(f"  Reserved:  {torch.cuda.memory_reserved(i)/1024**2:.2f} MB")
                 print(torch.cuda.memory_summary())
 
 
