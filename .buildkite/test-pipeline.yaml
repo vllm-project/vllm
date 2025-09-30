@@ -604,16 +604,16 @@ steps:
   - vllm/
   - tests/models/test_transformers.py
   - tests/models/test_registry.py
-  - tests/models/test_utils.py
-  - tests/models/test_vision.py
   commands:
     - pytest -v -s models/test_transformers.py models/test_registry.py
 
-- label: Basic Models Test (CPU) # 5min
+- label: Basic Models Test (Other CPU) # 5min
   timeout_in_minutes: 10
   torch_nightly: true
   source_file_dependencies:
-  - tests/models
+  - vllm/
+  - tests/models/test_utils.py
+  - tests/models/test_vision.py
   no_gpu: true
   commands:
     - pytest -v -s models/test_utils.py
