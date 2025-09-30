@@ -307,9 +307,10 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
-    "TransformersModel": ("transformers", "TransformersModel"),
+    "TransformersEmbeddingModel": ("transformers_pooling", "TransformersEmbeddingModel"),  # noqa: E501
+    "TransformersForSequenceClassification": ("transformers_pooling", "TransformersForSequenceClassification"),  # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
-    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
 }
 # yapf: enable
 
