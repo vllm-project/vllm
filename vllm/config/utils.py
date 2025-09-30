@@ -8,7 +8,6 @@ import inspect
 import json
 import pathlib
 import textwrap
-
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import MISSING, Field, field, fields, is_dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -156,6 +155,18 @@ def get_field(cls: ConfigType, name: str) -> Field:
         return field(default=default)
     raise ValueError(
         f"{cls.__name__}.{name} must have a default value or default factory.")
+
+
+def getattr_iter(object: object, names: Iterable[str], default: Any) -> Any:
+    """
+    A helper function that retrieves an attribute from an object which may
+    have multiple possible names. This is useful when fetching attributes from
+    arbitrary `transformers.PretrainedConfig` instances.
+    """
+    for name in names:
+        if hasattr(object, name):
+            return getattr(object, name)
+    return default
 
 
 def contains_object_print(text: str) -> bool:
