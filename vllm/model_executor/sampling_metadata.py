@@ -5,7 +5,7 @@ from array import array
 from dataclasses import dataclass
 from typing import Optional
 
-import torch,time
+import torch
 
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -571,14 +571,6 @@ class SamplingTensors:
                     prompt_tokens_cache.device == device):
                     # Reuse cached prompt_tokens already on HPU
                     prompt_t = prompt_tokens_cache
-                    # Get the last element from each list
-                    last_elements = [out[-1] for out in output_tokens]
-                    lengths = [len(out)-1 for out in output_tokens]
-                    indices = torch.tensor(lengths, device=device)
-                    rows = torch.arange(output_tokens_cache.shape[0], device=device)
-                    # Convert to a PyTorch tensor with shape [4, 1]
-                    last_elements_t = torch.tensor(last_elements).unsqueeze(1).to(output_tokens_cache.device)
-                    output_t = output_tokens_cache.index_put_((rows, indices), last_elements_t)
                 else:
                     prompt_t = make_tensor_with_pad_align(
                         prompt_tokens,
@@ -588,6 +580,18 @@ class SamplingTensors:
                         pin_memory=pin_memory,
                         max_len_align=1024,
                     )
+                if (output_tokens_cache is not None and
+                    output_tokens_cache.device == device and
+                    len(output_tokens) > 0 and len(output_tokens_cache[0]) > 0):
+                    # Get the last element from each list
+                    last_elements = [out[-1] for out in output_tokens]
+                    lengths = [len(out)-1 for out in output_tokens]
+                    indices = torch.tensor(lengths, device=device)
+                    rows = torch.arange(output_tokens_cache.shape[0], device=device)
+                    # Convert to a PyTorch tensor with shape [4, 1]
+                    last_elements_t = torch.tensor(last_elements).unsqueeze(1).to(output_tokens_cache.device)
+                    output_t = output_tokens_cache.index_put_((rows, indices), last_elements_t)
+                else:
                     output_t = make_tensor_with_pad_align(
                         output_tokens,
                         vocab_size,
@@ -660,7 +664,6 @@ class SamplingTensors:
         )
         # Because the memory is pinned, we can do non-blocking
         # transfer to device.
-        output_t=output_t.to(device=device, non_blocking=True) if output_t.device != device else output_t
         return cls(
             temperatures=temperatures_t.to(device=device, non_blocking=True),
             top_ps=top_ps_t.to(device=device, non_blocking=True),
@@ -673,5 +676,5 @@ class SamplingTensors:
             repetition_penalties=repetition_penalties_t.to(device=device,
                                                            non_blocking=True),
             prompt_tokens=prompt_t.to(device=device, non_blocking=True) if prompt_t.device != device else prompt_t,
-            output_tokens=output_t
+            output_tokens=output_t.to(device=device, non_blocking=True) if output_t.device != device else output_t
         )
