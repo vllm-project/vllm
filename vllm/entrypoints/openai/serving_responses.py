@@ -189,6 +189,23 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.tool_server = tool_server
 
+    def _validate_generator_input(
+            self,
+            engine_prompt: EngineTokensPrompt) -> Optional[ErrorResponse]:
+        """Add validations to the input to the generator here."""
+        if self.max_model_len <= len(engine_prompt["prompt_token_ids"]):
+            error_message = (
+                "The engine prompt length"
+                f" {len(engine_prompt['prompt_token_ids'])} "
+                f"exceeds the max_model_len {self.max_model_len}. "
+                "Please reduce prompt.")
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=error_message,
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        return None
+
     async def create_responses(
         self,
         request: ResponsesRequest,
@@ -284,19 +301,10 @@ class OpenAIServingResponses(OpenAIServing):
             available_tools = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
+                maybe_error = self._validate_generator_input(engine_prompt)
+                if maybe_error is not None:
+                    return maybe_error
 
-                if self.max_model_len <= len(
-                        engine_prompt["prompt_token_ids"]):
-                    error_message = (
-                        "The engine prompt length"
-                        f" {len(engine_prompt['prompt_token_ids'])} "
-                        f"exceeds the max_model_len {self.max_model_len}. "
-                        "Please reduce prompt.")
-                    return self.create_error_response(
-                        err_type="invalid_request_error",
-                        message=error_message,
-                        status_code=HTTPStatus.BAD_REQUEST,
-                    )
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
 
