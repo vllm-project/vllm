@@ -578,31 +578,31 @@ class MambaMixer2(MambaBase, CustomOp):
 
         if cache_enabled:
             # Split decodes and prefills:
-            seq_lens_completed_d, seq_lens_completed_p = torch.split(
-                attn_metadata.seq_lens_completed, [num_decodes, num_prefills],
-                dim=0)
             last_state_idx_d, last_state_idx_p = torch.split(
                 attn_metadata.last_computed_token_block_idx,
-                [num_decodes, num_prefills],
-                dim=0)
-            last_computed_offset_d, last_computed_offset_p = torch.split(
-                attn_metadata.last_computed_token_block_offset,
-                [num_decodes, num_prefills],
-                dim=0)
-            current_first_idx_d, current_first_idx_p = torch.split(
-                attn_metadata.current_first_token_block_idx,
                 [num_decodes, num_prefills],
                 dim=0)
             current_last_idx_d, current_last_idx_p = torch.split(
                 attn_metadata.current_last_token_block_idx,
                 [num_decodes, num_prefills],
                 dim=0)
+            # Prefill-only variables:
+            _, current_first_idx_p = torch.split(
+                attn_metadata.current_first_token_block_idx,
+                [num_decodes, num_prefills],
+                dim=0)            
+            _, seq_lens_completed_p = torch.split(
+                attn_metadata.seq_lens_completed, [num_decodes, num_prefills],
+                dim=0)
+            _, last_computed_offset_p = torch.split(
+                attn_metadata.last_computed_token_block_offset,
+                [num_decodes, num_prefills],
+                dim=0)
         else:
-            current_first_idx_d, current_first_idx_p = None, None
-            current_last_idx_d, current_last_idx_p = None, None
             last_state_idx_d, last_state_idx_p = None, None
-            seq_lens_completed_d, seq_lens_completed_p = None, None
-
+            current_last_idx_d, current_last_idx_p = None, None
+            _, current_first_idx_p = None, None
+            _, seq_lens_completed_p = None, None
 
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
@@ -722,7 +722,8 @@ class MambaMixer2(MambaBase, CustomOp):
                     varlen_states[last_chunk_indices_p]
             else:
                 # update ssm states
-                # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
+                # - varlen state is a (num_prefills, nheads, headdim, dstate) 
+                #   tensor
                 ssm_state[state_indices_tensor_p] = varlen_states
 
         # Process decode requests
