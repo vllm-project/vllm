@@ -304,7 +304,7 @@ steps:
     - pytest -v -s v1/worker
     - pytest -v -s v1/spec_decode
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
-    - pytest -v -s v1/metrics
+    - pytest -v -s -m 'not cpu_test' v1/metrics
     - pytest -v -s v1/test_oracle.py
     - pytest -v -s v1/test_request.py
     # Integration test for streaming correctness (requires special branch).
@@ -313,17 +313,16 @@ steps:
 
 - label: V1 Test others (CPU) # 5 mins
   source_file_dependencies:
-    - tests/v1/core
-    - tests/v1/structured_output
-    - tests/v1/test_serial_utils.py
-    - tests/v1/kv_connector/unit
+    - vllm/
+    - tests/v1
   no_gpu: true
   commands:
     # split the test to avoid interference
-    - pytest -v -s -m 'cpu_test' v1/core
-    - pytest -v -s -m 'cpu_test' v1/structured_output
+    - pytest -v -s v1/core
+    - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'cpu_test' v1/metrics
 
 
 - label: Examples Test # 30min
