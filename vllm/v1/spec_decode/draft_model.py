@@ -11,7 +11,6 @@ from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 
 class DraftModelProposer(SpecDecodeBaseProposer):
@@ -37,7 +36,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             runner=runner)
         self._raise_if_multimodal()
         self._raise_if_mrope()
-    
+
     def update_propose_kwargs(self, propose_kwargs: dict):
         common_attn_metadata = propose_kwargs["common_attn_metadata"]
         target_token_ids = propose_kwargs["target_token_ids"]
@@ -47,23 +46,24 @@ class DraftModelProposer(SpecDecodeBaseProposer):
 
         # update target_token_ids
         start_locs = torch.zeros(token_indices_to_sample.shape[0] + 1,
-                        device=token_indices_to_sample.device,
-                        dtype=torch.int32)
+                                 device=token_indices_to_sample.device,
+                                 dtype=torch.int32)
         start_locs[1:] = token_indices_to_sample + 1
         new_target_token_ids, _ = append_new_toks(toks=target_token_ids,
-                                                start_locs=start_locs,
-                                                new_toks=next_token_ids)
+                                                  start_locs=start_locs,
+                                                  new_toks=next_token_ids)
         # update positions
         positions_to_append = target_positions[token_indices_to_sample] + 1
         new_target_positions, _ = append_new_toks(toks=target_positions,
-                                                start_locs=start_locs,
-                                                new_toks=positions_to_append)
+                                                  start_locs=start_locs,
+                                                  new_toks=positions_to_append)
         # update common_attn_metadata
         new_common_attn_metadata = self.update_common_attn_metadata(
             new_target_positions, common_attn_metadata)
         # update token_indices_to_sample
-        new_token_indices_to_sample = new_common_attn_metadata.query_start_loc[1:] - 1
-        
+        new_token_indices_to_sample = new_common_attn_metadata.query_start_loc[
+            1:] - 1
+
         new_propose_kwargs = dict(
             target_token_ids=new_target_token_ids,
             target_positions=new_target_positions,
@@ -73,12 +73,15 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         )
         return propose_kwargs | new_propose_kwargs
 
-    def update_common_attn_metadata(self, new_positions: torch.Tensor, common_attn_metadata: CommonAttentionMetadata):
+    def update_common_attn_metadata(
+            self, new_positions: torch.Tensor,
+            common_attn_metadata: CommonAttentionMetadata):
         cad = common_attn_metadata
         batch_size = common_attn_metadata.batch_size()
 
         # token_indices is [0, ..., N], extend by batch_size
-        # new_token_indices = self.arange[:len(target_token_ids) + len(next_token_ids)]
+        # new_token_indices = \
+        #     self.arange[:len(target_token_ids) + len(next_token_ids)]
         # token indices to sample must be increased
         # by [+1, +2, ..., +batch_size]
         # new_token_indices_to_sample = last_token_indices + self.arange[
@@ -109,11 +112,12 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         #     kv_cache_group_id].slot_mapping.gpu[:new_num_actual_tokens]
 
         block_numbers = new_positions // self.block_size
-        block_ids = new_block_table_tensor.gather(
-            dim=1, index=block_numbers.view(1, -1))
+        block_ids = new_block_table_tensor.gather(dim=1,
+                                                  index=block_numbers.view(
+                                                      1, -1))
         block_ids = block_ids.view(-1)
-        new_slot_mapping = (block_ids * self.block_size
-                            + new_positions % self.block_size)
+        new_slot_mapping = (block_ids * self.block_size +
+                            new_positions % self.block_size)
 
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
@@ -131,7 +135,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         return new_cad
 
     def _raise_if_multimodal(self):
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
             raise NotImplementedError("Speculative Decoding with draft models "
                                       "does not support multimodal models yet")
 
