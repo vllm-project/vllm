@@ -13,17 +13,18 @@ import numpy as np
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
 
-from vllm.attention.backends.registry import _Backend
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
     from vllm.lora.request import LoRARequest
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
 else:
+    _Backend = None
     ModelConfig = None
     VllmConfig = None
     LoRARequest = None
@@ -164,11 +165,12 @@ class Platform:
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> _Backend:
+                             dtype: torch.dtype) -> "_Backend":
+        from vllm.attention.backends.registry import _Backend
         return _Backend.TORCH_SDPA
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool, use_sparse: bool) -> str:
