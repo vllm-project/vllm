@@ -18,7 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
-from vllm.v1.spec_decode.eagle_mixin import EagleChainMixin
+from vllm.v1.spec_decode.eagle_mixin import EagleMixin
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -134,7 +134,7 @@ class LlamaModel(nn.Module):
         return loaded_params
 
 
-class EagleLlamaForCausalLM(EagleChainMixin, LlamaForCausalLM):
+class EagleLlamaForCausalLM(EagleMixin, LlamaForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
