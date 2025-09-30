@@ -244,17 +244,16 @@ class OpenAIServing:
                                          AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
 
-        self.processor: Optional[Processor] = None
-
-    async def _initialize_processor(self) -> None:
-        if self.processor is not None:
-            return
-        vllm_config = await self.engine_client.get_vllm_config()
-        if vllm_config.model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = init_tokenizer_from_configs(vllm_config.model_config)
-        self.processor = Processor(vllm_config, tokenizer)
+    async def _get_processor(self) -> Processor:
+        if not hasattr(self, "_processor"):
+            vllm_config = await self.engine_client.get_vllm_config()
+            if vllm_config.model_config.skip_tokenizer_init:
+                tokenizer = None
+            else:
+                tokenizer = init_tokenizer_from_configs(
+                    vllm_config.model_config)
+            self._processor = Processor(vllm_config, tokenizer)
+        return self._processor
 
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
         """
@@ -867,7 +866,7 @@ class OpenAIServing:
 
         return conversation, [request_prompt], [engine_prompt]
 
-    def _process_inputs(
+    async def _process_inputs(
         self,
         request_id: str,
         engine_prompt: PromptType,
@@ -880,13 +879,13 @@ class OpenAIServing:
         """
         using the Processor to process inputs for AsyncLLM
         """
-        assert self.processor is not None
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.max_model_len,
                                   sampling_params.truncate_prompt_tokens,
                                   tokenization_kwargs)
 
-        prompt_str, engine_request = self.processor.process_inputs(
+        processor = await self._get_processor()
+        prompt_str, engine_request = processor.process_inputs(
             request_id,
             engine_prompt,
             sampling_params,
@@ -916,10 +915,9 @@ class OpenAIServing:
                 params=sampling_params,
                 lora_request=lora_request,
             )
-            await self._initialize_processor()
             trace_headers = kwargs.get("trace_headers")
             prompt_str, engine_request, tokenization_kwargs = (
-                self._process_inputs(
+                await self._process_inputs(
                     request_id,
                     engine_prompt,
                     sampling_params,
