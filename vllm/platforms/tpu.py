@@ -46,7 +46,7 @@ class TpuPlatform(Platform):
     ]
 
     @classmethod
-    def import_general_kernels(cls) -> None:
+    def import_core_kernels(cls) -> None:
         pass
 
     @classmethod

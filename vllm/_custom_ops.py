@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import contextlib
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -13,15 +12,8 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-try:
-    current_platform.import_general_kernels()
-except ImportError as e:
-    logger.warning("Failed to import from vllm._C with %r", e)
-
-supports_moe_ops = False
-with contextlib.suppress(ImportError):
-    current_platform.import_moe_kernels()
-    supports_moe_ops = True
+current_platform.import_core_kernels()
+supports_moe_ops = current_platform.try_import_moe_kernels()
 
 if TYPE_CHECKING:
 

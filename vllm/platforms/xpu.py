@@ -33,7 +33,7 @@ class XPUPlatform(Platform):
     device_control_env_var: str = "ZE_AFFINITY_MASK"
 
     @classmethod
-    def import_general_kernels(cls) -> None:
+    def import_core_kernels(cls) -> None:
         pass
 
     @classmethod
