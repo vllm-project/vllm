@@ -70,17 +70,25 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _grouped_impl: Callable[..., Any] | None = None
 _grouped_masked_impl: Callable[..., Any] | None = None
+_fp8_mqa_logits_impl: Callable[..., Any] | None = None
+_fp8_paged_mqa_logits_impl: Callable[..., Any] | None = None
+_get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
-    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl,\
-         _get_mn_major_tma_aligned_tensor_impl
+    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl
+    global _fp8_mqa_logits_impl, _fp8_paged_mqa_logits_impl
+    global _get_paged_mqa_logits_metadata_impl
+    global _get_mn_major_tma_aligned_tensor_impl
 
     # fast path
     if (_fp8_gemm_nt_impl is not None or _grouped_impl is not None
-            or _grouped_masked_impl is not None):
+            or _grouped_masked_impl is not None
+            or _fp8_mqa_logits_impl is not None
+            or _fp8_paged_mqa_logits_impl is not None
+            or _get_paged_mqa_logits_metadata_impl is not None):
         return
 
     if not has_deep_gemm():
@@ -97,8 +105,18 @@ def _lazy_init() -> None:
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
     _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
+    _fp8_mqa_logits_impl = getattr(_dg, "fp8_mqa_logits", None)
+    _fp8_paged_mqa_logits_impl = getattr(_dg, "fp8_paged_mqa_logits", None)
+    _get_paged_mqa_logits_metadata_impl = getattr(
+        _dg, "get_paged_mqa_logits_metadata", None)
     _get_mn_major_tma_aligned_tensor_impl = getattr(
         _dg, "get_mn_major_tma_aligned_tensor", None)
+
+
+def get_num_sms() -> int:
+    _lazy_init()
+    _dg = importlib.import_module("deep_gemm")
+    return int(_dg.get_num_sms())
 
 
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
@@ -133,6 +151,100 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
         return _missing(*args, **kwargs)
     return _grouped_masked_impl(
         *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs)
+
+
+def fp8_mqa_logits(
+    q: torch.Tensor,
+    kv: tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+) -> torch.Tensor:
+    """Compute FP8 MQA logits for a single sequence without KV paging.
+
+    Args:
+        q: Query tensor of shape [M, H, D]. Casted to
+            `torch.float8_e4m3fn` by caller.
+        kv: Tuple `(k_fp8, k_scales)` where `k_fp8` has shape [N, D] with
+            dtype `torch.float8_e4m3fn` and `k_scales` has shape [N] (or
+            [N, 1]) with dtype `torch.float32`.
+        weights: weights of shape [M, H], dtype `torch.float32`.
+        cu_seqlen_ks: Start indices (inclusive) for valid K per query position,
+            shape [M], dtype int32.
+        cu_seqlen_ke: End indices (exclusive) for valid K per query position,
+            shape [M], dtype int32.
+
+    Returns:
+        Logits tensor of shape [M, N], dtype `torch.float32`.
+    """
+    _lazy_init()
+    if _fp8_mqa_logits_impl is None:
+        return _missing()
+    return _fp8_mqa_logits_impl(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+
+
+def get_paged_mqa_logits_metadata(context_lens: torch.Tensor, block_size: int,
+                                  num_sms: int) -> torch.Tensor:
+    """Build scheduling metadata for paged MQA logits.
+
+    Args:
+        context_lens: Tensor of shape [B], dtype int32; effective context length
+            per batch element.
+        block_size: KV-cache block size in tokens (e.g., 64).
+        num_sms: Number of SMs available. 132 for Hopper
+
+    Returns:
+        Backend-specific tensor consumed by `fp8_paged_mqa_logits` to
+        schedule work across SMs.
+    """
+    _lazy_init()
+    if _get_paged_mqa_logits_metadata_impl is None:
+        return _missing()
+    return _get_paged_mqa_logits_metadata_impl(context_lens, block_size,
+                                               num_sms)
+
+
+def fp8_paged_mqa_logits(
+    q_fp8: torch.Tensor,
+    kv_cache_fp8: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    schedule_metadata: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    """Compute FP8 MQA logits using paged KV-cache.
+
+    Args:
+        q_fp8: Query tensor of shape [B, next_n, H, D]. Casted to
+            `torch.float8_e4m3fn` by caller.
+        kv_cache_fp8: Paged KV-cache in packed FP8+scale layout with shape
+            [num_blocks, block_size, 1, D+4], dtype `torch.uint8`. The last
+            4 bytes per (block,pos) store the `float` dequant scale.
+        weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
+        context_lens: Tensor of shape [B], dtype int32; effective context length
+            for each batch element.
+        block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
+            block indices to physical blocks in the paged cache.
+        schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
+            used to distribute work across SMs.
+        max_model_len: Maximum sequence length used to size the logits output.
+
+    Returns:
+        Logits tensor of shape [B * next_n, max_model_len], dtype
+        `torch.float32`.
+    """
+    _lazy_init()
+    if _fp8_paged_mqa_logits_impl is None:
+        return _missing()
+    return _fp8_paged_mqa_logits_impl(q_fp8,
+                                      kv_cache_fp8,
+                                      weights,
+                                      context_lens,
+                                      block_tables,
+                                      schedule_metadata,
+                                      max_model_len,
+                                      clean_logits=True)
 
 
 def _ceil_to_ue8m0(x: torch.Tensor):
@@ -195,9 +307,13 @@ __all__ = [
     "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
+    "fp8_mqa_logits",
+    "fp8_paged_mqa_logits",
+    "get_paged_mqa_logits_metadata",
     "per_block_cast_to_fp8",
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
+    "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
     "get_col_major_tma_aligned_tensor",
 ]
