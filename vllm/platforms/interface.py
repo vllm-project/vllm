@@ -40,33 +40,26 @@ def in_wsl() -> bool:
 
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
-    FLASH_ATTN_VLLM_V1 = enum.auto()
-    TRITON_ATTN_VLLM_V1 = enum.auto()
+    TRITON_ATTN = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     ROCM_AITER_MLA = enum.auto()  # Supported by V1
-    ROCM_AITER_MLA_VLLM_V1 = enum.auto()
     ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
     TORCH_SDPA = enum.auto()
-    TORCH_SDPA_VLLM_V1 = enum.auto()
     FLASHINFER = enum.auto()
-    FLASHINFER_VLLM_V1 = enum.auto()
     FLASHINFER_MLA = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
-    TRITON_MLA_VLLM_V1 = enum.auto()
     CUTLASS_MLA = enum.auto()
     FLASHMLA = enum.auto()  # Supported by V1
-    FLASHMLA_VLLM_V1 = enum.auto()
     FLASH_ATTN_MLA = enum.auto()  # Supported by V1
     PALLAS = enum.auto()
-    PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
     DIFFERENTIAL_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
-    XFORMERS_VLLM_V1 = enum.auto()
+    ROCM_ATTN = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
@@ -84,6 +77,7 @@ class CpuArchEnum(enum.Enum):
     ARM = enum.auto()
     POWERPC = enum.auto()
     S390X = enum.auto()
+    RISCV = enum.auto()
     OTHER = enum.auto()
     UNKNOWN = enum.auto()
 
@@ -200,7 +194,7 @@ class Platform:
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
+                             has_sink: bool, use_sparse: bool) -> str:
         """Get the attention backend class of a device."""
         return ""
 
@@ -373,6 +367,8 @@ class Platform:
             return CpuArchEnum.POWERPC
         elif machine == "s390x":
             return CpuArchEnum.S390X
+        elif machine.startswith("riscv"):
+            return CpuArchEnum.RISCV
 
         return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
 
@@ -482,20 +478,6 @@ class Platform:
                 == "external_launcher")
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
-        return False
-
-    @classmethod
-    def default_v1(cls, model_config: ModelConfig) -> bool:
-        """
-        Returns whether the current platform supports v1 by default.
-        """
-        return cls.supports_v1(model_config)
-
-    @classmethod
     def use_custom_allreduce(cls) -> bool:
         """
         Returns if custom allreduce is supported on the current platform
@@ -588,6 +570,13 @@ class Platform:
         return False
 
     @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        """
+        Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
     def use_sync_weight_loader(cls) -> bool:
         """
         Returns if the current platform needs to sync weight loader.
@@ -609,6 +598,21 @@ class Platform:
             return out
 
         return _synced_weight_loader
+
+    @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        """
+        Returns a mapping from device_type to a tuple of supported 
+        kv_buffer_device for nixl.
+        """
+        return {}
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> Optional[str]:
+        """
+        Returns the nixl memory type for the current platform.
+        """
+        return None
 
 
 class UnspecifiedPlatform(Platform):
