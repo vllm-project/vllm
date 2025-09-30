@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 import ray
 import torch
+from nixl._bindings import nixlXferTelemetry
 
 from vllm import LLM
 from vllm.config import KVTransferConfig
@@ -599,16 +600,24 @@ def test_kv_connector_stats_aggregation():
 
     # Record different transfers on each worker
     # Worker 1: 2 transfers
-    worker1_stats.record_transfer()
-    worker1_stats.record_transfer()
+    stats = nixlXferTelemetry(xferDuration=1,
+                              postDuration=1,
+                              totalBytes=1,
+                              descCount=1)
+    worker1_stats.record_transfer(stats)
+    worker1_stats.record_transfer(stats)
 
     # Worker 2: 1 transfer
-    worker2_stats.record_transfer()
+    worker2_stats.record_transfer(stats)
 
     # Worker 3: 3 transfers
-    worker3_stats.record_transfer()
-    worker3_stats.record_transfer()
-    worker3_stats.record_transfer()
+    stats = nixlXferTelemetry(xferDuration=2,
+                              postDuration=2,
+                              totalBytes=2,
+                              descCount=2)
+    worker3_stats.record_transfer(stats)
+    worker3_stats.record_transfer(stats)
+    worker3_stats.record_transfer(stats)
 
     # Create ModelRunnerOutput instances for each worker
     worker_outputs = []
@@ -637,6 +646,11 @@ def test_kv_connector_stats_aggregation():
     assert isinstance(kv_connector_stats, NixlKVConnectorStats)
     # Number of total transfers across all workers.
     assert kv_connector_stats.data["num_successful_transfers"] == 6
+    # Logging proc, call reduce() to get CLI-friendly stats.
+    cli_stats = kv_connector_stats.reduce()
+    assert cli_stats["Avg xfer time (ms)"] == 1.5
+    assert cli_stats["Avg post time (ms)"] == 1.5
+    assert cli_stats["Avg number of descriptors"] == 1.3
 
 
 def test_multi_kv_connector_stats_aggregation():
