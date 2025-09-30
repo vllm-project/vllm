@@ -145,10 +145,6 @@ def replace_linear_class(
         raise ValueError(
             f"Unsupported parallel style type {type(style)}, expected str")
 
-    # MXFP4 linear layer is not implemented
-    if quant_config and quant_config.get_name() == "mxfp4":
-        quant_config = None
-
     vllm_linear_cls, vllm_linear_kwargs = {
         "colwise": (ColumnParallelLinear, {}),
         "colwise_rep": (ColumnParallelLinear, {
@@ -642,11 +638,6 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         start, end = get_pp_indices(self.text_config.num_hidden_layers,
                                     self.pp_rank, self.pp_size)
 
-        # MXFP4 attention layer is not implemented
-        quant_config = self.quant_config
-        if quant_config and quant_config.get_name() == "mxfp4":
-            quant_config = None
-
         attention_instances = {}
         for i in range(start, end):
             # Handle interleaved sliding window attention
@@ -663,7 +654,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 scale=head_size**-0.5,
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
-                quant_config=quant_config,
+                quant_config=self.quant_config,
                 per_layer_sliding_window=per_layer_sliding_window,
                 prefix=f"{i}.attn",
                 attn_type=attn_type)
