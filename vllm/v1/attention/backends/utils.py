@@ -382,6 +382,9 @@ class PerLayerParameters:
     logits_soft_cap: Optional[float]
     sm_scale: float
     has_sinks: bool = False
+    # has same params for all layers
+    has_same_window_lefts: Optional[bool] = None
+    has_same_all_params: Optional[bool] = None
 
 
 def get_per_layer_parameters(
@@ -432,18 +435,11 @@ def infer_global_hyperparameters(
     param_sets = list(per_layer_params.values())
     global_params = param_sets[0]
 
-    # trtllm attention doesn't need global hyper params so disable the check
-    if not envs.VLLM_USE_TRTLLM_ATTENTION:
-        for params in param_sets:
-            if params.window_left != global_params.window_left:
-                raise ValueError(
-                    "Window left is not the same for all layers. " \
-                    "One potential fix is to set disable_sliding_window=True")
-            assert params == global_params, (
-                "FlashInfer backend currently only supports models in which all"
-                "layers share the same values "
-                "for the following hyperparameters:"
-                "`window_left`, `logits_soft_cap`, `sm_scale`.")
+    global_params.has_same_window_lefts = all(
+        params.window_left == global_params.window_left
+        for params in param_sets)
+    global_params.has_same_all_params = all(params == global_params
+                                            for params in param_sets)
 
     return global_params
 

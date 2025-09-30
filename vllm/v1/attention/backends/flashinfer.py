@@ -27,7 +27,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (can_use_trtllm_attention,
                                    flashinfer_disable_q_quantization,
-                                   supports_trtllm_attention,
                                    use_trtllm_attention)
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 # yapf conflicts with isort for this block
@@ -299,15 +298,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION is set to 1. Otherwise, try to
         # use fp8 q if kv cache is fp8, and will fall back to model dtype
         # if TRTLLM attention kernel is not used when building attn metadata
-        if supports_trtllm_attention() and \
-            not flashinfer_disable_q_quantization():
+        can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads,
+                                                  self.num_kv_heads)
+        if can_use_trtllm and not flashinfer_disable_q_quantization():
             self.q_data_type = self.kv_cache_dtype
         else:
             self.q_data_type = self.model_config.dtype
 
-        supports_spec_as_decode = \
-            can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode)
+        self._init_reorder_batch_threshold(
+            1, supports_spec_as_decode=can_use_trtllm)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -319,7 +318,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
         self.has_sinks = self.global_hyperparameters.has_sinks
-        if self.has_sinks and not supports_trtllm_attention():
+        if self.has_sinks and not can_use_trtllm:
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
                 "sinks, please use trtllm on blackwell or flash attention on "
@@ -518,15 +517,27 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                  is_prefill=False,
                                                  has_sinks=self.has_sinks,
                                                  has_spec=uses_spec_reorder)
-        if self.has_sinks and not (prefill_use_trtllm and decode_use_trtllm):
-            raise NotImplementedError(
-                "FlashInfer backend currently does not support attention "
-                "sinks, please use trtllm on blackwell or flash attention on "
-                "earlier GPUs.")
 
-        # If TRTLLM attention is not used, the q quantization is not supported.
-        # Fall back to use model dtype.
         if not (prefill_use_trtllm and decode_use_trtllm):
+            if self.has_sinks:
+                raise NotImplementedError(
+                    "FlashInfer backend currently does not support attention "
+                    "sinks, please use trtllm on blackwell or flash attention "
+                    "on earlier GPUs.")
+
+            if not self.global_hyperparameters.has_same_window_lefts:
+                raise ValueError(
+                    "Window left is not the same for all layers. " \
+                    "One potential fix is to set disable_sliding_window=True")
+
+            assert self.global_hyperparameters.has_same_all_params, (
+                "FlashInfer backend currently only supports models in which "
+                "all layers share the same values for the following "
+                "hyperparameters: `window_left`, `logits_soft_cap`, "
+                "`sm_scale`.")
+
+            # The q quantization is not supported for non-trtllm attention,
+            # fall back to model dtype.
             self.q_data_type = self.model_config.dtype
 
         attn_metadata = FlashInferMetadata(
@@ -730,8 +741,8 @@ class FlashInferImpl(AttentionImpl):
                     f"{sinks.shape[0]}.")
             self.sinks = sinks
 
-        self.support_trtllm_attn = (supports_trtllm_attention()
-                                    and num_heads % num_kv_heads == 0)
+        self.support_trtllm_attn = can_use_trtllm_attention(
+            num_heads, num_kv_heads)
         self.bmm1_scale: Optional[float] = None
         self.bmm2_scale: Optional[float] = None
         self.o_sf_scale: Optional[float] = None
