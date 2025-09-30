@@ -337,13 +337,19 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
         "target_attn_1": mock.MagicMock(),
         "target_attn_2": mock.MagicMock()
     }
+    target_indx_layers: dict[str, mock.MagicMock] = {}
     # Draft model has one extra attention layer compared to target model
     all_attn_layers = {
         **target_attn_layers, "draft_extra_attn": mock.MagicMock()
     }
 
+    all_indx_layers: dict[str, mock.MagicMock] = {}
+
     # Make mock_get_layers return different values for each call
-    mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
+    mock_get_layers.side_effect = [
+        target_attn_layers, target_indx_layers, all_attn_layers,
+        all_indx_layers
+    ]
 
     # Setup mock for pp group to return the appropriate value for world size
     mock_pp_group = mock.MagicMock()
