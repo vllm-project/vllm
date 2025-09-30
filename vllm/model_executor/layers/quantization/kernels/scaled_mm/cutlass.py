@@ -28,15 +28,6 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         if not current_platform.is_cuda():
             return False, "CutlassScaledMM requires running on CUDA."
 
-        # Blackwell doesn't support INT8
-        capability = current_platform.get_device_capability()
-        if capability is not None:
-            compute_cap = capability.to_int()
-            if compute_cap >= 100 and c.weight_dtype == torch.int8:
-                return False, (
-                    f"INT8 not supported on SM{compute_cap}. "
-                    f"Use FP8 quantization or older GPU architecture.")
-
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
