@@ -17,6 +17,7 @@ from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
+                                              extend_flat_seqs,
                                               set_kv_cache_layout)
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
@@ -566,3 +567,27 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
                                   LARGE_BLOCK_BACKENDS,
                                   sliding_window_mask_mod_fn,
                                   block_size=128)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_extend_flat_seqs(device: str):
+    """The extend_flat_seqs() function appends a single new value into multiple
+    sequences that are stored in a flat format. E.g.
+        [x1, x2, y1] and [x3, y2] become [x1, x2, x3, y1, y2]
+    """
+
+    # fmt: off
+    seqs = torch.tensor([11, 12, 13,
+                         21, 22,
+                         31], device=device)
+    end_locs = torch.tensor([2, 4, 5], device=device)
+    new_vals = torch.tensor([14,
+                             23,
+                             32], device=device)
+    expected_seqs = torch.tensor([11, 12, 13, 14,
+                                  21, 22, 23,
+                                  31, 32],
+                                 device=device)
+    # fmt: on
+    actual_seqs = extend_flat_seqs(seqs, end_locs, new_vals)
+    assert torch.all(actual_seqs == expected_seqs)

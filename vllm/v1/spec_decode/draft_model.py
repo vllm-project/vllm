@@ -9,6 +9,9 @@ from vllm.attention.layer import Attention
 from vllm.config import ModelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model
+from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
+                                              extend_all_queries_by_1,
+                                              extend_flat_seqs)
 from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
 
 
@@ -20,21 +23,17 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         device: torch.device,
         runner=None,
     ):
-        super().__init__(
-            vllm_config=vllm_config,
-            device=device,
-            pass_hidden_states_to_model=False,
-            pass_cudagraph_args_to_forward_ctx=True,
-            # The draft model runs one forward pass to prefill
-            # the target_token_ids, and another forward pass for decoding
-            # based on the next_token_ids. I.e. it needs 1 more forward pass.
-            one_extra_forward_pass=True,
-            # the first draft_token_ids are replaced by next_token_ids, so
-            # they don't need to be returned as proposed tokens
-            drop_first_drafted_tokens=True,
-            runner=runner)
+        super().__init__(vllm_config=vllm_config,
+                         device=device,
+                         pass_hidden_states_to_model=False,
+                         pass_cudagraph_args_to_forward_ctx=True,
+                         runner=runner)
         self._raise_if_multimodal()
         self._raise_if_mrope()
+
+    def update_propose_kwargs(self, propose_kwargs: dict):
+        return update_propose_kwargs(arange=self.arange,
+                                     propose_kwargs=propose_kwargs)
 
     def _raise_if_multimodal(self):
         if self.supports_mm_inputs:
@@ -96,3 +95,42 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
         self.attn_layer_names = list(draft_attn_layer_names)
+
+
+def update_propose_kwargs(arange: torch.Tensor, propose_kwargs: dict):
+    """
+    This function:
+    - Merges the target_token_ids and the next_token_ids into a 
+    single flat tensor.
+    - Appends new positions for these next_token_ids.
+    - Updates the common_attn_metadata to reflect that all query lengths are +1.
+    """
+    cad: CommonAttentionMetadata = propose_kwargs["common_attn_metadata"]
+    target_token_ids = propose_kwargs["target_token_ids"]
+    next_token_ids = propose_kwargs["next_token_ids"]
+    target_positions = propose_kwargs["target_positions"]
+    token_indices_to_sample = cad.last_token_indices()
+
+    # merge target_token_ids and next_token_ids
+    end_locs = cad.last_token_indices()
+    new_target_token_ids = extend_flat_seqs(seqs=target_token_ids,
+                                            end_locs=end_locs,
+                                            new_vals=next_token_ids)
+    # append new positions
+    positions_to_append = target_positions[token_indices_to_sample] + 1
+    new_target_positions = extend_flat_seqs(seqs=target_positions,
+                                            end_locs=end_locs,
+                                            new_vals=positions_to_append)
+
+    # update common_attn_metadata
+    new_cad: CommonAttentionMetadata = extend_all_queries_by_1(cad,
+                                                               arange=arange)
+
+    new_propose_kwargs = dict(
+        target_token_ids=new_target_token_ids,
+        target_positions=new_target_positions,
+        next_token_ids=None,
+        last_token_indices=None,
+        common_attn_metadata=new_cad,
+    )
+    return propose_kwargs | new_propose_kwargs

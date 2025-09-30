@@ -83,6 +83,12 @@ class CommonAttentionMetadata:
     # Needed by CrossAttentionBuilder
     encoder_seq_lens: Optional[np.ndarray] = None
 
+    def batch_size(self) -> int:
+        return self.seq_lens_cpu.shape[0]
+
+    def last_token_indices(self) -> torch.Tensor:
+        return self.query_start_loc[1:] - 1
+
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
@@ -97,6 +103,69 @@ def slice_query_start_locs(
     """
     return query_start_loc[request_slice.start: request_slice.stop + 1] -\
         query_start_loc[request_slice.start]
+
+
+def extend_all_queries_by_1(common_attn_metadata: CommonAttentionMetadata,
+                            arange: torch.Tensor) -> CommonAttentionMetadata:
+    """
+    Creates a new CommonAttentionMetadata with all query lengths increased by 1.
+    Also all seq lens are increased by 1.
+    This is useful e.g. in speculative decoding with draft models, where we
+    extend each sequence by 1 token.
+    """
+    cad = common_attn_metadata
+    # query start loc must be increased by [+0, +1, +2, ..., +batch_size]
+    new_query_start_loc = cad.query_start_loc \
+        + arange[:len(cad.query_start_loc)]
+    new_seq_lens = cad.seq_lens + 1
+    # slot mappings are extended (interleaved) by the next serial id
+    last_slot_mapping_ids = cad.slot_mapping[cad.last_token_indices()]
+    new_slot_mapping = extend_flat_seqs(seqs=cad.slot_mapping,
+                                        end_locs=cad.last_token_indices(),
+                                        new_vals=last_slot_mapping_ids + 1)
+    new_cad = CommonAttentionMetadata(
+        query_start_loc=new_query_start_loc,
+        query_start_loc_cpu=new_query_start_loc.to("cpu"),
+        seq_lens=new_seq_lens,
+        seq_lens_cpu=new_seq_lens.to("cpu"),
+        num_reqs=cad.num_reqs,  # num requests stays unchanged
+        num_computed_tokens_cpu=cad.num_computed_tokens_cpu + 1,
+        # each request is extended by 1 token -> batch_size tokens are added
+        num_actual_tokens=cad.num_actual_tokens + cad.batch_size(),
+        # All query lens increase by 1, so max query len increases by 1
+        max_query_len=cad.max_query_len + 1,
+        max_seq_len=cad.max_seq_len + 1,
+        # block table tensor depends on num requests, which stays constant
+        block_table_tensor=cad.block_table_tensor,
+        slot_mapping=new_slot_mapping,
+    )
+    return new_cad
+
+
+def extend_flat_seqs(seqs: torch.Tensor, end_locs: torch.Tensor,
+                     new_vals: torch.Tensor) -> torch.Tensor:
+    """
+    This function appends a single new value into multiple sequences 
+    that are stored in a flat format. E.g.
+        [x1, x2, y1] and [x3, y2] become [x1, x2, x3, y1, y2]
+    """
+    new_len = seqs.shape[0] + new_vals.shape[0]
+    new_seqs = torch.zeros(new_len, device=seqs.device, dtype=seqs.dtype)
+
+    # indices for previous seqs
+    start_locs = end_locs[:-1] + 1
+    seqs_new_idxs = torch.ones_like(seqs)
+    seqs_new_idxs[start_locs] += 1
+    seqs_new_idxs = seqs_new_idxs.cumsum(0) - 1
+
+    # indices for new values
+    new_val_idxs = end_locs + 1 + torch.arange(new_vals.shape[0],
+                                               device=seqs.device)
+    # assign seqs and new vals
+    new_seqs[seqs_new_idxs] = seqs
+    new_seqs[new_val_idxs] = new_vals
+
+    return new_seqs
 
 
 def _make_metadata_with_slice(

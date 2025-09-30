@@ -2648,7 +2648,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 target_token_ids = self.input_ids.gpu[token_indices]
                 target_positions = self._get_positions(token_indices)
-                if self.use_aux_hidden_state_outputs:
+                if self.speculative_config.uses_draft_model():
+                    target_hidden_states = None
+                elif self.use_aux_hidden_state_outputs:
                     assert aux_hidden_states is not None
                     target_hidden_states = torch.cat(
                         [h[token_indices] for h in aux_hidden_states], dim=-1)
@@ -2662,12 +2664,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             else:
                 mm_embed_inputs = None
-
             cudagraph_args: CudaGraphArgs = dict(
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_descriptor,
             )
-            draft_token_ids = self.drafter.propose(
+            propose_kwargs = dict(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -2678,6 +2679,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_embed_inputs=mm_embed_inputs,
                 cudagraph_args=cudagraph_args,
             )
+            if isinstance(self.drafter, DraftModelProposer):
+                propose_kwargs = self.drafter.update_propose_kwargs(
+                    propose_kwargs)
+            draft_token_ids = self.drafter.propose(**propose_kwargs)
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
