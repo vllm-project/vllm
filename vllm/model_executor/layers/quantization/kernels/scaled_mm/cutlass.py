@@ -31,8 +31,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # Blackwell doesn't support INT8
         capability = current_platform.get_device_capability()
         if capability is not None:
-            major, _ = capability
-            compute_cap = major * 10 + (_ if _ < 10 else 0)
+            compute_cap = capability.to_int()
             if compute_cap >= 100 and c.weight_dtype == torch.int8:
                 return False, (
                     f"INT8 not supported on SM{compute_cap}. "
