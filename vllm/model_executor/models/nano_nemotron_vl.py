@@ -1028,7 +1028,8 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
         raise AssertionError("This line should be unreachable.")
 
     def _process_image_input(
-            self, image_input: NanoNemotronVLImageInputs) -> torch.Tensor:
+            self, image_input: NanoNemotronVLImageInputs
+    ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -1060,18 +1061,22 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
         # Get video embeddings using the same processing as images
         video_embeddings = self._process_image_input(video_input)
 
+        final_video_embeddings: tuple[torch.Tensor, ...] = ()
+
         # Calculate video feature dimensions (number of frames and
-        #  their feature size (AKA tokens per frame))
-        num_patches = video_input["num_patches"][0].item()
-        assert video_embeddings[0].shape[0] % num_patches == 0
-        feature_size = video_embeddings[0].shape[0] // num_patches
+        # their feature size (AKA tokens per frame))
+        # TODO: Maybe this can be optimized to avoid the loop?
+        for i, single_video_embeddings in enumerate(video_embeddings):
+            num_patches = video_input["num_patches"][i].item()
+            assert single_video_embeddings.shape[0] % num_patches == 0
+            feature_size = single_video_embeddings.shape[0] // num_patches
 
-        # Create final embeddings that will replace placeholder embeddings
-        #  with video content and indicator tokens
-        final_video_embeddings = self._create_final_video_embeddings(
-            video_embeddings[0], feature_size, num_patches)
+            # Create final embeddings that will replace placeholder embeddings
+            # with video content and indicator tokens
+            final_video_embeddings += (self._create_final_video_embeddings(
+                single_video_embeddings, feature_size, num_patches), )
 
-        return (final_video_embeddings, )
+        return final_video_embeddings
 
     def _create_final_video_embeddings(self, video_embeddings: torch.Tensor,
                                        feature_size: int,
