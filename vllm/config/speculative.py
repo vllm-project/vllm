@@ -125,16 +125,24 @@ class SpeculativeConfig:
 
     # Suffix decoding configuration
     suffix_decoding_max_tree_depth: int = 64
-    """The maximum depth of the suffix decoding tree."""
+    """The maximum depth of the suffix decoding global and prompt trees. The
+    tree depth limits the sum of the prefix match and speculation lengths."""
 
     suffix_decoding_max_cached_requests: int = 10000
-    """The maximum number of requests to cache in the global suffix tree."""
+    """The maximum number of requests to cache in the global suffix tree. If
+    exceeded, will trigger eviction in FIFO order. If set to 0, the global
+    suffix tree is disabled and past responses are not cached (prompt trees
+    are still used)."""
 
     suffix_decoding_max_spec_factor: float = 1.0
-    """The maximum speculative factor for suffix decoding."""
+    """The maximum spec factor for suffix decoding. The spec factor controls
+    speculation lengths based on the prefix match length: max_spec_tokens =
+    max_spec_factor * prefix_match_length."""
 
     suffix_decoding_min_token_prob: float = 0.1
-    """The minimum token probability for suffix decoding."""
+    """The minimum token probability for suffix decoding. Will only speculate
+    tokens with estimated probability (based on frequency counts) greater than
+    or equal to this value."""
 
     def compute_hash(self) -> str:
         """
