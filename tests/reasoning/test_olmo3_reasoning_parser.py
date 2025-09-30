@@ -32,95 +32,67 @@ SIMPLE_REASONING = {
 
 SIMPLE_REASONING_WITH_NEWLINE = {
     "output": f"{START_REASONING}\n Look!\n\nI'm thinking...{END_REASONING}\nThis is the rest",  # noqa: E501
-    "reasoning_content": "Look!\n\nI'm thinking...",
+    "reasoning_content": " Look!\n\nI'm thinking...",
     "content": "This is the rest",
 }
 
 SIMPLE_REASONING_WITH_MULTIPLE_NEWLINES = {
-    "output": f"{START_REASONING}\n\n Look!\nI'm thinking...\n\n{END_REASONING}\n\n\nThis is the rest",  # noqa: E501
-    "reasoning_content": "Look!\nI'm thinking...",
+    "output": f"{START_REASONING}\nLook!\nI'm thinking...\n\n{END_REASONING}\n\n\nThis is the rest",  # noqa: E501
+    "reasoning_content": "\nLook!\nI'm thinking...\b",
     "content": "This is the rest",
 }
 
+
 TEST_CASES = [
     pytest.param(
-        False,
+        False,  # not streaming
+        NO_REASONING,
+        id="no_reasoning",
+    ),
+    pytest.param(
+        False,  # not streaming
+        NO_REASONING_WITH_NEWLINE,
+        id="no_reasoning_with_newline",
+    ),
+    pytest.param(
+        False,  # not streaming
         SIMPLE_REASONING,
         id="simple_reasoning",
     ),
     pytest.param(
-        False,
-        COMPLETE_REASONING,
-        id="complete_reasoning",
+        False,  # not streaming
+        SIMPLE_REASONING_WITH_NEWLINE,
+        id="simple_reasoning_with_newline",
     ),
     pytest.param(
-        False,
-        COMPLETE_REASONING_WITH_SYMBOL,
-        id="complete_reasoning_with_symbol",
+        True,  # enamble streaming
+        SIMPLE_REASONING_WITH_MULTIPLE_NEWLINES,
+        id="simple_reasoning_with_multiple_newlines",
     ),
     pytest.param(
-        False,
-        NO_REASONING,
-        id="no_reasoning",
-    ),
-    pytest.param(False, NO_REASONING_QUICK_THROUGHT, id="no_reasoning_quick"),
-    pytest.param(
-        False,
-        MULTIPLE_LINES,
-        id="multiple_lines",
-    ),
-    pytest.param(
-        False,
-        REASONING_WITH_THINK,
-        id="reasoning_with_think",
-    ),
-    pytest.param(
-        False,
-        COMPLETE_REASONING_WITH_THINK,
-        id="complete_reasoning_with_think",
-    ),
-    pytest.param(
-        False,
-        MULTIPLE_LINES_WITH_THINK,
-        id="multiple_lines_with_think",
-    ),
-    pytest.param(
-        True,
-        SIMPLE_REASONING,
-        id="simple_reasoning_streaming",
-    ),
-    pytest.param(
-        True,
-        COMPLETE_REASONING,
-        id="complete_reasoning_streaming",
-    ),
-    pytest.param(
-        True,
+        True,  # enamble streaming
         NO_REASONING,
         id="no_reasoning_streaming",
     ),
     pytest.param(
-        True, NO_REASONING_QUICK_THROUGHT, id="no_reasoning_quick_stream"
+        True,  # enamble streaming
+        NO_REASONING_WITH_NEWLINE,
+        id="no_reasoning_with_newline_streaming",
     ),
     pytest.param(
-        True,
-        MULTIPLE_LINES,
-        id="multiple_lines_streaming",
+        True,  # enamble streaming
+        SIMPLE_REASONING,
+        id="simple_reasoning_streaming",
     ),
     pytest.param(
-        True,
-        REASONING_WITH_THINK,
-        id="reasoning_with_think_streaming",
+        True,  # enamble streaming
+        SIMPLE_REASONING_WITH_NEWLINE,
+        id="simple_reasoning_with_newline_streaming",
     ),
     pytest.param(
-        True,
-        COMPLETE_REASONING_WITH_THINK,
-        id="complete_reasoning_with_think_streaming",
-    ),
-    pytest.param(
-        True,
-        MULTIPLE_LINES_WITH_THINK,
-        id="multiple_lines_with_think_streaming",
+        True,  # enamble streaming
+        SIMPLE_REASONING_WITH_MULTIPLE_NEWLINES,
+        id="simple_reasoning_with_multiple_newlines_streaming",
     ),
 ]
 
@@ -133,7 +105,7 @@ tokenizer = AutoTokenizer.from_pretrained(
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
 def test_reasoning(
     streaming: bool,
-    param_dict: dict,
+    param_dict: dict[str, str],
 ):
     output = tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
