@@ -19,7 +19,6 @@ RTOL = 0.08
 def launch_lm_eval(eval_config, tp_size):
     trust_remote_code = eval_config.get("trust_remote_code", False)
     max_model_len = eval_config.get("max_model_len", 4096)
-    gpu_memory_utilization = eval_config.get("gpu_memory_utilization", 1.0)
     batch_size = eval_config.get("batch_size", "auto")
     model_args = (
         f"pretrained={eval_config['model_name']},"
@@ -28,7 +27,6 @@ def launch_lm_eval(eval_config, tp_size):
         f"add_bos_token=true,"
         f"trust_remote_code={trust_remote_code},"
         f"max_model_len={max_model_len},"
-        f"gpu_memory_utilization={gpu_memory_utilization}"
     )
     results = lm_eval.simple_evaluate(
         model=eval_config["backend"],
