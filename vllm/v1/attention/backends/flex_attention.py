@@ -3,6 +3,7 @@
 """Attention layer with FlexAttention."""
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -296,6 +297,12 @@ class FlexAttentionMetadata:
     transformed_score_mod: Optional[_score_mod_signature] = None
     sliding_window: Optional[int] = None
 
+    @cached_property
+    def logical_block_ids(self):
+        return torch.arange(cdiv(self.max_seq_len, self.block_size),
+                            device=self.block_table.device,
+                            dtype=torch.long)
+
     def _convert_physical_to_logical(
         self,
         request_lookup: torch.Tensor,
@@ -474,6 +481,7 @@ class FlexAttentionMetadata:
 
         The direct path works as follows:
         1. For each query token, fetch blocks from block_table using max_seq_len
+           and exclude out of sliding window blocks if needed.
            (this fetches more blocks than needed for shorter sequences)
         2. Group query tokens into chunks of q_block_size
         3. For each group, deduplicate the blocks using unique_static_unsorted
@@ -498,19 +506,17 @@ class FlexAttentionMetadata:
             self.doc_ids, :cdiv(self.max_seq_len, self.block_size)]
 
         if self.sliding_window and self.causal:
+            device = used_pages.device
             token_indices = torch.arange(self.doc_ids.shape[0],
-                                         device="cuda",
+                                         device=device,
                                          dtype=torch.long)
             logical_q_idx = (token_indices - self.query_start_loc[self.doc_ids] +
                              self.decode_offset[self.doc_ids])
             min_kv_idx = torch.clamp(logical_q_idx - (self.sliding_window - 1),
                                      min=0)
             min_block_idx = min_kv_idx // self.block_size
-            logical_block_ids = torch.arange(cdiv(self.max_seq_len, self.block_size),
-                                             device="cuda",
-                                             dtype=torch.long)
-            sliding_mask = logical_block_ids >= min_block_idx[:, None]
-            used_pages = used_pages.masked_fill(~sliding_mask, 0)
+            sliding_mask = self.logical_block_ids >= min_block_idx[:, None]
+            used_pages.masked_fill_(~sliding_mask, 0)
 
         used_pages_padded = pad_to_multiple(used_pages,
                                             multiple=self.q_block_size,
@@ -564,6 +570,9 @@ class FlexAttentionMetadata:
         self.mask_mod = self.get_mask_mod()
         self.transformed_score_mod = self.get_transformed_score_mod()
 
+        self.logical_block_ids = torch.arange(cdiv(self.max_seq_len, self.block_size),
+                                              device=self.block_table.device,
+                                              dtype=torch.long)
         if self.direct_build and self.causal:
             self.block_mask = self._build_block_mask_direct()
         else:
