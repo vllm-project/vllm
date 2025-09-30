@@ -126,7 +126,7 @@ def find_tokenizer_file(files: list[str]):
     # plus tekken.json and tokenizer.mm.model variants.
     # Previous pattern only matched the versioned variants.
     file_pattern = re.compile(
-        r"^(tokenizer\.model(\.v.*)?|tekken\.json|tokenizer\.mm\.model(\.v.*)?)$"
+        r"^tokenizer\.model(\.v.*)?|tekken\.json|tokenizer\.mm\.model(\.v.*)?$"
     )
 
     matched_files = [file for file in files if file_pattern.match(file)]
