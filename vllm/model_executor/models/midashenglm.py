@@ -426,8 +426,7 @@ class DashengAudioTransformer(nn.Module):
             assert x_length.ndim == 1, "Lengths are of size (B,)"
             scaled_lengths = (x_length / (self.hop_length * 4)).long()
             mask = self._to_mask(max_length=t, lengths=scaled_lengths)
-            split_masks = mask.logical_not().split(target_length_in_patches,
-                                                   dim=-1)
+            split_masks = mask.split(target_length_in_patches, dim=-1)
         else:
             mask = None
             split_masks = [None] * len(input_splits)
