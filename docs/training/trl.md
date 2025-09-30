@@ -4,7 +4,7 @@
 
 Online methods such as GRPO or Online DPO require the model to generate completions. vLLM can be used to generate these completions!
 
-See the [vLLM guide integration](https://huggingface.co/docs/trl/main/en/vllm_integration) in the TRL documentation for more information.
+See the [vLLM integration guide](https://huggingface.co/docs/trl/main/en/vllm_integration) in the TRL documentation for more information.
 
 TRL currently supports the following online trainers with vLLM:
 
