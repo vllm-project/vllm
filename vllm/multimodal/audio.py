@@ -94,10 +94,10 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         self.kwargs = kwargs
 
     def load_bytes(
-            self,
-            data: bytes,
-            *,
-            request_overrides: Optional[dict[str, Any]] = None
+        self,
+        data: bytes,
+        *,
+        request_overrides: Optional[dict[str, Any]] = None
     ) -> tuple[npt.NDArray, float]:
         return librosa.load(BytesIO(data), sr=None)
 
@@ -110,7 +110,12 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
     ) -> tuple[npt.NDArray, float]:
         return self.load_bytes(base64.b64decode(data))
 
-    def load_file(self, filepath: Path, *, request_overrides: Optional[dict[str, Any]] = None) -> tuple[npt.NDArray, float]:
+    def load_file(
+        self,
+        filepath: Path,
+        *,
+        request_overrides: Optional[dict[str, Any]] = None
+    ) -> tuple[npt.NDArray, float]:
         return librosa.load(filepath, sr=None)
 
     def encode_base64(self, media: tuple[npt.NDArray, int]) -> str:
