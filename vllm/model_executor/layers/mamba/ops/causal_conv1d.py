@@ -513,7 +513,7 @@ def causal_conv1d_fn(
     x = x.to(conv_states.dtype)
     out = torch.empty_like(x)
     if metadata is not None:
-        cu_seqlen = metadata.cu_seqlen
+        #cu_seqlen = metadata.cu_seqlen
         nums_dict = metadata.nums_dict
         #x = metadata.x
         args = nums_dict

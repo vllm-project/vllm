@@ -68,7 +68,7 @@ def default_server_args(with_tool_parser: bool):
 def gptoss_server(monkeypatch_module: pytest.MonkeyPatch,
                   default_server_args: list[str]):
     with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
         with RemoteOpenAIServer(GPT_OSS_MODEL_NAME,
                                 default_server_args) as remote_server:
             yield remote_server
@@ -194,6 +194,7 @@ async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI,
     assert tc.function is not None and tc.function.name == "get_current_weather"
     args1 = tc.function.arguments
     assert args1 is not None and len(args1) > 0
+    assert not first_msg.content
 
     messages.append({"role": "assistant", "content": args1})
     messages.append({
@@ -239,6 +240,7 @@ class MockModelConfig:
     logits_processor_pattern = None
     diff_sampling_param: Optional[dict] = None
     allowed_local_media_path: str = ""
+    allowed_media_domains: Optional[list[str]] = None
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)

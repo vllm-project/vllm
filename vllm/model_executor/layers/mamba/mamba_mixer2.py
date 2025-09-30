@@ -9,7 +9,6 @@ if TYPE_CHECKING:
 import torch
 from torch import nn
 
-from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
@@ -22,8 +21,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
-                                                              update_metadata)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
@@ -32,13 +29,11 @@ from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
-    mamba_chunk_scan_combined)
+    mamba_chunk_scan_combined_varlen)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction, composed_weight_loader, sharded_weight_loader)
-from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
@@ -449,16 +444,12 @@ class MambaMixer2(MambaBase, CustomOp):
                                        self.use_rms_norm,
                                        eps=rms_norm_eps)
 
-        if envs.VLLM_USE_V1:
-            compilation_config = get_current_vllm_config().compilation_config
-            if prefix in compilation_config.static_forward_context:
-                raise ValueError(f"Duplicate layer name: {prefix}")
-            compilation_config.static_forward_context[prefix] = self
-            # The outer list is for v0 PP virtual engine. Though this code path
-            # only runs for v1, we have to do this to unify with the interface
-            # of Attention + v0 PP.
-            # The inner tuple is (conv_state, ssm_state)
-            self.kv_cache = [(torch.tensor([]), torch.tensor([]))]
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+        # The tuple is (conv_state, ssm_state)
+        self.kv_cache = (torch.tensor([]), torch.tensor([]))
 
         self.model_config = model_config
         self.cache_config = cache_config
@@ -468,8 +459,6 @@ class MambaMixer2(MambaBase, CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        mamba_cache_params: MambaCacheParams,
-        mamba2_metadata: Mamba2Metadata,
         mup_vector: Optional[torch.Tensor] = None,
     ):
         pass
@@ -478,65 +467,47 @@ class MambaMixer2(MambaBase, CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        mamba_cache_params: MambaCacheParams,
-        mamba2_metadata: Mamba2Metadata,
         mup_vector: Optional[torch.Tensor] = None,
     ):
-        if not envs.VLLM_USE_V1:
-            CustomOp.forward(self, hidden_states, output, mamba_cache_params,
-                             mamba2_metadata, mup_vector)
-        else:
-            torch.ops.vllm.mamba_mixer2(
-                hidden_states,
-                output,
-                self.prefix,
-                mup_vector,
-            )
+        torch.ops.vllm.mamba_mixer2(
+            hidden_states,
+            output,
+            self.prefix,
+            mup_vector,
+        )
 
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        mamba_cache_params: MambaCacheParams,
-        mamba2_metadata: Mamba2Metadata,
         mup_vector: Optional[torch.Tensor] = None,
     ):
         forward_context = get_forward_context()
-        # mamba2_metadata contains metadata necessary for the mamba2 triton
+        # attn_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
         cache_enabled = False
-        if envs.VLLM_USE_V1:
-            if attn_metadata is not None:
-                assert isinstance(attn_metadata, dict)
-                attn_metadata = attn_metadata[self.prefix]
-                mamba2_metadata = attn_metadata
-                assert isinstance(attn_metadata, Mamba2AttentionMetadata)
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                # conv_state = (..., dim, width-1) yet contiguous along 'dim'
-                conv_state = self_kv_cache[0].transpose(-1, -2)
-                ssm_state = self_kv_cache[1]
-                state_indices_tensor = attn_metadata.state_indices_tensor
-                mamba_block_size = attn_metadata.cache_spec.block_size
-                cache_strategy = attn_metadata.cache_spec.cache_strategy
-                cache_enabled = (cache_strategy != 'disabled')
-                cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
-                last_chunk_p = attn_metadata.last_chunk_p
-        else:
-            conv_state = mamba_cache_params.conv_state
-            ssm_state = mamba_cache_params.ssm_state
-            state_indices_tensor = mamba_cache_params.state_indices_tensor
-
-        # Common members between V1 metadata and V0 metadata
-        if mamba2_metadata is not None:
-            has_initial_states_p = mamba2_metadata.has_initial_states_p
-            prep_initial_states = mamba2_metadata.prep_initial_states
-            chunk_size = mamba2_metadata.chunk_size
-            seq_idx_p = mamba2_metadata.seq_idx_p
-            chunk_indices_p = mamba2_metadata.chunk_indices_p
-            chunk_offsets_p = mamba2_metadata.chunk_offsets_p
+        if attn_metadata is not None:
+            assert isinstance(attn_metadata, dict)
+            attn_metadata = attn_metadata[self.prefix]
+            assert isinstance(attn_metadata, Mamba2AttentionMetadata)
+            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            # conv_state = (..., dim, width-1) yet contiguous along 'dim'
+            conv_state = self_kv_cache[0].transpose(-1, -2)
+            ssm_state = self_kv_cache[1]
+            state_indices_tensor = attn_metadata.state_indices_tensor
+            has_initial_states_p = attn_metadata.has_initial_states_p
+            prep_initial_states = attn_metadata.prep_initial_states
+            chunk_size = attn_metadata.chunk_size
+            seq_idx_p = attn_metadata.seq_idx_p
+            query_start_loc_p = attn_metadata.query_start_loc_p
+            cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
+            last_chunk_indices_p = attn_metadata.last_chunk_indices_p
+            mamba_block_size = attn_metadata.cache_spec.block_size
+            cache_strategy = attn_metadata.cache_spec.cache_strategy
+            cache_enabled = (cache_strategy != 'disabled')
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -568,8 +539,8 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=-1,
         )
 
-        if envs.VLLM_USE_V1 and attn_metadata is None:
-            # V1 profile run
+        if attn_metadata is None:
+            # profile run
             hidden_states_B_C = (hidden_states_B_C.transpose(
                 0, 1).clone().transpose(0, 1)).contiguous()
             hidden_states, _B, _C = split_hidden_states_B_C_fn(
@@ -578,6 +549,7 @@ class MambaMixer2(MambaBase, CustomOp):
             out, _ = self.out_proj(hidden_states)
             return out
 
+        # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         num_prefills = attn_metadata.num_prefills  # request count
         num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
         num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
@@ -585,51 +557,26 @@ class MambaMixer2(MambaBase, CustomOp):
         has_decode = num_decodes > 0
         num_actual_tokens = num_prefill_tokens + num_decodes
 
-        # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
-        if envs.VLLM_USE_V1:
-            hidden_states_B_C_d, hidden_states_B_C_p = torch.split(
-                hidden_states_B_C[:num_actual_tokens],
-                [num_decodes, num_prefill_tokens],
-                dim=0,
-            )
-            dt_d, dt_p = torch.split(
-                dt[:num_actual_tokens],
-                [num_decodes, num_prefill_tokens],
-                dim=0,
-            )
-            # Split along batch dimension
-            state_indices_tensor_d, state_indices_tensor_p = torch.split(
-                state_indices_tensor[:num_actual_tokens],
-                [num_decodes, num_prefills],
-                dim=0,
-            )
-            query_start_loc_p = (
-                attn_metadata.query_start_loc[-num_prefills - 1:] -
-                num_decodes if has_prefill else None)
-        else:
-            hidden_states_B_C_p, hidden_states_B_C_d = torch.split(
-                hidden_states_B_C,
-                [num_prefill_tokens, num_decodes],
-                dim=0,
-            )
-            dt_p, dt_d = torch.split(
-                dt,
-                [num_prefill_tokens, num_decodes],
-                dim=0,
-            )
-            # Split along batch dimension
-            state_indices_tensor_p, state_indices_tensor_d = torch.split(
-                state_indices_tensor,
-                [num_prefills, num_decodes],
-                dim=0,
-            )
-            query_start_loc_p = (attn_metadata.query_start_loc[:num_prefills +
-                                                               1]
-                                 if has_prefill else None)
+        hidden_states_B_C_d, hidden_states_B_C_p = torch.split(
+            hidden_states_B_C[:num_actual_tokens],
+            [num_decodes, num_prefill_tokens],
+            dim=0,
+        )
+        dt_d, dt_p = torch.split(
+            dt[:num_actual_tokens],
+            [num_decodes, num_prefill_tokens],
+            dim=0,
+        )
+        # Split along batch dimension
+        state_indices_tensor_d, state_indices_tensor_p = torch.split(
+            state_indices_tensor[:num_actual_tokens],
+            [num_decodes, num_prefills],
+            dim=0,
+        )
 
-        if envs.VLLM_USE_V1 and cache_enabled:
+        if cache_enabled:
             # Split decodes and prefills:
             seq_lens_completed_d, seq_lens_completed_p = torch.split(
                 attn_metadata.seq_lens_completed, [num_decodes, num_prefills],
@@ -667,18 +614,11 @@ class MambaMixer2(MambaBase, CustomOp):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        if envs.VLLM_USE_V1:
-            preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
-                preallocated_ssm_out,
-                [num_decodes, num_prefill_tokens],
-                dim=0,
-            )
-        else:
-            preallocated_ssm_out_p, preallocated_ssm_out_d = torch.split(
-                preallocated_ssm_out,
-                [num_prefill_tokens, num_decodes],
-                dim=0,
-            )
+        preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
+            preallocated_ssm_out,
+            [num_decodes, num_prefill_tokens],
+            dim=0,
+        )
 
         # Process prefill requests
         if has_prefill:
@@ -687,11 +627,6 @@ class MambaMixer2(MambaBase, CustomOp):
             #   pointed to by "state_indices_tensor"
             x = hidden_states_B_C_p.transpose(
                 0, 1)  # this is the form that causal-conv see
-            if mamba2_metadata.cu_seqlen is None:
-                mamba2_metadata = update_metadata(x, query_start_loc_p,
-                                                  mamba2_metadata)
-            assert isinstance(mamba2_metadata.nums_dict, dict)
-
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
                 conv_weights,
@@ -705,7 +640,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 last_state_idx=last_state_idx_p,
                 seq_lens_completed=seq_lens_completed_p,
                 block_size_to_align=mamba_block_size,
-                metadata=mamba2_metadata,
+                metadata=attn_metadata,
                 query_start_loc=query_start_loc_p).transpose(
                     0, 1)[:num_prefill_tokens]
 
@@ -714,55 +649,43 @@ class MambaMixer2(MambaBase, CustomOp):
 
             # 3. State Space Model sequence transformation
             initial_states = None
-
             if (has_initial_states_p is not None and prep_initial_states):
-                # making a copy of the states
-                if envs.VLLM_USE_V1:
-                    kernel_ssm_indices = state_indices_tensor_p
-                    if cache_enabled:
-                        kernel_ssm_indices = state_indices_tensor_p.gather(
-                            1, last_state_idx_p.unsqueeze(1)).squeeze(1)
-                    initial_states = torch.where(
-                        has_initial_states_p[:, None, None, None],
-                        ssm_state[kernel_ssm_indices], 0)
-                else:
-                    initial_states = torch.where(
-                        has_initial_states_p[:, None, None, None],
-                        ssm_state[state_indices_tensor_p], 0)
+                kernel_ssm_indices = state_indices_tensor_p
+                if cache_enabled:
+                    kernel_ssm_indices = state_indices_tensor_p.gather(
+                        1, last_state_idx_p.unsqueeze(1)).squeeze(1)
+                initial_states = torch.where(
+                    has_initial_states_p[:, None, None, None],
+                    ssm_state[kernel_ssm_indices], 0)
 
             # NOTE: final output is an in-place update of out tensor
-            mamba_outputs = mamba_chunk_scan_combined(
-                hidden_states_p.view(1, num_prefill_tokens,
+            varlen_states = mamba_chunk_scan_combined_varlen(
+                hidden_states_p.view(num_prefill_tokens,
                                      self.num_heads // self.tp_size,
                                      self.head_dim),
-                dt_p.unsqueeze(0),
+                dt_p,
                 self.A,
-                B_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
+                B_p.view(num_prefill_tokens, self.n_groups // self.tp_size,
                          -1),
-                C_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
+                C_p.view(num_prefill_tokens, self.n_groups // self.tp_size,
                          -1),
                 chunk_size=chunk_size,
                 D=self.D,
                 z=None,
                 dt_bias=self.dt_bias,
                 seq_idx=seq_idx_p,
-                chunk_indices=chunk_indices_p,
-                chunk_offsets=chunk_offsets_p,
                 cu_seqlens=query_start_loc_p,
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
-                last_chunk=last_chunk_p,
+                last_chunk_indices=last_chunk_indices_p,
                 initial_states=initial_states,
                 return_intermediate_states=cache_enabled,
-                return_varlen_states=True,
-                return_final_states=False,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
-                out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
+                out=preallocated_ssm_out_p.view(num_prefill_tokens, -1,
                                                 self.head_dim),
                 state_dtype=ssm_state.dtype)
 
             if cache_enabled:
-                states, _ = mamba_outputs
                 n_blocks_to_fill = current_last_idx_p - current_first_idx_p
                 # Save states for sequences with more than just the final state:
                 for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
@@ -775,33 +698,32 @@ class MambaMixer2(MambaBase, CustomOp):
                     #  mamba_block_size = 1024, chunk_size = 256
                     #  1024 // 256 - 1 --> chunks[3]
                     # But when last chunk wasn't block aligned:
-                    # - last_computed_token_block_offset[seq_idx] // chunk_size
+                    # - last_computed_offset_p[seq_idx] // chunk_size
                     # e.g. 1000 // 256 -> 3 completed --> store chunk[0]
                     # e.g. 513 // 256 -> 2 completed --> store chunk[1] (skip 1)
                     # e.g. 256 // 256 -> 1 completed --> store chunk[2] (skip 2)
                     # e.g. 10 // 256 -> 0 completed --> store chunk[3] (skip 3)
                     chunk_stride = mamba_block_size // chunk_size
-                    last_computed_token_block_offset = \
-                        attn_metadata.last_computed_token_block_offset
                     first_aligned_chunk = \
-                      torch.concat([torch.zeros(1, dtype=last_chunk_p.dtype, \
-                      device=last_chunk_p.device), last_chunk_p + 1])[seq_idx] \
+                      torch.concat([torch.zeros(1, \
+                                    dtype=last_chunk_indices_p.dtype, \
+                                    device=last_chunk_indices_p.device), \
+                                    last_chunk_indices_p + 1])[seq_idx] \
                        + chunk_stride - 1 \
-                       - last_computed_token_block_offset[seq_idx] // chunk_size
-                    from_where = states[
-                        0, first_aligned_chunk:first_aligned_chunk +
+                       - last_computed_offset_p[seq_idx] // chunk_size
+                    from_where = varlen_states[
+                        first_aligned_chunk:first_aligned_chunk +
                         n_blocks_to_fill[seq_idx] * chunk_stride:chunk_stride]
                     ssm_state[cache_blocks_to_fill] = from_where
 
                 #For all seqs, store the last state (Note: might be partial):
                 ssm_state[state_indices_tensor_p.gather(1,
                         current_last_idx_p.unsqueeze(1)).squeeze(1)] = \
-                    states[0, last_chunk_p]
+                    varlen_states[last_chunk_indices_p]
             else:
-                varlen_state = mamba_outputs
                 # update ssm states
-                # - varlen state is (num_prefills, nheads, headdim, dstate)
-                ssm_state[state_indices_tensor_p] = varlen_state
+                # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
+                ssm_state[state_indices_tensor_p] = varlen_states
 
         # Process decode requests
         if has_decode:
@@ -918,8 +840,6 @@ def mamba_mixer2(
     self = forward_context.no_compile_layers[layer_name]
     self.forward_cuda(hidden_states=hidden_states,
                       output=output,
-                      mamba_cache_params=None,
-                      mamba2_metadata=None,
                       mup_vector=mup_vector)
 
 
@@ -937,5 +857,4 @@ direct_register_custom_op(
     op_func=mamba_mixer2,
     mutates_args=["output"],
     fake_impl=mamba_mixer2_fake,
-    dispatch_key=current_platform.dispatch_key,
 )
