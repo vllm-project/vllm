@@ -530,7 +530,8 @@ class EagleProposer:
                                 common_attn_metadata: CommonAttentionMetadata,
                                 spec_decode_metadata: SpecDecodeMetadata,
                                 valid_sampled_tokens_count: torch.Tensor) -> \
-                    tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
+                    tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor, \
+                          torch.Tensor, torch.cuda.Event]:
         """
         This function is used to prepare the inputs for speculative decoding
         It updates the common_attn_metadata for speculative decoding,
@@ -549,6 +550,9 @@ class EagleProposer:
             num_draft_tokens_gpu > 0,
             num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
             torch.zeros_like(num_draft_tokens_gpu))
+        
+        num_rejected_tokens_calc_event = torch.cuda.Event()
+        num_rejected_tokens_calc_event.record()
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
@@ -561,10 +565,10 @@ class EagleProposer:
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             seq_lens=common_attn_metadata.seq_lens,
-            query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
+            query_start_loc_cpu=query_start_loc_cpu.clone(),
+            seq_lens_cpu=common_attn_metadata.seq_lens_cpu.clone(),
             num_computed_tokens_cpu=common_attn_metadata.
-            num_computed_tokens_cpu,
+            num_computed_tokens_cpu.clone(),
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
@@ -577,7 +581,8 @@ class EagleProposer:
         token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1 \
             - num_rejected_tokens_gpu
 
-        return spec_common_attn_metadata, token_indices, token_indices_to_sample
+        return spec_common_attn_metadata, token_indices, token_indices_to_sample, \
+              num_rejected_tokens_gpu, num_rejected_tokens_calc_event
 
     def propose_tree(
         self,
