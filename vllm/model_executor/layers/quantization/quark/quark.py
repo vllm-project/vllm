@@ -385,8 +385,7 @@ class QuarkLinearMethod(LinearMethodBase):
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None,
-              x_quant_scales: Optional[torch.Tensor] = None):
+              bias: Optional[torch.Tensor] = None):
         """
         Use the output of create_weights and the CompressedTensorsScheme
         associated with the layer to apply the forward pass with the
