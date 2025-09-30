@@ -12,7 +12,7 @@ TRL currently supports the following online trainers with vLLM:
 - [Online DPO](https://huggingface.co/docs/trl/main/en/online_dpo_trainer)
 - [RLOO](https://huggingface.co/docs/trl/main/en/rloo_trainer)
 - [Nash-MD](https://huggingface.co/docs/trl/main/en/nash_md_trainer)
-- [XPOTrainer](https://huggingface.co/docs/trl/main/en/xpo_trainer)
+- [XPO](https://huggingface.co/docs/trl/main/en/xpo_trainer)
 
 To enable vLLM in TRL, set the `use_vllm` flag in the trainer configuration to `True`. You can control how vLLM operates during training with the `vllm_mode` parameter, which supports two modes:
 
