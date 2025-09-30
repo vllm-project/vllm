@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import math
 from collections.abc import Generator
 from typing import get_args
 
@@ -508,3 +509,84 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
     if logprobs_mode in ("raw_logits", "processed_logits"):
         assert positive_values > 0
     del llm
+
+
+@pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
+@pytest.mark.parametrize(
+    "model_setup",
+    [
+        (
+            "eagle",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+        )
+    ],
+)
+def test_spec_decode_logprobs(
+    logprobs_mode: LogprobsMode,
+    model_setup: tuple[str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Spec decode logprobs should match those of the base model.
+
+    Args:
+        logprobs_mode: logprobs mode.
+        model_setup: Spec decode method, base model name, and
+        draft model name.
+    """
+    from vllm import LLM
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        prompt = "Hello world"
+        sampling_params = SamplingParams(
+            temperature=0, logprobs=3, max_tokens=10, ignore_eos=False
+        )
+        method, model_name, spec_model_name = model_setup
+
+        # Run base LLM.
+        ref_llm = LLM(
+            model=model_name,
+            max_logprobs=5,
+            max_model_len=2048,
+            seed=42,
+            logprobs_mode=logprobs_mode,
+        )
+        ref_results = ref_llm.generate([prompt], sampling_params)
+        del ref_llm
+
+        # Run spec decode LLM.
+        spec_llm = LLM(
+            model_name,
+            speculative_config={
+                "method": method,
+                "model": spec_model_name,
+                "num_speculative_tokens": 3,
+                "max_model_len": 2048,
+            },
+            max_logprobs=5,
+            max_model_len=2048,
+            seed=42,
+            logprobs_mode=logprobs_mode,
+        )
+        spec_results = spec_llm.generate([prompt], sampling_params)
+        del spec_llm
+
+        # Collect logprobs outputs from reference and spec decode LLMs.
+        ref_logprobs = []
+        for output in ref_results[0].outputs:
+            for logprobs in output.logprobs:
+                for token_id in logprobs:
+                    ref_logprobs.append(logprobs[token_id])
+        spec_logprobs = []
+        for output in spec_results[0].outputs:
+            for logprobs in output.logprobs:
+                for token_id in logprobs:
+                    spec_logprobs.append(logprobs[token_id])
+
+        # Per-token logprobs are expected to be the same.
+        assert len(ref_logprobs) == len(spec_logprobs)
+        for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
+            assert math.isclose(ref_logprob.logprob, spec_logprob.logprob, abs_tol=1e-3)
+            assert ref_logprob.rank == spec_logprob.rank
+            assert ref_logprob.decoded_token == spec_logprob.decoded_token
