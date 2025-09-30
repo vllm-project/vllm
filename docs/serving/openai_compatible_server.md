@@ -236,10 +236,32 @@ The following extra parameters are supported:
 Our Embeddings API is compatible with [OpenAI's Embeddings API](https://platform.openai.com/docs/api-reference/embeddings);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-If the model has a [chat template][chat-template], you can replace `inputs` with a list of `messages` (same schema as [Chat API][chat-api])
-which will be treated as a single prompt to the model.
-
 Code example: <gh-file:examples/online_serving/pooling/openai_embedding_client.py>
+
+If the model has a [chat template][chat-template], you can replace `inputs` with a list of `messages` (same schema as [Chat API][chat-api])
+which will be treated as a single prompt to the model. Here is a convenience function for calling the API while retaining OpenAI's type annotations:
+
+??? code
+
+    ```python
+    from openai import OpenAI
+    from openai._types import NOT_GIVEN, NotGiven
+    from openai.types.chat import ChatCompletionMessageParam
+    from openai.types.create_embedding_response import CreateEmbeddingResponse
+
+    def create_chat_embeddings(
+        client: OpenAI,
+        *,
+        messages: list[ChatCompletionMessageParam],
+        model: str,
+        encoding_format: Union[Literal["base64", "float"], NotGiven] = NOT_GIVEN,
+    ) -> CreateEmbeddingResponse:
+        return client.post(
+            "/embeddings",
+            cast_to=CreateEmbeddingResponse,
+            body={"messages": messages, "model": model, "encoding_format": encoding_format},
+        )
+    ```
 
 #### Multi-modal inputs
 
@@ -254,7 +276,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
     vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
       --trust-remote-code \
       --max-model-len 4096 \
-      --chat-template examples/template_vlm2vec.jinja
+      --chat-template examples/template_vlm2vec_phi3v.jinja
     ```
 
     !!! important
@@ -262,34 +284,36 @@ and passing a list of `messages` in the request. Refer to the examples below for
         to run this model in embedding mode instead of text generation mode.
 
         The custom chat template is completely different from the original one for this model,
-        and can be found here: <gh-file:examples/template_vlm2vec.jinja>
+        and can be found here: <gh-file:examples/template_vlm2vec_phi3v.jinja>
 
     Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
 
     ??? code
 
         ```python
-        import requests
-
+        from openai import OpenAI
+        client = OpenAI(
+            base_url="http://localhost:8000/v1",
+            api_key="EMPTY",
+        )
         image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
-        response = requests.post(
-            "http://localhost:8000/v1/embeddings",
-            json={
-                "model": "TIGER-Lab/VLM2Vec-Full",
-                "messages": [{
+        response = create_chat_embeddings(
+            client,
+            model="TIGER-Lab/VLM2Vec-Full",
+            messages=[
+                {
                     "role": "user",
                     "content": [
                         {"type": "image_url", "image_url": {"url": image_url}},
                         {"type": "text", "text": "Represent the given image."},
                     ],
-                }],
-                "encoding_format": "float",
-            },
+                }
+            ],
+            encoding_format="float",
         )
-        response.raise_for_status()
-        response_json = response.json()
-        print("Embedding output:", response_json["data"][0]["embedding"])
+
+        print("Image embedding output:", response.data[0].embedding)
         ```
 
 === "DSE-Qwen2-MRL"
