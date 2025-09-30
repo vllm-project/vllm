@@ -14,18 +14,41 @@ TRL currently supports the following online trainers with vLLM:
 - [Nash-MD](https://huggingface.co/docs/trl/main/en/nash_md_trainer)
 - [XPO](https://huggingface.co/docs/trl/main/en/xpo_trainer)
 
-To enable vLLM in TRL, set the `use_vllm` flag in the trainer configuration to `True`. You can control how vLLM operates during training with the `vllm_mode` parameter, which supports two modes:
+To enable vLLM in TRL, set the `use_vllm` flag in the trainer configuration to `True`.
 
-1. **Server mode**
-2. **Colocate mode**
+## Modes of Using vLLM During Training
+
+TRL supports **two modes** for integrating vLLM during training: **server mode** and **colocate mode**. You can control how vLLM operates during training with the `vllm_mode` parameter.
+
+### Server mode
+
+Example configuration:
+
+```python
+from trl import GRPOConfig
+
+training_args = GRPOConfig(
+    ...,
+    use_vllm=True,
+    vllm_mode="server",  # default value, can be omitted
+)
+```
+
+### Colocate mode
+
+Example configuration:
+
+```python
+from trl import GRPOConfig
+
+training_args = GRPOConfig(
+    ...,
+    use_vllm=True,
+    vllm_mode="colocate",
+)
+```
 
 Some trainers also support **vLLM sleep mode**, which offloads parameters and caches to GPU RAM during training, helping reduce memory usage. Learn more in the [memory optimization docs](https://huggingface.co/docs/trl/main/en/reducing_memory_usage#vllm-sleep-mode).
 
-
 !!! info
-    For more information on the `use_vllm` flag you can provide to the configs of these online methods, see:
-
-    - [`trl.GRPOConfig.use_vllm`](https://huggingface.co/docs/trl/main/en/grpo_trainer#trl.GRPOConfig.use_vllm)
-    - [`trl.OnlineDPOConfig.use_vllm`](https://huggingface.co/docs/trl/main/en/online_dpo_trainer#trl.OnlineDPOConfig.use_vllm)
-    - [`trl.RLOOConfig.use_vllm`](https://huggingface.co/docs/trl/main/en/rloo_trainer#trl.RLOOConfig.use_vllm)
-
+    For detailed configuration options and flags, refer to the documentation of the specific trainer you are using.
