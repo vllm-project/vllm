@@ -20,14 +20,15 @@ _SAMPLING_EPS = 1e-5
 class InputBatch:
 
     def __init__(
-            self,
-            max_num_reqs: int,
-            max_model_len: int,
-            max_num_batched_tokens: int,
-            device: torch.device,
-            pin_memory: bool,
-            vocab_size: int,
-            block_sizes: list[int],  # The block_size of each kv cache group
+        self,
+        max_num_reqs: int,
+        max_model_len: int,
+        max_num_batched_tokens: int,
+        device: torch.device,
+        pin_memory: bool,
+        vocab_size: int,
+        block_sizes: list[int],  # The block_size of each kv cache group
+        kernel_block_sizes: list[int],
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -70,6 +71,7 @@ class InputBatch:
             pin_memory=pin_memory,
             device=device,
             block_sizes=block_sizes,
+            kernel_block_sizes=kernel_block_sizes,
         )
 
         # Sampling-related.

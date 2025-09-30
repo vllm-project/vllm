@@ -62,6 +62,9 @@ def initialize_kv_cache(runner: GPUModelRunner):
         block_sizes=[
             kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
         ],
+        kernel_block_sizes=[
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+        ],
     )
     runner.initialize_attn_backend(kv_cache_config)
 
@@ -838,3 +841,152 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
                                conv_blocks_constant)
             assert torch.equal(vllm_ctx[layer].kv_cache[0][1][blocks1, :],
                                ssm_blocks_constant)
+
+
+def test_hybrid_block_table_initialization():
+    """Test hybrid block table with different kernel and kvcache_manager block
+    sizes."""
+    from vllm.v1.worker.block_table import BlockTable
+
+    # Test configuration: kvcache_manager block size = 32,
+    # kernel block size = 16
+    block_size = 32
+    kernel_block_sizes = [16]
+    max_num_reqs = 10
+    max_num_blocks_per_req = 20
+    max_num_batched_tokens = 512
+
+    block_table = BlockTable(block_size=block_size,
+                             max_num_reqs=max_num_reqs,
+                             max_num_blocks_per_req=max_num_blocks_per_req,
+                             max_num_batched_tokens=max_num_batched_tokens,
+                             pin_memory=False,
+                             device=torch.device(DEVICE),
+                             kernel_block_size=kernel_block_sizes[0])
+
+    # Verify hybrid block configuration
+    assert block_table.use_hybrid_blocks is True
+    assert block_table.block_size == kernel_block_sizes[0]
+    assert block_table.blocks_per_phys_block == (
+        block_size // kernel_block_sizes[0])  # Changed to use first element
+
+    # Test block table conversion logic
+    # One kvcache_manager block should map to multiple kernel blocks
+    kvcache_manager_blocks = [0, 1, 2]
+
+    # Verify that kvcache_manager blocks can be converted to kernel blocks
+    # and that block table operations work correctly.
+    req_index = 0
+    block_table.append_row(kvcache_manager_blocks, req_index)
+    # Get expected kernel blocks from the implementation for verification.
+    expected_kernel_blocks = block_table._map_to_kernel_blocks(
+        np.array(kvcache_manager_blocks))
+    # Verify block table state
+    assert block_table.num_blocks_per_row[req_index] == len(
+        expected_kernel_blocks)
+    assert np.array_equal(
+        block_table.block_table.np[req_index, :len(expected_kernel_blocks)],
+        expected_kernel_blocks)
+
+
+def test_input_batch_with_kernel_block_sizes():
+    """Test InputBatch initialization with kernel_block_sizes parameter."""
+    max_num_reqs = 10
+    max_model_len = 512
+    max_num_batched_tokens = 512
+    device = torch.device(DEVICE)
+    pin_memory = False
+    vocab_size = 50272
+
+    # Test with different kernel block sizes
+    block_sizes = [32, 64]
+    kernel_block_sizes = [16, 32]
+
+    input_batch = InputBatch(max_num_reqs=max_num_reqs,
+                             max_model_len=max_model_len,
+                             max_num_batched_tokens=max_num_batched_tokens,
+                             device=device,
+                             pin_memory=pin_memory,
+                             vocab_size=vocab_size,
+                             block_sizes=block_sizes,
+                             kernel_block_sizes=kernel_block_sizes)
+
+    # Verify that block tables were created with kernel block sizes
+    assert len(input_batch.block_table.block_tables) == len(block_sizes)
+
+    for i, (phys_size,
+            kernel_size) in enumerate(zip(block_sizes, kernel_block_sizes)):
+        block_table = input_batch.block_table.block_tables[i]
+        if phys_size != kernel_size:
+            assert block_table.use_hybrid_blocks is True
+            assert block_table.block_size == kernel_size
+        else:
+            assert block_table.use_hybrid_blocks is False
+            assert block_table.block_size == kernel_size
+
+
+def test_hybrid_cache_integration(model_runner, dist_init):
+    """Test hybrid cache architecture integration with GPUModelRunner."""
+    # Create a new model runner with hybrid cache configuration
+    vllm_config = get_vllm_config()
+
+    # Configure hybrid cache with different kvcache_manager block size
+    vllm_config.cache_config.block_size = 32
+
+    model_config = vllm_config.model_config
+    num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+    head_size = model_config.get_head_size()
+    vllm_config.compilation_config.static_forward_context[
+        "layer.0"] = Attention(num_heads, head_size, 0.1)
+
+    runner = GPUModelRunner(vllm_config, DEVICE)
+
+    # Initialize KV cache with configuration
+    attn_spec = FullAttentionSpec(
+        block_size=16,  # Use kernel block size directly
+        num_kv_heads=runner.model_config.get_num_kv_heads(
+            runner.parallel_config),
+        head_size=runner.model_config.get_head_size(),
+        dtype=runner.kv_cache_dtype,
+        use_mla=False,
+    )
+    tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
+        ],
+    )
+    runner.kv_cache_config = kv_cache_config
+
+    # Initialize input batch with kernel block sizes
+    runner.input_batch = InputBatch(
+        max_num_reqs=runner.max_num_reqs,
+        max_model_len=runner.max_model_len,
+        max_num_batched_tokens=runner.max_num_tokens,
+        device=runner.device,
+        pin_memory=runner.pin_memory,
+        vocab_size=runner.model_config.get_vocab_size(),
+        block_sizes=[
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+        ],
+        kernel_block_sizes=[16])  # Use kernel block size
+
+    runner.initialize_attn_backend(kv_cache_config)
+
+    # Verify hybrid block table configuration
+    block_table = runner.input_batch.block_table.block_tables[0]
+    assert block_table.block_size == (
+        kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size)
+
+    # Test request processing with hybrid blocks
+    req_id = "hybrid_req_0"
+    scheduler_output = _schedule_new_request(req_id)
+
+    # Update states should work with hybrid blocks
+    runner._update_states(scheduler_output)
+    assert _is_req_scheduled(runner, req_id)
+    assert _is_req_state_block_table_match(runner, req_id)
