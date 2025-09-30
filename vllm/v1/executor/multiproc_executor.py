@@ -31,8 +31,6 @@ from vllm.distributed.device_communicators.shm_broadcast import (Handle,
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_pp_group, get_tp_group,
                                              get_cp_group)
-from vllm.executor.multiproc_worker_utils import (
-    set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
