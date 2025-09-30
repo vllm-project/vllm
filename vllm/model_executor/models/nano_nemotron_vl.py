@@ -917,8 +917,6 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
         self.vision_model = self.get_vit_model_from_radio_config(config).to(
             self.language_model.config.torch_dtype)
 
-        self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-
         # Construct the vision projection.
         vit_hidden_size = config.vit_hidden_size
         vision_projection_hidden_size = config.projector_hidden_size
@@ -943,6 +941,7 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
         self.img_context_token_id = None
         self.video_context_token_id = None
         self.config = config
+        self.model_config = vllm_config.model_config
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
@@ -1105,7 +1104,8 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
         # Generate video replacement text and convert to token IDs
         video_repl_text = NanoNemotronVLProcessor.get_video_repl(
             feature_size, num_patches, IMG_CONTEXT).full
-        repl_token_ids = torch.tensor(_seq2tokens(self.tokenizer,
+        tokenizer = cached_tokenizer_from_config(self.model_config)
+        repl_token_ids = torch.tensor(_seq2tokens(tokenizer,
                                                   video_repl_text),
                                       device=device)
 
