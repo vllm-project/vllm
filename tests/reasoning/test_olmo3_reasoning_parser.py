@@ -20,8 +20,8 @@ NO_REASONING = {
 
 NO_REASONING_WITH_NEWLINE = {
     "output": f"{START_REASONING}\n{END_REASONING}\n\nNo thoughts, head empty!",
-    "reasoning_content": None,
-    "content": "No thoughts, head empty!",
+    "reasoning_content": "\n",
+    "content": "\n\nNo thoughts, head empty!",
 }
 
 SIMPLE_REASONING = {
@@ -31,15 +31,15 @@ SIMPLE_REASONING = {
 }
 
 SIMPLE_REASONING_WITH_NEWLINE = {
-    "output": f"{START_REASONING}\n Look!\n\nI'm thinking...{END_REASONING}\nThis is the rest",  # noqa: E501
+    "output": f"{START_REASONING} Look!\n\nI'm thinking...{END_REASONING}\nThis is the rest",  # noqa: E501
     "reasoning_content": " Look!\n\nI'm thinking...",
-    "content": "This is the rest",
+    "content": "\nThis is the rest",
 }
 
 SIMPLE_REASONING_WITH_MULTIPLE_NEWLINES = {
     "output": f"{START_REASONING}\nLook!\nI'm thinking...\n\n{END_REASONING}\n\n\nThis is the rest",  # noqa: E501
-    "reasoning_content": "\nLook!\nI'm thinking...\b",
-    "content": "This is the rest",
+    "reasoning_content": "\nLook!\nI'm thinking...\n\n",
+    "content": "\n\n\nThis is the rest",
 }
 
 
