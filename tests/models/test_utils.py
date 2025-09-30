@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
 from vllm.model_executor.models.utils import AutoWeightsLoader
+
+pytestmark = pytest.mark.cpu_test
 
 
 class ModuleWithBatchNorm(torch.nn.Module):

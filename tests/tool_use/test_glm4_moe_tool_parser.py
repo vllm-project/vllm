@@ -10,6 +10,8 @@ from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
 from vllm.entrypoints.openai.tool_parsers import Glm4MoeModelToolParser
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+pytestmark = pytest.mark.cpu_test
+
 pytest.skip("skip glm4_moe parser test", allow_module_level=True)
 # Use a common model that is likely to be available
 MODEL = "zai-org/GLM-4.5"
