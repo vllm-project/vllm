@@ -47,16 +47,29 @@ class BatchDescriptor(NamedTuple):
         return BatchDescriptor(self.num_tokens, uniform_decode=False)
 
 
-def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
+def _compute_sp_num_tokens(num_tokens_across_dp_cpu: torch.Tensor,
+                           sequence_parallel_size: int) -> list[int]:
+    sp_tokens = ((num_tokens_across_dp_cpu + sequence_parallel_size - 1) //
+                 sequence_parallel_size)
+
+    sp_tokens = sp_tokens.repeat_interleave(sequence_parallel_size)
+    return sp_tokens.tolist()
+
+
+def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: torch.Tensor,
+                                      sequence_parallel_size: int,
                                       max_num_tokens: int,
                                       chunk_idx: int) -> list[int]:
-    dp_size = len(num_tokens_across_dp_cpu)
 
-    local_size = [-1] * dp_size
-    for i in range(dp_size):
-        dp_tokens = num_tokens_across_dp_cpu[i]
+    sp_tokens = _compute_sp_num_tokens(num_tokens_across_dp_cpu,
+                                       sequence_parallel_size)
+    sp_size = len(sp_tokens)
+
+    local_size = [-1] * sp_size
+    for i in range(sp_size):
+        # Take into account sharding if MoE activation is sequence parallel.
         local_size[i] = min(max_num_tokens,
-                            dp_tokens - (max_num_tokens * chunk_idx))
+                            sp_tokens[i] - (max_num_tokens * chunk_idx))
         if local_size[i] <= 0:
             local_size[i] = 1  # ensure lockstep even if done
     return local_size
@@ -65,33 +78,30 @@ def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
 @dataclass
 class DPMetadata:
     max_tokens_across_dp_cpu: torch.Tensor
-    cu_tokens_across_dp_cpu: torch.Tensor
+    num_tokens_across_dp_cpu: torch.Tensor
+
+    # NOTE: local_sizes should only be set by the chunked_sizes context manager
     local_sizes: Optional[list[int]] = None
 
     @staticmethod
-    def make(
-        parallel_config: ParallelConfig,
-        attn_metadata: Any,
-        num_tokens: int,
-        num_tokens_across_dp: torch.Tensor,
-    ) -> "DPMetadata":
+    def make(parallel_config: ParallelConfig, num_tokens: int,
+             num_tokens_across_dp_cpu: torch.Tensor) -> "DPMetadata":
 
-        assert num_tokens_across_dp is not None
+        assert num_tokens_across_dp_cpu is not None
         assert parallel_config.data_parallel_size > 1
         dp_rank = parallel_config.data_parallel_rank
         batchsize = num_tokens
 
         # If num_tokens_across_dp is None, it will be computed by all_reduce
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
-        assert (num_tokens_across_dp[dp_rank] == batchsize
-                ), f"{num_tokens_across_dp[dp_rank]} {batchsize}"
-        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp)
-        cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
-        return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu,
-                          num_tokens_across_dp)
+        assert (num_tokens_across_dp_cpu[dp_rank] == batchsize
+                ), f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp_cpu)
+        return DPMetadata(max_tokens_across_dp_cpu, num_tokens_across_dp_cpu)
 
     @contextmanager
-    def chunked_sizes(self, max_chunk_size_per_rank: int, chunk_idx: int):
+    def chunked_sizes(self, sequence_parallel_size: int,
+                      max_chunk_size_per_rank: int, chunk_idx: int):
         """
         Context manager to compute and temporarily set the per-rank local token
         sizes for a specific chunk during chunked forward execution.
@@ -105,31 +115,40 @@ class DPMetadata:
         `chunk_idx`, this context manager sets `self.local_sizes` to the number
         of tokens to process in that chunk on each rank.
 
-        It uses cumulative sizes (`cu_tokens_across_dp_cpu`) to derive the
-        number of tokens per rank, and calls `_compute_chunked_local_num_tokens`
-        to determine the chunk-wise split.
-
         `self.local_sizes` is only valid inside the context.
 
         Args:
+            sequence_parallel_size: When Attn is TP and MoE layers are EP,
+                                    we use SP between the layers to avoid
+                                    redundant ops. We need this value to
+                                    compute the chunked sizes.
             max_chunk_size_per_rank: The max number of tokens each rank is 
                                      allowed to process in this chunk.
             chunk_idx: The index of the chunk to compute sizes for.
         """
-        cu_sizes = self.cu_tokens_across_dp_cpu
-        num_tokens_across_dp_cpu = [
-            (cu_sizes[i] -
-             cu_sizes[i - 1]).item() if i > 0 else cu_sizes[0].item()
-            for i in range(len(cu_sizes))
-        ]
         self.local_sizes = _compute_chunked_local_num_tokens(
-            num_tokens_across_dp_cpu, max_chunk_size_per_rank, chunk_idx)
+            self.num_tokens_across_dp_cpu, sequence_parallel_size,
+            max_chunk_size_per_rank, chunk_idx)
+        try:
+            yield self.local_sizes
+        finally:
+            self.local_sizes = None
+
+    @contextmanager
+    def sp_local_sizes(self, sequence_parallel_size: int):
+        """
+        Context mamager for setting self.local_sizes. Same as self.chunked_sizes
+        but without any chunking.
+        """
+        self.local_sizes = _compute_sp_num_tokens(
+            self.num_tokens_across_dp_cpu, sequence_parallel_size)
         try:
             yield self.local_sizes
         finally:
             self.local_sizes = None
 
     def get_chunk_sizes_across_dp_rank(self) -> Optional[list[int]]:
+        assert self.local_sizes is not None
         return self.local_sizes
 
 
@@ -229,9 +248,9 @@ def set_forward_context(
     dp_metadata: Optional[DPMetadata] = None
     if vllm_config.parallel_config.data_parallel_size > 1 and (
             attn_metadata is not None or num_tokens is not None):
-        dp_metadata = DPMetadata.make(vllm_config.parallel_config,
-                                      attn_metadata, num_tokens or 0,
-                                      num_tokens_across_dp)
+        assert num_tokens_across_dp is not None
+        dp_metadata = DPMetadata.make(vllm_config.parallel_config, num_tokens
+                                      or 0, num_tokens_across_dp)
 
     forward_context = create_forward_context(attn_metadata, vllm_config,
                                              virtual_engine, dp_metadata,

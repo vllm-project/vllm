@@ -251,46 +251,48 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            # Schedule newly needed KV blocks for the request.
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
-                if new_blocks is None:
-                    # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
-                        self.running.remove(preempted_req)
-                        if preempted_req in scheduled_running_reqs:
-                            scheduled_running_reqs.remove(preempted_req)
-                    else:
-                        preempted_req = self.running.pop()
 
-                    self.kv_cache_manager.free(preempted_req)
-                    self.encoder_cache_manager.free(preempted_req)
-                    preempted_req.status = RequestStatus.PREEMPTED
-                    preempted_req.num_computed_tokens = 0
-                    if self.log_stats:
-                        preempted_req.record_event(
-                            EngineCoreEventType.PREEMPTED, scheduled_timestamp)
-
-                    self.waiting.prepend_request(preempted_req)
-                    preempted_reqs.append(preempted_req)
-                    if preempted_req == request:
-                        # No more request to preempt.
-                        can_schedule = False
-                        break
-                else:
+                if new_blocks is not None:
                     # The request can be scheduled.
-                    can_schedule = True
                     break
-            if not can_schedule:
+
+                # The request cannot be scheduled.
+                # Preempt the lowest-priority request.
+                if self.policy == SchedulingPolicy.PRIORITY:
+                    preempted_req = max(
+                        self.running,
+                        key=lambda r: (r.priority, r.arrival_time),
+                    )
+                    self.running.remove(preempted_req)
+                    if preempted_req in scheduled_running_reqs:
+                        scheduled_running_reqs.remove(preempted_req)
+                else:
+                    preempted_req = self.running.pop()
+
+                self.kv_cache_manager.free(preempted_req)
+                self.encoder_cache_manager.free(preempted_req)
+                preempted_req.status = RequestStatus.PREEMPTED
+                preempted_req.num_computed_tokens = 0
+                preempted_req.num_preemptions += 1
+                if self.log_stats:
+                    preempted_req.record_event(EngineCoreEventType.PREEMPTED,
+                                               scheduled_timestamp)
+
+                self.waiting.prepend_request(preempted_req)
+                preempted_reqs.append(preempted_req)
+                if preempted_req == request:
+                    # No more request to preempt. Cannot schedule this request.
+                    break
+
+            if new_blocks is None:
+                # Cannot schedule this request.
                 break
-            assert new_blocks is not None
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -1288,4 +1290,9 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (kv_connector_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
+            if req_id not in self.requests:
+                logger.warning(
+                    "Got finished sending KV transfer for request %s,"
+                    "but the request is already freed.", req_id)
+            else:
+                self._free_blocks(self.requests[req_id])
