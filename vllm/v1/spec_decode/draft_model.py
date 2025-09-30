@@ -9,8 +9,9 @@ from vllm.attention.layer import Attention
 from vllm.config import ModelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.attention.backends.utils import (append_new_toks,
-                                              extend_all_queries_by_1)
+from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
+                                              extend_all_queries_by_1,
+                                              extend_flat_seqs)
 from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
 
 
@@ -31,38 +32,32 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self._raise_if_mrope()
 
     def update_propose_kwargs(self, propose_kwargs: dict):
-        common_attn_metadata = propose_kwargs["common_attn_metadata"]
+        cad: CommonAttentionMetadata = propose_kwargs["common_attn_metadata"]
         target_token_ids = propose_kwargs["target_token_ids"]
         next_token_ids = propose_kwargs["next_token_ids"]
         target_positions = propose_kwargs["target_positions"]
-        token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
+        token_indices_to_sample = cad.last_token_indices()
 
         # update target_token_ids
-        start_locs = torch.zeros(token_indices_to_sample.shape[0] + 1,
-                                 device=token_indices_to_sample.device,
-                                 dtype=torch.int32)
-        start_locs[1:] = token_indices_to_sample + 1
-        new_target_token_ids, _ = append_new_toks(toks=target_token_ids,
-                                                  start_locs=start_locs,
-                                                  new_toks=next_token_ids)
+        end_locs = cad.last_token_indices()
+        new_target_token_ids = extend_flat_seqs(seqs=target_token_ids,
+                                                end_locs=end_locs,
+                                                new_vals=next_token_ids)
         # update positions
         positions_to_append = target_positions[token_indices_to_sample] + 1
-        new_target_positions, _ = append_new_toks(toks=target_positions,
-                                                  start_locs=start_locs,
-                                                  new_toks=positions_to_append)
-        # update common_attn_metadata
-        new_common_attn_metadata = extend_all_queries_by_1(
-            common_attn_metadata, arange=self.arange)
-        # update token_indices_to_sample
-        new_token_indices_to_sample = new_common_attn_metadata.query_start_loc[
-            1:] - 1
+        new_target_positions = extend_flat_seqs(seqs=target_positions,
+                                                end_locs=end_locs,
+                                                new_vals=positions_to_append)
+
+        new_cad: CommonAttentionMetadata = extend_all_queries_by_1(
+            cad, arange=self.arange)
 
         new_propose_kwargs = dict(
             target_token_ids=new_target_token_ids,
             target_positions=new_target_positions,
             next_token_ids=None,
-            last_token_indices=new_token_indices_to_sample,
-            common_attn_metadata=new_common_attn_metadata,
+            last_token_indices=None,
+            common_attn_metadata=new_cad,
         )
         return propose_kwargs | new_propose_kwargs
 

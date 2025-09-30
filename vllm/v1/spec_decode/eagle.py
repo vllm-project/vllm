@@ -192,7 +192,7 @@ class SpecDecodeBaseProposer:
         batch_size = common_attn_metadata.batch_size()
 
         if last_token_indices is None:
-            last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+            last_token_indices = common_attn_metadata.last_token_indices()
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
