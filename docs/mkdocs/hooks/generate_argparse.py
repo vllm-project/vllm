@@ -168,5 +168,5 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         doc_path = ARGPARSE_DOC_DIR / f"{stem}.md"
         # Specify encoding for building on Windows
         with open(doc_path, "w", encoding="utf-8") as f:
-            f.write(parser.format_help())
+            f.write(super(type(parser), parser).format_help())
         logger.info("Argparse generated: %s", doc_path.relative_to(ROOT_DIR))

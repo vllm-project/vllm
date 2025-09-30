@@ -28,11 +28,12 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        vllm_config: VllmConfig,
         disable_input_layernorm: bool,
         prefix: str = "",
+        config: Optional[LlamaConfig] = None,
     ) -> None:
-        super().__init__(config, prefix=prefix)
+        super().__init__(vllm_config, prefix=prefix, config=config)
 
         # Skip the input_layernorm
         # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427
@@ -64,14 +65,18 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
-                self.config,
+                vllm_config,
                 i == 0,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                config=self.config,
             ) for i in range(self.config.num_hidden_layers)
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
                                   self.config.hidden_size,
                                   bias=False)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -148,6 +153,9 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 scale=logit_scale)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
