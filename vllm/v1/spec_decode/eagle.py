@@ -47,8 +47,6 @@ class SpecDecodeBaseProposer:
         device: torch.device,
         pass_hidden_states_to_model: bool,
         pass_cudagraph_args_to_forward_ctx: bool,
-        one_extra_forward_pass: bool,
-        drop_first_drafted_tokens: bool,
         runner=None,
     ):
         self.vllm_config = vllm_config
@@ -58,7 +56,6 @@ class SpecDecodeBaseProposer:
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.pass_cudagraph_args_to_forward_ctx \
             = pass_cudagraph_args_to_forward_ctx
-        self.drop_first_drafted_tokens = drop_first_drafted_tokens
 
         self.runner = runner
         self.dtype = vllm_config.model_config.dtype
@@ -66,9 +63,6 @@ class SpecDecodeBaseProposer:
         self.block_size = vllm_config.cache_config.block_size
         self.num_speculative_tokens = (
             self.speculative_config.num_speculative_tokens)
-        self.num_forward_passes = self.num_speculative_tokens
-        if one_extra_forward_pass:
-            self.num_forward_passes += 1
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
         self.token_arange_np = np.arange(self.max_num_tokens)
@@ -285,7 +279,7 @@ class SpecDecodeBaseProposer:
         logits = self.model.compute_logits(sample_hidden_states)
 
         # Early exit if there is only one draft token to be generated.
-        if self.num_forward_passes == 1:
+        if self.num_speculative_tokens == 1:
             draft_token_ids = logits.argmax(dim=-1)
             return draft_token_ids.view(-1, 1)
 
@@ -323,10 +317,7 @@ class SpecDecodeBaseProposer:
                 f"{self.allowed_attn_types}")
 
         # Generate the remaining draft tokens.
-        if self.drop_first_drafted_tokens:
-            draft_token_ids_list = [next_token_ids]
-        else:
-            draft_token_ids_list = [draft_token_ids]
+        draft_token_ids_list = [draft_token_ids]
 
         if self.use_cuda_graph and \
                 batch_size <= self.cudagraph_batch_sizes[-1]:
@@ -339,7 +330,7 @@ class SpecDecodeBaseProposer:
         common_attn_metadata.query_start_loc = self.arange[:batch_size + 1]
         common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
             self.token_arange_np[:batch_size + 1]).clone()
-        for token_index in range(self.num_forward_passes - 1):
+        for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -459,9 +450,6 @@ class SpecDecodeBaseProposer:
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
-
-        if self.drop_first_drafted_tokens:
-            draft_token_ids_list = draft_token_ids_list[1:]
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
@@ -1094,8 +1082,6 @@ class EagleProposer(SpecDecodeBaseProposer):
                          device,
                          pass_hidden_states_to_model=True,
                          pass_cudagraph_args_to_forward_ctx=False,
-                         one_extra_forward_pass=False,
-                         drop_first_drafted_tokens=False,
                          runner=runner)
 
 

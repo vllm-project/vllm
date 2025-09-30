@@ -21,19 +21,11 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         device: torch.device,
         runner=None,
     ):
-        super().__init__(
-            vllm_config=vllm_config,
-            device=device,
-            pass_hidden_states_to_model=False,
-            pass_cudagraph_args_to_forward_ctx=False,
-            # The draft model runs one forward pass to prefill
-            # the target_token_ids, and another forward pass for decoding
-            # based on the next_token_ids. I.e. it needs 1 more forward pass.
-            one_extra_forward_pass=False,
-            # the first draft_token_ids are replaced by next_token_ids, so
-            # they don't need to be returned as proposed tokens
-            drop_first_drafted_tokens=False,
-            runner=runner)
+        super().__init__(vllm_config=vllm_config,
+                         device=device,
+                         pass_hidden_states_to_model=False,
+                         pass_cudagraph_args_to_forward_ctx=False,
+                         runner=runner)
         self._raise_if_multimodal()
         self._raise_if_mrope()
 
