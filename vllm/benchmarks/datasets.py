@@ -2311,9 +2311,6 @@ class MTBenchDataset(HuggingFaceDataset):
                     tokenize=False,
                 )
 
-            # REMOVE
-            print(f"Prompt {i}: {prompt}\n---")
-
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(
