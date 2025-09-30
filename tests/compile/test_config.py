@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
+import torch
 
 import vllm
 from vllm.compilation.counter import compilation_counter
@@ -144,13 +145,7 @@ def test_splitting_ops_dynamic():
     assert not config.compilation_config.splitting_ops_contain_attention()
 
     # When use_inductor_graph_partition=True
-    try:
-        import torch  # type: ignore
-        torch_version = torch.__version__
-    except Exception:  # pragma: no cover - torch may be absent in minimal envs
-        torch = None
-        torch_version = '0.0.0'
-
+    torch_version = torch.__version__
     if _is_torch_equal_or_newer(torch_version, '2.9.0.dev'):
         # inductor graph partition is only available in PyTorch 2.9+.
         # this is a fast config check so we are not using pytest.skip.
@@ -208,6 +203,7 @@ def test_splitting_ops_dynamic():
 
 def test_resolve_operator_overload():
     import torch
+
     from vllm.config.compilation import _resolve_operator_overload
 
     assert (_resolve_operator_overload("aten.mm.default") 

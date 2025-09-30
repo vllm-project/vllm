@@ -7,7 +7,7 @@ import os
 import pprint
 import time
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, Callable, Optional
 
 import torch
@@ -16,6 +16,7 @@ from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.compilation import _inductor_partition_rule_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -179,9 +180,23 @@ class CompilerManager:
         else:
             maybe_key = \
                 f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
-        compiled_graph, handle = self.compiler.compile(
-            graph, example_inputs, additional_inductor_config, runtime_shape,
-            maybe_key)
+        ops = self.compilation_config.splitting_ops
+        if self.compilation_config.use_inductor_graph_partition:
+            if ops is None:
+                ops = list(self.compilation_config._attention_ops)
+                self.compilation_config.splitting_ops = ops
+            context = _inductor_partition_rule_context(ops)
+        else:
+            context = nullcontext()
+
+        with context:
+            compiled_graph, handle = self.compiler.compile(
+                graph,
+                example_inputs,
+                additional_inductor_config,
+                runtime_shape,
+                maybe_key,
+            )
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
@@ -648,3 +663,5 @@ class VllmBackend:
             return self.split_gm(*list_args)
 
         return copy_and_call
+
+

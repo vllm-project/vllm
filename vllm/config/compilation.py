@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import enum
 import hashlib
 from collections import Counter
@@ -635,10 +636,9 @@ class CompilationConfig:
         if self.splitting_ops is None:
             self.splitting_ops = list(self._attention_ops)
         logger.debug(
-            "Setting up inductor graph partition with splitting_ops: %s",
+            "Using splitting_ops for inductor graph partition: %s",
             self.splitting_ops,
         )
-        _register_inductor_partition_rules(self.splitting_ops)
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion
@@ -727,8 +727,8 @@ def _parse_operator_name(op_name: str) -> tuple[str, str, str]:
         parts = op_name.split(".")
         if len(parts) < 2:
             raise ValueError(
-                f"Operator name '{op_name}' must include a namespace "
-                f"and operator", )
+                f"Operator name '{op_name}' must include a namespace and "
+                "operator", )
         namespace, remainder = parts[0], ".".join(parts[1:])
     if not remainder:
         raise ValueError(
@@ -775,8 +775,10 @@ def _resolve_operator_overload(op_name: str):
     raise ValueError(f"Unsupported operator type for '{op_name}'")
 
 
-def _register_inductor_partition_rules(op_names: list[str]) -> None:
+@contextlib.contextmanager
+def _inductor_partition_rule_context(op_names: list[str]):
     if not op_names:
+        yield
         return
 
     from torch._inductor import scheduler as inductor_scheduler  # type: ignore
@@ -788,6 +790,10 @@ def _register_inductor_partition_rules(op_names: list[str]) -> None:
                        None)
     if callable(clear_fn):
         clear_fn()
+    else:
+        logger.debug(
+            "Inductor scheduler does not expose clear_should_partition_rules; "
+            "partition rules may persist across compilations.", )
 
     def _always_partition(*_args, **_kwargs):
         return True
@@ -798,3 +804,9 @@ def _register_inductor_partition_rules(op_names: list[str]) -> None:
 
     logger.debug("Registered inductor partition rules for ops: %s",
                  unique_names)
+
+    try:
+        yield
+    finally:
+        if callable(clear_fn):
+            clear_fn()

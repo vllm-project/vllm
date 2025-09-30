@@ -75,26 +75,6 @@ class PiecewiseBackend:
                 runtime_shape=shape,
                 runnable=self.compiled_graph_for_general_shape,
             )
-        
-        # Setup dynamic partition rules if using inductor graph partition
-        if self.compilation_config.use_inductor_graph_partition:
-            self._setup_dynamic_partition_rules()
-
-    def _setup_dynamic_partition_rules(self):
-        """Setup dynamic partition rules for inductor graph partition.
-        
-        This method registers partition rules with PyTorch's inductor scheduler
-        to control graph partitioning at compilation time.
-        """
-        from vllm.config.compilation import _register_inductor_partition_rules
-        
-        splitting_ops = self.compilation_config.splitting_ops
-        if splitting_ops is None:
-            # Use default attention ops if no splitting_ops specified
-            splitting_ops = list(self.compilation_config._attention_ops)
-        
-        logger.debug("Setting up dynamic partition rules for ops: %s", splitting_ops)
-        _register_inductor_partition_rules(splitting_ops)
 
     def check_for_ending_compilation(self):
         if self.is_last_graph and not self.to_be_compiled_sizes:
