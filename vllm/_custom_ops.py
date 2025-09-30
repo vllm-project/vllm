@@ -2021,19 +2021,35 @@ def ceil_div(a, b):
     return (a + b - 1) // b
 
 
-if hasattr(torch.ops._C, "_qutlass_C"):
+if hasattr(torch.ops, "_qutlass_C"):
+    @register_fake("_qutlass_C::matmul_mxf4_bf16_tn")
+    def _fake_matmul_mxf4_bf16_tn(a: torch.Tensor, b: torch.Tensor, a_sf: torch.Tensor,
+                                  b_sf: torch.Tensor, alpha: torch.Tensor):
+        return a.new_empty(*a.shape[:-1], b.shape[0], dtype=torch.bfloat16)
 
-    @register_fake("_C::_qutlass_C::fusedQuantizeMxQuest")
+    @register_fake("_qutlass_C::matmul_ada_mxf4_bf16_tn")
+    def _fake_matmul_ada_mxf4_bf16_tn(a: torch.Tensor, b: torch.Tensor, a_sf: torch.Tensor,
+                                      b_sf: torch.Tensor, alpha: torch.Tensor):        
+        return a.new_empty(*a.shape[:-1], b.shape[0], dtype=torch.bfloat16)
+
+    @register_fake("_qutlass_C::fusedQuantizeMxQuest")
     def _fake_fused_quantize_mx_quest(a: torch.Tensor, b: torch.Tensor,
                                       xh_e2m1: torch.Tensor,
                                       xh_e8m0: torch.Tensor):
         return xh_e2m1, xh_e8m0
 
-    @register_fake("_C::_qutlass_C::fusedQuantizeMxAbsMax")
+    @register_fake("_qutlass_C::fusedQuantizeMxAbsMax")
     def _fake_fused_quantize_mx_absmax(a: torch.Tensor, b: torch.Tensor,
                                        xh_e2m1: torch.Tensor,
                                        xh_e8m0: torch.Tensor):
         return xh_e2m1, xh_e8m0
+    
+    @register_fake("_qutlass_C::fusedQuantizeNv")
+    def _fake_fused_quantize_nv(a: torch.Tensor, b: torch.Tensor,
+                                xh_e2m1: torch.Tensor,
+                                xh_e4m3: torch.Tensor,
+                                global_scale: torch.Tensor):
+        return xh_e2m1, xh_e4m3
 
 
 def fusedQuantizeMx(
