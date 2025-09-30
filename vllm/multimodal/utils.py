@@ -100,7 +100,7 @@ class MediaConnector:
             msg = "Only base64 data URLs are supported for now."
             raise NotImplementedError(msg)
 
-        return media_io.load_base64(media_type, data)
+        return media_io.load_base64(media_type, data, request_overrides)
 
     def _load_file_url(
         self,

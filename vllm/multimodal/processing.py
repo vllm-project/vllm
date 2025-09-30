@@ -1287,8 +1287,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _to_mm_items(
         self,
         mm_data: MultiModalDataDict,
-        *,
-        io_overrides: Optional[dict[str, dict[str, object]]] = None,
     ) -> MultiModalDataItems:
         """
         Normalize
@@ -1297,7 +1295,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before passing them to
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
         """
-        mm_items = self.data_parser.parse_mm_data(mm_data, io_overrides=io_overrides or {})
+        mm_items = self.data_parser.parse_mm_data(mm_data)
         for modality, items in mm_items.items():
             self.validate_num_items(modality, len(items))
 
@@ -1743,6 +1741,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         mm_uuids: Optional[MultiModalUUIDDict] = None,
+        hashed_mm_processor_kwargs: Optional[Mapping[str, object]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         (
             prompt_ids,
@@ -1755,6 +1754,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             tokenization_kwargs=tokenization_kwargs,
             enable_hf_prompt_update=True,
         )
+        if hashed_mm_processor_kwargs is None:
+            hashed_mm_processor_kwargs = hf_processor_mm_kwargs
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
@@ -1764,7 +1765,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # Use overrides if provided; fallback to data-dependent hashing.
         mm_hashes = self._hash_mm_items(mm_data_items,
-                                        hf_processor_mm_kwargs,
+                                        hashed_mm_processor_kwargs,
                                         tokenization_kwargs,
                                         mm_uuids=mm_uuids)
 
@@ -1790,12 +1791,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         mm_uuids: Optional[MultiModalUUIDDict] = None,
+        hashed_mm_processor_kwargs: Optional[Mapping[str, object]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
         """
         cache = self.cache
+        # hashed_mm_processor_mm_kwargs used for complete hashing
+        if hashed_mm_processor_kwargs is None:
+            hashed_mm_processor_kwargs = hf_processor_mm_kwargs
 
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
         if cache is None or passthrough_data:
@@ -1805,10 +1810,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
+                hashed_mm_processor_kwargs=hashed_mm_processor_kwargs,
             )
 
         mm_hashes = self._hash_mm_items(mm_data_items,
-                                        hf_processor_mm_kwargs,
+                                        hashed_mm_processor_kwargs,
                                         tokenization_kwargs,
                                         mm_uuids=mm_uuids)
 
@@ -2026,10 +2032,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        # get IO overrides pre request
-        io_overrides = self._get_io_overrides(hf_processor_mm_kwargs)
+        # split static and dynamic kwargs
+        full_mm_processor_kwargs = dict(hf_processor_mm_kwargs)
+        static_mm_processor_kwargs, dynamic_mm_processor_kwargs = {}, {}
+        for k, v in hf_processor_mm_kwargs.items():
+            if k in DYNAMIC_KEYS:
+                dynamic_mm_processor_kwargs[k] = v
+            else:
+                static_mm_processor_kwargs[k] = v
+        
         # parse mm_data to mm_items with io_overrides
-        mm_items = self._to_mm_items(mm_data, io_overrides=io_overrides)
+        mm_items = self._to_mm_items(mm_data)
 
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
@@ -2041,9 +2054,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         ) = self._cached_apply_hf_processor(
             prompt,
             mm_items,
-            hf_processor_mm_kwargs,
+            hf_processor_mm_kwargs=static_mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
+            hashed_mm_processor_mm_kwargs=full_mm_processor_kwargs,
         )
 
         # NOTE: tokenization_kwargs are not required to init processor

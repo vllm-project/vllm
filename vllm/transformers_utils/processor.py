@@ -184,7 +184,7 @@ def cached_static_processor(
     processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
     **static_kwargs: Any,
 ):
-    get_processor(
+    return get_processor(
         processor_name,
         *args,
         revision=revision,

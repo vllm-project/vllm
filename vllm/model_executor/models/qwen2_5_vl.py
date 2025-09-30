@@ -64,7 +64,6 @@ from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import DYNAMIC_KEYS
 from vllm.utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 

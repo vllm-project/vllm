@@ -489,26 +489,6 @@ class MultiModalDataParser:
 
         return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
-    def _parse_video_first_sample(self, raw, overrides):
-        items = raw if isinstance(raw, (list, tuple)) else [raw]
-        out = []
-        for item in items:
-            if isinstance(item, str) and item.startswith(("http","https","data:","file:")):
-                frames, md = self.media_connector.fetch_video(
-                    item, request_overrides=overrides)
-            elif isinstance(item, (bytes, bytearray)):
-                frames, md = VideoMediaIO(ImageMediaIO()).load_bytes(
-                    item, request_overrides=overrides)
-            else:
-                # 已是帧
-                if overrides:
-                    md = {"_requested_overrides": overrides}
-                    frames = np.asarray(item[0]) if (isinstance(item,(tuple,list)) and len(item)==2) else np.asarray(item)
-                out.append((frames, md))
-                continue
-            out.append((frames, md))
-        return self._wrap_video_items(out)
-
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {
             "audio": self._parse_audio_data,
@@ -517,12 +497,7 @@ class MultiModalDataParser:
         }
 
     def parse_mm_data(self,
-                      mm_data: MultiModalDataDict,
-                      io_overrides: Optional[dict[str, dict[str, object]]] = None
-    ) -> MultiModalDataItems:
-        """
-        io_overrides: {"video": {"fps": 2.0, ...}}
-        """
+                      mm_data: MultiModalDataDict) -> MultiModalDataItems:
         subparsers = self._get_subparsers()
 
         mm_items = MultiModalDataItems()
@@ -531,11 +506,7 @@ class MultiModalDataParser:
                 raise ValueError(f"Unsupported modality: {k}")
 
             # ignore empty embedding data
-            if k == "video" and io_overrides is not None:
-                parsed_data = subparsers[k](v, io_overrides.get("video"))
-            else:
-                parsed_data = subparsers[k](v)
-            if parsed_data is not None:
+            if (parsed_data := subparsers[k](v)) is not None:
                 mm_items[k] = parsed_data
 
         return mm_items

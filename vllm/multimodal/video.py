@@ -6,7 +6,7 @@ from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import numpy.typing as npt
