@@ -33,7 +33,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
@@ -604,16 +603,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         raise AssertionError("This line should be unreachable.")
 
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
-        # Copied from https://github.com/huggingface/transformers/blob/39c3c0a72af6fbda5614dde02ff236069bb79827/src/transformers/models/llava/modeling_llava.py#L421  # noqa
-        if strategy == "default":
-            return image_features[:, 1:]
-        elif strategy == "full":
-            return image_features
-
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
-
     def _image_pixels_to_features(
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel,
@@ -622,16 +611,10 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features: Union[torch.Tensor, tuple[torch.Tensor, ...]] = \
-            vision_tower(pixel_values)
-
-        def select_features(leaf: torch.Tensor):
-            return self._select_image_features(
-                leaf,
-                strategy=self.config.vision_feature_select_strategy,
-            )
-
-        return json_map_leaves(select_features, image_features)
+        return vision_tower(
+            pixel_values,
+            feature_select_strategy=self.config.vision_feature_select_strategy,
+        )
 
     def _process_image_pixels(
         self,

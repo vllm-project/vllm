@@ -27,7 +27,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -350,29 +349,11 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         vision_tower: SiglipVisionModel,
         pixel_values: torch.Tensor,
-        **kwargs,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
-        target_dtype: torch.dtype = \
-            vision_tower.get_input_embeddings().weight.dtype
-        image_features: Union[torch.Tensor, tuple[torch.Tensor, ...]] = \
-            vision_tower(pixel_values.to(dtype=target_dtype), **kwargs)
-
-        def select_features(leaf: torch.Tensor):
-            return self._select_image_features(
-                leaf,
-                strategy=self.config.vision_feature_select_strategy,
-            )
-
-        return json_map_leaves(select_features, image_features)
-
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
-        if strategy == "default":
-            return image_features[:, 1:]
-        elif strategy == "full":
-            return image_features
-
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
+        return vision_tower(
+            pixel_values.to(dtype=vision_tower.dtype),
+            feature_select_strategy=self.config.vision_feature_select_strategy,
+        )
 
     def _process_image_input(self, image_input: AyaVisionImagePixelInputs,
                              **kwargs) -> list[torch.Tensor]:
