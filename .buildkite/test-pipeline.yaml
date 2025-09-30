@@ -52,12 +52,9 @@ steps:
   - vllm/
   - tests/multimodal
   - tests/utils_
-  - tests/worker
-  - tests/transformers_utils
   commands:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
-  - pytest -v -s transformers_utils
 
 - label: Async Engine, Inputs, Utils, Worker Test (CPU) # 4 mins
   timeout_in_minutes: 10
@@ -65,14 +62,16 @@ steps:
   - vllm/
   - tests/test_inputs.py
   - tests/test_outputs.py
-  - tests/standalone_tests/lazy_imports.py
   - tests/multimodal
+  - tests/standalone_tests/lazy_imports.py
+  - tests/transformers_utils
   no_gpu: true
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s transformers_utils
 
 - label: Python-only Installation Test # 10min
   timeout_in_minutes: 20
