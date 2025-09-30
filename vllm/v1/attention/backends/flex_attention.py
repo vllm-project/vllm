@@ -598,12 +598,10 @@ class FlexAttentionMetadataBuilder(
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.direct_build: bool = True
-        # self.q_block_size: int = 16 if is_torch_equal_or_newer(
-        #     "2.9.0.dev0") else 128
-        # self.kv_block_size: int = 16 if is_torch_equal_or_newer(
-        #     "2.9.0.dev0") else 128
-        self.q_block_size: int = 128
-        self.kv_block_size: int = 128
+        self.q_block_size: int = 16 if is_torch_equal_or_newer(
+            "2.9.0.dev0") else 128
+        self.kv_block_size: int = 16 if is_torch_equal_or_newer(
+            "2.9.0.dev0") else 128
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -782,18 +780,13 @@ class FlexAttentionImpl(AttentionImpl):
 
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
-            # if attn_metadata.direct_build:
-            # TODO: Support skipping the computation of sliding window
-            # in direct block mask building code path.
-            logger.warning_once(
-                "Using direct block mask building with sliding window, "
-                "which is suboptimal now. Performance may be degraded.")
-            # update mask mod in attention metadata
-            attn_metadata.mask_mod = attn_metadata.get_mask_mod()
-            attn_metadata.block_mask = (
-                attn_metadata._build_block_mask_direct())
-            # else:
-            #     attn_metadata.block_mask = attn_metadata.build_block_mask()
+            if attn_metadata.direct_build:
+                # update mask mod in attention metadata
+                attn_metadata.mask_mod = attn_metadata.get_mask_mod()
+                attn_metadata.block_mask = (
+                    attn_metadata._build_block_mask_direct())
+            else:
+                attn_metadata.block_mask = attn_metadata.build_block_mask()
 
         if not attn_metadata.causal:
             assert self.attn_type == AttentionType.ENCODER_ONLY
