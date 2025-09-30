@@ -76,6 +76,7 @@ class EagleProposer:
         self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
         self.draft_indexer_metadata_builder: Optional[
             AttentionMetadataBuilder] = None
+        self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
 
         self.use_cuda_graph = (not current_platform.is_xpu()
