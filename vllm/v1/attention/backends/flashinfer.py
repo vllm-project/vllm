@@ -440,6 +440,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu
         block_table_tensor = common_attn_metadata.block_table_tensor
 
+        if self.cp_world_size > 1:
+            seq_lens_np[:num_decodes] = seq_lens_np[:num_decodes] // \
+                self.cp_world_size + (self.cp_rank < seq_lens_np[:num_decodes] \
+                                      % self.cp_world_size)
+
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
         use_cascade = common_prefix_len > 0

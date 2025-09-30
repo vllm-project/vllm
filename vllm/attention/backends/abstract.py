@@ -280,9 +280,10 @@ class AttentionImpl(ABC, Generic[T]):
             self.cp_world_size = get_cp_group().world_size
             self.cp_rank = get_cp_group().rank_in_group
         except AssertionError:
-            # PCP might not be initialized in testing
+            # CP might not be initialized in testing
             self.cp_world_size = 1
             self.cp_rank = 0
+
         self.need_to_return_lse_for_decode = self.dcp_world_size > 1 \
             and self.can_return_lse_for_decode
         return self
