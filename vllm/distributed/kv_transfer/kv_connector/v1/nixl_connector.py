@@ -59,6 +59,7 @@ try:
 except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
+    nixlXferTelemetry = None
 
 try:
     from nixl._api import nixl_agent_config
@@ -477,6 +478,9 @@ class NixlConnectorWorker:
         self.nixl_backends = \
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "backends", ["UCX"])
+        # TODO temporary, once nixl allows for telemetry flag in config
+        # (next release), we can remove this env var.
+        os.environ["NIXL_TELEMETRY_ENABLE"] = "1"
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
         if nixl_agent_config is None:
@@ -1177,9 +1181,8 @@ class NixlConnectorWorker:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     # Get telemetry from NIXL
-                    if self._enable_telemetry:
-                        res = self.nixl_wrapper.get_xfer_telemetry(handle)
-                        self.xfer_stats.record_transfer(res)
+                    res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                    self.xfer_stats.record_transfer(res)
                     self.nixl_wrapper.release_xfer_handle(handle)
                 elif xfer_state == "PROC":
                     in_progress = True
