@@ -209,7 +209,6 @@ direct_register_custom_op(
     _fp8_gemm_nt_op,
     mutates_args=["output"],
     fake_impl=_fp8_gemm_nt_op_fake,
-    dispatch_key="CUDA",
 )
 
 
