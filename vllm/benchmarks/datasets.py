@@ -735,8 +735,7 @@ class RandomMultiModalDataset(RandomDataset):
             if not video_writer.isOpened():
                 raise RuntimeError("Failed to create video writer")
             
-            for frame in range(num_frames):
-                frame = random_pixels[random_pixels]
+            for frame in random_pixels:
                 video_writer.write(frame)
             
             video_writer.release()
