@@ -1694,10 +1694,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 scale=layer._k_scale,
             )
 
-        dbo_yield(schedules=(Schedule.ATTN_SHARED_OVERLAP,))
+        dbo_yield(schedules=(Schedule.ATTN_SHARED_OVERLAP, ))
 
         if fp8_attention:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
+        if has_prefill:
+            output[num_decode_tokens:] = self._forward_prefill(
+                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
+                attn_metadata, layer._k_scale)
 
         if has_decode:
             assert attn_metadata.decode is not None

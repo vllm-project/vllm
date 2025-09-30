@@ -172,34 +172,6 @@ class DPMetadata:
         return result, padded_num_tokens_tensor.cpu()
 
     @staticmethod
-    def should_ubatch_across_dp(should_ubatch: bool, orig_num_tokens_per_ubatch: int,
-                                padded_num_tokens_per_ubatch: int, dp_size: int,
-                                dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
-
-        tensor = torch.zeros(3, dp_size, device="cuda", dtype=torch.int32)
-        tensor[0][dp_rank] = orig_num_tokens_per_ubatch
-        tensor[1][dp_rank] = padded_num_tokens_per_ubatch
-        tensor[2][dp_rank] = 1 if should_ubatch else 0
-
-
-        from vllm.distributed.parallel_state import get_dp_group
-        dist.all_reduce(tensor, group=get_dp_group().device_group)
-
-        result: bool = bool(torch.all(tensor[2]== 1).item())
-        if not result:
-            return result, None
-        
-        orig_num_tokens_tensor = tensor[0, :]
-        padded_num_tokens_tensor = tensor[1, :]
-
-        orig_min_num_tokens = orig_num_tokens_tensor.min().item()
-        padded_max_num_tokens = padded_num_tokens_tensor.max().item()
-        if padded_max_num_tokens >= 2 * orig_min_num_tokens:
-            logger.debug(f"Aborting ubatching {orig_min_num_tokens} {padded_max_num_tokens}")
-            return False, None
-        return result, padded_num_tokens_tensor
-
-    @staticmethod
     def make(
         parallel_config: ParallelConfig,
         attn_metadata: Any,
@@ -227,7 +199,6 @@ class DPMetadata:
         if num_tokens_across_dp_cpu is None:
             num_tokens_across_dp_cpu = DPMetadata.num_tokens_across_dp(
                 batchsize, dp_size, dp_rank)
-
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp_cpu)
         return DPMetadata(max_tokens_across_dp_cpu, num_tokens_across_dp_cpu)
 

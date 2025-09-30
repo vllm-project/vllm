@@ -159,12 +159,6 @@ class AttentionGroup:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
 
-    def get_metadata_builder(self, ubatch_id: Optional[int] = None) -> AttentionMetadataBuilder:
-        if ubatch_id is None:
-            return self.metadata_builders[0]
-        assert len(self.metadata_builders) > ubatch_id
-        return self.metadata_builders[ubatch_id]
-
 
 def sanity_check_mm_encoder_outputs(
     mm_embeddings: MultiModalEmbeddings,
