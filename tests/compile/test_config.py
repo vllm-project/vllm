@@ -205,3 +205,15 @@ def test_splitting_ops_dynamic():
         # is unchanged.
         assert config.compilation_config.cudagraph_mode == \
             CUDAGraphMode.PIECEWISE
+
+def test_resolve_operator_overload():
+    import torch
+    from vllm.config.compilation import _resolve_operator_overload
+
+    assert (_resolve_operator_overload("aten.mm.default") 
+            is torch.ops.aten.mm.default)
+    assert (_resolve_operator_overload("aten::addmm.default") 
+            is torch.ops.aten.addmm.default)
+
+    with pytest.raises(ValueError):
+        _resolve_operator_overload("aten.nonexistent_op")

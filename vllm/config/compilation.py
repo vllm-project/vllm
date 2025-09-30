@@ -25,7 +25,6 @@ logger = init_logger(__name__)
 
 # Track which OpOverload objects already have partition rules registered so we
 # do not re-register them on every configuration update.
-_REGISTERED_PARTITION_OVERLOADS: set[Any] = set()
 
 
 class CompilationLevel:
@@ -362,14 +361,6 @@ class CompilationConfig:
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
 
-    # User-specified splitting_ops when use_inductor_graph_partition=True
-    _user_specified_splitting_ops: list[str] = field(default_factory=list,
-                                                     init=False)
-    """User-specified splitting_ops when use_inductor_graph_partition=True"""
-
-    inductor_partition_user_ops: Optional[list[str]] = None
-    """Persistent copy of user-provided ops for inductor graph partition."""
-
     static_forward_context: dict[str, Any] = field(default_factory=dict,
                                                    init=False)
     """Per-model forward context
@@ -406,7 +397,6 @@ class CompilationConfig:
         factors.append(self.backend)
         factors.append(self.custom_ops)
         factors.append(self.splitting_ops)
-        factors.append(self.inductor_partition_user_ops)
         factors.append(self.use_inductor)
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
@@ -642,69 +632,13 @@ class CompilationConfig:
 
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition
-        use_inductor_graph_partition_msg = (
-            "When use_inductor_graph_partition=True, splitting_ops "
-            "are ignored and set to an empty list. Instead, "
-            "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
-            "used to annotate custom ops for graph partition.")
-
-        logger.info("[VLLM DEBUG] Setting up inductor graph partition...")
-        logger.info("[VLLM DEBUG] Original splitting_ops: %s",
-                    self.splitting_ops)
-
-        # If user explicitly specified splitting_ops, respect user config
-        if self.splitting_ops is not None and len(self.splitting_ops) > 0:
-            logger.info(
-                "[VLLM DEBUG] Preserving user-specified splitting_ops: %s",
-                self.splitting_ops)
-            # Store user configuration for potential future use
-            self._user_specified_splitting_ops = list(self.splitting_ops)
-            self.inductor_partition_user_ops = list(self.splitting_ops)
-            logger.warning_once(use_inductor_graph_partition_msg)
-        elif self.inductor_partition_user_ops:
-            # Restore user-provided ops captured in a previous process.
-            self._user_specified_splitting_ops = list(
-                self.inductor_partition_user_ops)
-            logger.info(
-                "[VLLM DEBUG] Restored user ops from "
-                "inductor_partition_user_ops: %s",
-                self._user_specified_splitting_ops)
-        else:
-            self._user_specified_splitting_ops = []
-            self.inductor_partition_user_ops = None
-
-        logger.info("[VLLM DEBUG] Preserved _user_specified_splitting_ops: %s",
-                    self._user_specified_splitting_ops)
-
-        # Setup dynamic partition rules if supported
-        logger.info("[VLLM DEBUG] Setting up dynamic partition rules...")
-        partition_success = self._setup_dynamic_partition_rules()
-
-        # Only clear splitting_ops if dynamic rules were successfully set up
-        # Otherwise, preserve them for traditional splitting behavior
-        if partition_success:
-            logger.info(
-                "[VLLM DEBUG] Dynamic rules active, clearing splitting_ops")
-            self.splitting_ops = []
-        else:
-            logger.info(
-                "[VLLM DEBUG] Dynamic rules failed, "
-                "preserving splitting_ops: %s", self.splitting_ops)
-            # Keep original splitting_ops + user-specified ones
-            if self._user_specified_splitting_ops:
-                # Merge user ops back into splitting_ops for traditional
-                # behavior
-                existing_ops = list(self.splitting_ops or [])
-                combined_ops: list[str] = []
-                all_ops = existing_ops + self._user_specified_splitting_ops
-                for op_name in all_ops:
-                    if op_name not in combined_ops:
-                        combined_ops.append(op_name)
-                self.splitting_ops = combined_ops
-                self.inductor_partition_user_ops = list(
-                    self._user_specified_splitting_ops)
-                logger.info("[VLLM DEBUG] Restored combined splitting_ops: %s",
-                            self.splitting_ops)
+        if self.splitting_ops is None:
+            self.splitting_ops = list(self._attention_ops)
+        logger.debug(
+            "Setting up inductor graph partition with splitting_ops: %s",
+            self.splitting_ops,
+        )
+        _register_inductor_partition_rules(self.splitting_ops)
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion
@@ -745,233 +679,6 @@ class CompilationConfig:
         return use_fx_graph_piecewise_compilation or \
             use_inductor_piecewise_compilation
 
-    def _setup_dynamic_partition_rules(self) -> bool:
-        """Setup PyTorch 2.9+ dynamic partition rules if available.
-
-        Returns:
-            bool: True if dynamic rules were successfully configured for all
-            user-specified operations, False otherwise.
-        """
-        try:
-            import torch
-            from torch._inductor.scheduler import (
-                register_should_partition_rule)
-            from torch._ops import OpOverload, OpOverloadPacket
-        except ImportError as e:
-            logger.info(
-                "[VLLM DEBUG] Dynamic partition rules not available: %s", e)
-            return False
-        except Exception as e:
-            logger.error(
-                "[VLLM DEBUG] Failed to import dynamic "
-                "partition prerequisites: %s", e)
-            return False
-
-        logger.info(
-            "[VLLM DEBUG] Attempting to set up dynamic partition rules")
-        logger.info("[VLLM DEBUG] Target ops from _attention_ops: %s",
-                    self._attention_ops)
-        logger.info("[VLLM DEBUG] Target ops from user: %s",
-                    self._user_specified_splitting_ops)
-
-        op_aliases: dict[str, str] = {
-            # Flash attention backends eventually lower to the unified
-            # attention custom op. Users historically list "flash_attention"
-            # in splitting_ops, so normalize it here.
-            "flash_attention": "vllm.unified_attention",
-            # Other vLLM attention backends ultimately dispatch through the
-            # unified attention implementation as well.
-            "vllm.mamba_mixer2": "vllm.unified_attention",
-            "vllm.mamba_mixer": "vllm.unified_attention",
-            "vllm.short_conv": "vllm.unified_attention",
-            "vllm.linear_attention": "vllm.unified_attention",
-            "vllm.plamo2_mamba_mixer": "vllm.unified_attention",
-            "vllm.gdn_attention": "vllm.unified_attention",
-        }
-
-        # Keep candidate names ordered but deduplicated
-        candidate_names: list[str] = []
-        for raw_name in list(self._attention_ops) + list(
-                self._user_specified_splitting_ops):
-            normalized_name = op_aliases.get(raw_name, raw_name)
-            if normalized_name not in candidate_names:
-                candidate_names.append(normalized_name)
-
-        # Track which user-provided names were satisfied through aliasing so we
-        # do not flag them as unresolved later on.
-        alias_resolutions: set[str] = {
-            name
-            for name in self._user_specified_splitting_ops
-            if name in op_aliases
-        }
-
-        if not candidate_names:
-            logger.info("[VLLM DEBUG] No candidate ops provided for dynamic "
-                        "partitioning")
-            return False
-
-        def _normalize_candidates(
-                op_name: str) -> list[tuple[str, str, Optional[str]]]:
-            """Expand a raw op name into possible (namespace, op, overload) 
-            tuples."""
-            normalized: list[tuple[str, str, Optional[str]]] = []
-            # Handle torch-style "ns::op" strings.
-            if "::" in op_name:
-                ns, rest = op_name.split("::", 1)
-                sub = rest.split(".")
-                normalized.append(
-                    (ns, sub[0], sub[1] if len(sub) > 1 else "default"))
-                return normalized
-
-            parts = op_name.split(".")
-            if len(parts) == 1:
-                # No namespace provided; try common namespaces.
-                for ns in ("vllm", "aten"):
-                    normalized.append((ns, parts[0], "default"))
-            elif len(parts) >= 2:
-                ns = parts[0]
-                op = parts[1]
-                overload = parts[2] if len(parts) > 2 else "default"
-                normalized.append((ns, op, overload))
-            return normalized
-
-        def _resolve_to_overload(op_name: str) -> Optional[OpOverload]:
-            for ns, op, overload in _normalize_candidates(op_name):
-                namespace_obj = getattr(torch.ops, ns, None)
-                if namespace_obj is None:
-                    continue
-                op_packet = getattr(namespace_obj, op, None)
-                if op_packet is None:
-                    continue
-                if isinstance(op_packet, OpOverload):
-                    return op_packet
-                if isinstance(op_packet, OpOverloadPacket):
-                    overload_candidates = []
-                    if overload:
-                        overload_candidates.append(overload)
-                    # Always try "default" in case the user omitted it.
-                    if overload != "default":
-                        overload_candidates.append("default")
-                    for overload_name in overload_candidates:
-                        try:
-                            resolved = getattr(op_packet, overload_name)
-                        except AttributeError:
-                            continue
-                        else:
-                            if isinstance(resolved, OpOverload):
-                                return resolved
-                    # Fallback: single-overload packets expose only one option.
-                    try:
-                        overload_list = op_packet.overloads()
-                    except AttributeError:
-                        overload_list = ""
-                    if overload_list:
-                        # overloads() returns a comma-separated string.
-                        for overload_name in [
-                                name.strip()
-                                for name in overload_list.split(",")
-                                if name.strip()
-                        ]:
-                            try:
-                                resolved = getattr(op_packet, overload_name)
-                            except AttributeError:
-                                continue
-                            if isinstance(resolved, OpOverload):
-                                return resolved
-            return None
-
-        resolved_overloads: dict[OpOverload, str] = {}
-        unresolved_names: list[str] = []
-
-        for op_name in candidate_names:
-            overload = _resolve_to_overload(op_name)
-            if overload is None:
-                unresolved_names.append(op_name)
-                continue
-            resolved_overloads[overload] = op_name
-
-        if unresolved_names:
-            logger.info("[VLLM DEBUG] Unable to resolve OpOverload for: %s",
-                        unresolved_names)
-
-        if not resolved_overloads:
-            logger.info("[VLLM DEBUG] No resolvable operations for dynamic "
-                        "partition rules")
-            return False
-
-        successfully_registered: list[str] = []
-        skipped_already_registered: list[str] = []
-        active_rule_ops: set[str] = set()
-
-        def _make_partition_rule(op_label: str):
-
-            def _partition_rule(node, partition_nodes):
-                target = getattr(node, "target", None)
-                logger.debug(
-                    "[VLLM DEBUG] Partition rule triggered for %s (target=%s)",
-                    op_label, target)
-                return True
-
-            return _partition_rule
-
-        for overload, op_name in resolved_overloads.items():
-            if overload in _REGISTERED_PARTITION_OVERLOADS:
-                skipped_already_registered.append(op_name)
-                active_rule_ops.add(op_name)
-                continue
-            try:
-                register_should_partition_rule(overload,
-                                               _make_partition_rule(op_name))
-            except Exception as exc:
-                logger.warning(
-                    "[VLLM DEBUG] Failed to register partition rule for %s: %s",
-                    op_name, exc)
-            else:
-                _REGISTERED_PARTITION_OVERLOADS.add(overload)
-                successfully_registered.append(op_name)
-                active_rule_ops.add(op_name)
-                logger.info(
-                    "[VLLM DEBUG] ✅ Registered dynamic partition rule for %s",
-                    op_name)
-
-        if skipped_already_registered:
-            logger.debug("[VLLM DEBUG] Skipped already registered ops: %s",
-                         skipped_already_registered)
-
-        if active_rule_ops and op_aliases:
-            inverse_aliases: dict[str, list[str]] = {}
-            for alias, target in op_aliases.items():
-                inverse_aliases.setdefault(target, []).append(alias)
-            for target_name, aliases in inverse_aliases.items():
-                if target_name in active_rule_ops:
-                    active_rule_ops.update(aliases)
-
-        if not active_rule_ops:
-            logger.warning(
-                "[VLLM DEBUG] No dynamic partition rules registered for "
-                "resolved ops")
-            return False
-
-        unresolved_user_ops = [
-            op_name for op_name in self._user_specified_splitting_ops
-            if op_name not in active_rule_ops
-        ]
-
-        unresolved_user_ops = [
-            op_name for op_name in unresolved_user_ops
-            if op_name not in alias_resolutions
-        ]
-
-        if unresolved_user_ops:
-            logger.warning(
-                "[VLLM DEBUG] User-specified splitting ops without "
-                "dynamic rules: %s", unresolved_user_ops)
-            return False
-
-        logger.info("[VLLM DEBUG] Dynamic partition rules set up for ops: %s",
-                    successfully_registered)
-        return True
-
     def custom_op_log_check(self):
         """
         This method logs the enabled/disabled custom ops and checks that the
@@ -1009,3 +716,85 @@ class CompilationConfig:
                 enable_str = "enabling" if op[0] == '+' else "disabling"
                 logger.warning_once("Op '%s' %s, %s with '%s' has no effect",
                                     op_name, missing_str, enable_str, op)
+
+
+def _parse_operator_name(op_name: str) -> tuple[str, str, str]:
+    if not op_name:
+        raise ValueError("Operator name must be non-empty")
+    if "::" in op_name:
+        namespace, remainder = op_name.split("::", 1)
+    else:
+        parts = op_name.split(".")
+        if len(parts) < 2:
+            raise ValueError(
+                f"Operator name '{op_name}' must include a namespace "
+                f"and operator", )
+        namespace, remainder = parts[0], ".".join(parts[1:])
+    if not remainder:
+        raise ValueError(
+            f"Operator name '{op_name}' must include an operator identifier", )
+    if "." in remainder:
+        operator, overload = remainder.split(".", 1)
+    else:
+        operator, overload = remainder, "default"
+    overload = overload or "default"
+    return namespace, operator, overload
+
+
+def _resolve_operator_overload(op_name: str):
+    import torch
+    from torch._ops import OpOverload, OpOverloadPacket
+
+    namespace, operator, overload = _parse_operator_name(op_name)
+    try:
+        namespace_obj = getattr(torch.ops, namespace)
+    except AttributeError as exc:
+        raise ValueError(f"Unknown operator namespace '{namespace}'") from exc
+
+    try:
+        operator_obj = getattr(namespace_obj, operator)
+    except AttributeError as exc:
+        raise ValueError(
+            f"Unknown operator '{namespace}::{operator}'", ) from exc
+
+    if isinstance(operator_obj, OpOverload):
+        if overload not in ("default", ""):
+            raise ValueError(
+                f"Operator '{namespace}::{operator}' has no overload "
+                f"'{overload}'", )
+        return operator_obj
+
+    if isinstance(operator_obj, OpOverloadPacket):
+        try:
+            return getattr(operator_obj, overload)
+        except AttributeError as exc:
+            raise ValueError(
+                f"Operator '{namespace}::{operator}' has no overload "
+                f"'{overload}'", ) from exc
+
+    raise ValueError(f"Unsupported operator type for '{op_name}'")
+
+
+def _register_inductor_partition_rules(op_names: list[str]) -> None:
+    if not op_names:
+        return
+
+    from torch._inductor import scheduler as inductor_scheduler  # type: ignore
+
+    unique_names = list(dict.fromkeys(op_names))
+    overloads = [_resolve_operator_overload(name) for name in unique_names]
+
+    clear_fn = getattr(inductor_scheduler, "clear_should_partition_rules",
+                       None)
+    if callable(clear_fn):
+        clear_fn()
+
+    def _always_partition(*_args, **_kwargs):
+        return True
+
+    for overload in overloads:
+        inductor_scheduler.register_should_partition_rule(
+            overload, _always_partition)
+
+    logger.debug("Registered inductor partition rules for ops: %s",
+                 unique_names)
