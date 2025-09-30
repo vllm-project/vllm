@@ -54,8 +54,8 @@ def _get_processor_factory_fn(processor_cls: Union[type, tuple[type, ...]]):
 
 
 def split_and_quantize(allowed_kwargs: dict[str, Any]):
-    static_kwargs:dict[str, Any] = {}
-    dynamic_kwargs:dict[str, Any] = {}
+    static_kwargs: dict[str, Any] = {}
+    dynamic_kwargs: dict[str, Any] = {}
 
     for key, value in allowed_kwargs.items():
         if key in DYNAMIC_KEYS:

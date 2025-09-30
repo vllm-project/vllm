@@ -3,7 +3,7 @@
 import base64
 from io import BytesIO
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -93,17 +93,24 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         # for flexible control.
         self.kwargs = kwargs
 
-    def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
+    def load_bytes(
+            self,
+            data: bytes,
+            *,
+            request_overrides: Optional[dict[str, Any]] = None
+    ) -> tuple[npt.NDArray, float]:
         return librosa.load(BytesIO(data), sr=None)
 
     def load_base64(
         self,
         media_type: str,
         data: str,
+        *,
+        request_overrides: Optional[dict[str, Any]] = None,
     ) -> tuple[npt.NDArray, float]:
         return self.load_bytes(base64.b64decode(data))
 
-    def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
+    def load_file(self, filepath: Path, *, request_overrides: Optional[dict[str, Any]] = None) -> tuple[npt.NDArray, float]:
         return librosa.load(filepath, sr=None)
 
     def encode_base64(self, media: tuple[npt.NDArray, int]) -> str:

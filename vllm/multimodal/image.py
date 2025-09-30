@@ -82,15 +82,28 @@ class ImageMediaIO(MediaIO[Image.Image]):
         else:
             return convert_image_mode(image, self.image_mode)
 
-    def load_bytes(self, data: bytes, *, request_overrides: Optional[dict[str, Any]] = None) -> Image.Image:
+    def load_bytes(
+            self,
+            data: bytes,
+            *,
+            request_overrides: Optional[dict[str, Any]] = None) -> Image.Image:
         image = Image.open(BytesIO(data))
         image.load()
         return self._convert_image_mode(image)
 
-    def load_base64(self, media_type: str, data: str, *, request_overrides: Optional[dict[str, Any]] = None) -> Image.Image:
+    def load_base64(
+            self,
+            media_type: str,
+            data: str,
+            *,
+            request_overrides: Optional[dict[str, Any]] = None) -> Image.Image:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
-    def load_file(self, filepath: Path, *, request_overrides: Optional[dict[str, Any]] = None) -> Image.Image:
+    def load_file(
+            self,
+            filepath: Path,
+            *,
+            request_overrides: Optional[dict[str, Any]] = None) -> Image.Image:
         image = Image.open(filepath)
         image.load()
         return self._convert_image_mode(image)
@@ -116,14 +129,30 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
     def __init__(self) -> None:
         super().__init__()
 
-    def load_bytes(self, data: bytes, *, request_overrides: Optional[dict[str, Any]] = None) -> torch.Tensor:
+    def load_bytes(
+            self,
+            data: bytes,
+            *,
+            request_overrides: Optional[dict[str,
+                                             Any]] = None) -> torch.Tensor:
         buffer = BytesIO(data)
         return torch.load(buffer, weights_only=True)
 
-    def load_base64(self, media_type: str, data: str, *, request_overrides: Optional[dict[str, Any]] = None) -> torch.Tensor:
+    def load_base64(
+            self,
+            media_type: str,
+            data: str,
+            *,
+            request_overrides: Optional[dict[str,
+                                             Any]] = None) -> torch.Tensor:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
-    def load_file(self, filepath: Path, *, request_overrides: Optional[dict[str, Any]] = None) -> torch.Tensor:
+    def load_file(
+            self,
+            filepath: Path,
+            *,
+            request_overrides: Optional[dict[str,
+                                             Any]] = None) -> torch.Tensor:
         return torch.load(filepath, weights_only=True)
 
     def encode_base64(self, media: torch.Tensor) -> str:

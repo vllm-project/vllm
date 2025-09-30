@@ -100,7 +100,9 @@ class MediaConnector:
             msg = "Only base64 data URLs are supported for now."
             raise NotImplementedError(msg)
 
-        return media_io.load_base64(media_type, data, request_overrides=request_overrides)
+        return media_io.load_base64(media_type,
+                                    data,
+                                    request_overrides=request_overrides)
 
     def _load_file_url(
         self,
@@ -180,19 +182,19 @@ class MediaConnector:
             data = await connection.async_get_bytes(url, timeout=fetch_timeout)
             future = loop.run_in_executor(global_thread_pool,
                                           media_io.load_bytes, data,
-                                          request_overrides)
+                                          request_overrides=request_overrides)
             return await future
 
         if url_spec.scheme == "data":
             future = loop.run_in_executor(global_thread_pool,
                                           self._load_data_url, url_spec,
-                                          media_io, request_overrides)
+                                          media_io, request_overrides=request_overrides)
             return await future
 
         if url_spec.scheme == "file":
             future = loop.run_in_executor(global_thread_pool,
                                           self._load_file_url, url_spec,
-                                          media_io, request_overrides)
+                                          media_io, request_overrides=request_overrides)
             return await future
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
