@@ -250,71 +250,31 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
     ) -> torch.Tensor:
         """Sample from logits using aiter ops."""
-        B = logits.size(0)
-        device = logits.device
-
-        # Normalize k (support scalar or per-batch) - This part is necessary
-        maybe_k_arr: Optional[torch.Tensor] = None
-        top_k_val: int = 0
-        if k is not None:
-            if torch.is_tensor(k):
-                k = k.view(-1)
-                if k.numel() not in [1, B]:
-                    raise RuntimeError("top-k tensor size must be 1")
-                maybe_k_arr = k.to(device=device, dtype=torch.int32)
-            else:
-                top_k_val = int(k)
-
-        # Normalize p (support scalar or per-batch) - This part is necessary
-        maybe_p_arr: Optional[torch.Tensor] = None
-        top_p_val: float = 0.0
-        if p is not None:
-            if torch.is_tensor(p):
-                p = p.view(-1)
-                if p.numel() == 1:
-                    maybe_p_arr = p.to(device=device,
-                                       dtype=torch.float32).expand(B)
-                else:
-                    assert p.numel() == B
-                    maybe_p_arr = p.to(device=device, dtype=torch.float32)
-            else:
-                top_p_val = float(p)
-
-        use_top_k = top_k_val > 0 or maybe_k_arr is not None
-        use_top_p = (maybe_p_arr is not None) or (0.0 < top_p_val < 1.0)
-
+        use_top_k = k is not None
+        use_top_p = p is not None
         # Joint k+p path
         if use_top_p and use_top_k:
-            logger.info_once("k+p path")
             probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
             next_token_ids = self.aiter_ops.top_k_top_p_sampling_from_probs(
                 probs,
                 None,
-                maybe_k_arr,
-                top_k_val,
-                maybe_p_arr,
-                top_p_val,
+                *_to_tensor_scalar_tuple(k),
+                *_to_tensor_scalar_tuple(p),
                 deterministic=True,
             )
             return next_token_ids.view(-1)
-
         # Top-p only path
         elif use_top_p:
-            logger.info_once("p path")
-            # This path needs probs, so we compute it here.
             probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
             next_token_ids = self.aiter_ops.top_p_sampling_from_probs(
-                probs, None, maybe_p_arr, top_p_val, deterministic=True)
+                probs, None, *_to_tensor_scalar_tuple(p), deterministic=True)
             return next_token_ids.view(-1)
-
         # Top-k only path
         elif use_top_k:
-            logger.info_once("k path")
             probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
             renorm_probs = self.aiter_ops.top_k_renorm_probs(
-                probs, maybe_k_arr, top_k_val)
+                probs, *_to_tensor_scalar_tuple(k))
             return torch.multinomial(renorm_probs, num_samples=1).view(-1)
-
         raise RuntimeError(
             "aiter_sample was called with no active top-k or top-p.")
 
