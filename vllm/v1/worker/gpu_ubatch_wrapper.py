@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -86,7 +88,8 @@ class SMControlContextManager:
 class UBatchWrapper:
 
     def __init__(self, runnable: Callable, vllm_config: VllmConfig,
-                 runtime_mode: CUDAGraphMode, device: torch.cuda.device):
+                 runtime_mode: CUDAGraphMode, device: torch.cuda.device,
+                 delayed_start: bool = False):
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
@@ -105,6 +108,7 @@ class UBatchWrapper:
 
         self.sm_control = self._create_sm_control_context(vllm_config)
         self.device = device
+        self.delayed_start = delayed_start
 
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
@@ -123,11 +127,62 @@ class UBatchWrapper:
             if comm_sms > 0:
                 set_comm_sms = lambda sms: all2all_manager.set_num_sms(sms)
 
-        # TODO(lucas): support other kernels besides DeepGEMM
-        set_compute_sms = lambda sms: None
-        if has_deep_gemm() and comm_sms > 0:
-            import deep_gemm as dg
-            set_compute_sms = lambda sms: dg.set_num_sms(sms)
+        set_compute_sms: Callable[[int], None]
+        compute_sm_setters: list[tuple[str, Callable[[int], None]]] = []
+        registered_specs: set[str] = set()
+
+        if comm_sms > 0:
+
+            def _resolve_sm_setter(module_spec: str
+                                   ) -> Optional[Callable[[int], None]]:
+                module_name, _, attr_path = module_spec.partition(":")
+                try:
+                    module = importlib.import_module(module_name)
+                except Exception:
+                    return None
+
+                target = module
+                if attr_path:
+                    for attr in attr_path.split('.'):
+                        target = getattr(target, attr, None)
+                        if target is None:
+                            return None
+
+                setter = getattr(target, "set_num_sms", None)
+                return setter if callable(setter) else None
+
+            def _register_sm_setter(module_spec: str) -> None:
+                module_spec = module_spec.strip()
+                if not module_spec or module_spec in registered_specs:
+                    return
+                setter = _resolve_sm_setter(module_spec)
+                if setter is not None:
+                    compute_sm_setters.append((module_spec, setter))
+                    registered_specs.add(module_spec)
+
+            if has_deep_gemm():
+                _register_sm_setter("deep_gemm")
+
+            for default_spec in ("pplx_kernels", "flashinfer"):
+                _register_sm_setter(default_spec)
+
+            extra_specs = os.getenv("VLLM_DBO_COMPUTE_SM_MODULES", "")
+            if extra_specs:
+                for spec in extra_specs.split(','):
+                    _register_sm_setter(spec)
+
+        if compute_sm_setters:
+
+            def set_compute_sms(sms: int) -> None:
+                for module_spec, setter in compute_sm_setters:
+                    try:
+                        setter(sms)
+                    except Exception:
+                        logger.debug("Failed to set SM count via %s",
+                                     module_spec,
+                                     exc_info=True)
+        else:
+            set_compute_sms = lambda sms: None
 
         return SMControlContextManager(comm_sms=comm_sms,
                                        set_comm_sms=set_comm_sms,
@@ -266,7 +321,8 @@ class UBatchWrapper:
     def _make_ubatch_metadata(self, ubatch_slices, attn_metadata, input_ids,
                               positions, inputs_embeds, intermediate_tensors,
                               compute_stream, dp_metadata, batch_descriptor,
-                              cudagraph_runtime_mode) -> list[UbatchMetadata]:
+                              cudagraph_runtime_mode,
+                              delayed_start: bool = False) -> list[UbatchMetadata]:
 
         # Create one forward context per ubatch
         forward_contexts = []
@@ -284,7 +340,8 @@ class UBatchWrapper:
             comm_stream=self.comm_stream,
             compute_stream=compute_stream,
             forward_contexts=forward_contexts,
-            ready_barrier=self.ready_barrier)
+            ready_barrier=self.ready_barrier,
+            delayed_start=delayed_start)
 
         ubatch_metadata: list[UbatchMetadata] = []
         for i, ubatch_slice in enumerate(ubatch_slices):

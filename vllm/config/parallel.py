@@ -151,6 +151,16 @@ class ParallelConfig:
     prefills. If the number of tokens in the request is greater than this
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
+    microbatch_schedule: Literal["mlp_shared_overlap", "attn_shared_overlap"] =\
+        "mlp_shared_overlap"
+    """Schedule policy for microbatch overlap coordination.
+
+    Options:
+    - "mlp_shared_overlap": overlap MLP and communication across ubatches
+    - "attn_shared_overlap": overlap MLA attention and communication across 
+        ubatches
+    see: vllm/v1/worker/ubatching.py for diagrams of the schedules.
+    """
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
