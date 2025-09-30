@@ -9,7 +9,7 @@ import textwrap
 import time
 import uuid
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, cast
 from unittest.mock import patch
 
 import pytest
@@ -56,6 +56,27 @@ def clear_kv_transfer():
     yield
     if has_kv_transfer_group():
         ensure_kv_transfer_shutdown()
+
+
+def get_default_xfer_telemetry(xferDurationS: float = 1,
+                               postDurationS: float = 1,
+                               totalBytes: int = 1,
+                               descCount: int = 1) -> nixlXferTelemetry:
+
+    class AttributeDict(dict):
+        __slots__ = ()
+        __getattr__ = dict.__getitem__
+        __setattr__ = dict.__setitem__  # type: ignore[assignment]
+
+    # We can't instantiate nixlXferTelemetry because it's read only
+    return cast(
+        nixlXferTelemetry,
+        AttributeDict(
+            xferDuration=xferDurationS * 1e6,  # in us
+            postDuration=postDurationS * 1e6,  # in us
+            totalBytes=totalBytes,
+            descCount=descCount,
+        ))
 
 
 class FakeNixlWrapper:
@@ -132,6 +153,9 @@ class FakeNixlWrapper:
 
     def transfer(self, handle: int) -> str:
         return "PROC"
+
+    def get_xfer_telemetry(self, handle: int) -> nixlXferTelemetry:
+        return get_default_xfer_telemetry()
 
     ############################################################
     # Follow are for changing the behavior during testing.
@@ -600,10 +624,7 @@ def test_kv_connector_stats_aggregation():
 
     # Record different transfers on each worker
     # Worker 1: 2 transfers
-    stats = nixlXferTelemetry(xferDuration=1,
-                              postDuration=1,
-                              totalBytes=1,
-                              descCount=1)
+    stats = get_default_xfer_telemetry()
     worker1_stats.record_transfer(stats)
     worker1_stats.record_transfer(stats)
 
@@ -611,10 +632,10 @@ def test_kv_connector_stats_aggregation():
     worker2_stats.record_transfer(stats)
 
     # Worker 3: 3 transfers
-    stats = nixlXferTelemetry(xferDuration=2,
-                              postDuration=2,
-                              totalBytes=2,
-                              descCount=2)
+    stats = get_default_xfer_telemetry(xferDurationS=2,
+                                       postDurationS=2,
+                                       totalBytes=2,
+                                       descCount=2)
     worker3_stats.record_transfer(stats)
     worker3_stats.record_transfer(stats)
     worker3_stats.record_transfer(stats)
@@ -648,9 +669,9 @@ def test_kv_connector_stats_aggregation():
     assert kv_connector_stats.data["num_successful_transfers"] == 6
     # Logging proc, call reduce() to get CLI-friendly stats.
     cli_stats = kv_connector_stats.reduce()
-    assert cli_stats["Avg xfer time (ms)"] == 1.5
-    assert cli_stats["Avg post time (ms)"] == 1.5
-    assert cli_stats["Avg number of descriptors"] == 1.3
+    assert cli_stats["Avg xfer time (ms)"] == 1500.0
+    assert cli_stats["Avg post time (ms)"] == 1500.0
+    assert cli_stats["Avg number of descriptors"] == 1.5
 
 
 def test_multi_kv_connector_stats_aggregation():
@@ -663,6 +684,7 @@ def test_multi_kv_connector_stats_aggregation():
 
     from dataclasses import dataclass
 
+    # Mock a KVConnectorStats class for testing aggregation over connectors.
     @dataclass
     class FooKVConnectorStats(KVConnectorStats):
 
