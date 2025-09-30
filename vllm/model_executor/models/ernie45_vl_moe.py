@@ -210,7 +210,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 config.moe_num_experts[0],
                 bias=False,
                 params_dtype=torch.float32,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.text_experts_gate")
 
             self.text_experts = FusedMoE(
@@ -240,7 +240,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 config.moe_num_experts[1],
                 bias=False,
                 params_dtype=torch.float32,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.vision_experts_gate")
 
             self.vision_experts = FusedMoE(
