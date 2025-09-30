@@ -185,26 +185,25 @@ class MediaConnector:
                 global_thread_pool,
                 partial(media_io.load_bytes,
                         data,
-                        request_overrides=request_overrides)
-            )
+                        request_overrides=request_overrides))
             return await future
 
         if url_spec.scheme == "data":
             future = loop.run_in_executor(
                 global_thread_pool,
                 partial(self._load_data_url,
-                        url_spec, media_io,
-                        request_overrides=request_overrides)
-            )
+                        url_spec,
+                        media_io,
+                        request_overrides=request_overrides))
             return await future
 
         if url_spec.scheme == "file":
             future = loop.run_in_executor(
                 global_thread_pool,
                 partial(self._load_file_url,
-                        url_spec, media_io,
-                        request_overrides=request_overrides)
-            )
+                        url_spec,
+                        media_io,
+                        request_overrides=request_overrides))
             return await future
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)

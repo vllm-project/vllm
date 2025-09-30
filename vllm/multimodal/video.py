@@ -278,7 +278,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         *,
         request_overrides: Optional[dict[str, Any]] = None
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        # request_overrides: 仅本次调用生效（例如 {'fps': 2.0, 'max_duration': 120}）
+        # request_overrides: (for example {'fps': 2.0, 'max_duration': 120})
         effective = dict(self.kwargs)
         if request_overrides:
             effective.update(request_overrides)
