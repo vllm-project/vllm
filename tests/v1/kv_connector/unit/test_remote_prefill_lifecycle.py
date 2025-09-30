@@ -78,7 +78,7 @@ def test_basic_lifecycle():
     # (2b): forward(): request finishes recv.
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_recving=[request_id])
+        finished_recving={request_id})
 
     # (2c): update_from_output():
     engine_core_outputs = scheduler.update_from_output(scheduler_output,
@@ -197,7 +197,7 @@ def test_interleaved_lifecycle():
 
     model_runner_output = create_model_runner_output(
         [request_local_a, request_local_b],
-        finished_recving=[request_remote.request_id])
+        finished_recving={request_remote.request_id})
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
     # STEP 5: RECVed KVs are sent to ModelRunner.
@@ -246,16 +246,16 @@ def test_no_spurious_prefix_caching():
         request_id=1,
         block_size=BLOCK_SIZE,
         num_tokens=NUM_TOKENS,
+        common_prefix_len=NUM_TOKENS,
         do_remote_prefill=True,
-        use_all_1s_for_prompt_tokens=True,
     )
 
     request_local = create_request(
         request_id=2,
         block_size=BLOCK_SIZE,
         num_tokens=NUM_TOKENS,
+        common_prefix_len=NUM_TOKENS,
         do_remote_prefill=False,
-        use_all_1s_for_prompt_tokens=True,
     )
 
     # Schedule the remote prefill request. This should not
@@ -322,7 +322,7 @@ def test_full_block_prompt():
     scheduler_output = scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_recving=[request_id])
+        finished_recving={request_id})
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.waiting) == 1
     assert (request_id in scheduler.finished_recving_kv_req_ids)
@@ -402,7 +402,7 @@ def test_cannot_schedule_after_recv():
     # Step 3: finish recving (5 blocks in use)
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(
-        reqs=[request_normal], finished_recving=[request_remote.request_id])
+        reqs=[request_normal], finished_recving={request_remote.request_id})
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
@@ -516,7 +516,7 @@ def test_cannot_recv():
     # Step 5: finish recving (5 blocks in use)
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(
-        reqs=[], finished_recving=[request_remote.request_id])
+        reqs=[], finished_recving={request_remote.request_id})
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 1

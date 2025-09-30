@@ -75,8 +75,7 @@ class KVConnectorModelRunnerMixin:
                 scheduler_output, wait_for_save=False) as kv_connector_output:
             pass
 
-        if (not kv_connector_output.finished_sending
-                and not kv_connector_output.finished_recving):
+        if kv_connector_output.is_empty():
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
@@ -120,6 +119,8 @@ class KVConnectorModelRunnerMixin:
 
             output.finished_sending, output.finished_recving = (
                 kv_connector.get_finished(scheduler_output.finished_req_ids))
+            output.invalid_block_ids = (
+                kv_connector.get_block_ids_with_load_errors())
 
             output.kv_connector_stats = KVConnectorModelRunnerMixin.\
             get_kv_connector_stats()

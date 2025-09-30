@@ -142,6 +142,9 @@ class SingleTypeKVCacheManager(ABC):
         num_cached_blocks = self.num_cached_block[request.request_id]
         num_full_blocks = num_tokens // self.block_size
 
+        if num_cached_blocks >= num_full_blocks:
+            return
+
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
