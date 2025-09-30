@@ -40,7 +40,7 @@ fi
 echo "[sync-extras] Fetching ${REMOTE}/${BRANCH}"
 git fetch "$REMOTE" "$BRANCH" || true
 
-echo "[sync-extras] Updating from ${REMOTE}/${BRANCH}"
+echo "[sync-extras] Backing up protected paths"
 TMPDIR=""
 BACKED_UP=()
 for path in "${PROTECTED[@]}"; do
@@ -62,6 +62,11 @@ for path in "${PROTECTED[@]}"; do
   fi
 done
 
+echo "[sync-extras] Resetting working tree to clean state"
+git reset --hard
+git clean -fd
+
+echo "[sync-extras] Merging ${REMOTE}/${BRANCH}"
 set +e
 MERGE_OUTPUT=$(git merge --ff-only "${REMOTE}/${BRANCH}" 2>&1)
 MERGE_STATUS=$?
@@ -73,6 +78,7 @@ if [ $MERGE_STATUS -ne 0 ]; then
 fi
 
 if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then
+  echo "[sync-extras] Restoring protected paths"
   for path in "${BACKED_UP[@]}"; do
     src="$TMPDIR/$path"
     if [ -d "$src" ]; then
