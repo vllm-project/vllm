@@ -325,16 +325,24 @@ class Attention(nn.Module, AttentionLayerBase):
                                   attn_metadata,
                                   output=output)
             else:
-                # if self.attn_backend.include_kv_cache:
-                torch.ops.vllm.unified_kv_cache_update(key, value,
-                                                       self.layer_name)
-                torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
-                # else:
-                #     # torch.ops.vllm.unified_kv_cache_update(
-                #     #     key, value, self.layer_name)
-                #     torch.ops.vllm.unified_attention_no_kv(
-                #         query, key, value, output, self.layer_name)
+                if self.attn_backend.include_kv_cache:
+                    torch.ops.vllm.unified_attention_with_output(
+                        query,
+                        key,
+                        value,
+                        output,
+                        self.layer_name,
+                        include_kv_cache_update=True)
+                else:
+                    torch.ops.vllm.unified_kv_cache_update(
+                        key, value, self.layer_name)
+                    torch.ops.vllm.unified_attention_with_output(
+                        query,
+                        key,
+                        value,
+                        output,
+                        self.layer_name,
+                        include_kv_cache_update=False)
             return output.view(-1, hidden_size)
         else:
             assert self.attn_backend.include_kv_cache, "Attention backend does not support kv cache"  # noqa: E501
@@ -596,61 +604,6 @@ direct_register_custom_op(
 )
 
 
-def unified_attention_no_kv(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-    output_scale: Optional[torch.Tensor] = None,
-    output_block_scale: Optional[torch.Tensor] = None,
-) -> None:
-    wait_for_kv_layer_from_connector(layer_name)
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
-    self.impl.forward(
-        self,
-        query,
-        key,
-        value,
-        kv_cache,
-        attn_metadata,
-        output=output,
-        output_scale=output_scale,
-        output_block_scale=output_block_scale,
-        #   should_do_kv_cache_update=True,
-    )
-
-    # TODO keep one of these two
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
-
-
-def unified_attention_no_kv_fake(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-    output_scale: Optional[torch.Tensor] = None,
-    output_block_scale: Optional[torch.Tensor] = None,
-) -> None:
-    return
-
-
-# TODO call self.impl.forward, no kv cache update (pass it as arg)
-direct_register_custom_op(
-    op_name="unified_attention_no_kv",
-    op_func=unified_attention_no_kv,
-    mutates_args=["output", "output_block_scale"],
-    fake_impl=unified_attention_no_kv_fake,
-    tags=tag_cudagraph_unsafe,
-)
-
-
 def unified_kv_cache_update(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -701,8 +654,10 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
     output_block_scale: Optional[torch.Tensor] = None,
+    include_kv_cache_update: bool = True,
 ) -> None:
-    wait_for_kv_layer_from_connector(layer_name)
+    if not include_kv_cache_update:
+        wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
@@ -718,7 +673,7 @@ def unified_attention_with_output(
                       output=output,
                       output_scale=output_scale,
                       output_block_scale=output_block_scale,
-                      should_do_kv_cache_update=True)
+                      should_do_kv_cache_update=include_kv_cache_update)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -731,6 +686,7 @@ def unified_attention_with_output_fake(
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
     output_block_scale: Optional[torch.Tensor] = None,
+    include_kv_cache_update: bool = True,
 ) -> None:
     return
 
