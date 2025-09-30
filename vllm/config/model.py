@@ -686,7 +686,6 @@ class ModelConfig:
                 return "TransformersEmbeddingModel"
             if convert == "classify":
                 return "TransformersForSequenceClassification"
-            raise ValueError(f"Unsupported convert type: {convert}")
         # Resolve Transformers backend generate classes
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
