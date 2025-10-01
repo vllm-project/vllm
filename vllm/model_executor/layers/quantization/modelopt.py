@@ -921,16 +921,19 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
 
-        if envs.VLLM_USE_TRTLLM_FP4_GEMM:
-            assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
-            self.backend = "flashinfer-trtllm"
-        elif has_flashinfer():
-            self.backend = "flashinfer-cutlass"
-        elif cutlass_fp4_supported():
-            self.backend = "cutlass"
-        elif is_fp4_marlin_supported():
-            self.backend = "marlin"
-        else:
+        self.backend = None
+        if envs.VLLM_NVFP4_GEMM_BACKEND is None:
+            if cutlass_fp4_supported():
+                self.backend = "cutlass"
+            elif is_fp4_marlin_supported():
+                self.backend = "marlin"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND.startswith("flashinfer-"):
+            assert has_flashinfer(), (
+                f"FlashInfer is required for {envs.VLLM_NVFP4_GEMM_BACKEND}"
+            )
+            self.backend = envs.VLLM_NVFP4_GEMM_BACKEND
+
+        if self.backend is None:
             raise ValueError(
                 "Current platform does not support NVFP4"
                 " quantization. Please use Blackwell and"
@@ -1104,11 +1107,11 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.alpha,
             output_dtype,
         )
-        if self.backend == "flashinfer-trtllm":
-            out = flashinfer_scaled_fp4_mm(*mm_args, backend="trtllm")
-        elif self.backend == "flashinfer-cutlass":
-            out = flashinfer_scaled_fp4_mm(*mm_args, backend="cutlass")
+        if self.backend.startswith("flashinfer-"):
+            backend_name = self.backend[len("flashinfer-"):]
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
         else:
+            assert self.backend == "cutlass"
             out = cutlass_scaled_fp4_mm(*mm_args)
 
         if bias is not None:
