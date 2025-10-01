@@ -220,7 +220,6 @@ class LoRAModel(AdapterModel):
                 if "base_layer" in lora_module:
                     continue
                 part_name = module_name.split(".")[-1]
-                print(lora_module)
                 if part_name not in expected_lora_modules:
                     unexpected_modules.append(module_name)
             if unexpected_modules:
