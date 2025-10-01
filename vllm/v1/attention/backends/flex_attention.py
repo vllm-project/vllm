@@ -91,7 +91,6 @@ class FlexAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
@@ -508,10 +507,12 @@ class FlexAttentionMetadata:
 
         if self.sliding_window and self.causal:
             device = used_pages.device
+            assert self.doc_ids is not None
             token_indices = torch.arange(self.doc_ids.shape[0],
                                          device=device,
                                          dtype=torch.long)
-            logical_q_idx = (token_indices - self.query_start_loc[self.doc_ids] +
+            logical_q_idx = (token_indices -
+                             self.query_start_loc[self.doc_ids] +
                              self.decode_offset[self.doc_ids])
             min_kv_idx = torch.clamp(logical_q_idx - (self.sliding_window - 1),
                                      min=0)
@@ -571,9 +572,6 @@ class FlexAttentionMetadata:
         self.mask_mod = self.get_mask_mod()
         self.transformed_score_mod = self.get_transformed_score_mod()
 
-        self.logical_block_ids = torch.arange(cdiv(self.max_seq_len, self.block_size),
-                                              device=self.block_table.device,
-                                              dtype=torch.long)
         if self.direct_build and self.causal:
             self.block_mask = self._build_block_mask_direct()
         else:
@@ -598,7 +596,7 @@ class FlexAttentionMetadataBuilder(
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.direct_build: bool = True
+        self.direct_build: bool = is_torch_equal_or_newer("2.9.0.dev0")
         self.q_block_size: int = 16 if is_torch_equal_or_newer(
             "2.9.0.dev0") else 128
         self.kv_block_size: int = 16 if is_torch_equal_or_newer(
