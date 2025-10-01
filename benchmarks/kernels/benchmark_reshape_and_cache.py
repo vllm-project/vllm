@@ -162,7 +162,7 @@ if __name__ == "__main__":
         default="auto",
     )
 
-    parser.add_argument("--iters", type=int, default=100)
+    parser.add_argument("--iters", type=int, default=200)
 
     parser.add_argument(
         "--mode",
