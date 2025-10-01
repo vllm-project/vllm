@@ -72,8 +72,6 @@ def run_clip(query: Query) -> ModelRequestData:
     engine_args = EngineArgs(
         model="openai/clip-vit-base-patch32",
         runner="pooling",
-        # FIXME: Prefix caching doesn't work because of multiple block sizes
-        enable_prefix_caching=False,
         limit_mm_per_prompt={"image": 1},
     )
 

@@ -386,14 +386,16 @@ class MultiHeadAttention(nn.Module):
         head_size: int,
         scale: float,
         num_kv_heads: Optional[int] = None,
-        is_causal: bool = False,
+        # This has no effect, it is only here to make it easier to swap
+        # between Attention and MultiHeadAttention
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
-        self.is_causal = is_causal
+        self.layer_name = prefix
 
         assert self.num_heads % self.num_kv_heads == 0, \
             f"num_heads ({self.num_heads}) is not " \
@@ -486,62 +488,36 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_q=q_len,
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
-                causal=self.is_causal,
             )
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
-            if self.is_causal:
-                attn_bias = BlockDiagonalMask.from_seqlens(
-                    q_seqlen=[q_len] * bsz,
-                    kv_seqlen=[kv_len] * bsz,
-                    device=query.device,
-                ).make_causal()
-            else:
-                attn_bias = None
-
-            out = xops.memory_efficient_attention_forward(
-                query,
-                key,
-                value,
-                scale=self.scale,
-                attn_bias=attn_bias,
-            )
+            out = xops.memory_efficient_attention_forward(query,
+                                                          key,
+                                                          value,
+                                                          scale=self.scale)
         elif self.attn_backend == _Backend.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
-            out = F.scaled_dot_product_attention(
-                query,
-                key,
-                value,
-                scale=self.scale,
-                is_causal=self.is_causal,
-            )
+            out = F.scaled_dot_product_attention(query,
+                                                 key,
+                                                 value,
+                                                 scale=self.scale)
             out = out.transpose(1, 2)
         elif self.attn_backend == _Backend.PALLAS:
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
             from torch_xla.experimental.custom_kernel import flash_attention
-            out = flash_attention(
-                query,
-                key,
-                value,
-                sm_scale=self.scale,
-                causal=self.is_causal,
-            )
+            out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
 
             # ROCm Flash Attention expects (batch, seq, heads, head_dim)
-            out = flash_attn_varlen_func(
-                query,
-                key,
-                value,
-                softmax_scale=self.scale,
-                is_causal=self.is_causal,
-            )
+            out = flash_attn_varlen_func(query,
+                                         key,
+                                         value,
+                                         softmax_scale=self.scale)
         else:
             # ViT attention hasn't supported this backend yet
             raise NotImplementedError(

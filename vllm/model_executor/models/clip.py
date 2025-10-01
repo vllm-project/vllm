@@ -9,6 +9,7 @@ import torch.nn as nn
 from transformers import (BatchFeature, CLIPConfig, CLIPProcessor,
                           CLIPTextConfig, CLIPVisionConfig)
 
+from vllm.attention import Attention
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -325,16 +326,17 @@ class CLIPVisionEmbeddings(nn.Module):
 
 
 class CLIPAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
         self,
         config: Union[CLIPTextConfig, CLIPVisionConfig],
         quant_config: Optional[QuantizationConfig] = None,
+        *,
         prefix: str = "",
-        is_causal: bool = False,
+        attn_type: Union[type[Attention], type[MultiHeadAttention]],
     ) -> None:
         super().__init__()
+
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -364,11 +366,11 @@ class CLIPAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(
+        self.attn = attn_type(
             self.num_heads_per_partition,
             self.head_dim,
             self.scale,
-            is_causal=is_causal,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(
@@ -421,15 +423,16 @@ class CLIPEncoderLayer(nn.Module):
         self,
         config: Union[CLIPTextConfig, CLIPVisionConfig],
         quant_config: Optional[QuantizationConfig] = None,
+        *,
         prefix: str = "",
-        is_causal: bool = False,
+        attn_type: Union[type[Attention], type[MultiHeadAttention]],
     ) -> None:
         super().__init__()
         self.self_attn = CLIPAttention(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            is_causal=is_causal,
+            attn_type=attn_type,
         )
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
@@ -469,8 +472,9 @@ class CLIPEncoder(nn.Module):
         config: Union[CLIPTextConfig, CLIPVisionConfig],
         quant_config: Optional[QuantizationConfig] = None,
         num_hidden_layers_override: Optional[int] = None,
+        *,
         prefix: str = "",
-        is_causal: bool = False,
+        attn_type: Union[type[Attention], type[MultiHeadAttention]],
     ) -> None:
         super().__init__()
 
@@ -484,7 +488,7 @@ class CLIPEncoder(nn.Module):
             CLIPEncoderLayer(config=config,
                              quant_config=quant_config,
                              prefix=f"{prefix}.layers.{layer_idx}",
-                             is_causal=is_causal)
+                             attn_type=attn_type)
             for layer_idx in range(num_hidden_layers)
         ])
 
@@ -527,7 +531,7 @@ class CLIPTextTransformer(nn.Module):
             config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.encoder",
-            is_causal=True,
+            attn_type=Attention,
         )
 
         self.final_layer_norm = nn.LayerNorm(
@@ -544,13 +548,6 @@ class CLIPTextTransformer(nn.Module):
         position_ids: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # There is no batch dimension from the model runner,
-        # but MHA expects a batch dimension
-        if input_ids is not None and input_ids.ndim == 1:
-            input_ids = input_ids.unsqueeze(0)
-        if inputs_embeds is not None and inputs_embeds.ndim == 2:
-            inputs_embeds = inputs_embeds.unsqueeze(0)
-
         hidden_states = self.embeddings(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -563,8 +560,7 @@ class CLIPTextTransformer(nn.Module):
         )
         last_hidden_state = self.final_layer_norm(last_hidden_state)
 
-        # Remove the batch dimension for the model runner
-        return last_hidden_state.squeeze(0)
+        return last_hidden_state
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -623,7 +619,7 @@ class CLIPVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
-            is_causal=False,
+            attn_type=MultiHeadAttention,
         )
 
         num_hidden_layers = config.num_hidden_layers

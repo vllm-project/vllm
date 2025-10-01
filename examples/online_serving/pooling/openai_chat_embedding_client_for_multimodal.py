@@ -47,8 +47,7 @@ def run_clip(client: OpenAI, model: str):
     Start the server using:
 
     vllm serve openai/clip-vit-base-patch32 \
-        --runner pooling \
-        --no-enable-prefix-caching
+        --runner pooling
     """
 
     response = create_chat_embeddings(
