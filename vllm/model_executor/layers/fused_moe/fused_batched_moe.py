@@ -906,7 +906,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
-        E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
+        E, max_num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids)
 
         assert w1.size(0) == E

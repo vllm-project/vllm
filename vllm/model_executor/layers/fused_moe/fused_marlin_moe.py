@@ -4,6 +4,7 @@
 from typing import Optional
 
 import torch
+from typing_extensions import override
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -262,6 +263,35 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
         super().__init__(quant_config)
 
+    @override
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        assert w1.dim() == 3 and w2.dim() == 3
+
+        E = w1.size(0)
+        K = a1.size(-1)
+        N = marlin_moe_intermediate_size(w1, w2)
+
+        if a1.dim() == 2:
+            # Make sure we are using the correct a1 (pre-permute).
+            assert topk_ids.size(0) == a1.size(0), \
+                f"{topk_ids.size(0)} != {a1.size(0)}"
+            M = a1.size(0)
+        else:
+            assert a1.dim() == 3
+            assert a1.size(0) == E, f"{a1.size(0)} == {E}"
+            M = a1.size(1)  # This is max_num_tokens
+
+        assert topk_ids.dim() == 2
+        topk = topk_ids.size(1)
+
+        return E, M, N, K, topk
+
     def supports_expert_map(self) -> bool:
         return True
 
@@ -322,7 +352,9 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-        return torch.ops.vllm.fused_marlin_moe(
+        assert self.w1_scale is not None
+        assert self.w2_scale is not None
+        return fused_marlin_moe(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
