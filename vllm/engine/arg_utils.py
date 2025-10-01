@@ -136,7 +136,7 @@ def parse_limit_mm_per_prompt(val: str):
                 # Unknown modality - use BaseDummyOptions for OOT models
                 result[modality] = BaseDummyOptions(**options)
         except TypeError as e:
-            raise ValueError(f"Invalid options for {modality}: {e}") from e
+            raise ValueError(f"Invalid options for {modality}") from e
 
     return result
 

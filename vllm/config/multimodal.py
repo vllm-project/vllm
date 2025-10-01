@@ -5,7 +5,7 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass as standard_dataclass
 from dataclasses import field
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional
 
 from pydantic.dataclasses import dataclass
 
@@ -23,16 +23,14 @@ class BaseDummyOptions:
 
 
 @standard_dataclass
-class VideoDummyOptions:
+class VideoDummyOptions(BaseDummyOptions):
     """Options for generating dummy video data during profiling."""
-    count: int = 999
     num_frames: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
 
     def __post_init__(self):
-        if self.count < 0:
-            raise ValueError("count must be non-negative")
+        super().__post_init__()
         if self.num_frames is not None and self.num_frames <= 0:
             raise ValueError("num_frames must be positive")
         if self.width is not None and self.width <= 0:
@@ -42,15 +40,13 @@ class VideoDummyOptions:
 
 
 @standard_dataclass
-class ImageDummyOptions:
+class ImageDummyOptions(BaseDummyOptions):
     """Options for generating dummy image data during profiling."""
-    count: int = 999
     width: Optional[int] = None
     height: Optional[int] = None
 
     def __post_init__(self):
-        if self.count < 0:
-            raise ValueError("count must be non-negative")
+        super().__post_init__()
         if self.width is not None and self.width <= 0:
             raise ValueError("width must be positive")
         if self.height is not None and self.height <= 0:
@@ -58,25 +54,15 @@ class ImageDummyOptions:
 
 
 @standard_dataclass
-class AudioDummyOptions:
+class AudioDummyOptions(BaseDummyOptions):
     """Options for generating dummy audio data during profiling."""
-    count: int = 999
     length: Optional[int] = None
 
     def __post_init__(self):
-        if self.count < 0:
-            raise ValueError("count must be non-negative")
+        super().__post_init__()
         if self.length is not None and self.length <= 0:
             raise ValueError("length must be positive")
 
-
-# Union type for all supported option types
-ModalityDummyOptions = Union[BaseDummyOptions, VideoDummyOptions,
-                             ImageDummyOptions, AudioDummyOptions]
-
-# Configuration type - all values normalized to ModalityDummyOptions
-# at initialization
-LimitPerPromptType = dict[str, ModalityDummyOptions]
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
@@ -87,7 +73,7 @@ MMCacheType = Literal["shm", "lru"]
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: LimitPerPromptType = field(default_factory=dict)
+    limit_per_prompt: dict[str, BaseDummyOptions] = field(default_factory=dict)
     """The maximum number of input items and options allowed per 
         prompt for each modality.
     Defaults to 999 for each modality.
@@ -190,21 +176,14 @@ class MultiModalConfig:
         if limit_data is None:
             # Unspecified modality is set to 999 by default
             return 999
-        elif isinstance(
-                limit_data,
-            (VideoDummyOptions, ImageDummyOptions, AudioDummyOptions)):
-            return limit_data.count
-        else:
-            raise ValueError(
-                f"Invalid limit data type for {modality}: {type(limit_data)}")
+        return limit_data.count
 
-    def get_dummy_options(self,
-                          modality: str) -> Optional[ModalityDummyOptions]:
+    def get_dummy_options(self, modality: str) -> Optional[BaseDummyOptions]:
         """
         Get the configurable dummy data options for a modality.
         Returns None if no options are configured for this modality.
         """
-        # All values are now ModalityDummyOptions after normalization
+        # All values are now DummyOptions after normalization
         return self.limit_per_prompt.get(modality)
 
     def merge_mm_processor_kwargs(

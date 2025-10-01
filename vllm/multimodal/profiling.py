@@ -127,6 +127,11 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         if num_audios == 0:
             return []
         if overrides and overrides.length:
+            if overrides.length > length:
+                logger.warning(
+                    "audio.length override (%d) exceeds model's "
+                    "maximum length (%d), will be ignored", overrides.length,
+                    length)
             length = min(length, overrides.length)
         audio = np.zeros((length, ))
         return [audio] * num_audios
@@ -143,8 +148,18 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             return []
         if overrides:
             if overrides.width:
+                if overrides.width > width:
+                    logger.warning(
+                        "image.width override (%d) exceeds model's "
+                        "maximum width (%d), will be ignored", overrides.width,
+                        width)
                 width = min(width, overrides.width)
             if overrides.height:
+                if overrides.height > height:
+                    logger.warning(
+                        "image.height override (%d) exceeds model's "
+                        "maximum height (%d), will be ignored",
+                        overrides.height, height)
                 height = min(height, overrides.height)
         image = Image.new("RGB", (width, height), color=255)
         return [image] * num_images
@@ -162,10 +177,25 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             return []
         if overrides:
             if overrides.num_frames:
+                if overrides.num_frames > num_frames:
+                    logger.warning(
+                        "video.num_frames override (%d) exceeds model's "
+                        "maximum number of frames (%d), will be ignored",
+                        overrides.num_frames, num_frames)
                 num_frames = min(num_frames, overrides.num_frames)
             if overrides.width:
+                if overrides.width > width:
+                    logger.warning(
+                        "video.width override (%d) exceeds model's "
+                        "maximum width (%d), will be ignored", overrides.width,
+                        width)
                 width = min(width, overrides.width)
             if overrides.height:
+                if overrides.height > height:
+                    logger.warning(
+                        "video.height override (%d) exceeds model's "
+                        "maximum height (%d), will be ignored",
+                        overrides.height, height)
                 height = min(height, overrides.height)
         video = np.full((num_frames, width, height, 3), 255)
         return [video] * num_videos

@@ -1044,7 +1044,6 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        # Get model defaults
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         target_num_frames = \
