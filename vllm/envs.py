@@ -1352,6 +1352,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HAS_FLASHINFER_CUBIN":
     lambda: os.getenv("VLLM_HAS_FLASHINFER_CUBIN", False),
 
+    # If set to 1, force the use of CUDNN FP4 GEMM backend in flashinfer.
+    # Otherwise, uses the first available of: flashinfer cutlass GEMM,
+    # vllm cutlass GEMM, marlin GEMM.
+    "VLLM_USE_CUDNN_FP4_GEMM":
+    lambda: bool(int(os.getenv("VLLM_USE_CUDNN_FP4_GEMM", "0"))),
+
     # If set to 1, force the use of TRTLLM FP4 GEMM backend in flashinfer.
     # Otherwise, uses the first available of: flashinfer cutlass GEMM,
     # vllm cutlass GEMM, marlin GEMM.
@@ -1549,6 +1555,7 @@ def compute_hash() -> str:
         "VLLM_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
         "VLLM_USE_DEEP_GEMM_E8M0_HOPPER",
+        "VLLM_USE_CUDNN_FP4_GEMM",
         "VLLM_USE_TRTLLM_FP4_GEMM",
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
         "VLLM_USE_FLASHINFER_MOE_FP16",
