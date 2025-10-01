@@ -323,9 +323,15 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
-        use_audio_in_video = (all(
-            item["use_audio_in_video"].data
-            for item in mm_kwargs["video"]) if "video" in mm_kwargs else False)
+        use_audio_in_video = False
+        if "video" in mm_kwargs:
+            video_items = [
+                item for item in mm_kwargs["video"] if item is not None
+            ]
+            # only check video items (if there are any)
+            if video_items:
+                use_audio_in_video = all(item["use_audio_in_video"].data
+                                         for item in video_items)
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
