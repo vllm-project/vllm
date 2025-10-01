@@ -19,7 +19,7 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
 from vllm.logger import init_logger
-from vllm.platforms import current_platform, default_current_platform_to_cpu
+from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -167,15 +167,6 @@ def cli_env_setup():
     if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
         logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-
-def bench_cli_platform_setup():
-    # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
-    if sys.argv and len(sys.argv) >= 2 and sys.argv[1] == "bench":
-        logger.debug("Bench command detected, "
-                     "must ensure current platform is not UnspecifiedPlatform "
-                     "to avoid device type inference error")
-        default_current_platform_to_cpu()
 
 
 def _validate_truncation_size(

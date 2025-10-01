@@ -257,22 +257,15 @@ def __getattr__(name: str):
             f"No attribute named '{name}' exists in {__name__}.")
 
 
-def default_current_platform_to_cpu():
-    """Set current platform with CpuPlatform as default """
-    """instead of UnspecifiedPlatform."""
-    global _current_platform
-
-    if _current_platform is None:
-        _current_platform = resolve_obj_by_qualname(
-            resolve_current_platform_cls_qualname())()
-
-    if _current_platform.is_unspecified():
-        logger.info("Unspecified platform detected, "
-                    "switching to CPU platform by default instead")
-        _current_platform = resolve_obj_by_qualname(
-            "vllm.platforms.cpu.CpuPlatform")()
-
-    return _current_platform
+def __setattr__(name: str, value):
+    if name == 'current_platform':
+        global _current_platform
+        _current_platform = value
+    elif name in globals():
+        globals()[name] = value
+    else:
+        raise AttributeError(
+            f"No attribute named '{name}' exists in {__name__}.")
 
 
 __all__ = [
