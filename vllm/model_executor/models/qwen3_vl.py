@@ -66,9 +66,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import is_list_of
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -82,8 +81,7 @@ from .qwen2_5_vl import (Qwen2_5_VisionAttention,
 from .qwen2_vl import Qwen2VLProcessingInfo
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
-                    _merge_multimodal_embeddings, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    _merge_multimodal_embeddings, maybe_prefix)
 from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
@@ -336,14 +334,6 @@ class Qwen3_VisionTransformer(nn.Module):
         }:
             raise RuntimeError(
                 f"Qwen3-VL does not support {self.attn_backend} backend now.")
-        if current_platform.is_device_capability(
-                100) and self.attn_backend != _Backend.TORCH_SDPA:
-            # TODO(Roger/Wentao): remove this after FA
-            # or XFORMERS's issue fixed on Blackwell
-            logger.info_once("Qwen3-VL vision attention does not support "
-                             f"{self.attn_backend} backend on Blackwell now. "
-                             "Vision attention backend is set to TORCH_SDPA.")
-            self.attn_backend = _Backend.TORCH_SDPA
 
         self.blocks = nn.ModuleList([
             Qwen3_VisionBlock(
@@ -1135,14 +1125,17 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-
-        self.visual = Qwen3_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "visual"),
-            use_data_parallel=self.use_data_parallel,
-        )
+        if not multimodal_config.get_limit_per_prompt("image") and \
+            not multimodal_config.get_limit_per_prompt("video"):
+            self.visual = None
+        else:
+            self.visual = Qwen3_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+                use_data_parallel=self.use_data_parallel,
+            )
 
         self.language_model = Qwen3LLMForCausalLM(vllm_config=vllm_config,
                                                   prefix=maybe_prefix(
@@ -1158,11 +1151,15 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             config.vision_config.deepstack_visual_indexes
         ) if self.use_deepstack else 0
         # register buffer for deepstack
-        self.deepstack_input_embeds = [
-            torch.zeros(vllm_config.scheduler_config.max_num_batched_tokens,
-                        config.text_config.hidden_size)
-            for _ in range(self.deepstack_num_level)
-        ] if self.use_deepstack else None
+        if self.use_deepstack and self.visual is not None:
+            self.deepstack_input_embeds = [
+                torch.zeros(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    config.text_config.hidden_size)
+                for _ in range(self.deepstack_num_level)
+            ]
+        else:
+            self.deepstack_input_embeds = None
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
@@ -1472,75 +1469,6 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return inputs_embeds
 
-    def get_input_embeddings_v0(
-        self,
-        input_ids: torch.Tensor,
-        image_input: Optional[Qwen2_5_VLImageInputs] = None,
-        video_input: Optional[Qwen2_5_VLVideoInputs] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.get_input_embeddings(input_ids)
-
-        if self.use_deepstack:
-            visual_dim = inputs_embeds.shape[-1]
-            deepstack_input_embeds = None
-            if image_input is not None or video_input is not None:
-                deepstack_input_embeds = torch.zeros_like(
-                    inputs_embeds).unsqueeze(1).repeat(
-                        1, self.deepstack_num_level, 1).flatten(1)
-
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            if self.use_deepstack:
-                image_embeds = torch.cat(image_embeds)
-
-                image_embeds, image_embeds_multiscale = image_embeds.split(
-                    [visual_dim, visual_dim * self.deepstack_num_level],
-                    dim=-1)
-
-                deepstack_input_embeds = merge_multimodal_embeddings(
-                    input_ids,
-                    deepstack_input_embeds,
-                    image_embeds_multiscale,
-                    placeholder_token_id=self.config.image_token_id,
-                )
-
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                image_embeds,
-                placeholder_token_id=self.config.image_token_id,
-            )
-
-        if video_input is not None:
-            video_embeds = self._process_video_input(video_input)
-            if self.use_deepstack:
-                video_embeds = torch.cat(video_embeds)
-
-                video_embeds, video_embeds_multiscale = video_embeds.split(
-                    [visual_dim, visual_dim * self.deepstack_num_level],
-                    dim=-1)
-
-                deepstack_input_embeds = merge_multimodal_embeddings(
-                    input_ids,
-                    deepstack_input_embeds,
-                    video_embeds_multiscale,
-                    placeholder_token_id=self.config.video_token_id,
-                )
-
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                video_embeds,
-                placeholder_token_id=self.config.video_token_id,
-            )
-
-        if self.use_deepstack and deepstack_input_embeds is not None:
-            deepstack_input_embeds = deepstack_input_embeds.view(
-                inputs_embeds.shape[0], self.deepstack_num_level,
-                visual_dim).permute(1, 0, 2).contiguous()
-            self._set_deepstack_input_embeds(deepstack_input_embeds)
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1576,26 +1504,6 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner from
-        # `get_multimodal_embeddings` and `get_input_embeddings`, this
-        # condition is only for v0 compatibility.
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            video_input = self._parse_and_validate_video_input(**kwargs)
-
-            if image_input is None and video_input is None:
-                inputs_embeds = None
-            else:
-                if uses_mrope(self.config):
-                    assert positions.ndim == 2 and positions.size(0) == 3, (
-                        "multimodal section rotary embedding requires "
-                        f"(3, seq_len) positions, but got {positions.size()}")
-                inputs_embeds = self.get_input_embeddings_v0(
-                    input_ids,
-                    image_input=image_input,
-                    video_input=video_input)
-                input_ids = None
-
         if self.use_deepstack and inputs_embeds is not None and get_pp_group(
         ).is_first_rank:
             deepstack_input_embeds = self._get_deepstack_input_embeds(
@@ -1625,7 +1533,11 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+
+        skip_prefixes = []
+        if self.visual is None:
+            skip_prefixes.extend(["visual."])
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
