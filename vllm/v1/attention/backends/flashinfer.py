@@ -167,7 +167,7 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHINFER_VLLM_V1"
+        return "FLASHINFER"
 
     @staticmethod
     def get_impl_cls() -> type[FlashInferImpl]:
@@ -187,6 +187,7 @@ class FlashInferBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
