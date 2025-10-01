@@ -101,7 +101,7 @@ def test_deepseek_fp8_block_moe_deep_gemm(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skip(reason=("Known issue: lack of kernel support. "
-"Expected failure: assert self.block_quant is None"))
+                          "Expected failure: assert self.block_quant is None"))
 def test_deepseek_fp8_block_moe_flashinfer_cutlass(
         monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
@@ -109,7 +109,8 @@ def test_deepseek_fp8_block_moe_flashinfer_cutlass(
     can_initialize("deepseek-ai/DeepSeek-V3.1")
 
 
-def test_deepseek_fp8_block_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
+def test_deepseek_fp8_block_moe_flashinfer_trtllm(
+        monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
     can_initialize("deepseek-ai/DeepSeek-V3.1")
