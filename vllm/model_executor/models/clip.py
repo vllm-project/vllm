@@ -599,39 +599,6 @@ class CLIPTextTransformer(nn.Module):
         return loaded_params
 
 
-class CLIPTextModel(nn.Module):
-
-    def __init__(
-        self,
-        config: CLIPTextConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        *,
-        prefix: str = "",
-    ):
-        super().__init__(config)
-
-        self.text_model = CLIPTextTransformer(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.text_model",
-        )
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.text_model.get_input_embeddings(input_ids)
-
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor],
-        position_ids: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        return self.text_model(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            inputs_embeds=inputs_embeds,
-        )
-
-
 class CLIPVisionTransformer(nn.Module):
 
     def __init__(
