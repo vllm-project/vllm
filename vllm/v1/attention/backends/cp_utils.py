@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
+import torch
+from torch import distributed as dist
 
 from vllm.distributed.parallel_state import (get_context_parallel_rank,
-                                             get_context_parallel_world_size)
+                                             get_context_parallel_world_size,
+                                             get_cp_group)
 from vllm.logger import init_logger
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
@@ -251,5 +254,48 @@ def prepare_inputs_for_cp(
 
         total_num_local_scheduled_tokens += num_scheduled_tokens_local[idx]
 
-    return (num_scheduled_tokens_local, num_computed_tokens_local,
-            q_seqlens_sharded)
+    return num_scheduled_tokens_local, num_computed_tokens_local, q_seqlens_sharded
+
+
+def cp_get_neighbor_ranks() -> tuple[int, int]:
+    return (get_cp_group().prev_rank, get_cp_group().next_rank)
+
+
+def cp_pass_around(
+        tensors: list[torch.Tensor], to_rank: int, from_rank: int
+) -> tuple[list[torch.Tensor], list[torch.distributed.Work]]:
+    """
+    Passes a list of tensors to designated to_rank, and receives the same
+    number of tensors with the same sizes from designated from_rank.
+    Note: to_rank and from_rank are the ranks in default PG rather than
+    context parallel pg. All ranks in a CP group must call this function
+    together, which results in passing the same tensors in a circular way
+    across all ranks in a CP group.
+
+    Args:
+        tensors: list of tensors to be passed around in the CP group
+        to_rank: rank to pass my tensors to
+        from_rank: rank to receive tensors from
+
+    Returns:
+        dests: list of tensors received from from_rank
+        reqs: list of P2POp requests to wait for to complete receiving
+            from from_rank
+    """
+    dests = []
+    p2p_ops = []
+    for x in tensors:
+        x = x.contiguous()
+        dest = torch.empty_like(x)
+        dests.append(dest)
+        p2p_ops += [
+            dist.P2POp(dist.isend,
+                       x,
+                       to_rank,
+                       group=get_cp_group().device_group),
+            dist.P2POp(dist.irecv,
+                       dest,
+                       from_rank,
+                       group=get_cp_group().device_group),
+        ]
+    return dests, dist.batch_isend_irecv(p2p_ops)
