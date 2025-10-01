@@ -314,10 +314,12 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         config: Qwen3VLMoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        parallel_config = vllm_config.parallel_config
 
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        self.sequence_parallel = parallel_config.use_sequence_parallel_moe
 
         if not multimodal_config.get_limit_per_prompt("image") and \
             not multimodal_config.get_limit_per_prompt("video"):
@@ -328,7 +330,7 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
-                use_data_parallel=self.use_data_parallel,
+                disable_tp=self.use_data_parallel or self.sequence_parallel,
             )
 
         self.language_model = Qwen3MoeLLMForCausalLM(vllm_config=vllm_config,

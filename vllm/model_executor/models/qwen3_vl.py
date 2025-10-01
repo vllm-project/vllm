@@ -128,7 +128,7 @@ class Qwen3_VisionMLP(nn.Module):
                  act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "",
-                 use_data_parallel: bool = False):
+                 disable_tp: bool = False):
         super().__init__()
         self.linear_fc1 = ColumnParallelLinear(in_features,
                                                hidden_features,
@@ -136,14 +136,14 @@ class Qwen3_VisionMLP(nn.Module):
                                                quant_config=quant_config,
                                                return_bias=False,
                                                prefix=f"{prefix}.linear_fc1",
-                                               disable_tp=use_data_parallel)
+                                               disable_tp=disable_tp)
         self.linear_fc2 = RowParallelLinear(hidden_features,
                                             in_features,
                                             bias=bias,
                                             quant_config=quant_config,
                                             return_bias=False,
                                             prefix=f"{prefix}.linear_fc2",
-                                            disable_tp=use_data_parallel)
+                                            disable_tp=disable_tp)
         self.act_fn = act_fn
 
     def forward(self, x: torch.Tensor):
@@ -162,7 +162,7 @@ class Qwen3_VisionBlock(nn.Module):
         norm_layer: Optional[Callable[[int], nn.Module]] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
+        disable_tp: bool = False,
         attn_backend: _Backend = _Backend.TORCH_SDPA,
         use_upstream_fa: bool = False,
     ) -> None:
@@ -171,22 +171,21 @@ class Qwen3_VisionBlock(nn.Module):
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
-        self.attn = Qwen2_5_VisionAttention(
-            embed_dim=dim,
-            num_heads=num_heads,
-            projection_size=dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            use_data_parallel=use_data_parallel,
-            attn_backend=attn_backend,
-            use_upstream_fa=use_upstream_fa)
+        self.attn = Qwen2_5_VisionAttention(embed_dim=dim,
+                                            num_heads=num_heads,
+                                            projection_size=dim,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.attn",
+                                            disable_tp=disable_tp,
+                                            attn_backend=attn_backend,
+                                            use_upstream_fa=use_upstream_fa)
         self.mlp = Qwen3_VisionMLP(dim,
                                    mlp_hidden_dim,
                                    act_fn=act_fn,
                                    bias=True,
                                    quant_config=quant_config,
                                    prefix=f"{prefix}.mlp",
-                                   use_data_parallel=use_data_parallel)
+                                   disable_tp=disable_tp)
 
     def forward(
             self,
@@ -217,7 +216,7 @@ class Qwen3_VisionPatchMerger(nn.Module):
         use_postshuffle_norm: bool = False,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = context_dim * (spatial_merge_size**2)
@@ -234,14 +233,14 @@ class Qwen3_VisionPatchMerger(nn.Module):
                                                bias=True,
                                                quant_config=quant_config,
                                                prefix=f"{prefix}.linear_fc1",
-                                               disable_tp=use_data_parallel)
+                                               disable_tp=disable_tp)
         self.act_fn = nn.GELU()
         self.linear_fc2 = RowParallelLinear(self.hidden_size,
                                             d_model,
                                             bias=True,
                                             quant_config=quant_config,
                                             prefix=f"{prefix}.linear_fc2",
-                                            disable_tp=use_data_parallel)
+                                            disable_tp=disable_tp)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_postshuffle_norm:
@@ -263,7 +262,7 @@ class Qwen3_VisionTransformer(nn.Module):
         norm_eps: float = 1e-6,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = vision_config.hidden_size
@@ -274,7 +273,7 @@ class Qwen3_VisionTransformer(nn.Module):
         self.spatial_merge_unit = self.spatial_merge_size**2
         self.temporal_patch_size = vision_config.temporal_patch_size
         self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
-        self.use_data_parallel = use_data_parallel
+        self.disable_tp = disable_tp
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
 
         # NOTE: This is used for creating empty tensor for all_gather for
@@ -303,7 +302,7 @@ class Qwen3_VisionTransformer(nn.Module):
             spatial_merge_size=self.spatial_merge_size,
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
-            use_data_parallel=use_data_parallel,
+            disable_tp=disable_tp,
         )
 
         self.deepstack_merger_list = nn.ModuleList([
@@ -315,7 +314,7 @@ class Qwen3_VisionTransformer(nn.Module):
                 norm_layer=norm_layer,
                 quant_config=quant_config,
                 prefix=f"{prefix}.deepstack_merger_list.{layer_idx}",
-                use_data_parallel=use_data_parallel)
+                disable_tp=disable_tp)
             for layer_idx in range(len(self.deepstack_visual_indexes))
         ])
 
@@ -344,7 +343,7 @@ class Qwen3_VisionTransformer(nn.Module):
                 norm_layer=norm_layer,
                 quant_config=quant_config,
                 prefix=f"{prefix}.blocks.{layer_idx}",
-                use_data_parallel=use_data_parallel,
+                disable_tp=disable_tp,
                 attn_backend=self.attn_backend,
                 use_upstream_fa=use_upstream_fa)
             for layer_idx in range(vision_config.depth)
@@ -1134,7 +1133,7 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
-                use_data_parallel=self.use_data_parallel,
+                disable_tp=self.use_data_parallel,
             )
 
         self.language_model = Qwen3LLMForCausalLM(vllm_config=vllm_config,

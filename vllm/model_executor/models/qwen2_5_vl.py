@@ -218,7 +218,7 @@ class Qwen2_5_VisionMLP(nn.Module):
                  act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "",
-                 use_data_parallel: bool = False):
+                 disable_tp: bool = False):
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=in_features,
@@ -226,14 +226,14 @@ class Qwen2_5_VisionMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
-            disable_tp=use_data_parallel)
+            disable_tp=disable_tp)
 
         self.down_proj = RowParallelLinear(hidden_features,
                                            in_features,
                                            bias=bias,
                                            quant_config=quant_config,
                                            prefix=f"{prefix}.down_proj",
-                                           disable_tp=use_data_parallel)
+                                           disable_tp=disable_tp)
         self.act_fn = act_fn
 
     def forward(self, x: torch.Tensor):
@@ -271,13 +271,13 @@ class Qwen2_5_VisionAttention(nn.Module):
         projection_size: int,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
+        disable_tp: bool = False,
         attn_backend: _Backend = _Backend.TORCH_SDPA,
         use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
-        self.tp_size = (1 if use_data_parallel else
+        self.tp_size = (1 if disable_tp else
                         parallel_state.get_tensor_model_parallel_world_size())
         self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
         self.hidden_size_per_attention_head = dist_utils.divide(
@@ -293,13 +293,13 @@ class Qwen2_5_VisionAttention(nn.Module):
             bias=True,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv",
-            disable_tp=use_data_parallel)
+            disable_tp=disable_tp)
 
         self.proj = RowParallelLinear(input_size=projection_size,
                                       output_size=embed_dim,
                                       quant_config=quant_config,
                                       prefix=f"{prefix}.proj",
-                                      disable_tp=use_data_parallel)
+                                      disable_tp=disable_tp)
         self.attn_backend = attn_backend
         self.use_upstream_fa = use_upstream_fa
         self.is_flash_attn_backend = self.attn_backend in {
@@ -425,7 +425,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         norm_layer: Optional[Callable[[int], nn.Module]] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
+        disable_tp: bool = False,
         attn_backend: _Backend = _Backend.TORCH_SDPA,
         use_upstream_fa: bool = False,
     ) -> None:
@@ -434,22 +434,21 @@ class Qwen2_5_VisionBlock(nn.Module):
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
-        self.attn = Qwen2_5_VisionAttention(
-            embed_dim=dim,
-            num_heads=num_heads,
-            projection_size=dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            use_data_parallel=use_data_parallel,
-            attn_backend=attn_backend,
-            use_upstream_fa=use_upstream_fa)
+        self.attn = Qwen2_5_VisionAttention(embed_dim=dim,
+                                            num_heads=num_heads,
+                                            projection_size=dim,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.attn",
+                                            disable_tp=disable_tp,
+                                            attn_backend=attn_backend,
+                                            use_upstream_fa=use_upstream_fa)
         self.mlp = Qwen2_5_VisionMLP(dim,
                                      mlp_hidden_dim,
                                      act_fn=act_fn,
                                      bias=True,
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.mlp",
-                                     use_data_parallel=use_data_parallel)
+                                     disable_tp=disable_tp)
 
     def forward(
             self,
@@ -640,7 +639,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 norm_layer=norm_layer,
                 quant_config=quant_config,
                 prefix=f"{prefix}.blocks.{layer_idx}",
-                use_data_parallel=use_data_parallel,
+                disable_tp=use_data_parallel,
                 attn_backend=self.attn_backend,
                 use_upstream_fa=use_upstream_fa) for layer_idx in range(depth)
         ])
