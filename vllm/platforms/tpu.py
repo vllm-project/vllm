@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Optional, Union, cast
 import torch
 from tpu_info import device
 
-from vllm.attention.backends.registry import _Backend
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -15,6 +14,7 @@ from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
 else:
@@ -22,6 +22,7 @@ else:
     ModelConfig = None
     VllmConfig = None
     PoolingParams = None
+    _Backend = None
 
 logger = init_logger(__name__)
 
@@ -47,10 +48,11 @@ class TpuPlatform(Platform):
     ]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink, use_sparse) -> str:
+        from vllm.attention.backends.registry import _Backend
         if use_sparse:
             raise NotImplementedError(
                 "Sparse Attention is not supported on TPU.")
