@@ -244,7 +244,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         token_start = query_start_loc_cpu[reqs_start].item()
         token_end = query_start_loc_cpu[reqs_end].item()
         total_seq_lens = seq_lens_cpu[reqs_start:reqs_end].sum()
-        assert total_seq_lens < self.max_prefill_buffer_size
+        assert total_seq_lens <= self.max_prefill_buffer_size
         cu_seq_lens = torch.cat([
             torch.zeros(1, dtype=torch.int32),
             seq_lens_cpu[reqs_start:reqs_end].cumsum(dim=0)
