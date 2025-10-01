@@ -517,10 +517,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         - workspace2 shape tuple: must be large enough to hold the
           result of the activation function.
         - output shape tuple: must be exact size of the final gemm output.
-        - Note: workspace shapes can be empty if the workspace is not needed.
+        - Note: workspace shapes can be 0 if the workspace is not needed.
           But in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens when the shape is
-          not empty.
+          not 0.
         """
         raise NotImplementedError
 
@@ -614,9 +614,8 @@ class SharedResizableBuffer:
         self.buffer = None
 
     def get(self, shape: tuple[int, ...], device: torch.device,
-            dtype: torch.dtype):
-        if shape == () or shape is None:
-            return None
+            dtype: torch.dtype) -> torch.Tensor:
+        assert shape != ()
         shape_numel = prod(shape)
         if (self.buffer is None or self.buffer.numel() < shape_numel
                 or self.buffer.device != device or self.buffer.dtype != dtype):
@@ -709,19 +708,16 @@ class FusedMoEModularKernel(torch.nn.Module):
         ubatch_idx = dbo_current_ubatch_id()
         buffers = self.shared_buffers[ubatch_idx]
 
-        print(f"WS {workspace13_shape, workspace2_shape, fused_out_shape}")
+        #print(f"WS {workspace13_shape, workspace2_shape, fused_out_shape}")
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         workspace13 = buffers.workspace13.get(workspace13_shape,
-                                              device=a1.device,
+                                              device=device,
                                               dtype=workspace_dtype)
         workspace2 = buffers.workspace2.get(workspace2_shape,
-                                            device=a1.device,
+                                            device=device,
                                             dtype=workspace_dtype)
-
-        assert fused_out is None or fused_out.shape == fused_out_shape, (
-            f"fused_out {fused_out.shape} but expected {fused_out_shape}")
 
         # Construct the entire output that can then be processed in chunks.
         if num_chunks == 1 and prod(workspace13_shape) >= prod(
@@ -729,9 +725,9 @@ class FusedMoEModularKernel(torch.nn.Module):
             # Reuse workspace13 for the output in the non-chunked case.
             fused_out = _resize_cache(workspace13, fused_out_shape)
         else:
-            fused_out = self.fused_out_buffer.get(fused_out_shape,
-                                                  device=device,
-                                                  dtype=out_dtype)
+            fused_out = buffers.fused_out.get(fused_out_shape,
+                                              device=device,
+                                              dtype=out_dtype)
 
         return workspace13, workspace2, fused_out
 
@@ -855,7 +851,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         else:
             # Overlap shared expert compute with all2all dispatch.
             dbo_maybe_run_recv_hook()
-            receiver = self.prepare_finalize.prepare_async(
+            prepare_ret = self.prepare_finalize.prepare_async(
                 hidden_states,
                 topk_weights,
                 topk_ids,
