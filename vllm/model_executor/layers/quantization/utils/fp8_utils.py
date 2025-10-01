@@ -183,9 +183,7 @@ def _padded_cutlass_fake(
 direct_register_custom_op(
     "padded_cutlass",
     _padded_cutlass,
-    mutates_args=[],
     fake_impl=_padded_cutlass_fake,
-    dispatch_key="CUDA",
 )
 
 
