@@ -52,21 +52,6 @@ TERM_PLOTLIB_AVAILABLE = ((importlib.util.find_spec("termplotlib") is not None)
                           and (shutil.which("gnuplot") is not None))
 
 
-# TODO: Remove this in v0.11.0
-class DeprecatedEndpointTypeAction(argparse.Action):
-    """Argparse action for the deprecated --endpoint-type flag.
-    """
-
-    def __call__(self, _, namespace, values, option_string=None):
-        warnings.warn(
-            "'--endpoint-type' is deprecated and will be removed in v0.11.0. "
-            "Please use '--backend' instead or remove this argument if you "
-            "have already set it.",
-            stacklevel=1,
-        )
-        setattr(namespace, self.dest, values)
-
-
 class TaskType(Enum):
     GENERATION = "generation"
     EMBEDDING = "embedding"
@@ -882,15 +867,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default="openai",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
         help="The type of backend or endpoint to use for the benchmark."
-    )
-    parser.add_argument(
-        "--endpoint-type",
-        type=str,
-        default=None,
-        choices=list(ASYNC_REQUEST_FUNCS.keys()),
-        action=DeprecatedEndpointTypeAction,
-        help="'--endpoint-type' is deprecated and will be removed in v0.11.0. "
-        "Please use '--backend' instead.",
     )
     parser.add_argument(
         "--base-url",
