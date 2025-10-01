@@ -112,6 +112,11 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "Echo is unsupported with prompt embeds.")
 
+        if (request.prompt_logprobs is not None
+                and request.prompt_embeds is not None):
+            return self.create_error_response(
+                "prompt_logprobs is not compatible with prompt embeds.")
+
         request_id = (
             f"cmpl-"
             f"{self._base_request_id(raw_request, request.request_id)}")

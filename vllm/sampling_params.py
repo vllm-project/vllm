@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampling parameters for text generation."""
 import copy
-from dataclasses import dataclass
+import warnings
+from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Annotated, Any, Optional, Union
 
 import msgspec
-from pydantic import BaseModel
+from pydantic.dataclasses import dataclass
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -28,60 +29,48 @@ class SamplingType(IntEnum):
 
 # maybe make msgspec?
 @dataclass
-class GuidedDecodingParams:
-    """One of these fields will be used to build a logit processor."""
+class StructuredOutputsParams:
+    # One of these fields will be used to build a logit processor.
     json: Optional[Union[str, dict]] = None
     regex: Optional[str] = None
     choice: Optional[list[str]] = None
     grammar: Optional[str] = None
     json_object: Optional[bool] = None
-    """These are other options that can be set"""
-    backend: Optional[str] = None
-    backend_was_auto: bool = False
+    # These are other options that can be set.
     disable_fallback: bool = False
     disable_any_whitespace: bool = False
     disable_additional_properties: bool = False
     whitespace_pattern: Optional[str] = None
     structural_tag: Optional[str] = None
 
-    @staticmethod
-    def from_optional(
-        json: Optional[Union[dict, BaseModel, str]] = None,
-        regex: Optional[str] = None,
-        choice: Optional[list[str]] = None,
-        grammar: Optional[str] = None,
-        json_object: Optional[bool] = None,
-        backend: Optional[str] = None,
-        whitespace_pattern: Optional[str] = None,
-        structural_tag: Optional[str] = None,
-    ) -> Optional["GuidedDecodingParams"]:
-        if all(arg is None for arg in (json, regex, choice, grammar,
-                                       json_object, structural_tag)):
-            return None
-        # Extract json schemas from pydantic models
-        if isinstance(json, (BaseModel, type(BaseModel))):
-            json = json.model_json_schema()
-        return GuidedDecodingParams(
-            json=json,
-            regex=regex,
-            choice=choice,
-            grammar=grammar,
-            json_object=json_object,
-            backend=backend,
-            whitespace_pattern=whitespace_pattern,
-            structural_tag=structural_tag,
-        )
+    _backend: Optional[str] = field(default=None, init=False)
+    """CAUTION: Should only be set by Processor._validate_structured_output"""
+    _backend_was_auto: bool = field(default=False, init=False)
+    """CAUTION: Should only be set by Processor._validate_structured_output"""
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
-        guide_count = sum([
+        count = sum([
             self.json is not None, self.regex is not None, self.choice
             is not None, self.grammar is not None, self.json_object is not None
         ])
-        if guide_count > 1:
+        if count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding but multiple are "
-                f"specified: {self.__dict__}")
+                "You can only use one kind of structured outputs constraint "
+                f"but multiple are specified: {self.__dict__}")
+
+
+@dataclass
+class GuidedDecodingParams(StructuredOutputsParams):
+
+    def __post_init__(self):
+        warnings.warn(
+            "GuidedDecodingParams is deprecated. This will be removed in "
+            "v0.12.0 or v1.0.0, which ever is soonest. Please use "
+            "StructuredOutputsParams instead.",
+            DeprecationWarning,
+            stacklevel=2)
+        return super().__post_init__()
 
 
 class RequestOutputKind(Enum):
@@ -106,7 +95,13 @@ class SamplingParams(
     """
 
     n: int = 1
-    """Number of output sequences to return for the given prompt."""
+    """Number of outputs to return for the given prompt request.
+
+    NOTE:
+        `AsyncLLM` streams outputs by default. When `n > 1`, all `n` outputs
+        are generated and streamed cumulatively per request. To see all `n`
+        outputs upon completion, use `output_kind=RequestOutputKind.FINAL_ONLY`
+        in `SamplingParams`."""
     best_of: Optional[int] = None
     """Number of output sequences that are generated from the prompt. From
     these `best_of` sequences, the top `n` sequences are returned. `best_of`
@@ -196,9 +191,10 @@ class SamplingParams(
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
+    structured_outputs: Optional[StructuredOutputsParams] = None
+    """Parameters for configuring structured outputs."""
     guided_decoding: Optional[GuidedDecodingParams] = None
-    """If provided, the engine will construct a guided decoding logits
-    processor from these parameters."""
+    """Deprecated alias for structured_outputs."""
     logit_bias: Optional[dict[int, float]] = None
     """If provided, the engine will construct a logits processor that applies
     these logit biases."""
@@ -246,6 +242,7 @@ class SamplingParams(
                                                    msgspec.Meta(
                                                        ge=-1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
+        structured_outputs: Optional[StructuredOutputsParams] = None,
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
@@ -258,6 +255,15 @@ class SamplingParams(
                 int(token): min(100.0, max(-100.0, bias))
                 for token, bias in logit_bias.items()
             }
+        if guided_decoding is not None:
+            warnings.warn(
+                "guided_decoding is deprecated. This will be removed in "
+                "v0.12.0 or v1.0.0, which ever is soonest. Please use "
+                "structured_outputs instead.",
+                DeprecationWarning,
+                stacklevel=2)
+            structured_outputs = guided_decoding
+            guided_decoding = None
 
         return SamplingParams(
             n=1 if n is None else n,
@@ -288,7 +294,7 @@ class SamplingParams(
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
-            guided_decoding=guided_decoding,
+            structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
@@ -353,6 +359,16 @@ class SamplingParams(
 
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
+
+        if self.guided_decoding is not None:
+            warnings.warn(
+                "guided_decoding is deprecated. This will be removed in "
+                "v0.12.0 or v1.0.0, which ever is soonest. Please use "
+                "structured_outputs instead.",
+                DeprecationWarning,
+                stacklevel=2)
+            self.structured_outputs = self.guided_decoding
+            self.guided_decoding = None
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
@@ -559,7 +575,7 @@ class SamplingParams(
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
-            f"guided_decoding={self.guided_decoding}, "
+            f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args})")
 
 

@@ -7,10 +7,9 @@ from unittest.mock import patch
 import pytest
 
 from vllm import LLM
-from vllm.config import ModelImpl
-from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.utils import GiB_bytes
-from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
+from vllm.v1.core.kv_cache_utils import (generate_scheduler_kv_cache_config,
+                                         get_kv_cache_configs)
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import create_new_process_for_each_test
@@ -62,36 +61,29 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
                                   False))
 
     # Avoid calling model.forward()
-    def _initialize_kv_caches_v0(self) -> None:
-        self.cache_config.num_gpu_blocks = 0
-        self.cache_config.num_cpu_blocks = 0
-
     def _initialize_kv_caches_v1(self, vllm_config):
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
-        scheduler_kv_cache_config = get_kv_cache_configs(
+        kv_cache_configs = get_kv_cache_configs(
             vllm_config,
             kv_cache_specs,
             [10 * GiB_bytes],
-        )[0]
+        )
+        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
+            kv_cache_configs)
 
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
 
-    with (patch.object(V0LLMEngine, "_initialize_kv_caches",
-                       _initialize_kv_caches_v0),
-          patch.object(V1EngineCore, "_initialize_kv_caches",
+    with (patch.object(V1EngineCore, "_initialize_kv_caches",
                        _initialize_kv_caches_v1), monkeypatch.context() as m):
         if model_info.v0_only:
-            m.setenv("VLLM_USE_V1", "0")
-        if model_arch in ("Phi4FlashForCausalLM", "MotifForCausalLM"):
-            # Phi4FlashForCausalLM and MotifForCausalLM
-            # only supports DIFFERENTIAL_FLASH_ATTN backend
-            m.setenv("VLLM_ATTENTION_BACKEND", "DIFFERENTIAL_FLASH_ATTN")
+            # NOTE(woosuk): skip the test for V0-only models
+            return
         if model_arch == "GptOssForCausalLM":
             # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
             # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
             # L4 supports FA3.
-            m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+            m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         LLM(
@@ -111,8 +103,8 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             # these tests seem to produce leftover memory
             gpu_memory_utilization=0.80,
             load_format="dummy",
-            model_impl=ModelImpl.TRANSFORMERS
-            if model_arch in _TRANSFORMERS_BACKEND_MODELS else ModelImpl.VLLM,
+            model_impl="transformers"
+            if model_arch in _TRANSFORMERS_BACKEND_MODELS else "vllm",
             hf_overrides=hf_overrides_fn,
             max_num_seqs=model_info.max_num_seqs)
 
