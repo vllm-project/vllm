@@ -30,6 +30,11 @@ class KVCacheBlocks:
     kv_cache_groups have the same number of blocks, which is true for now but
     will be broken if we want to give different block_size to different
     kv_cache_groups in the future.
+
+    tuple[tuple[]] is used for the following reasons:
+    - claim immutable
+    - precompute an empty KVCacheBlocks instance in KVCacheManager
+      to avoid GC overhead
     """
 
     def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
@@ -62,6 +67,8 @@ class KVCacheBlocks:
                 - the outer tuple corresponds to KV cache groups
                 - each inner list contains the block_ids of the blocks in that
                   group
+
+        TODO(Jialin): replace the return type to tuple[tuple[int...], ...]
         """
         if allow_none and all(len(group) == 0 for group in self.blocks):
             return None
@@ -132,7 +139,7 @@ class KVCacheManager:
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
         # overhead.
-        self.empty_block_list = KVCacheBlocks(
+        self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups)))
 
     @property
@@ -173,7 +180,7 @@ class KVCacheManager:
         if (not self.enable_caching
                 or (request.sampling_params is not None
                     and request.sampling_params.prompt_logprobs is not None)):
-            return self.empty_block_list, 0
+            return self.empty_kv_cache_blocks, 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
@@ -255,7 +262,7 @@ class KVCacheManager:
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
         else:
-            new_computed_block_list = self.empty_block_list.blocks
+            new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
