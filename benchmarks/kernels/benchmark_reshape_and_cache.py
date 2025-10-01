@@ -127,12 +127,10 @@ def main(args):
             benchmark_mode=args.mode,
             device="cuda",
         )
-        rows.append([n_tok, "HDN", lat * 1e6])  # convert to microseconds
+        rows.append([n_tok, lat * 1e6])  # convert to microseconds
 
     print(f"Benchmark results for implementation cuda (measuring with {args.mode}):")
-    print(
-        tabulate(rows, headers=["num_tokens", "layout", "latency (µs)"], floatfmt=".3f")
-    )
+    print(tabulate(rows, headers=["num_tokens", "latency (µs)"], floatfmt=".3f"))
 
 
 if __name__ == "__main__":
