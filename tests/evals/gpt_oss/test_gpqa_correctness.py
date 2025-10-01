@@ -27,7 +27,7 @@ def run_gpqa_eval(model_name: str, base_url: str) -> float:
     cmd = [
         sys.executable, "-m", "gpt_oss.evals", "--eval", "gpqa", "--model",
         model_name, "--reasoning-effort", "low", "--base-url", base_url,
-        "--n-threads", "500"
+        "--n-threads", "200"
     ]
 
     try:
