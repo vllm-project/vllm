@@ -41,7 +41,7 @@ from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
-from .vision import get_vision_encoder_info
+from .vision import get_num_selected_vision_tokens, get_vision_encoder_info
 
 
 class LlavaImagePixelInputs(TensorSchema):
@@ -147,19 +147,6 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def _apply_feature_select_strategy(
-        self,
-        strategy: str,
-        encoder_num_image_tokens: int,
-    ) -> int:
-        if strategy == "default":
-            return encoder_num_image_tokens - 1
-        if strategy == "full":
-            return encoder_num_image_tokens
-
-        msg = f"Unexpected feature select strategy: {strategy!r}"
-        raise NotImplementedError(msg)
-
     def get_num_image_tokens(
         self,
         *,
@@ -169,12 +156,12 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
 
-        return self._apply_feature_select_strategy(
-            hf_config.vision_feature_select_strategy,
+        return get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,
                 image_height=image_height,
             ),
+            hf_config.vision_feature_select_strategy,
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
