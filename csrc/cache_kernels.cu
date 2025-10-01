@@ -209,60 +209,6 @@ void copy_blocks_mla(std::vector<torch::Tensor> const& kv_caches,
 
 namespace vllm {
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
-__global__ void reshape_and_cache_kernel(
-    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
-    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
-    cache_t* __restrict__ key_cache,     // [num_blocks, num_heads, head_size/x,
-                                         // block_size, x]
-    cache_t* __restrict__ value_cache,   // [num_blocks, num_heads, head_size,
-                                         // block_size]
-    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int key_stride, const int value_stride, const int num_heads,
-    const int head_size, const int block_size, const int x,
-    const float* k_scale, const float* v_scale) {
-  const int64_t token_idx = blockIdx.x;
-  const int64_t slot_idx = slot_mapping[token_idx];
-  if (slot_idx < 0) {
-    // Padding token that should be ignored.
-    return;
-  }
-
-  const int64_t block_idx = slot_idx / block_size;
-  const int64_t block_offset = slot_idx % block_size;
-
-  const int n = num_heads * head_size;
-  for (int i = threadIdx.x; i < n; i += blockDim.x) {
-    const int64_t src_key_idx = token_idx * key_stride + i;
-    const int64_t src_value_idx = token_idx * value_stride + i;
-
-    const int head_idx = i / head_size;
-    const int head_offset = i % head_size;
-    const int x_idx = head_offset / x;
-    const int x_offset = head_offset % x;
-
-    const int64_t tgt_key_idx =
-        block_idx * num_heads * (head_size / x) * block_size * x +
-        head_idx * (head_size / x) * block_size * x + x_idx * block_size * x +
-        block_offset * x + x_offset;
-    const int64_t tgt_value_idx =
-        block_idx * num_heads * head_size * block_size +
-        head_idx * head_size * block_size + head_offset * block_size +
-        block_offset;
-    scalar_t tgt_key = key[src_key_idx];
-    scalar_t tgt_value = value[src_value_idx];
-    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
-      key_cache[tgt_key_idx] = tgt_key;
-      value_cache[tgt_value_idx] = tgt_value;
-    } else {
-      key_cache[tgt_key_idx] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, *k_scale);
-      value_cache[tgt_value_idx] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_value, *v_scale);
-    }
-  }
-}
-
 // Used by vectorization_utils to copy/convert one element
 template <typename OutT, typename InT, Fp8KVCacheDataType kv_dt>
 struct CopyWithScaleOp {
@@ -276,6 +222,62 @@ struct CopyWithScaleOp {
     }
   }
 };
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void reshape_and_cache_kernel(
+    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size//x, x]
+    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size//x, x]
+    cache_t* __restrict__ key_cache,     // [num_blocks, num_heads, head_size//x, block_size, x]
+    cache_t* __restrict__ value_cache,   // [num_blocks, num_heads, head_size//x, x, block_size]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int key_stride, const int value_stride, const int num_heads,
+    const int head_size, const int block_size, const int x,
+    const float* k_scale, const float* v_scale) {
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  if (slot_idx < 0) {
+    return;
+  }
+
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+  const int h_block_count = head_size / x;  // head_size//x
+
+  const int h_block_idx = threadIdx.x;
+  if (h_block_idx >= num_heads * h_block_count) {
+    return;
+  }
+
+  const int head_idx = h_block_idx / h_block_count;
+  const int h_block = h_block_idx % h_block_count;
+
+  const scalar_t* __restrict__ key_src = key + token_idx * key_stride + head_idx * head_size + h_block * x;
+  const int64_t src_value_start = token_idx * value_stride + head_idx * head_size + h_block * x;
+
+  cache_t* __restrict__ key_dst = key_cache + block_idx * num_heads * h_block_count * block_size * x
+                              + head_idx * h_block_count * block_size * x
+                              + h_block * block_size * x
+                              + block_offset * x;
+  const int64_t tgt_value_start = block_idx * num_heads * h_block_count * x * block_size
+                                + head_idx * h_block_count * x * block_size
+                                + h_block * x * block_size
+                                + block_offset;
+
+  float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
+  constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+  vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, x, 0, 1, k_op);
+
+  #pragma unroll
+  for (int i = 0; i < x; i++) {
+    scalar_t value_val = value[src_value_start + i];
+    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      value_cache[tgt_value_start + i * block_size] = value_val;
+    } else {
+      value_cache[tgt_value_start + i * block_size] = fp8::scaled_convert<cache_t, scalar_t, kv_dt>(value_val, *v_scale);
+    }
+  }
+}
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void reshape_and_cache_flash_kernel(
@@ -431,9 +433,10 @@ void reshape_and_cache(
 
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);
+  int head_div_x = head_size / x;
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * head_size, 512));
+  dim3 block(std::min(num_heads * head_div_x, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
