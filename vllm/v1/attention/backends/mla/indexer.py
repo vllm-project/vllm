@@ -171,6 +171,36 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     return max_model_len * 2
 
 
+def split_prefill_chunks(seq_lens_cpu: torch.Tensor,
+                         max_prefill_buffer_size: int,
+                         reqs_start: int) -> list[tuple[int, int]]:
+    """
+    Split the prefill chunks into a list of tuples of (reqs_start, reqs_end)
+    such that the total sequence length of each chunk is less than the
+    maximum prefill buffer size.
+
+    Args:
+        seq_lens_cpu: The sequence lengths of the prefill requests.
+        max_prefill_buffer_size: The maximum prefill buffer size.
+        reqs_start: The start index of the prefill requests.
+    
+    Returns:
+        A list of tuples of (reqs_start, reqs_end).
+    """
+    chunk_seq_ids = []
+    total_seq_lens = 0
+    for i in range(reqs_start, len(seq_lens_cpu)):
+        cur_seq_len = seq_lens_cpu[i].item()
+        total_seq_lens += cur_seq_len
+        if total_seq_lens > max_prefill_buffer_size:
+            chunk_seq_ids.append((reqs_start, i))
+            reqs_start = i
+            total_seq_lens = cur_seq_len
+    if total_seq_lens > 0:
+        chunk_seq_ids.append((reqs_start, len(seq_lens_cpu)))
+    return chunk_seq_ids
+
+
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_BATCH
@@ -230,35 +260,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_reqs=reqs_end - reqs_start,
         )
 
-    def split_prefill_chunks(self, seq_lens_cpu: torch.Tensor,
-                             max_prefill_buffer_size: int,
-                             reqs_start: int) -> list[tuple[int, int]]:
-        """
-        Split the prefill chunks into a list of tuples of (reqs_start, reqs_end)
-        such that the total sequence length of each chunk is less than the
-        maximum prefill buffer size.
-
-        Args:
-            seq_lens_cpu: The sequence lengths of the prefill requests.
-            max_prefill_buffer_size: The maximum prefill buffer size.
-            reqs_start: The start index of the prefill requests.
-        
-        Returns:
-            A list of tuples of (reqs_start, reqs_end).
-        """
-        chunk_seq_ids = []
-        total_seq_lens = 0
-        for i in range(reqs_start, len(seq_lens_cpu)):
-            cur_seq_len = seq_lens_cpu[i].item()
-            total_seq_lens += cur_seq_len
-            if total_seq_lens > max_prefill_buffer_size:
-                chunk_seq_ids.append((reqs_start, i))
-                reqs_start = i
-                total_seq_lens = cur_seq_len
-        if total_seq_lens > 0:
-            chunk_seq_ids.append((reqs_start, len(seq_lens_cpu)))
-        return chunk_seq_ids
-
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
@@ -278,7 +279,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         prefill_metadata = None
         if num_prefills > 0:
-            chunk_seq_ids = self.split_prefill_chunks(
+            chunk_seq_ids = split_prefill_chunks(
                 common_attn_metadata.seq_lens_cpu,
                 self.max_prefill_buffer_size,
                 num_decodes,
