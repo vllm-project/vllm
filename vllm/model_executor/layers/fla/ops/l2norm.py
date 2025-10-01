@@ -78,7 +78,7 @@ def l2norm_fwd_kernel2(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr):
     row_idx = xoffset + tl.arange(0, MBLOCK)[:, None]
     xmask = row_idx < M
     rindex = tl.arange(0, N)[None, :]
-    xs = tl.load(X + (rindex + N * row_idx), None).to(tl.float32)
+    xs = tl.load(X + (rindex + N * row_idx), xmask).to(tl.float32)
     square = tl.broadcast_to(xs * xs, [MBLOCK, N])
     square_sum = tl.sum(tl.where(xmask, square, 0), 1)[:, None]
     rsqrt = tl.rsqrt(square_sum + eps)

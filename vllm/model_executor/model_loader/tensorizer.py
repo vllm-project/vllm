@@ -171,51 +171,52 @@ class TensorizerConfig(MutableMapping):
     _is_sharded: bool = field(init=False, default=False)
     _fields: ClassVar[tuple[str, ...]]
     _keys: ClassVar[frozenset[str]]
-    """
-    Args for the TensorizerConfig class. These are used to configure the 
-    behavior of model serialization and deserialization using Tensorizer.
+    """Configuration class for Tensorizer settings.
     
-    Args:
-      tensorizer_uri: Path to serialized model tensors. Can be a local file 
-          path or a S3 URI. This is a required field unless lora_dir is 
-          provided and the config is meant to be used for the
-          `tensorize_lora_adapter` function. Unless a `tensorizer_dir` or 
-          `lora_dir` is passed to this object's initializer, this is a required 
-          argument.
-      tensorizer_dir: Path to a directory containing serialized model tensors,
-          and all other potential model artifacts to load the model, such as 
-          configs and tokenizer files. Can be passed instead of `tensorizer_uri`
-          where the `model.tensors` file will be assumed to be in this 
-          directory.
-      vllm_tensorized: If True, indicates that the serialized model is a 
-          vLLM model. This is used to determine the behavior of the 
-          TensorDeserializer when loading tensors from a serialized model.
-          It is far faster to deserialize a vLLM model as it utilizes
-          tensorizer's optimized GPU loading. Note that this is now
-          deprecated, as serialized vLLM models are now automatically
-          inferred as vLLM models.
-      verify_hash: If True, the hashes of each tensor will be verified against 
-          the hashes stored in the metadata. A `HashMismatchError` will be 
-          raised if any of the hashes do not match.
-      num_readers: Controls how many threads are allowed to read concurrently
-          from the source file. Default is `None`, which will dynamically set
-          the number of readers based on the number of available 
-          resources and model size. This greatly increases performance.
-      encryption_keyfile: File path to a binary file containing a  
-          binary key to use for decryption. `None` (the default) means 
-          no decryption. See the example script in 
-          examples/others/tensorize_vllm_model.py. 
-      s3_access_key_id: The access key for the S3 bucket. Can also be set via
-          the S3_ACCESS_KEY_ID environment variable.
-      s3_secret_access_key: The secret access key for the S3 bucket. Can also
-          be set via the S3_SECRET_ACCESS_KEY environment variable.
-      s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
-          S3_ENDPOINT_URL environment variable.
-      lora_dir: Path to a directory containing LoRA adapter artifacts for 
-          serialization or deserialization. When serializing LoRA adapters 
-          this is the only necessary parameter to pass to this object's 
-          initializer.
-  """
+    These settings configure the behavior of model serialization and 
+    deserialization using Tensorizer.
+    
+    Attributes:
+        tensorizer_uri: Path to serialized model tensors. Can be a local file 
+            path or a S3 URI. This is a required field unless lora_dir is 
+            provided and the config is meant to be used for the
+            `tensorize_lora_adapter` function. Unless a `tensorizer_dir` or 
+            `lora_dir` is passed to this object's initializer, this is 
+            a required argument.
+        tensorizer_dir: Path to a directory containing serialized model tensors,
+            and all other potential model artifacts to load the model, such as 
+            configs and tokenizer files. Can be passed instead of 
+            `tensorizer_uri` where the `model.tensors` file will be assumed 
+            to be in this directory.
+        vllm_tensorized: If True, indicates that the serialized model is a 
+            vLLM model. This is used to determine the behavior of the 
+            TensorDeserializer when loading tensors from a serialized model.
+            It is far faster to deserialize a vLLM model as it utilizes
+            tensorizer's optimized GPU loading. Note that this is now
+            deprecated, as serialized vLLM models are now automatically
+            inferred as vLLM models.
+        verify_hash: If True, the hashes of each tensor will be verified 
+            against the hashes stored in the metadata. A `HashMismatchError` 
+            will be raised if any of the hashes do not match.
+        num_readers: Controls how many threads are allowed to read concurrently
+            from the source file. Default is `None`, which will dynamically set
+            the number of readers based on the number of available 
+            resources and model size. This greatly increases performance.
+        encryption_keyfile: File path to a binary file containing a  
+            binary key to use for decryption. `None` (the default) means 
+            no decryption. See the example script in 
+            examples/others/tensorize_vllm_model.py. 
+        s3_access_key_id: The access key for the S3 bucket. Can also be set via
+            the S3_ACCESS_KEY_ID environment variable.
+        s3_secret_access_key: The secret access key for the S3 bucket. Can also
+            be set via the S3_SECRET_ACCESS_KEY environment variable.
+        s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
+            S3_ENDPOINT_URL environment variable.
+        lora_dir: Path to a directory containing LoRA adapter artifacts for 
+            serialization or deserialization. When serializing LoRA adapters 
+            this is the only necessary parameter to pass to this object's 
+            initializer.
+    """
 
     def __post_init__(self):
         # check if the configuration is for a sharded vLLM model
@@ -671,21 +672,15 @@ def tensorize_vllm_model(engine_args: "EngineArgs",
         ) as stream:
             stream.write(encryption_params.key)
 
-    from vllm import LLMEngine
-    from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+    assert envs.VLLM_USE_V1
 
-    if not envs.VLLM_USE_V1:
-        engine = LLMEngine.from_engine_args(engine_args)
-        engine.model_executor.collective_rpc(
-            "save_tensorized_model",
-            kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
-        )
-    else:
-        engine = V1LLMEngine.from_vllm_config(engine_config)
-        engine.collective_rpc(
-            "save_tensorized_model",
-            kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
-        )
+    from vllm.v1.engine.llm_engine import LLMEngine
+
+    engine = LLMEngine.from_vllm_config(engine_config)
+    engine.collective_rpc(
+        "save_tensorized_model",
+        kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
+    )
 
 
 def tensorize_lora_adapter(lora_path: str,

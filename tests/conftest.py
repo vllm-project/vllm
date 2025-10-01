@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# ruff: noqa
+
+from tblib import pickling_support
+
+# Install support for pickling exceptions so that we can nicely propagate
+# failures from tests running in a subprocess.
+# This should be run before any custom exception subclasses are defined.
+pickling_support.install()
+
 import http.server
 import json
 import math
@@ -9,6 +19,7 @@ import socket
 import tempfile
 import threading
 from collections.abc import Generator
+from contextlib import nullcontext
 from enum import Enum
 from typing import Any, Callable, Optional, TypedDict, TypeVar, Union, cast
 
@@ -29,19 +40,20 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import ConvertOption, RunnerOption, _get_and_verify_dtype
+from vllm.config.model import (ConvertOption, RunnerOption,
+                               _get_and_verify_dtype)
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
-from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
+from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.sequence import Logprob
 from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.utils import set_default_torch_num_threads
 
 logger = init_logger(__name__)
 
@@ -148,26 +160,6 @@ def cleanup_VLLM_USE_V1(monkeypatch):
         monkeypatch.delenv("VLLM_USE_V1")
 
 
-@pytest.fixture(params=[True, False])
-def run_with_both_engines(request, monkeypatch):
-    # Automatically runs tests twice, once with V1 and once without
-    use_v1 = request.param
-    # Tests decorated with `@skip_v1` are only run without v1
-    skip_v0 = request.node.get_closest_marker("skip_v0")
-    skip_v1 = request.node.get_closest_marker("skip_v1")
-
-    if use_v1:
-        if skip_v1:
-            pytest.skip("Skipping test on vllm V1")
-        monkeypatch.setenv('VLLM_USE_V1', '1')
-    else:
-        if skip_v0:
-            pytest.skip("Skipping test on vllm V0")
-        monkeypatch.setenv('VLLM_USE_V1', '0')
-
-    yield
-
-
 @pytest.fixture(autouse=True)
 def init_test_http_connection():
     # pytest_asyncio may use a different event loop per test
@@ -235,39 +227,6 @@ class DecoderPromptType(Enum):
 
 
 @pytest.fixture
-def example_encoder_decoder_prompts(
-) -> dict[DecoderPromptType, list[ExplicitEncoderDecoderPrompt]]:
-    '''
-    Returns an encoder prompt list and a decoder prompt list, wherein each pair
-    of same-index entries in both lists corresponds to an (encoder prompt,
-    decoder prompt) tuple.
-
-    Returns:
-
-    * Encoder prompt list
-    * Decoder prompt list (reverse of encoder prompt list)
-    '''
-
-    encoder_prompts = []
-    for filename in _TEST_PROMPTS:
-        encoder_prompts += _read_prompts(filename)
-
-    custom_decoder_prompts = encoder_prompts[::-1]
-    empty_str_decoder_prompts = [""] * len(encoder_prompts)
-    none_decoder_prompts = [None] * len(encoder_prompts)
-
-    # NONE decoder prompt type
-    return {
-        DecoderPromptType.NONE:
-        zip_enc_dec_prompts(encoder_prompts, none_decoder_prompts),
-        DecoderPromptType.EMPTY_STR:
-        zip_enc_dec_prompts(encoder_prompts, empty_str_decoder_prompts),
-        DecoderPromptType.CUSTOM:
-        zip_enc_dec_prompts(encoder_prompts, custom_decoder_prompts),
-    }
-
-
-@pytest.fixture
 def example_long_prompts() -> list[str]:
     prompts = []
     for filename in _LONG_PROMPTS:
@@ -318,6 +277,35 @@ class HfRunner:
         return x.to(device)
 
     def __init__(
+        self,
+        model_name: str,
+        dtype: str = "auto",
+        *,
+        model_kwargs: Optional[dict[str, Any]] = None,
+        trust_remote_code: bool = True,
+        is_sentence_transformer: bool = False,
+        is_cross_encoder: bool = False,
+        skip_tokenizer_init: bool = False,
+        auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
+        # Set this to avoid hanging issue
+        default_torch_num_threads: Optional[int] = None,
+    ) -> None:
+        init_ctx = (nullcontext() if default_torch_num_threads is None else
+                    set_default_torch_num_threads(default_torch_num_threads))
+
+        with init_ctx:
+            self._init(
+                model_name=model_name,
+                dtype=dtype,
+                model_kwargs=model_kwargs,
+                trust_remote_code=trust_remote_code,
+                is_sentence_transformer=is_sentence_transformer,
+                is_cross_encoder=is_cross_encoder,
+                skip_tokenizer_init=skip_tokenizer_init,
+                auto_cls=auto_cls,
+            )
+
+    def _init(
         self,
         model_name: str,
         dtype: str = "auto",
@@ -680,68 +668,6 @@ class HfRunner:
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
 
-    def generate_encoder_decoder_greedy_logprobs_limit(
-        self,
-        encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
-        max_tokens: int,
-        num_logprobs: Optional[int],
-        images: Optional[PromptImageInput] = None,
-        **kwargs: Any,
-    ) -> list[TokensTextLogprobs]:
-        '''
-        Greedy logprobs generation for vLLM encoder/decoder models
-        '''
-
-        all_logprobs: list[list[dict[int, float]]] = []
-        all_output_ids: list[list[int]] = []
-        all_output_strs: list[str] = []
-
-        for i, (encoder_prompt, decoder_prompt) in enumerate(
-                to_enc_dec_tuple_list(encoder_decoder_prompts)):
-            processor_kwargs: dict[str, Any] = {
-                "text": encoder_prompt,
-                "return_tensors": "pt",
-            }
-            if images is not None and images[i] is not None:
-                processor_kwargs["images"] = images[i]
-
-            encoder_inputs = self.processor(**processor_kwargs)
-            encoder_inputs = self.wrap_device(encoder_inputs)
-
-            if decoder_prompt is None:
-                decoder_input_ids = None
-            else:
-                decoder_inputs = self.tokenizer(decoder_prompt,
-                                                return_tensors="pt")
-                decoder_input_ids = self.wrap_device(decoder_inputs.input_ids)
-
-            output = self.model.generate(
-                decoder_input_ids=decoder_input_ids,
-                use_cache=True,
-                do_sample=False,
-                max_new_tokens=max_tokens,
-                output_hidden_states=True,
-                return_dict_in_generate=True,
-                **encoder_inputs,
-                **kwargs,
-            )
-
-            (
-                seq_logprobs_lst,
-                output_len,
-            ) = self._hidden_states_to_logprobs(output.decoder_hidden_states,
-                                                num_logprobs)
-
-            all_logprobs.append(seq_logprobs_lst)
-            seq_ids = output.sequences[0]
-            output_ids = seq_ids[-output_len:]
-            all_output_ids.append(output_ids.tolist())
-            all_output_strs.append(self.tokenizer.decode(output_ids))
-
-        outputs = zip(all_output_ids, all_output_strs, all_logprobs)
-        return [(output_ids, output_str, output_logprobs)
-                for output_ids, output_str, output_logprobs in outputs]
-
     def encode(self, prompts: list[str], *args,
                **kwargs) -> list[list[torch.Tensor]]:
         return self.model.encode(prompts, *args, **kwargs)
@@ -798,26 +724,32 @@ class VllmRunner:
         enable_chunked_prefill: Optional[bool] = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
+        # Set this to avoid hanging issue
+        default_torch_num_threads: Optional[int] = None,
         **kwargs,
     ) -> None:
-        self.llm = LLM(
-            model=model_name,
-            runner=runner,
-            convert=convert,
-            tokenizer=tokenizer_name,
-            tokenizer_mode=tokenizer_mode,
-            trust_remote_code=trust_remote_code,
-            dtype=dtype,
-            seed=seed,
-            swap_space=swap_space,
-            enforce_eager=enforce_eager,
-            disable_log_stats=disable_log_stats,
-            tensor_parallel_size=tensor_parallel_size,
-            max_model_len=max_model_len,
-            block_size=block_size,
-            enable_chunked_prefill=enable_chunked_prefill,
-            **kwargs,
-        )
+        init_ctx = (nullcontext() if default_torch_num_threads is None else
+                    set_default_torch_num_threads(default_torch_num_threads))
+
+        with init_ctx:
+            self.llm = LLM(
+                model=model_name,
+                runner=runner,
+                convert=convert,
+                tokenizer=tokenizer_name,
+                tokenizer_mode=tokenizer_mode,
+                trust_remote_code=trust_remote_code,
+                dtype=dtype,
+                seed=seed,
+                swap_space=swap_space,
+                enforce_eager=enforce_eager,
+                disable_log_stats=disable_log_stats,
+                tensor_parallel_size=tensor_parallel_size,
+                max_model_len=max_model_len,
+                block_size=block_size,
+                enable_chunked_prefill=enable_chunked_prefill,
+                **kwargs,
+            )
 
     def get_inputs(
         self,
@@ -930,26 +862,6 @@ class VllmRunner:
                 if sampling_params.prompt_logprobs is None else
                 toks_str_logsprobs_prompt_logprobs)
 
-    def generate_encoder_decoder_w_logprobs(
-        self,
-        encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
-        sampling_params: SamplingParams,
-    ) -> Union[list[TokensTextLogprobs],
-               list[TokensTextLogprobsPromptLogprobs]]:
-        '''
-        Logprobs generation for vLLM encoder/decoder models
-        '''
-
-        assert sampling_params.logprobs is not None
-        req_outputs = self.llm.generate(encoder_decoder_prompts,
-                                        sampling_params=sampling_params)
-        toks_str_logsprobs_prompt_logprobs = (
-            self._final_steps_generate_w_logprobs(req_outputs))
-        # Omit prompt logprobs if not required by sampling params
-        return ([x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
-                if sampling_params.prompt_logprobs is None else
-                toks_str_logsprobs_prompt_logprobs)
-
     def generate_greedy(
         self,
         prompts: Union[list[str], list[torch.Tensor]],
@@ -1027,29 +939,6 @@ class VllmRunner:
 
         return perplexities
 
-    def generate_encoder_decoder_greedy_logprobs(
-        self,
-        encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
-        max_tokens: int,
-        num_logprobs: Optional[int],
-        num_prompt_logprobs: Optional[int] = None,
-        skip_special_tokens: bool = True,
-    ) -> Union[list[TokensTextLogprobs],
-               list[TokensTextLogprobsPromptLogprobs]]:
-        greedy_logprobs_params = SamplingParams(
-            temperature=0.0,
-            max_tokens=max_tokens,
-            logprobs=num_logprobs,
-            prompt_logprobs=(num_prompt_logprobs),
-            skip_special_tokens=skip_special_tokens,
-        )
-        '''
-        Greedy logprobs generation for vLLM encoder/decoder models
-        '''
-
-        return self.generate_encoder_decoder_w_logprobs(
-            encoder_decoder_prompts, greedy_logprobs_params)
-
     def generate_beam_search(
         self,
         prompts: list[str],
@@ -1114,17 +1003,7 @@ class VllmRunner:
         return [req_output.outputs.score for req_output in req_outputs]
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        if hasattr(self.llm.llm_engine, "model_executor"):
-            # This works either in V0 or in V1 with
-            # VLLM_ENABLE_V1_MULTIPROCESSING=0
-            executor = self.llm.llm_engine.model_executor
-            return executor.apply_model(func)
-
-        # This works in V1 with VLLM_ALLOW_INSECURE_SERIALIZATION=1
-        def _apply_model(self):
-            return func(self.get_model())
-
-        return self.llm.llm_engine.collective_rpc(_apply_model)
+        return self.llm.apply_model(func)
 
     def get_llm(self) -> LLM:
         return self.llm
@@ -1200,7 +1079,7 @@ def dummy_llava_path():
                           local_dir=_dummy_llava_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
-                              "*.msgpack"
+                              "*.msgpack", "*.safetensors"
                           ])
         assert os.path.exists(json_path)
         with open(json_path) as f:
@@ -1219,7 +1098,7 @@ def dummy_gemma2_embedding_path():
                           local_dir=_dummy_gemma2_embedding_path,
                           ignore_patterns=[
                               "*.bin", "*.bin.index.json", "*.pt", "*.h5",
-                              "*.msgpack"
+                              "*.msgpack", "*.safetensors"
                           ])
         assert os.path.exists(json_path)
         with open(json_path) as f:

@@ -48,7 +48,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .ernie45_moe import Ernie4_5_MoeMLP
@@ -200,7 +199,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
 
         assert config.moe_num_experts[0] == config.moe_num_experts[1]
         self.e_score_correction_bias = nn.Parameter(
-            torch.empty(2, config.moe_num_experts[0]))
+            torch.empty(2, config.moe_num_experts[0], dtype=torch.float32))
 
         assert text_moe_layer_start_index <= text_moe_layer_end_index
 
@@ -210,6 +209,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 config.hidden_size,
                 config.moe_num_experts[0],
                 bias=False,
+                params_dtype=torch.float32,
                 quant_config=quant_config,
                 prefix=f"{prefix}.text_experts_gate")
 
@@ -239,6 +239,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 config.hidden_size,
                 config.moe_num_experts[1],
                 bias=False,
+                params_dtype=torch.float32,
                 quant_config=quant_config,
                 prefix=f"{prefix}.vision_experts_gate")
 
@@ -289,7 +290,8 @@ class Ernie4_5_VLMoeMoE(nn.Module):
 
         if visual_token_mask is not None and visual_token_mask.all():
             # only vision modal input
-            router_logits, _ = self.vision_experts_gate(hidden_states)
+            router_logits, _ = self.vision_experts_gate(
+                hidden_states.to(dtype=torch.float32))
             final_hidden_states = self.vision_experts(
                 hidden_states=hidden_states, router_logits=router_logits)
         elif visual_token_mask is not None and visual_token_mask.any():
@@ -304,19 +306,21 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             vision_hidden_states = hidden_states[visual_token_mask].reshape(
                 -1, self.hidden_size)
 
-            text_router_logits, _ = self.text_experts_gate(text_hidden_states)
+            text_router_logits, _ = self.text_experts_gate(
+                text_hidden_states.to(dtype=torch.float32))
             final_hidden_states[text_token_mask] = self.text_experts(
                 hidden_states=text_hidden_states,
                 router_logits=text_router_logits).flatten()
 
             vision_router_logits, _ = self.vision_experts_gate(
-                vision_hidden_states)
+                vision_hidden_states.to(dtype=torch.float32))
             final_hidden_states[visual_token_mask] = self.vision_experts(
                 hidden_states=vision_hidden_states,
                 router_logits=vision_router_logits).flatten()
         else:
             # only text modal input
-            text_router_logits, _ = self.text_experts_gate(hidden_states)
+            text_router_logits, _ = self.text_experts_gate(
+                hidden_states.to(dtype=torch.float32))
 
             final_hidden_states = self.text_experts(
                 hidden_states=hidden_states, router_logits=text_router_logits)
@@ -557,7 +561,9 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
 
@@ -585,10 +591,8 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

@@ -58,7 +58,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TranslationRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
-from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer
+from vllm.entrypoints.renderer import (BaseRenderer, CompletionRenderer,
+                                       RenderConfig)
 # yapf: enable
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -247,6 +248,19 @@ class OpenAIServing:
             model_config=self.model_config,
             tokenizer=tokenizer,
             async_tokenizer_pool=self._async_tokenizer_pool)
+
+    def _build_render_config(
+        self,
+        request: Any,
+    ) -> RenderConfig:
+        """
+        Build and return a `RenderConfig` for an endpoint.
+
+        Used by the renderer to control how prompts are prepared
+        (e.g., tokenization and length handling). Endpoints should
+        implement this with logic appropriate to their request type.
+        """
+        raise NotImplementedError
 
     def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
@@ -683,9 +697,7 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
-        A simpler implementation of
-        [`_tokenize_prompt_input_or_inputs`][vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs]
-        that assumes single input.
+        A simpler implementation that tokenizes a single prompt input.
         """
         async for result in self._tokenize_prompt_inputs_async(
                 request,
@@ -704,9 +716,7 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> AsyncGenerator[TextTokensPrompt, None]:
         """
-        A simpler implementation of
-        [`_tokenize_prompt_input_or_inputs`][vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs]
-        that assumes multiple inputs.
+        A simpler implementation that tokenizes multiple prompt inputs.
         """
         for prompt in prompt_inputs:
             if isinstance(prompt, str):
@@ -965,17 +975,6 @@ class OpenAIServing:
         if not model_name:
             return True
         return self.models.is_base_model(model_name)
-
-    def _get_model_name(
-        self,
-        model_name: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> str:
-        if lora_request:
-            return lora_request.lora_name
-        if not model_name:
-            return self.models.base_model_paths[0].name
-        return model_name
 
 
 def clamp_prompt_logprobs(

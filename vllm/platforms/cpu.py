@@ -93,11 +93,14 @@ class CpuPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
+                             has_sink: bool, use_sparse: bool) -> str:
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
             raise NotImplementedError("MLA is not supported on CPU.")
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on CPU.")
         logger.info("Using Torch SDPA backend.")
         if not use_v1:
             raise ValueError("CPU backend only supports V1.")
@@ -125,10 +128,6 @@ class CpuPlatform(Platform):
         Set the device for the current platform.
         """
         torch.cpu.set_device(device)
-
-    @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
 
     @classmethod
     def inference_mode(cls):
@@ -185,6 +184,11 @@ class CpuPlatform(Platform):
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
+        # Disable DBO
+        if parallel_config.enable_dbo:
+            logger.warning(
+                "Dual-Batch Overlap is not supported on CPU, disabled.")
+            parallel_config.enable_dbo = False
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationLevel
@@ -328,22 +332,9 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_v1(cls, model_config) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
+    def opaque_attention_op(cls) -> bool:
         return True
 
     @classmethod
-    def default_v1(cls, model_config) -> bool:
-        """Returns whether the current platform can use v1 by default for the
-        supplied model configuration.
-        """
-        arch = cls.get_cpu_architecture()
-        return (cls.supports_v1(model_config)
-                and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC,
-                             CpuArchEnum.ARM, CpuArchEnum.S390X))
-
-    @classmethod
-    def opaque_attention_op(cls) -> bool:
+    def support_hybrid_kv_cache(cls) -> bool:
         return True

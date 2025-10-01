@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import inspect
 from typing import Callable, Optional, TypeVar, Union, overload
 from unittest.mock import patch
 
 import torch
 import torch.nn as nn
+from packaging import version
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 from vllm.compilation.counter import compilation_counter
@@ -14,7 +16,7 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
-from vllm.utils import supports_dynamo
+from vllm.utils import resolve_obj_by_qualname, supports_dynamo
 
 from .monitor import start_monitoring_torch_compile
 
@@ -299,9 +301,12 @@ def _support_torch_compile(
                 logger.debug(
                     "enable_cpp_symbolic_shape_guards config not available")
 
-            with patch.object(InliningInstructionTranslator, 'inline_call',
-                              patched_inline_call), torch._dynamo.config.patch(
-                                  **dynamo_config_patches):
+            with patch.object(
+                    InliningInstructionTranslator, "inline_call",
+                    patched_inline_call), torch._dynamo.config.patch(
+                        **dynamo_config_patches
+                    ), maybe_use_cudagraph_partition_wrapper(
+                        self.vllm_config), _torch27_patch_tensor_subclasses():
                 output = self.compiled_callable(*args, **kwargs)
             return output
 
@@ -314,3 +319,82 @@ def _support_torch_compile(
 
     cls.__call__ = __call__
     return cls
+
+
+@contextlib.contextmanager
+def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
+    """
+    Context manager to set/unset customized cudagraph partition wrappers.
+
+    If we're using Inductor-based graph partitioning, we currently have the
+    whole `fx.Graph` before Inductor lowering and and the piecewise
+    splitting happens after all graph passes and fusions. Here, we add
+    a custom hook for Inductor to wrap each partition with our static
+    graph wrapper class to maintain more control over static graph
+    capture and replay.
+    """
+    from vllm.config import CUDAGraphMode
+
+    compilation_config = vllm_config.compilation_config
+    if (compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+            and compilation_config.use_inductor_graph_partition):
+        from torch._inductor.utils import CUDAGraphWrapperMetadata
+
+        from vllm.compilation.cuda_graph import CUDAGraphOptions
+        from vllm.platforms import current_platform
+
+        static_graph_wrapper_class = resolve_obj_by_qualname(
+            current_platform.get_static_graph_wrapper_cls())
+
+        def customized_cudagraph_wrapper(f,
+                                         metadata: CUDAGraphWrapperMetadata):
+            partition_id = metadata.partition_index
+            num_partitions = metadata.num_partitions
+            return static_graph_wrapper_class(
+                runnable=f,
+                vllm_config=vllm_config,
+                runtime_mode=CUDAGraphMode.PIECEWISE,
+                cudagraph_options=CUDAGraphOptions(
+                    debug_log_enable=partition_id == 0,
+                    gc_disable=partition_id != 0,
+                    weak_ref_output=partition_id == num_partitions - 1,
+                ))
+
+        torch._inductor.utils.set_customized_partition_wrappers(
+            customized_cudagraph_wrapper)
+
+    yield
+
+    if (compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+            and compilation_config.use_inductor_graph_partition):
+        torch._inductor.utils.set_customized_partition_wrappers(None)
+
+
+@contextlib.contextmanager
+def _torch27_patch_tensor_subclasses():
+    """
+    Add support for using tensor subclasses (ie `BasevLLMParameter`, ect) when
+    using torch 2.7.0. This enables using weight_loader_v2 and the use of
+    `BasevLLMParameters` without having to replace them with regular tensors
+    before `torch.compile`-time.
+    """
+    from vllm.model_executor.parameter import (BasevLLMParameter,
+                                               ModelWeightParameter,
+                                               RowvLLMParameter,
+                                               _ColumnvLLMParameter)
+
+    def return_false(*args, **kwargs):
+        return False
+
+    if version.parse("2.7") <= version.parse(
+            torch.__version__) < version.parse("2.8"):
+        yield
+        return
+
+    with (torch._dynamo.config.patch("traceable_tensor_subclasses", [
+            BasevLLMParameter, ModelWeightParameter, _ColumnvLLMParameter,
+            RowvLLMParameter
+    ]),
+          patch("torch._dynamo.variables.torch.can_dispatch_torch_function",
+                return_false)):
+        yield
