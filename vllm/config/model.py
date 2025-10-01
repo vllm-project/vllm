@@ -16,8 +16,8 @@ from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
 import vllm.envs as envs
-from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
-                                    MultiModalConfig)
+from vllm.config.multimodal import (BaseDummyOptions, MMCacheType,
+                                    MMEncoderTPMode, MultiModalConfig)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.utils import assert_hashable, config
 from vllm.logger import init_logger
@@ -274,7 +274,7 @@ class ModelConfig:
     multimodal_config: Optional[MultiModalConfig] = None
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
-    limit_mm_per_prompt: InitVar[Optional[dict[str, int]]] = None
+    limit_mm_per_prompt: InitVar[Optional[dict[str, BaseDummyOptions]]] = None
     media_io_kwargs: InitVar[Optional[dict[str, dict[str, Any]]]] = None
     mm_processor_kwargs: InitVar[Optional[dict[str, Any]]] = None
     mm_processor_cache_gb: InitVar[Optional[float]] = None
