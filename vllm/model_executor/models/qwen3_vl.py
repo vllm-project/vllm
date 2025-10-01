@@ -1127,6 +1127,8 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         if not multimodal_config.get_limit_per_prompt("image") and \
             not multimodal_config.get_limit_per_prompt("video"):
+            self.visual = None
+        else:
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
@@ -1134,8 +1136,6 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
             )
-        else:
-            self.visual = None
 
         self.language_model = Qwen3LLMForCausalLM(vllm_config=vllm_config,
                                                   prefix=maybe_prefix(
