@@ -92,11 +92,12 @@ class NgramProposer:
         """
         draft_token_ids: list[list[int]] = []
 
-        # Only rank 0 will run the ngram proposer 
+        # Only rank 0 will run the ngram proposer
         # and broadcast the results to other ranks.
         if self.tp_group is None or self.tp_group.rank == self.leader_rank:
-            # Only run batch propose if there are requests needing ngram proposals.
-            # avoid calling numba function with empty list which causes error
+            # Only run batch propose if there are requests needing
+            # ngram proposals. Avoid calling numba function with empty
+            # list which causes error:
             # ValueError: cannot compute fingerprint of empty list
             if num_ngram_requests := len(valid_ngram_requests):
                 original_num_numba_threads = get_num_threads()
@@ -106,7 +107,8 @@ class NgramProposer:
                 total_tokens = np.sum(num_tokens_no_spec)
                 if total_tokens >= self.num_tokens_threshold:
                     final_num_threads = max(
-                        1, min(self.num_numba_thread_available,
+                        1,
+                        min(self.num_numba_thread_available,
                             num_ngram_requests))
                     set_num_threads(final_num_threads)
                 else:
@@ -135,7 +137,7 @@ class NgramProposer:
         if self.tp_group is not None and self.tp_group.world_size > 1:
             draft_token_ids = self.tp_group.broadcast_object_list(
                 draft_token_ids, src=self.leader_rank)
-            
+
         return draft_token_ids
 
     def propose(

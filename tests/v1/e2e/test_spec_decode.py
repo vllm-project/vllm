@@ -80,7 +80,6 @@ def model_name():
 
 
 def test_ngram_correctness(
-    monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_name: str,
 ):
