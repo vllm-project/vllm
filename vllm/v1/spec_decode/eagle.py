@@ -261,6 +261,12 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
         )
         if self.pass_cudagraph_args_to_forward_ctx:
+            # Update num_tokens in batch descriptor, eg after cudagraph padding
+            old_bd: BatchDescriptor = cudagraph_args["batch_descriptor"]
+            if old_bd is not None:
+                new_bd = BatchDescriptor(num_tokens=num_input_tokens,
+                                         uniform_decode=old_bd.uniform_decode)
+                cudagraph_args["batch_descriptor"] = new_bd
             forward_ctx_kwargs.update(cudagraph_args)
 
         with set_forward_context(**forward_ctx_kwargs):
