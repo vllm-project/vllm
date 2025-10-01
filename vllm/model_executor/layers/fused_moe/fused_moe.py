@@ -528,7 +528,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
         assert block_shape is None or block_shape[0] == 0
-    else:
+    elif not use_mxfp4_w4a4:
         assert A_scale is None
         assert B_scale is None
 

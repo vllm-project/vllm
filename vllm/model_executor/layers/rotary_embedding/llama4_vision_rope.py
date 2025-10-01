@@ -55,6 +55,7 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
 
     def forward_native(  # type: ignore[override]
         self,
+        positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -75,7 +76,8 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
 
     def forward_cuda(  # type: ignore[override]
         self,
+        positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        return self.forward_native(query, key)
+        return self.forward_native(positions, query, key)

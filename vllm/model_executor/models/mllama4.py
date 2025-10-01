@@ -294,7 +294,7 @@ class Llama4VisionAttention(nn.Module):
 
         q = q.view(q.shape[0], q.shape[1], self.num_local_heads, self.head_dim)
         k = k.view(k.shape[0], k.shape[1], self.num_local_heads, self.head_dim)
-        q, k = self.rotary_emb(q, k)
+        q, k = self.rotary_emb(None, q, k)
 
         q = q.view(q.shape[0], q.shape[1], -1)
         k = k.view(k.shape[0], k.shape[1], -1)
