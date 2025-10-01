@@ -336,8 +336,7 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_cudagraph_capture_size: int = field(default=None,
-                                            init=False)  # type: ignore
+    max_cudagraph_capture_size: int = field(default=None)  # type: ignore
     """Used to specify the max cudagraph capture size. 
     1. if it's provided and cudagraph_capture_sizes is not configured,
     then cudagraph_capture_sizes would follow the pattern: 
@@ -588,8 +587,9 @@ class CompilationConfig:
         if self.max_cudagraph_capture_size is not None:
             assert self.max_cudagraph_capture_size ==\
                 max_cudagraph_capture_size, (
-                "compliation_config.max_cudagraph_capture_size"
-                "is inconsistent with cudagraph_capture_sizes")
+                f"max_cudagraph_capture_size:{self.max_cudagraph_capture_size}"
+                " should be consistent with the max value of "
+                f"cudagraph_capture_sizes:{max_cudagraph_capture_size}")
         else:
             self.max_cudagraph_capture_size = max_cudagraph_capture_size
 
