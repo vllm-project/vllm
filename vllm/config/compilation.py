@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
 from warnings import warn
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
@@ -230,7 +230,10 @@ class CompilationConfig:
 
     # Inductor capture
     use_inductor: bool = True
-    """Whether to use inductor compilation:
+    """
+    Whether to use inductor compilation.
+
+    This flag is deprecated and will be removed. Please use the 'backend' option instead.
 
     - False: inductor compilation is not used. graph runs in eager
         (custom_ops enabled by default).
@@ -549,8 +552,18 @@ class CompilationConfig:
             "The 'use_inductor' flag is deprecated and will be removed in a future release. "
             "Please use the 'backend' option instead.",
         )
-            
+    
+   
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
+        """
+        Initialize the backend for the compilation config from a vllm config.
+        Arguments:
+            vllm_config: The vllm config to initialize the backend from.
+        Returns:
+            The backend for the compilation config.
+        """
+        if self.level is None:
+            raise ValueError("No compilation level is set. This method should only be called via vllm config where the level is set if none is provided.")
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
@@ -563,9 +576,14 @@ class CompilationConfig:
             if self.backend in torch_backends:
                 return self.backend
             return resolve_obj_by_qualname(self.backend)
-
-        # TODO: pass user-specified backend to piecewise compilation
-        # merge with the config use_inductor
+        if self.level == CompilationLevel.PIECEWISE:
+            if self.backend == "":
+                vllm_config.compilation_config.backend = "inductor"
+            elif self.backend in ["eager", "inductor"]:
+                vllm_config.compilation_config.backend = self.backend
+            else:
+                raise ValueError(f"Invalid backend for piecewise compilation: {self.backend}")
+       
         assert self.level == CompilationLevel.PIECEWISE
 
         from vllm.compilation.backends import VllmBackend
