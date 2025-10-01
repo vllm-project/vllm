@@ -526,7 +526,8 @@ SLIDING_WINDOW_BACKENDS_TO_TEST = [
 
 
 @pytest.mark.parametrize("batch_spec_name", [
-    "large_prefill", "mixed_large",
+    "small_decode", "small_prefill", "mixed_medium", "large_decode",
+    "large_prefill", "mixed_large"
 ])
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
 def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
