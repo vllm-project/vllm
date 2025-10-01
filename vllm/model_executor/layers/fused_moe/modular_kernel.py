@@ -1006,6 +1006,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         #
         # Invoke Experts
         #
+
+        # TODO(bnell) is this necessary?  move into allocate_buffers
         if a1q.numel() == 0:
             # This happens when none of the tokens from the all2all reach this
             # EP rank. Also, note that this is only relevant for CUDAGraph
