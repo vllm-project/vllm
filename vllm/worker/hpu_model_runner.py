@@ -129,7 +129,7 @@ class VisionBuckets:
                 else:
                     self.is_batch_based = False
                     multimodal_buckets = [
-                        1600, 3136, 4096, 6400, 7744, 9216, 12544
+                        784, 1600, 3136, 4096, 6400, 7744, 9216, 12544
                     ]
             else:
                 multimodal_buckets = [int(i) for i in envvar.split(',')]
