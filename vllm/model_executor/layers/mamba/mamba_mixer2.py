@@ -738,13 +738,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 #Note:
                 # for decode always: current_first_idx_d == current_last_idx_d
                 # at block boundaries: current_first_idx_d > last_state_idx_d
-
-                # copy initial state to new location,
-                # as update kernel works in place
-                #if (current_last_idx_d > last_state_idx_d).any():
-                # (skip IF as it breaks CUDA graphs)
-                conv_state[state_indices_tensor_d_output] = conv_state[
-                    state_indices_tensor_d_input]
             else:
                 # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
@@ -757,11 +750,13 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=state_indices_tensor_d_output)
+                conv_state_indices=state_indices_tensor_d,
+                current_last_idx=current_last_idx_d,
+                last_state_idx=last_state_idx_d,
+            )
 
             hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(
                 hidden_states_B_C_d)
-
 
             # 3. State Space Model sequence transformation
             n_groups = self.n_groups // self.tp_size

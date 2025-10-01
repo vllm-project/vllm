@@ -35,7 +35,6 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     seqlen: tl.int32,  # cu_seqlen
     num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
     # Strides
-    stride_x_seq: tl.constexpr,  # stride to get to next sequence,
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
     stride_x_token: tl.constexpr,  # stride to get to next token (same feature-index, same sequence-index)
     stride_w_dim: tl.constexpr,  # stride to get to next dim-axis value
@@ -687,7 +686,6 @@ def causal_conv1d_fn(
         cu_seqlen,
         num_cache_lines,
         # stride
-        stride_x_seq,
         stride_x_dim,
         stride_x_token,
         stride_w_dim,
@@ -723,10 +721,11 @@ def _causal_conv1d_update_kernel(
     w_ptr,  # (dim, width)
     bias_ptr,
     conv_state_ptr,
-    cache_seqlens_ptr,  # circular buffer
     conv_state_indices_ptr,
     num_accepted_tokens_ptr,
     query_start_loc_ptr,  # (batch + 1)
+    current_last_idx,
+    last_state_idx,
     o_ptr,  # (batch, dim, seqlen)
     # Matrix dimensions
     batch: int,
@@ -754,7 +753,7 @@ def _causal_conv1d_update_kernel(
     KERNEL_WIDTH: tl.constexpr,
     SILU_ACTIVATION: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    IS_CONTINUOUS_BATCHING: tl.constexpr,
+    IS_CACHE_ENABLED: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     USE_PAD_SLOT: tl.constexpr,
@@ -768,13 +767,19 @@ def _causal_conv1d_update_kernel(
     # [BLOCK_N,] elements along the feature-dimension (channel)
     idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
 
-    if IS_CONTINUOUS_BATCHING:
-        # mask = idx_seq < batch
-        conv_state_batch_coord = tl.load(conv_state_indices_ptr +
-                                         idx_seq * stride_state_indices).to(
-                                             tl.int64)
+    if IS_CACHE_ENABLED:
+        # Get the state from the last_state_idx
+        conv_state_init = tl.load(last_state_idx + idx_seq)
+        current_last_index = tl.load(current_last_idx + idx_seq)
     else:
-        conv_state_batch_coord = idx_seq
+        conv_state_init = 0
+        current_last_index = 0
+
+    # cache_idx
+    conv_state_batch_coord = tl.load(conv_state_indices_ptr +
+                                        idx_seq * stride_state_indices +
+                                        conv_state_init).to(tl.int64)
+
     if USE_PAD_SLOT:  # noqa
         if conv_state_batch_coord == pad_slot_id:
             # not processing as this is not the actual sequence
@@ -786,7 +791,7 @@ def _causal_conv1d_update_kernel(
             tl.int64)
         # revise state_len and seqlen
         state_len = state_len - (seqlen -
-                                 (query_end_index - query_start_index))
+                                    (query_end_index - query_start_index))
         seqlen = query_end_index - query_start_index
         x_offset = query_start_index * stride_x_token
         o_offset = query_start_index * stride_o_token
@@ -872,11 +877,16 @@ def _causal_conv1d_update_kernel(
 
     new_conv_state = tl.where(mask, conv_state, loaded_x)
 
-    conv_state_base = (conv_state_ptr +
-                       (conv_state_batch_coord * stride_conv_state_seq) +
-                       (idx_feats * stride_conv_state_dim))  # [BLOCK_N,]
-    conv_state_ptrs_target = conv_state_base + (
-        idx_tokens * stride_conv_state_tok)[:, None]  # [BLOCK_M, BLOCK_N]
+    # Get the state from the last_state_idx
+    # cache_idx
+    conv_states_offset = tl.load(conv_state_indices_ptr +
+                                    idx_seq * stride_state_indices +
+                                    current_last_index).to(tl.int64)
+    conv_state_ptrs_target = (
+        conv_state_ptr +
+        (conv_states_offset * stride_conv_state_seq) +  # Offset from seq
+        (idx_feats * stride_conv_state_dim))[None, :] + (  # [BLOCK_N,]
+            idx_tokens * stride_conv_state_tok)[:, None]
     mask = (idx_tokens < state_len)[:, None] & (idx_feats < dim)[None, :]
     tl.store(conv_state_ptrs_target, new_conv_state, mask)
 
@@ -1023,6 +1033,8 @@ def causal_conv1d_update(
     query_start_loc: Optional[torch.Tensor] = None,
     max_query_len: int = -1,
     pad_slot_id: int = PAD_SLOT_ID,
+    current_last_idx: Optional[torch.Tensor] = None,
+    last_state_idx: Optional[torch.Tensor] = None,
     validate_data=False,
 ):
     """
@@ -1045,6 +1057,10 @@ def causal_conv1d_update(
         If not None, the conv_state is a larger tensor along the batch dim,
         and we are selecting the batch coords specified by conv_state_indices.
         Useful for a continuous batching scenario.
+    current_last_idx: (batch) int32
+        The last cache block to be filled. This tensor indexes into cache_indices
+    last_state_idx: (batch) int32
+        The cache block for the init values. This tensor indexes into cache_indices
     num_accepted_tokens: (batch,), dtype int32
         If not None, it indicates the number of accepted tokens for each
         sequence in the batch.
@@ -1144,10 +1160,11 @@ def causal_conv1d_update(
         weight,
         bias,
         conv_state,
-        cache_seqlens,
         conv_state_indices,
         num_accepted_tokens,
         query_start_loc,
+        current_last_idx,
+        last_state_idx,
         out,
         # Matrix dimensions
         batch,
@@ -1175,7 +1192,7 @@ def causal_conv1d_update(
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
         IS_VARLEN=query_start_loc is not None,
-        IS_CONTINUOUS_BATCHING=conv_state_indices is not None,
+        IS_CACHE_ENABLED=current_last_idx is not None,
         IS_SPEC_DECODING=num_accepted_tokens is not None,
         NP2_STATELEN=np2_statelen,
         USE_PAD_SLOT=pad_slot_id is not None,
