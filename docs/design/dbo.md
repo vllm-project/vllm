@@ -43,6 +43,7 @@ Cudagraphs for DBO are entirely managed by the `UBatchWrapper` as well. Because 
 
 #### Interfaces
 `__init__` method takes in the model, VllmConfig, CUDAGraphMode, and device.
+
 `forward` method exclusively takes in model arguments. It determines whether or not to run with DBO if there's a `ubatch_slices` object in the `forward_context`. Otherwise it just naively runs the model.
 ### UBatchContext
 ubatch_context
