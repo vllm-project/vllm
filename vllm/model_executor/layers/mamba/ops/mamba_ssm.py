@@ -278,6 +278,9 @@ def selective_state_update(state,
         assert state_batch_indices.shape == (batch, )
     if dst_state_batch_indices is not None:
         assert dst_state_batch_indices.shape == (batch, )
+    else:
+        # revert to the default behavior of in-place state updates
+        dst_state_batch_indices = state_batch_indices
     assert out.shape == x.shape
 
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE_M']), batch, nheads)

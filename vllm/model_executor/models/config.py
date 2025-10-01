@@ -295,12 +295,12 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         # TODO: find a way to keep this list updated, or redundant
         MAMBA2_MODELS = [
             "BambaForCausalLM",
-            "FalconH1ForCausalLM",
+            #"FalconH1ForCausalLM",
             "GraniteMoeHybridForCausalLM",
             "Mamba2ForCausalLM",
-            "NemotronHForCausalLM",
-            #"Plamo2ForCausalLM",  # currently fails
-            "Zamba2ForCausalLM",
+            #"NemotronHForCausalLM",
+            #"Plamo2ForCausalLM",
+            #"Zamba2ForCausalLM",
         ]
         if cache_config.enable_prefix_caching:
             if model_config.architecture in MAMBA2_MODELS:
