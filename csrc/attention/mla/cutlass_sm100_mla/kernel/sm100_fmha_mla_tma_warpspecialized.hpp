@@ -587,8 +587,8 @@ struct Sm100FmhaMlaKernelTmaWarpspecialized {
             local_split_kv = params.ptr_split_kv[get<2>(blk_coord)];
           }
         }
-	      // if (local_split_kv <= get<3>(blk_coord))
-	      //   continue;
+	      if (local_split_kv <= get<3>(blk_coord))
+	        continue;
         load_page_table(
           blk_coord,
           problem_shape,
@@ -612,8 +612,8 @@ struct Sm100FmhaMlaKernelTmaWarpspecialized {
               local_split_kv = params.ptr_split_kv[get<2>(blk_coord)];
             }
           }
-	        // if (local_split_kv <= get<3>(blk_coord))
-          //   continue;
+	        if (local_split_kv <= get<3>(blk_coord))
+            continue;
           load_cpasync(
             blk_coord,
             problem_shape,
@@ -641,8 +641,8 @@ struct Sm100FmhaMlaKernelTmaWarpspecialized {
                 local_split_kv = params.ptr_split_kv[get<2>(blk_coord)];
               }
             }
-	          // if (local_split_kv <= get<3>(blk_coord))
-            //   continue;
+	          if (local_split_kv <= get<3>(blk_coord))
+              continue;
             load_tma</* paged= */ true>(
               blk_coord,
               problem_shape,
@@ -668,8 +668,8 @@ struct Sm100FmhaMlaKernelTmaWarpspecialized {
                 local_split_kv = params.ptr_split_kv[get<2>(blk_coord)];
               }
             }
-	          // if (local_split_kv <= get<3>(blk_coord))
-            //   continue;
+	          if (local_split_kv <= get<3>(blk_coord))
+              continue;
             load_tma<false>(
               blk_coord,
               problem_shape,
@@ -701,8 +701,8 @@ struct Sm100FmhaMlaKernelTmaWarpspecialized {
                 local_split_kv = params.ptr_split_kv[get<2>(blk_coord)];
             }
           }
-	        // if (local_split_kv <= get<3>(blk_coord))
-          //   continue;
+	        if (local_split_kv <= get<3>(blk_coord))
+            continue;
           mma(blk_coord,
             problem_shape,
             shared_storage.tensors,
@@ -734,8 +734,8 @@ struct Sm100FmhaMlaKernelTmaWarpspecialized {
             local_split_kv = params.ptr_split_kv[get<2>(blk_coord)];
           }
         }
-	      // if (local_split_kv <= get<3>(blk_coord))
-        //   continue;
+	      if (local_split_kv <= get<3>(blk_coord))
+          continue;
         compute(
           blk_coord,
           problem_shape,
@@ -1900,7 +1900,7 @@ struct Sm100FmhaMlaKernelTmaWarpspecialized {
       cutlass::arch::NamedBarrier(
           (kNumComputeWarps + kNumLoadWarps) * NumThreadsPerWarp,
           kNamedBarrierEpilogue
-      ).arrive();
+      ).arrive_and_wait();
 
       return;
     }
