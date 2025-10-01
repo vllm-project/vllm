@@ -306,7 +306,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW TRUE
+        GIT_SHALLOW FALSE
     )
   endif()
   FetchContent_MakeAvailable(cutlass)
@@ -373,10 +373,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
       CUDA_ARCHS "${MARLIN_ARCHS}")
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-      set_source_files_properties(${MARLIN_TEMPLATE_KERNEL_SRC}
-        PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-    endif()
+    # We must set -static-global-template-stub=false due to referencing
+    # kernel templates instantiated in other compilation units.
+    set_property(
+      SOURCE ${MARLIN_TEMPLATE_KERNEL_SRC}
+      APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-static-global-template-stub=false>"
+    )
 
     list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
 
@@ -956,10 +959,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set_gencode_flags_for_srcs(
       SRCS "${MOE_WNAA16_MARLIN_SRC}"
       CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-      set_source_files_properties(${MOE_WNAA16_MARLIN_SRC}
-        PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-    endif()
+    # We must set -static-global-template-stub=false due to referencing
+    # kernel templates instantiated in other compilation units.
+    set_property(
+      SOURCE ${MOE_WNAA16_MARLIN_SRC}
+      APPEND PROPERTY
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:-static-global-template-stub=false>"
+    )
 
     list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
 
