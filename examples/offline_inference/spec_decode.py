@@ -54,7 +54,7 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp"],
+        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
@@ -74,7 +74,6 @@ def parse_args():
     parser.add_argument("--custom-mm-prompts", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     parser.add_argument("--request-id-prefix", type=str, default="")
-    parser.add_argument("--max-model-len", type=int, default=16384)
     return parser.parse_args()
 
 
