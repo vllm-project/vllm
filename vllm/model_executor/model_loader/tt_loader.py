@@ -20,12 +20,6 @@ class TTModelLoader(BaseModelLoader):
         device_config = vllm_config.device_config
         scheduler_config = vllm_config.scheduler_config
 
-        # For TT models, prepend "TT" to the architecture name,
-        # e.g. "TTLlamaForCausalLM"
-        arch_names = model_config.hf_config.architectures
-        for i in range(len(arch_names)):
-            arch_names[i] = "TT" + arch_names[i]
-
         model_class, _ = get_model_architecture(model_config)
 
         data_parallel = 1
