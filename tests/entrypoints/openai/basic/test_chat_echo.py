@@ -59,7 +59,7 @@ async def test_prompt_logprobs(client: openai.AsyncOpenAI, model_name):
     completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        extra_body={"prompt_logprobs": -1},
+        extra_body={"prompt_logprobs": 5},
     )
 
     assert completion.prompt_logprobs is not None
@@ -80,7 +80,7 @@ async def test_top_logprobs(client: openai.AsyncOpenAI, model_name):
         model=model_name,
         messages=messages,
         extra_body={
-            "top_logprobs": -1,
+            "top_logprobs": 5,
             "logprobs": "true",
         },
     )

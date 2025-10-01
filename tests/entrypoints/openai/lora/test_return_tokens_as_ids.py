@@ -9,7 +9,7 @@ import pytest
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from ...utils import RemoteOpenAIServer
+from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
