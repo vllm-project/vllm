@@ -10,13 +10,14 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from itertools import product
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
 from vllm.utils import (cuda_device_count_stateless,
@@ -25,61 +26,150 @@ from vllm.utils import (cuda_device_count_stateless,
 logger = init_logger(__name__)
 
 MiB = 1024 * 1024
-# Max size for each world size in case symmetric memory is available
-# For different SM architectures
-CUSTOM_ALL_REDUCE_MAX_SIZES = {
+# Max size in MB for custom all-reduce per SM architecture and world size.
+# If world size is not in the table, it will be disabled.
+CUSTOM_ALL_REDUCE_MAX_SIZES_MIB = {
     "9.0": {
-        2: 64 * MiB,  # 64 MB
-        4: 32 * MiB,  # 32 MB
-        6: MiB // 2,  # 512 KB
-        8: MiB // 4,  # 256 KB
+        2: 64,
+        4: 32,
+        6: 16,
+        8: 16,
     },
     "10.0": {
-        2: 2 * MiB,  # 2 MB
-        4: 2 * MiB,  # 2 MB
-        6: 1 * MiB,  # 1 MB
-        8: 1 * MiB,  # 1 MB
+        2: 2,
+        4: 2,
+        6: 1,
+        8: 4,
     }
 }
 
-SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
+# Minimum size in MB to enable Torch symmetric memory all-reduce
+# per SM architecture and world size.
+# If world size is not in the table, it will be disabled.
+TORCH_SYMM_MEM_ALL_REDUCE_MIN_SIZES_MIB = {
     "9.0": {
-        2: 64 * MiB,  # 64 MB
-        4: 32 * MiB,  # 32 MB
-        6: 64 * MiB,  # 64 MB
-        8: 64 * MiB,  # 64 MB
+        2: 64,
+        4: 32,
+        6: 0.5,
+        8: 0.25,
     },
     "10.0": {
-        2: 8 * MiB,  # 8 MB
-        4: 32 * MiB,  # 32 MB
-        6: 128 * MiB,  # 128 MB
-        8: 128 * MiB,  # 128 MB
+        2: 2,
+        4: 2,
+        6: 1,
+        8: 1,
     }
 }
 
-NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
-    "min_world_size": 4,
-    "thresholds": {
-        4: 2 * MiB,  # 2 MB
-        8: 1 * MiB,  # 1 MB
+# Maximum size in MB to enable Torch symmetric memory all-reduce
+# per SM architecture and world size.
+# If world size is not in the table, it will be disabled.
+TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES_MIB = {
+    "9.0": {
+        2: 64,
+        4: 32,
+        6: 64,
+        8: 64,
     },
-    "always_use_above_world_size": 8  # Always use symm mem for world_size > 8
+    "10.0": {
+        2: 8,
+        4: 32,
+        6: 128,
+        8: 128,
+    }
+}
+
+# Minimum size in MB to enable NCCL symmetric memory all-reduce
+# per SM architecture and world size.
+NCCL_SYMM_MEM_ALL_REDUCE_MIN_SIZES_MIB: dict[str, dict[int, int]] = {
+    # If an architecture is not listed, fall back behavior will disable
+    # size-based enabling unless world_size exceeds the largest key.
+    "10.0": {
+        4: 2,
+        8: 0,
+    },
 }
 
 
-def should_nccl_symm_mem_allreduce(world_size: int,
-                                   input_tensor: torch.Tensor) -> bool:
-    from vllm.distributed.device_communicators.pynccl_allocator import (
-        is_symmetric_memory_enabled)
-    if not is_symmetric_memory_enabled():
+def within_range(size_bytes: int, min_mib: Optional[float],
+                 max_mib: Optional[float]) -> bool:
+    if min_mib is not None and size_bytes < int(min_mib * MiB):
         return False
-    if world_size < NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["min_world_size"]:
-        return False
-    threshold = NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["thresholds"].get(world_size)
-    if threshold is not None and input_tensor.nbytes >= threshold:
-        return True
-    return (world_size
-            > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"])
+    return not (max_mib is not None and size_bytes > int(max_mib * MiB))
+
+
+class AllReduceManager:
+    """Manager of all-reduce path for CUDA-like backends."""
+
+    def __init__(self,
+                 pynccl_comm=None,
+                 ca_comm=None,
+                 qr_comm=None,
+                 symm_mem_comm=None,
+                 device_group: Optional[dist.ProcessGroup] = None):
+        self.pynccl_comm = pynccl_comm
+        self.ca_comm = ca_comm
+        self.qr_comm = qr_comm
+        self.symm_mem_comm = symm_mem_comm
+        self.device_group = device_group
+        self.cfg = get_current_vllm_config().parallel_config.allreduce_config
+        if self.ca_comm is not None:
+            if self.cfg.custom_allreduce.max_mib is not None:
+                self.cfg.custom_allreduce.max_mib = min(
+                    self.ca_comm.max_size / MiB,
+                    self.cfg.custom_allreduce.max_mib)
+            else:
+                self.cfg.custom_allreduce.max_mib = self.ca_comm.max_size / MiB
+
+    def _allows(self, which: str, input_size: int) -> bool:
+        policy = getattr(self.cfg, which)
+        if not policy.enable:
+            return False
+        return within_range(input_size, policy.min_mib, policy.max_mib)
+
+    def all_reduce(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        input_size = input_tensor.nbytes
+        # 1) NCCL symmetric memory
+        if (self.pynccl_comm is not None
+                and self._allows("nccl_symm_mem", input_size)
+                and self.pynccl_comm.should_use_nccl_symm_mem(input_tensor)):
+            out = self.pynccl_comm.all_reduce_symmetric_with_copy(input_tensor)
+            if out is not None:
+                return out
+
+        # 2) QuickReduce (ROCm MI300)
+        qr_comm = self.qr_comm
+        if (qr_comm is not None and not getattr(qr_comm, "disabled", False)
+                and qr_comm.should_quick_allreduce(input_tensor)):
+            out = qr_comm.quick_all_reduce(input_tensor)
+            assert out is not None
+            return out
+
+        # 3) Custom all-reduce
+        ca_comm = self.ca_comm
+        if (ca_comm is not None and not getattr(ca_comm, "disabled", False)
+                and self._allows("custom_allreduce", input_size)
+                and ca_comm.should_custom_ar(input_tensor)):
+            out = ca_comm.custom_all_reduce(input_tensor)
+            assert out is not None
+            return out
+
+        # 4) Torch symmetric memory
+        symm_mem_comm = self.symm_mem_comm
+        if (symm_mem_comm is not None
+                and self._allows("torch_symm_mem", input_size)
+                and symm_mem_comm.should_use_symm_mem(input_tensor)):
+            out = symm_mem_comm.all_reduce(input_tensor)
+            assert out is not None
+            return out
+
+        # 5) pynccl fallback
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None:
+            out = pynccl_comm.all_reduce(input_tensor)
+            if out is not None:
+                return out
+        return None
 
 
 def producer(batch_src: Sequence[int],
@@ -308,7 +398,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
     return _gpu_p2p_access_cache[f"{src}->{tgt}"]
 
 
-__all__ = ["gpu_p2p_access_check"]
+__all__ = ["gpu_p2p_access_check", "AllReduceManager"]
 
 if __name__ == "__main__":
     batch_src, batch_tgt, output_file = pickle.loads(sys.stdin.buffer.read())

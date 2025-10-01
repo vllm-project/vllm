@@ -7,7 +7,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.distributed.device_communicators.all_reduce_utils import (
-    SYMM_MEM_ALL_REDUCE_MAX_SIZES)
+    TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES_MIB, MiB)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -54,14 +54,15 @@ class SymmMemCommunicator:
         self.world_size = dist.get_world_size(self.group)
         self.device_capability = current_platform.get_device_capability(
         ).as_version_str()
-        if self.device_capability not in SYMM_MEM_ALL_REDUCE_MAX_SIZES:
+        if (self.device_capability
+                not in TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES_MIB):
             logger.warning(
                 "SymmMemCommunicator: Device capability %s not supported, "
                 "communicator is not available.",
                 self.device_capability,
             )
             return
-        if self.world_size not in SYMM_MEM_ALL_REDUCE_MAX_SIZES[
+        if self.world_size not in TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES_MIB[
                 self.device_capability]:
             logger.warning(
                 "SymmMemCommunicator: World size %d not supported, "
@@ -77,8 +78,8 @@ class SymmMemCommunicator:
                 self.max_size,
             )
         else:
-            self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[
-                self.device_capability][self.world_size]
+            self.max_size = int(TORCH_SYMM_MEM_ALL_REDUCE_MAX_SIZES_MIB[
+                self.device_capability][self.world_size] * MiB)
 
         self.buffer = torch_symm_mem.empty(
             self.max_size // self.dtype.itemsize,
@@ -99,9 +100,7 @@ class SymmMemCommunicator:
         if inp.dtype != self.dtype:
             return False
         inp_size = inp.numel() * inp.element_size()
-        if inp_size % 4 != 0:
-            return False
-        return inp_size < self.max_size
+        return inp_size % 4 == 0
 
     def all_reduce(
             self,

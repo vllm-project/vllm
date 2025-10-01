@@ -11,7 +11,7 @@ from torch.distributed import ProcessGroup
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.all_reduce_utils import (
-    CUSTOM_ALL_REDUCE_MAX_SIZES, gpu_p2p_access_check)
+    CUSTOM_ALL_REDUCE_MAX_SIZES_MIB, MiB, gpu_p2p_access_check)
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -113,10 +113,10 @@ class CustomAllreduce:
         device_capability = current_platform.get_device_capability(
         ).as_version_str()
         if (current_platform.is_cuda() and symm_mem_enabled
-                and device_capability in CUSTOM_ALL_REDUCE_MAX_SIZES):
+                and device_capability in CUSTOM_ALL_REDUCE_MAX_SIZES_MIB):
             max_size = min(
-                CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability][world_size],
-                max_size)
+                CUSTOM_ALL_REDUCE_MAX_SIZES_MIB[device_capability][world_size]
+                * MiB, max_size)
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
         if cuda_visible_devices:
             device_ids = list(map(int, cuda_visible_devices.split(",")))
@@ -227,11 +227,7 @@ class CustomAllreduce:
             return False
         if not is_weak_contiguous(inp):
             return False
-        # for 4 or more non NVLink-capable GPUs, custom allreduce provides
-        # little performance improvement over NCCL.
-        if self.world_size == 2 or self.fully_connected:
-            return inp_size < self.max_size
-        return False
+        return self.world_size == 2 or self.fully_connected
 
     def all_reduce(self,
                    inp: torch.Tensor,
