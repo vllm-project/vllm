@@ -125,9 +125,6 @@ Key components that might require changes:
 + Attention 
 + Study the inference code and find any other components to be updated
 
-Task: 
-You are an expert machine learning engineer with a complete understanding of vLLM. Open and study each file in this repository when needed to understand how vLLM works. We want to have a working forward pass with token parallel enabled. Understand how vLLM manages KV cache for each request and implement a way to have token parallel compatible KV cache management: the GPUs in the token parallel group will hold KV cache for a subset of the batch or requests. During attention, each GPU will compute the attention computation independently for its share of requests. 
-
 **Update Attention calls**: 
 
 + Each token parallel attention rank will receive qkv for its respective set of requests. (NOTE: we need to make the scatter more flexible)
