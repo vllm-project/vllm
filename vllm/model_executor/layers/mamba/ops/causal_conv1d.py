@@ -36,7 +36,8 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
     # Strides
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
-    stride_x_token: tl.constexpr,  # stride to get to next token (same feature-index, same sequence-index)
+    stride_x_token: tl.
+    constexpr,  # stride to get to next token (same feature-index, same sequence-index)
     stride_w_dim: tl.constexpr,  # stride to get to next dim-axis value
     stride_w_width: tl.constexpr,  # stride to get to next width-axis value
     stride_istate_seq: tl.constexpr,
@@ -45,7 +46,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     stride_cache_indices: tl.constexpr,
     stride_o_dim: tl.constexpr,
     stride_o_token: tl.constexpr,
-    stride_block_m: tl.constexpr, # Stride block to align divided by BLOCK_M
+    stride_block_m: tl.constexpr,  # Stride block to align divided by BLOCK_M
     # others
     pad_slot_id: tl.constexpr,
     # Meta-parameters
@@ -85,7 +86,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
     if IS_CACHE_ENABLED:
         # Handle the case if prefix caching is enabled
-        
+
         # Get the length of the completed sequence so far and compute the offset.
         current_first_index = tl.load(current_first_idx + idx_seq)
         current_last_index = tl.load(current_last_idx + idx_seq)
@@ -126,14 +127,14 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     conv_state_batch_coord = tl.load(conv_state_indices_ptr +
                                      idx_seq * stride_cache_indices +
                                      conv_state_init_index).to(tl.int64)
-    
+
     if USE_PAD_SLOT:  # noqa
         if conv_state_batch_coord == pad_slot_id:
             # not processing as this is not the actual sequence
             return
     conv_states_base = (conv_states_ptr +
-                       (conv_state_batch_coord * stride_conv_state_seq) +
-                       (idx_feats * stride_conv_state_dim))  # [BLOCK_N,]
+                        (conv_state_batch_coord * stride_conv_state_seq) +
+                        (idx_feats * stride_conv_state_dim))  # [BLOCK_N,]
 
     w_base = w_ptr + (idx_feats * stride_w_dim)  # [BLOCK_N,]
 
@@ -142,8 +143,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     # 2. update conv_state with new data [only by the Triton program handles chunk_offset=0]
     if chunk_offset == 0:
         # read from conv_states
-        load_init_state = tl.load(has_initial_states_ptr + idx_seq).to(
-            tl.int1)
+        load_init_state = tl.load(has_initial_states_ptr + idx_seq).to(tl.int1)
         if load_init_state:
             # load from conv_states
             prior_tokens = conv_states_base + (state_len -
@@ -207,10 +207,8 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
             # Compute the offset where the last block should be written in the conv_states
             conv_states_offset = tl.load(conv_state_indices_ptr +
-                                         idx_seq *
-                                         stride_cache_indices +
-                                         current_last_index).to(
-                                                tl.int64)
+                                         idx_seq * stride_cache_indices +
+                                         current_last_index).to(tl.int64)
 
             conv_states_ptrs_target = (
                 conv_states_ptr + (conv_states_offset * stride_conv_state_seq)
@@ -320,7 +318,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
         # Store intermediate states aligned with stride_cache_chunk
         # The states are cached starting from the last stride_block_m.
-        # For example: 
+        # For example:
         # If n_block_to_fill = 0, then the state at the sequence is cached.
         # If n_block_to_fill > 0, then the states at the sequence and at the n_block_to_fill-last stride_block_m are cached.
         if (chunk_offset - 1) < n_block_to_fill:
@@ -333,8 +331,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 idx_feats * stride_x_dim)[None, :]  # [BLOCK_M,BLOCK_N,]
 
             mask_x = (
-                (idx_tokens_last >= 0)[:, None] &
-                (idx_feats < dim)[None, :]
+                (idx_tokens_last >= 0)[:, None] & (idx_feats < dim)[None, :]
             )  # token-index  # token-index  # feature-index
             loaded_x = tl.load(x_ptrs, mask_x, 0.0)
             new_conv_state = tl.load(x_ptrs, mask_x, 1.0)
@@ -343,16 +340,17 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             # cache_idx
             conv_states_offset = tl.load(conv_state_indices_ptr +
                                          idx_seq * stride_cache_indices +
-                                         current_first_index + (chunk_offset - 1)).to(tl.int64)
-            
+                                         current_first_index +
+                                         (chunk_offset - 1)).to(tl.int64)
+
             conv_states_ptrs_target = (
-                conv_states_ptr +
-                (conv_states_offset * stride_conv_state_seq) +  # Offset from seq
+                conv_states_ptr + (conv_states_offset * stride_conv_state_seq)
+                +  # Offset from seq
                 (idx_feats * stride_conv_state_dim))[None, :] + (  # [BLOCK_N,]
                     idx_tokens_conv * stride_conv_state_tok)[:, None]
 
             mask = (idx_tokens_conv < state_len)[:, None] & (idx_feats
-                                                            < dim)[None, :]
+                                                             < dim)[None, :]
             tl.debug_barrier()  #  NOTE: use this due to bug in Triton compiler
             tl.store(conv_states_ptrs_target, new_conv_state, mask)
 
@@ -448,7 +446,7 @@ def causal_conv1d_fn(
     current_last_idx: Optional[torch.Tensor] = None,
     last_state_idx: Optional[torch.Tensor] = None,
     seq_lens_completed: Optional[torch.Tensor] = None,
-    block_size_to_align: Optional[int] = 0,
+    block_size_to_align=0,
     metadata=None,
     validate_data=False,
 ):
@@ -571,7 +569,8 @@ def causal_conv1d_fn(
     else:
         stride_o_dim = out.stride(1)
         stride_o_token = out.stride(2)
-    stride_cache_indices = cache_indices.stride(0) if cache_indices is not None else 0
+    stride_cache_indices = cache_indices.stride(
+        0) if cache_indices is not None else 0
 
     if validate_data:
         assert x.dim() == 2
@@ -777,8 +776,8 @@ def _causal_conv1d_update_kernel(
 
     # cache_idx
     conv_state_batch_coord = tl.load(conv_state_indices_ptr +
-                                        idx_seq * stride_state_indices +
-                                        conv_state_init).to(tl.int64)
+                                     idx_seq * stride_state_indices +
+                                     conv_state_init).to(tl.int64)
 
     if USE_PAD_SLOT:  # noqa
         if conv_state_batch_coord == pad_slot_id:
@@ -791,7 +790,7 @@ def _causal_conv1d_update_kernel(
             tl.int64)
         # revise state_len and seqlen
         state_len = state_len - (seqlen -
-                                    (query_end_index - query_start_index))
+                                 (query_end_index - query_start_index))
         seqlen = query_end_index - query_start_index
         x_offset = query_start_index * stride_x_token
         o_offset = query_start_index * stride_o_token
@@ -880,8 +879,8 @@ def _causal_conv1d_update_kernel(
     # Get the state from the last_state_idx
     # cache_idx
     conv_states_offset = tl.load(conv_state_indices_ptr +
-                                    idx_seq * stride_state_indices +
-                                    current_last_index).to(tl.int64)
+                                 idx_seq * stride_state_indices +
+                                 current_last_index).to(tl.int64)
     conv_state_ptrs_target = (
         conv_state_ptr +
         (conv_states_offset * stride_conv_state_seq) +  # Offset from seq
