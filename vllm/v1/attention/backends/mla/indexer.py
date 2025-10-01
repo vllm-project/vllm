@@ -191,6 +191,7 @@ def split_prefill_chunks(seq_lens_cpu: torch.Tensor,
     total_seq_lens = 0
     for i in range(reqs_start, len(seq_lens_cpu)):
         cur_seq_len = seq_lens_cpu[i].item()
+        assert cur_seq_len <= max_prefill_buffer_size
         total_seq_lens += cur_seq_len
         if total_seq_lens > max_prefill_buffer_size:
             chunk_seq_ids.append((reqs_start, i))
