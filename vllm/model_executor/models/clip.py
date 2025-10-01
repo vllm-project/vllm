@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Minimal implementation of CLIPVisionModel intended to be only used
-within a vision language model."""
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import Annotated, Literal, Optional, Union
