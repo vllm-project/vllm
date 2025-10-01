@@ -40,7 +40,8 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix)
-from .vision import VisionEncoderInfo, get_vision_encoder_info
+from .vision import (VisionEncoderInfo, get_num_selected_vision_tokens,
+                     get_vision_encoder_info)
 
 
 class TarsierImagePixelInputs(TensorSchema):
@@ -201,18 +202,6 @@ class TarsierProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def _apply_feature_select_strategy(
-        self,
-        strategy: str,
-        encoder_num_image_tokens: int,
-    ) -> int:
-        if strategy == "default":
-            return encoder_num_image_tokens - 1
-        if strategy == "full":
-            return encoder_num_image_tokens
-        msg = f"Unexpected feature select strategy: {strategy!r}"
-        raise NotImplementedError(msg)
-
     def get_num_image_tokens(
         self,
         *,
@@ -221,21 +210,21 @@ class TarsierProcessingInfo(BaseProcessingInfo):
     ) -> int:
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
-        num_projected_patches = self._apply_feature_select_strategy(
-            hf_config.vision_feature_select_strategy,
+        num_projected_patches = get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,
                 image_height=image_height,
             ),
+            hf_config.vision_feature_select_strategy,
         )
         if num_projected_patches <= 0:
             default_size = self.get_image_size_with_most_features()
-            num_projected_patches_default = self._apply_feature_select_strategy(
-                hf_config.vision_feature_select_strategy,
+            num_projected_patches_default = get_num_selected_vision_tokens(
                 vision_encoder_info.get_num_image_tokens(
                     image_width=default_size.width,
                     image_height=default_size.height,
                 ),
+                hf_config.vision_feature_select_strategy,
             )
             if num_projected_patches_default <= 0:
                 raise ValueError(
