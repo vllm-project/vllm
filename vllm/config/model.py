@@ -137,6 +137,9 @@ class ModelConfig:
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
+    allowed_media_domains: Optional[list[str]] = None
+    """If set, only media URLs that belong to this domain can be used for 
+    multi-modal inputs. """
     revision: Optional[str] = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
@@ -506,9 +509,14 @@ class ModelConfig:
                 else:  # task == "auto"
                     pass
             else:
+                debug_info = {
+                    "architectures": architectures,
+                    "is_generative_model": is_generative_model,
+                    "is_pooling_model": is_pooling_model,
+                }
                 raise AssertionError("The model should be a generative or "
                                      "pooling model when task is set to "
-                                     f"{self.task!r}.")
+                                     f"{self.task!r}. Found: {debug_info}")
 
             self.runner = runner
             self.convert = convert
@@ -1074,14 +1082,14 @@ class ModelConfig:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp',
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_v32', 'deepseek_mtp',
               'kimi_k2', 'longcat_flash'):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
             # underlying architecture
             return self.hf_text_config.model.model_type in \
-                    ('deepseek_v2', 'deepseek_v3') \
+                    ('deepseek_v2', 'deepseek_v3', 'deepseek_v32') \
                 and self.hf_text_config.kv_lora_rank is not None
         return False
 
@@ -1326,11 +1334,13 @@ class ModelConfig:
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
+                config_format=self.config_format,
             )
         else:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
+                config_format=self.config_format,
             )
 
         if config is None:

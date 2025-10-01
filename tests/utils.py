@@ -91,8 +91,10 @@ class RemoteOpenAIServer:
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
             env.update(env_dict)
+        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
+        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
-            ["vllm", "serve", model, *vllm_serve_args],
+            serve_cmd,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
@@ -1141,6 +1143,8 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
             print("Skip FLASH_ATTN on ROCm as aiter is not installed")
 
         return attn_backend_list
+    elif current_platform.is_xpu():
+        return ["FLASH_ATTN", "TRITON_ATTN"]
     else:
         raise ValueError("Unsupported platform")
 

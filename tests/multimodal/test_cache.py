@@ -19,6 +19,8 @@ from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargsItem,
                                     MultiModalSharedField)
 from vllm.multimodal.processing import PromptInsertion
 
+pytestmark = pytest.mark.cpu_test
+
 
 def _dummy_elem(
     modality: str,
