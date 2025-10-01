@@ -333,7 +333,7 @@ class CLIPAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         *,
         prefix: str = "",
-        attn_type: Union[type[Attention], type[MultiHeadAttention]],
+        attn_cls: Union[type[Attention], type[MultiHeadAttention]],
     ) -> None:
         super().__init__()
 
@@ -366,7 +366,7 @@ class CLIPAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = attn_type(
+        self.attn = attn_cls(
             self.num_heads_per_partition,
             self.head_dim,
             self.scale,
@@ -425,14 +425,14 @@ class CLIPEncoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         *,
         prefix: str = "",
-        attn_type: Union[type[Attention], type[MultiHeadAttention]],
+        attn_cls: Union[type[Attention], type[MultiHeadAttention]],
     ) -> None:
         super().__init__()
         self.self_attn = CLIPAttention(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            attn_type=attn_type,
+            attn_cls=attn_cls,
         )
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
@@ -474,7 +474,7 @@ class CLIPEncoder(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
         *,
         prefix: str = "",
-        attn_type: Union[type[Attention], type[MultiHeadAttention]],
+        attn_cls: Union[type[Attention], type[MultiHeadAttention]],
     ) -> None:
         super().__init__()
 
@@ -488,7 +488,7 @@ class CLIPEncoder(nn.Module):
             CLIPEncoderLayer(config=config,
                              quant_config=quant_config,
                              prefix=f"{prefix}.layers.{layer_idx}",
-                             attn_type=attn_type)
+                             attn_cls=attn_cls)
             for layer_idx in range(num_hidden_layers)
         ])
 
@@ -531,7 +531,7 @@ class CLIPTextTransformer(nn.Module):
             config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.encoder",
-            attn_type=Attention,
+            attn_cls=Attention,
         )
 
         self.final_layer_norm = nn.LayerNorm(
@@ -619,7 +619,7 @@ class CLIPVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
-            attn_type=MultiHeadAttention,
+            attn_cls=MultiHeadAttention,
         )
 
         num_hidden_layers = config.num_hidden_layers
