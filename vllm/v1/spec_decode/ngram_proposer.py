@@ -6,6 +6,7 @@ import numpy as np
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_tp_group
 
 
 class NgramProposer:
@@ -44,14 +45,20 @@ class NgramProposer:
             # Cap the number of threads to 8 to avoid using too many threads
             # since other components like frontend (incl tokenization)
             # and Structured Outputs also use multiple threads.
-            # TODO(ekagra-ranjan): bump up the cap from 1 to 8
-            # when TP parallelization for ngram is implemented.
-            self.num_numba_thread_available = min(1, (cpu_count // 2))
+            self.num_numba_thread_available = min(8, (cpu_count // 2))
             # Divide by tp_size to ensure each tensor parallel rank
             # has some threads since all ranks will run this.
             self.num_numba_thread_available //= tp_size
         else:
             self.num_numba_thread_available = 1
+
+        # Tensor parallel group for TP parallel ngram.
+        # Rank 0 will run the ngram proposer and broadcast the results
+        # to other ranks. This is done so that all CPU threads is available
+        # to rank 0 to run the ngram proposer, instead of dividing CPU threads
+        # among all TP ranks.
+        self.tp_group = get_tp_group()
+        self.leader_rank = 0
 
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
@@ -85,40 +92,50 @@ class NgramProposer:
         """
         draft_token_ids: list[list[int]] = []
 
-        # Only run batch propose if there are requests needing ngram proposals.
-        # avoid calling numba function with empty list which causes error
-        # ValueError: cannot compute fingerprint of empty list
-        if num_ngram_requests := len(valid_ngram_requests):
-            original_num_numba_threads = get_num_threads()
-            # Ensure we use at least one thread.
-            # If total tokens is small, using multiple threads
-            # may slow down due to overhead.
-            total_tokens = np.sum(num_tokens_no_spec)
-            if total_tokens >= self.num_tokens_threshold:
-                final_num_threads = max(
-                    1, min(self.num_numba_thread_available,
-                           num_ngram_requests))
-                set_num_threads(final_num_threads)
-            else:
-                set_num_threads(1)
+        # Only rank 0 will run the ngram proposer 
+        # and broadcast the results to other ranks.
+        if self.tp_group is None or self.tp_group.rank == self.leader_rank:
+            # Only run batch propose if there are requests needing ngram proposals.
+            # avoid calling numba function with empty list which causes error
+            # ValueError: cannot compute fingerprint of empty list
+            if num_ngram_requests := len(valid_ngram_requests):
+                original_num_numba_threads = get_num_threads()
+                # Ensure we use at least one thread.
+                # If total tokens is small, using multiple threads
+                # may slow down due to overhead.
+                total_tokens = np.sum(num_tokens_no_spec)
+                if total_tokens >= self.num_tokens_threshold:
+                    final_num_threads = max(
+                        1, min(self.num_numba_thread_available,
+                            num_ngram_requests))
+                    set_num_threads(final_num_threads)
+                else:
+                    set_num_threads(1)
 
-            batch_propose_numba(valid_ngram_requests, num_tokens_no_spec,
-                                token_ids_cpu, self.min_n, self.max_n,
-                                self.max_model_len, self.k,
-                                self.valid_ngram_draft,
-                                self.valid_ngram_num_drafts)
+                batch_propose_numba(valid_ngram_requests, num_tokens_no_spec,
+                                    token_ids_cpu, self.min_n, self.max_n,
+                                    self.max_model_len, self.k,
+                                    self.valid_ngram_draft,
+                                    self.valid_ngram_num_drafts)
 
-            # Restore original number of threads.
-            set_num_threads(original_num_numba_threads)
+                # Restore original number of threads.
+                set_num_threads(original_num_numba_threads)
 
-        for i in range(num_requests):
-            if i in valid_ngram_requests and \
-                self.valid_ngram_num_drafts[i] > 0:
-                draft_token_ids.append(self.valid_ngram_draft[
-                    i, :self.valid_ngram_num_drafts[i]].tolist())
-            else:
-                draft_token_ids.append([])
+            for i in range(num_requests):
+                if i in valid_ngram_requests and \
+                    self.valid_ngram_num_drafts[i] > 0:
+                    draft_token_ids.append(self.valid_ngram_draft[
+                        i, :self.valid_ngram_num_drafts[i]].tolist())
+                else:
+                    draft_token_ids.append([])
+        else:
+            draft_token_ids = [[] for _ in range(num_requests)]
 
+        # Broadcast from rank 0 to other ranks using GroupCoordinator
+        if self.tp_group is not None and self.tp_group.world_size > 1:
+            draft_token_ids = self.tp_group.broadcast_object_list(
+                draft_token_ids, src=self.leader_rank)
+            
         return draft_token_ids
 
     def propose(
