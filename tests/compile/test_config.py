@@ -205,10 +205,14 @@ def test_splitting_ops_dynamic():
 def test_resolve_operator_overload():
     import torch
 
-    from vllm.config.compilation import _resolve_operator_overload
+    from vllm.config.compilation import (_parse_operator_name,
+                                         _resolve_operator_overload)
 
     assert (_resolve_operator_overload("aten.mm.default")
             is torch.ops.aten.mm.default)
+    assert _parse_operator_name("flash_attention") == ("flash_attention",
+                                                       "flash_attention",
+                                                       "default")
     assert (_resolve_operator_overload("aten::addmm.default")
             is torch.ops.aten.addmm.default)
 

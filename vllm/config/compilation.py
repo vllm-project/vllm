@@ -726,10 +726,11 @@ def _parse_operator_name(op_name: str) -> tuple[str, str, str]:
     else:
         parts = op_name.split(".")
         if len(parts) < 2:
-            raise ValueError(
-                f"Operator name '{op_name}' must include a namespace and "
-                "operator", )
-        namespace, remainder = parts[0], ".".join(parts[1:])
+            # Accept bare op names (e.g. 'flash_attention') by treating the
+            # string as both namespace and operator, matching torch.ops usage.
+            namespace, remainder = op_name, op_name
+        else:
+            namespace, remainder = parts[0], ".".join(parts[1:])
     if not remainder:
         raise ValueError(
             f"Operator name '{op_name}' must include an operator identifier", )
