@@ -51,7 +51,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_list_of
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP, SupportsQuant)
@@ -216,9 +215,6 @@ def init_on_device_without_buffers(device: torch.device):
 
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
-
-    def get_hf_config(self):
-        return self.ctx.model_config.hf_config
 
     def get_supported_mm_limits(self):
         return {"image": None}
@@ -784,6 +780,7 @@ def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
     },
     enable_if=can_enable_torch_compile)
 class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
+    merge_by_field_config = True
     # Backwards compatibility for prev released models. State dicts back then
     # had different formats and cannot be loaded with `AutoModel` mapping as is
     hf_to_vllm_mapper = WeightsMapper(
@@ -828,40 +825,27 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         return self.model
 
     def get_multimodal_embeddings(self, **kwargs):
-        pixel_values = kwargs.pop("pixel_values", None)
-        pixel_values = pixel_values if pixel_values is not None else kwargs.pop(
-            "image_patches", None)
-        image_embeds = kwargs.pop("image_embeds", None)
+        pixel_values: Optional[torch.Tensor] = kwargs.pop("pixel_values", None)
+        image_embeds: Optional[torch.Tensor] = kwargs.pop("image_embeds", None)
+        # Model might use `image_patches` instead of `pixel_values`
+        if pixel_values is None:
+            pixel_values = kwargs.pop("image_patches", None)
 
         if image_embeds is not None:
             return image_embeds
 
-        if pixel_values is None and image_embeds is None:
+        if pixel_values is None:
             return None
 
         num_image_patches = kwargs.pop("num_image_patches")
         if pixel_values is not None:
-            if isinstance(pixel_values, torch.Tensor):
-                pixel_values = flatten_bn(pixel_values).to(self.dtype)
-            elif is_list_of(pixel_values, torch.Tensor):
-                pixel_values = flatten_and_concat(pixel_values).to(self.dtype)
-            else:
-                raise ValueError(
-                    f"Unsupported pixel_values type {type(pixel_values)}. "
-                    "Expected `torch.Tensor` or list of `torch.Tensor`.")
-
-            if isinstance(num_image_patches, list):
-                num_image_patches = torch.cat(num_image_patches)
-
             vision_embeddings = self.model.get_image_features(
-                pixel_values,
-                **{
-                    k: v.flatten(0, 1)
-                    for k, v in kwargs.items()
-                },
-            )
+                pixel_values, **kwargs)
 
             if isinstance(vision_embeddings, torch.Tensor):
+                if isinstance(num_image_patches, list):
+                    num_image_patches = torch.cat(num_image_patches)
+
                 if vision_embeddings.ndim == 2:
                     vision_embeddings = vision_embeddings.unsqueeze(0)
 
