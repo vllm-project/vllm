@@ -5,6 +5,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
@@ -103,17 +104,13 @@ if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_aiter_rms_norm",
         op_func=rocm_aiter_rms_norm_impl,
-        mutates_args=[],
         fake_impl=rocm_aiter_rms_norm_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
         op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
         op_func=rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-        mutates_args=[],
         fake_impl=rocm_aiter_rmsnorm2d_fwd_with_add_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
 
@@ -379,3 +376,20 @@ class PolyNorm(CustomOp):
         x: torch.Tensor,
     ) -> torch.Tensor:
         return poly_norm(x, self.weight, self.bias, self.variance_epsilon)
+
+
+class LayerNorm(nn.Module):
+    """
+    Layer Normalization.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
+
+    def forward(self, x: torch.Tensor):
+        return F.layer_norm(x.float(), (self.dim, ), self.weight, self.bias,
+                            self.eps).type_as(x)

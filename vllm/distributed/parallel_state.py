@@ -149,29 +149,22 @@ def all_gather_fake(tensor: torch.Tensor, dim: int, world_size: int,
 
 
 if supports_custom_op():
-    from vllm.platforms import current_platform
     direct_register_custom_op(
         op_name="all_reduce",
         op_func=all_reduce,
-        mutates_args=[],
         fake_impl=all_reduce_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
         op_name="reduce_scatter",
         op_func=reduce_scatter,
-        mutates_args=[],
         fake_impl=reduce_scatter_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
         op_name="all_gather",
         op_func=all_gather,
-        mutates_args=[],
         fake_impl=all_gather_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
 
@@ -663,14 +656,29 @@ class GroupCoordinator:
         tensor_dict: dict[str, Union[torch.Tensor, Any]],
         dst: Optional[int] = None,
         all_gather_group: Optional["GroupCoordinator"] = None,
+        all_gather_tensors: Optional[dict[str, bool]] = None,
     ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
         """Send the input tensor dictionary.
         NOTE: `dst` is the local rank of the source rank.
+
+        all_gather_group: The group for the all-gather operation. If provided,
+            an optimization is enabled where each rank in the group sends a
+            slice of a tensor and the receiver reconstructs it using an
+            all-gather, which can improve performance. This is typically the
+            tensor-parallel group.
+        all_gather_tensors: A dictionary to specify which tensors should use
+            the all-gather optimization, which is only effective when
+            `all_gather_group` is provided. By default, this optimization is
+            on for any tensor whose size is divisible by the
+            `all_gather_group`'s world size. However, it should be disabled
+            for tensors that are not fully replicated across the group (e.g.,
+            the residual tensor when sequence parallelism is enabled). This
+            dictionary allows overriding the default behavior on a per-tensor
+            basis.
         """
         # Bypass the function if we are using only 1 GPU.
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return tensor_dict
-
         all_gather_size = (1 if all_gather_group is None else
                            all_gather_group.world_size)
         all_gather_rank = (0 if all_gather_group is None else
@@ -699,14 +707,23 @@ class GroupCoordinator:
         # `send_object_list` has serialization & deserialization,
         # all happening on CPU. Therefore, we can use the CPU group.
         self.send_object(metadata_list, dst=dst)
-        for tensor in tensor_list:
+
+        tensor_keys = [
+            k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)
+        ]
+        assert len(tensor_keys) == len(tensor_list)
+
+        for key, tensor in zip(tensor_keys, tensor_list):
             if tensor.numel() == 0:
                 # Skip sending empty tensors.
                 continue
 
             # send-allgather: send only a slice, then do allgather.
-            if (all_gather_group is not None
-                    and tensor.numel() % all_gather_size == 0):
+            use_all_gather = (all_gather_group is not None
+                              and tensor.numel() % all_gather_size == 0)
+            use_all_gather = all_gather_tensors.get(key, use_all_gather) \
+                if all_gather_tensors else use_all_gather
+            if use_all_gather:
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
 
             if tensor.is_cpu:
@@ -725,14 +742,29 @@ class GroupCoordinator:
         self,
         src: Optional[int] = None,
         all_gather_group: Optional["GroupCoordinator"] = None,
+        all_gather_tensors: Optional[dict[str, bool]] = None,
     ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
         """Recv the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
+
+        all_gather_group: The group for the all-gather operation. If provided,
+            an optimization is enabled where each rank in the group sends a
+            slice of a tensor and the receiver reconstructs it using an
+            all-gather, which can improve performance. This is typically the
+            tensor-parallel group.
+        all_gather_tensors: A dictionary to specify which tensors should use
+            the all-gather optimization, which is only effective when
+            `all_gather_group` is provided. By default, this optimization is
+            on for any tensor whose size is divisible by the
+            `all_gather_group`'s world size. However, it should be disabled
+            for tensors that are not fully replicated across the group (e.g.,
+            the residual tensor when sequence parallelism is enabled). This
+            dictionary allows overriding the default behavior on a per-tensor
+            basis.
         """
         # Bypass the function if we are using only 1 GPU.
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return None
-
         all_gather_size = (1 if all_gather_group is None else
                            all_gather_group.world_size)
         all_gather_rank = (0 if all_gather_group is None else
@@ -766,6 +798,8 @@ class GroupCoordinator:
                 # send-allgather: send only a slice, then do allgather.
                 use_all_gather = (all_gather_group is not None
                                   and tensor.numel() % all_gather_size == 0)
+                use_all_gather = all_gather_tensors.get(key, use_all_gather) \
+                    if all_gather_tensors else use_all_gather
 
                 if use_all_gather:
                     orig_shape = tensor.shape
@@ -837,17 +871,24 @@ class GroupCoordinator:
                 model)
 
     def dispatch(
-            self, hidden_states: torch.Tensor,
-            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.device_communicator is not None:
             return self.device_communicator.dispatch(hidden_states,
-                                                     router_logits)
+                                                     router_logits,
+                                                     is_sequence_parallel)
         else:
             return hidden_states, router_logits
 
-    def combine(self, hidden_states) -> torch.Tensor:
+    def combine(self,
+                hidden_states,
+                is_sequence_parallel: bool = False) -> torch.Tensor:
         if self.device_communicator is not None:
-            return self.device_communicator.combine(hidden_states)
+            return self.device_communicator.combine(hidden_states,
+                                                    is_sequence_parallel)
         else:
             return hidden_states
 
@@ -991,7 +1032,9 @@ def init_distributed_environment(world_size: int = -1,
         distributed_init_method, backend)
     from vllm.config import get_current_vllm_config
     config = get_current_vllm_config()
-    if config is not None and config.parallel_config.data_parallel_size > 1:
+    if config is not None and config.parallel_config.data_parallel_size > 1 \
+        and config.parallel_config.distributed_executor_backend \
+        != "external_launcher":
         parallel_config = config.parallel_config
         # adjust to take into account data parallelism
         # offset the rank by the data parallel rank

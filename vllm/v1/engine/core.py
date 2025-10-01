@@ -29,10 +29,12 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
                         resolve_obj_by_qualname, set_process_title)
-from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_config,
+from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
+from vllm.v1.core.kv_cache_utils import (BlockHash,
+                                         generate_scheduler_kv_cache_config,
+                                         get_kv_cache_configs,
                                          get_request_block_hasher,
-                                         init_none_hash,
-                                         unify_kv_cache_configs)
+                                         init_none_hash)
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
@@ -129,6 +131,9 @@ class EngineCore:
             log_stats=self.log_stats,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+        if self.scheduler.connector is not None:  # type: ignore
+            self.model_executor.init_kv_output_aggregator(
+                self.scheduler.connector.get_finished_count())  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = engine_receiver_cache_from_config(
@@ -191,28 +196,13 @@ class EngineCore:
             available_gpu_memory = [0] * len(kv_cache_specs)
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
-        # Get the kv cache tensor size
-        kv_cache_configs = [
-            get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
-                                available_gpu_memory_one_worker)
-            for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
-            zip(kv_cache_specs, available_gpu_memory)
-        ]
 
-        # Since we use a shared centralized controller, we need the
-        # `kv_cache_config` to be consistent across all workers to make sure
-        # all the memory operators can be applied to all workers.
-        unify_kv_cache_configs(kv_cache_configs)
-
-        # All workers have the same kv_cache_config except layer names, so use
-        # an arbitrary one to initialize the scheduler.
-        assert all([
-            cfg.num_blocks == kv_cache_configs[0].num_blocks
-            for cfg in kv_cache_configs
-        ])
-        num_gpu_blocks = kv_cache_configs[0].num_blocks
+        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
+                                                available_gpu_memory)
+        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
+            kv_cache_configs)
+        num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         num_cpu_blocks = 0
-        scheduler_kv_cache_config = kv_cache_configs[0]
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
@@ -542,6 +532,9 @@ class EngineCoreProc(EngineCore):
         # Reduces pause times of oldest generation collections.
         gc.collect()
         gc.freeze()
+
+        # If enable, attach GC debugger after static variable freeze.
+        maybe_attach_gc_debug_callback()
 
     @contextmanager
     def _perform_handshakes(
