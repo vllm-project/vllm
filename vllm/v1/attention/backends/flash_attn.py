@@ -195,7 +195,8 @@ class FlashAttentionMetadataBuilder(
 
         self.use_full_cuda_graph = \
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        self.max_cudagraph_size = self.compilation_config.max_capture_size
+        self.max_cudagraph_size = self.compilation_config.\
+            max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.aot_schedule:
             if self.max_cudagraph_size > 992:
@@ -544,7 +545,7 @@ class FlashAttentionImpl(AttentionImpl):
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
                 num_splits=attn_metadata.max_num_splits,
-                s_aux=self.sinks,
+                # s_aux=self.sinks,
             )
             return output
 

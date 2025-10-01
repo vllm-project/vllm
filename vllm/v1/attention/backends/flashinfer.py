@@ -277,7 +277,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper] = {}
             self._decode_cudagraph_max_bs = min(
-                max_num_reqs, self.compilation_config.max_capture_size)
+                max_num_reqs, self.compilation_config.\
+                max_cudagraph_capture_size)
 
         self.num_qo_heads = self.model_config.get_num_attention_heads(
             self.vllm_config.parallel_config)

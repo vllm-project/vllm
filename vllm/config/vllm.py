@@ -202,10 +202,10 @@ class VllmConfig:
         return hash_str
 
     def pad_for_cudagraph(self, batch_size: int) -> int:
-        # if batch_size > self.compilation_config.max_capture_size,
+        # if batch_size > self.compilation_config.max_cudagraph_capture_size,
         # it should raise an IndexError.
         # the caller should make sure the batch_size is within the range,
-        # i.e., batch_size <= self.compilation_config.max_capture_size
+        # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
     @staticmethod
@@ -578,15 +578,14 @@ class VllmConfig:
         batch_size_capture_list = []
         if self.model_config is not None and \
             not self.model_config.enforce_eager:
-            cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
-            if len(cuda_graph_sizes) == 1:
-                batch_size_capture_list = [1, 2, 4] + [
-                    i for i in range(8, cuda_graph_sizes[0] + 1, 8)
-                ]
-            elif len(cuda_graph_sizes) > 1:
-                batch_size_capture_list = sorted(cuda_graph_sizes)
-            else:
-                raise TypeError(f"Invalid value for {cuda_graph_sizes=}.")
+            max_cudagraph_capture_size = self.compilation_config.\
+                max_cudagraph_capture_size
+            if max_cudagraph_capture_size is None:
+                max_cudagraph_capture_size = min(
+                    self.scheduler_config.max_num_seqs * 2, 512)
+            batch_size_capture_list = [1, 2, 4] + [
+                i for i in range(8, max_cudagraph_capture_size + 1, 8)
+            ]
             if self.parallel_config.tensor_parallel_size > 1 and \
                 self.compilation_config.pass_config.enable_sequence_parallelism:
                 batch_size_capture_list = \

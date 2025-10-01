@@ -160,7 +160,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.moe = moe
         self.mxfp4_backend = get_mxfp4_backend()
         self.max_capture_size = get_current_vllm_config(
-        ).compilation_config.max_capture_size
+        ).compilation_config.max_cudagraph_capture_size
 
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
             "No MXFP4 MoE backend (FlashInfer/Marlin/Triton) available."
