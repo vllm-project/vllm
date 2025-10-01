@@ -7,8 +7,8 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
-
+from typing import TYPE_CHECKING, Any, ClassVar, Optional, Union
+from warnings import warn
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
@@ -460,7 +460,7 @@ class CompilationConfig:
             return CUDAGraphMode[value.upper()]
         return value
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, **kwargs) -> None:
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
@@ -545,7 +545,12 @@ class CompilationConfig:
                     "(where 'op' is the registered op name)"
                 )
 
-    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
+        logger.warning_once(
+            "The 'use_inductor' flag is deprecated and will be removed in a future release. "
+            "Please use the 'backend' option instead.",
+        )
+            
+    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
