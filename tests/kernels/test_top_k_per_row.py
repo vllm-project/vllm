@@ -79,17 +79,11 @@ def compare_top_k_results(cuda_indices: torch.Tensor,
             torch_values.append(torch_row_values[torch_pos[0]])
 
         if len(cuda_values) != len(torch_values):
-            print(
-                f"Row {row_idx} has {len(cuda_values)} values in CUDA and {len(torch_values)} values in Torch"
-            )
             return False
         if not torch.allclose(torch.tensor(cuda_values),
                               torch.tensor(torch_values),
                               rtol=tolerance,
                               atol=tolerance):
-            print(
-                f"CUDA values: {cuda_values} don't match Torch values: {torch_values}"
-            )
             return False
 
     return True
