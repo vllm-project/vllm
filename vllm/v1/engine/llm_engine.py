@@ -241,7 +241,7 @@ class LLMEngine:
             return
 
         # Fan out child requests (for n>1).
-        parent_req = ParentRequest(request_id, params)
+        parent_req = ParentRequest(request_id, request.sampling_params)
         for idx in range(n):
             request_id, params = parent_req.get_child_info(idx)
             child_request = request if idx == n - 1 else copy(request)
