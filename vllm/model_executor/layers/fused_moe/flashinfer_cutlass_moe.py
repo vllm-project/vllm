@@ -110,7 +110,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         workspace1 = (curr_M, K)
         workspace2 = (0, )
-        output_shape = (M, K * 2 if if self.quant_dtype == "nvfp4" else K)
+        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" else K)
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
         return (workspace1, workspace2, output_shape)
