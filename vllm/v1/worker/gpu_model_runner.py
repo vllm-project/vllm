@@ -634,8 +634,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_data.resumed_from_preemption[i]
+            num_output_tokens = req_data.num_output_tokens[i]
 
             # Update the cached states.
+
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
@@ -653,6 +655,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 elif num_new_tokens > 0:
                     req_state.output_token_ids.extend(
                         new_token_ids[-num_new_tokens:])
+            elif num_output_tokens < len(req_state.output_token_ids):
+                # Some output tokens were discarded due to a sync-KV-load
+                # failure. Align the cached state.
+                del req_state.output_token_ids[num_output_tokens:]
+
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                if req_index is not None:
+                    old_end_idx = self.input_batch.num_tokens_no_spec[
+                        req_index]
+                    end_idx = self.input_batch.num_prompt_tokens[
+                        req_index] + num_output_tokens
+                    self.input_batch.num_tokens[req_index] = end_idx
+                    self.input_batch.num_tokens_no_spec[req_index] = end_idx
+                    self.input_batch.is_token_ids[req_index,
+                                                  end_idx:old_end_idx] = False
 
             # Update the block IDs.
             if not resumed_from_preemption:
