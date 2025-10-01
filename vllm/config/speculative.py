@@ -3,6 +3,7 @@
 
 import ast
 import hashlib
+import json
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 from pydantic import SkipValidation, model_validator
@@ -29,10 +30,10 @@ else:
 
 logger = init_logger(__name__)
 
-SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "ngram-eagle", "medusa",
-                            "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
-                            "longcat_flash_mtp", "mtp"]
+SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "ngram-eagle",
+                            "medusa", "mlp_speculator", "draft_model",
+                            "deepseek_mtp", "ernie_mtp", "qwen3_next_mtp",
+                            "mimo_mtp", "longcat_flash_mtp", "mtp"]
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
 
@@ -241,7 +242,7 @@ class SpeculativeConfig:
                 raise ValueError(
                     "num_speculative_tokens was provided but without "
                     "speculative model.")
-        
+
         # set num_speculative_tokens from num_speculative_tokens_per_method
         # for methods like ngram-eagle
         if self.num_speculative_tokens_per_method is not None:
@@ -308,7 +309,7 @@ class SpeculativeConfig:
             # draft related config as None here.
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
-        
+
         # allow ngram-eagle to use this code block similar to eagle
         if self.method not in ("ngram"):
 
@@ -557,7 +558,7 @@ class SpeculativeConfig:
                 "num_speculative_tokens must be provided with "
                 "speculative model unless the draft model config contains an "
                 "n_predict parameter.")
-        
+
         if self.method == "ngram-eagle":
             assert self.num_speculative_tokens_per_method is not None, (
                 "num_speculative_tokens_per_method must be provided for "

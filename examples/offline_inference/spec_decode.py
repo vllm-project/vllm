@@ -142,6 +142,7 @@ def main(args):
             "num_speculative_tokens_per_method": num_speculative_tokens_per_method,
             "prompt_lookup_max": args.prompt_lookup_max,
             "prompt_lookup_min": args.prompt_lookup_min,
+        }
     elif args.method == "mtp":
         speculative_config = {
             "method": "mtp",

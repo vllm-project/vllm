@@ -152,8 +152,10 @@ def test_ngram_correctness(
           "eagle618/eagle-deepseek-v3-random", 1), False),
     ],
     ids=[
-        "qwen3_eagle3", "qwen2_5_vl_eagle3", "llama3_eagle", "llama3_ngram_eagle",
-        "llama3_eagle3", "llama4_eagle", "llama4_eagle_mm", "deepseek_eagle"
+        "qwen3_eagle3", "qwen2_5_vl_eagle3",
+        "llama3_eagle", "llama3_ngram_eagle",
+        "llama3_eagle3", "llama4_eagle",
+        "llama4_eagle_mm", "deepseek_eagle"
     ])
 @pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())

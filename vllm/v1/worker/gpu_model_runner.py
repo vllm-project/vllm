@@ -1252,8 +1252,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if (self.speculative_config
                     and spec_decode_common_attn_metadata is None):
-                if isinstance(self.drafter, EagleProposer):
-                    if (self.drafter.attn_layer_names[0]
+                if isinstance(self.drafter_eagle, EagleProposer):
+                    if (self.drafter_eagle.attn_layer_names[0]
                             in kv_cache_group_spec.layer_names):
                         spec_decode_common_attn_metadata = common_attn_metadata
                 else:
@@ -2700,7 +2700,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if self.speculative_config.method == "ngram-eagle":
                 draft_token_ids_eagle = draft_token_ids
-        
+
         if self.speculative_config.method == "ngram-eagle":
             assert draft_token_ids_ngram is not None, "ngram proposer failed"
             assert draft_token_ids_eagle is not None, "eagle proposer failed"
