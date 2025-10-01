@@ -45,6 +45,19 @@ SIMPLE_REASONING_WITH_MULTIPLE_NEWLINES = {
     "content": "\n\n\nThis is the rest",
 }
 
+NO_REASONING_ONLY_END_THINK = {
+    "output": f"{END_REASONING}\n\nNo thoughts, head empty!",
+    "reasoning_content": None,
+    "content": "\n\nNo thoughts, head empty!",
+}
+
+REASONING_ONLY_END_THINK = {
+    "output":
+    f"The user is asking me not to think.{END_REASONING}No thoughts!",
+    "reasoning_content": "The user is asking me not to think.",
+    "content": "No thoughts!",
+}
+
 TEST_CASES = [
     pytest.param(
         False,  # not streaming
@@ -72,6 +85,16 @@ TEST_CASES = [
         id="simple_reasoning_with_multiple_newlines",
     ),
     pytest.param(
+        False,  # not streaming
+        NO_REASONING_ONLY_END_THINK,
+        id="no_reasoning_only_end_think",
+    ),
+    pytest.param(
+        False,  # not streaming
+        REASONING_ONLY_END_THINK,
+        id="yes_reasoning_only_end_think",
+    ),
+    pytest.param(
         True,  # enable streaming
         NO_REASONING,
         id="no_reasoning_streaming",
@@ -95,6 +118,16 @@ TEST_CASES = [
         True,  # enable streaming
         SIMPLE_REASONING_WITH_MULTIPLE_NEWLINES,
         id="simple_reasoning_with_multiple_newlines_streaming",
+    ),
+    pytest.param(
+        True,  # enable streaming
+        NO_REASONING_ONLY_END_THINK,
+        id="no_reasoning_only_end_think_streaming",
+    ),
+    pytest.param(
+        True,  # enable streaming
+        REASONING_ONLY_END_THINK,
+        id="yes_reasoning_only_end_think_streaming",
     ),
 ]
 

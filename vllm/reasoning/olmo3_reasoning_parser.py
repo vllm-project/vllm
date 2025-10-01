@@ -79,30 +79,35 @@ def string_overlap(a: str,
 class Olmo3ReasoningBuffer:
     think_start: str = "<think>"
     think_end: str = "</think>"
-    text_buffer: str = ""
-    state: Olmo3ReasoningState = Olmo3ReasoningState.IDLE
+    buffer: str = ""
+
+    # we start in reasoning state to support cases where we hardcode
+    # <think> as the start of the reasoning block.
+    # In those cases, the only token we will see is </think>, which
+    # is when we switch to content state.
+    state: Olmo3ReasoningState = Olmo3ReasoningState.REASONING
 
     def process_buffer(self) -> Optional[DeltaMessage]:
-        start_think_idx = self.text_buffer.find(self.think_start)
+        start_think_idx = self.buffer.find(self.think_start)
 
         if start_think_idx >= 0:
             self.state = Olmo3ReasoningState.REASONING
-            pretext, self.text_buffer = (
-                self.text_buffer[:start_think_idx],
-                self.text_buffer[start_think_idx + len(self.think_start):],
+            pretext, self.buffer = (
+                self.buffer[:start_think_idx],
+                self.buffer[start_think_idx + len(self.think_start):],
             )
             if start_think_idx > 0:
                 # this covers the case there's content before
                 # the start of the reasoning block
                 return DeltaMessage(content=pretext)
 
-        end_think_idx = self.text_buffer.rfind(self.think_end)
+        end_think_idx = self.buffer.rfind(self.think_end)
 
         if end_think_idx >= 0:
             self.state = Olmo3ReasoningState.CONTENT
-            pretext, self.text_buffer = (
-                self.text_buffer[:end_think_idx],
-                self.text_buffer[end_think_idx + len(self.think_end):],
+            pretext, self.buffer = (
+                self.buffer[:end_think_idx],
+                self.buffer[end_think_idx + len(self.think_end):],
             )
             if end_think_idx > 0:
                 # this covers the case there's content before
@@ -114,8 +119,8 @@ class Olmo3ReasoningBuffer:
             # the text buffer
             (
                 text_buffer,
-                self.text_buffer,
-            ) = self.text_buffer, ""
+                self.buffer,
+            ) = self.buffer, ""
             return DeltaMessage(reasoning_content=text_buffer)
 
         if self.state == Olmo3ReasoningState.CONTENT:
@@ -123,8 +128,8 @@ class Olmo3ReasoningBuffer:
             # the text buffer
             (
                 text_buffer,
-                self.text_buffer,
-            ) = self.text_buffer, ""
+                self.buffer,
+            ) = self.buffer, ""
             return DeltaMessage(content=text_buffer)
 
         # nothing to return unless we are in reasoning or content state
@@ -132,11 +137,11 @@ class Olmo3ReasoningBuffer:
 
     def __len__(self):
         # is the length of the text buffer
-        return len(self.text_buffer)
+        return len(self.buffer)
 
     def add_text(self, delta_text: str) -> Optional[DeltaMessage]:
         # we start by adding the delta text to the buffer
-        self.text_buffer += delta_text
+        self.buffer += delta_text
 
         # setting this to empty before starting
         delta_message: Optional[DeltaMessage] = None
@@ -151,7 +156,7 @@ class Olmo3ReasoningBuffer:
         partial_overlap_end = overlap_think_end is not None and len(
             overlap_think_end) < len(self.think_end)
 
-        if (partial_overlap_start and self.think_start in self.text_buffer
+        if (partial_overlap_start and self.think_start in self.buffer
                 and not partial_overlap_end):
             # we can only process the buffer if partial overlap
             # is the last part of think token (thus causing
@@ -159,7 +164,7 @@ class Olmo3ReasoningBuffer:
             # and there are no partial overlaps with end think
             delta_message = self.process_buffer()
 
-        elif partial_overlap_end and self.think_end in self.text_buffer:
+        elif partial_overlap_end and self.think_end in self.buffer:
             # same as before (partial overlap only allowed)
             # if the buffer contains the end think token,
             # but we don't have to check for partial overlap
@@ -194,46 +199,39 @@ class Olmo3ReasoningParser(ReasoningParser):
 
     Olmo3ReasoningParser
 
-    This class implements a reasoning parser specifically designed
-    for the Olmo 33 family of models. It is responsible for parsing and
-    extracting structured reasoning and answer segments from model
-    outputs that follow a specific pattern.
+    This class implements a reasoning parser specifically designed for the
+    Olmo 3 family of models. Olmo 3 models do not use special tokens to
+    indicate reasoning; rather, reasoning trace is wrapped in `<think>` and
+    `</think>`, which are tokenized using standard vocabulary entries.
+    Because of this, the parser operates in string space, accumulating the
+    characters in a buffer until it sees `<think>` or `</think>`. tokens
+    to switch modes.
 
     Key Features:
-        - For non-stream output , Recognizes and extracts reasoning ("think")
-         and answer ("answer") sections from text using regular expressions.
-        - For stream process, it requires a token id sequences to change the
-          reasoning state and other state so it maintains internal state to
-          manage parsing across multiple token.
-
-    Implementation is based on the implementation of the Hunyuan A13B Reasoning
-    Parser, but with modified token ids and no <answer> token.
-
-    # think start: "<think>": [14023, 771, *]
-    # think ends: "</think>": [524, 27963, *]
-
-    Where the value of the last token is the number of newlines.
-
-    - No newline: 29
-    - 1 newline: 397
-    - 2 newlines: 1363
-    - 3 newlines: 10586
-    - 4 newlines: 28801
-    - 5 newlines: 76819
-
-    Six or more then it's equal to no newline.
+        - For non-stream output, Recognizes and extracts reasoning (text
+          bracketed by `<think>` and `</think>`) and content (everything
+          after the first `</think>`).
+        - For stream process, it uses a buffer to accumulate delta text,
+          and output progressive delta messages as soon as thinking starts
+          or ends.
+        - For reliability, some Olmo 3 models may hardcode the first
+          `<think>` token is the input text (similar to Deepseek R1,
+          or reasoning-only Qwen models). To support such variants, the
+          parser can optionally work in cases where the first `<think>`
+          token is missing from generation.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         self.model_tokenizer = tokenizer
         self.think_start = r"<think>"
         self.think_end = r"</think>"
-        # self.no_think_expr = f"{self.think_start_expr}{self.think_end_expr}"
 
-        self.reasoning_regex = re.compile(
-            rf"(?:{self.think_start}(?P<think>.*?){self.think_end})(?P<answer>.*?)$",
-            re.DOTALL,
-        )
+        # notice that the first think is optional; this allows template to
+        # work in cases when we hardcode a <think> at the beginning of the
+        # reasoning template.
+        reasoning_expr = (rf"^(?:{self.think_start})?(?P<reasoning>.*?)" +
+                          rf"{self.think_end}(?P<content>.*)$")
+        self.reasoning_regex = re.compile(reasoning_expr, re.DOTALL)
 
         self.buffer = Olmo3ReasoningBuffer(think_start=self.think_start,
                                            think_end=self.think_end)
@@ -270,9 +268,9 @@ class Olmo3ReasoningParser(ReasoningParser):
 
         re_match = self.reasoning_regex.match(model_output)
         if re_match:
-            think_content = re_match.group("think") or None
-            answer_content = re_match.group("answer") or None
-            return think_content, answer_content
+            reasoning_content = re_match.group("reasoning") or None
+            content = re_match.group("content") or None
+            return reasoning_content, content
 
         # no reasoning content
         return None, model_output
@@ -290,7 +288,7 @@ class Olmo3ReasoningParser(ReasoningParser):
 
         delta_message = self.buffer.add_text(delta_text)
         if (delta_message is None
-                and self.buffer.think_end in self.buffer.text_buffer):
+                and self.buffer.think_end in self.buffer.buffer):
             # this is a bit hacky, but, because of how the buffer is
             # constructed, if the last delta_text contains characters that
             # marks the end of thinking tokens, then messages in the buffer
