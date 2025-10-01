@@ -10,8 +10,8 @@ import numpy.typing as npt
 from PIL import Image
 
 import vllm.envs as envs
-from vllm.config.multimodal import (AudioDummyOptions, ImageDummyOptions,
-                                    ModalityDummyOptions, VideoDummyOptions)
+from vllm.config.multimodal import (AudioDummyOptions, BaseDummyOptions,
+                                    ImageDummyOptions, VideoDummyOptions)
 from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -75,7 +75,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         """
         Build the multimodal input which, after processing, results in
@@ -95,7 +95,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> ProcessorInputs:
         """
         Build the input which, after processing, results in
@@ -229,7 +229,7 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalInputs:
         if mm_counts is None:
             mm_counts = self.get_mm_limits()
@@ -263,7 +263,7 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> DummyEncoderData:
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
         mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
@@ -297,7 +297,7 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> DummyDecoderData:
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
 

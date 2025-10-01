@@ -124,7 +124,7 @@ def parse_limit_mm_per_prompt(val: str):
                 f"Invalid options type for {modality}: {type(options)}. "
                 f"Must be int or dict.")
 
-        # Single path: create ModalityDummyOptions from dict
+        # Single path: create BaseDummyOptions from dict
         try:
             if modality == "video":
                 result[modality] = VideoDummyOptions(**options)

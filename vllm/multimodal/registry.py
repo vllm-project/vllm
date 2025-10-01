@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
 
-from vllm.config.multimodal import ModalityDummyOptions
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
@@ -99,7 +99,7 @@ class MultiModalRegistry:
     def _extract_mm_options(
         self,
         model_config: "ModelConfig",
-    ) -> Optional[Mapping[str, ModalityDummyOptions]]:
+    ) -> Optional[Mapping[str, BaseDummyOptions]]:
         """
         Extract multimodal dummy options from model config.
 
@@ -110,8 +110,10 @@ class MultiModalRegistry:
             return None
 
         mm_options = {
-            m: model_config.multimodal_config.get_dummy_options(m)
+            m: opt
             for m in model_config.multimodal_config.limit_per_prompt
+            if (opt := model_config.multimodal_config.get_dummy_options(m)
+                ) is not None
         }
 
         return mm_options if len(mm_options) > 0 else None

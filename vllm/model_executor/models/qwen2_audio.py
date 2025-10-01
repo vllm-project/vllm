@@ -34,7 +34,7 @@ from transformers.models.qwen2_audio import (Qwen2AudioConfig,
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import ModalityDummyOptions
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (AudioItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
@@ -146,7 +146,7 @@ class Qwen2AudioDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 

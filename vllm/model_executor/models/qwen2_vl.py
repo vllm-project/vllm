@@ -43,7 +43,7 @@ from transformers.models.qwen2_vl.video_processing_qwen2_vl import (
 
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
-from vllm.config.multimodal import ModalityDummyOptions
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
@@ -1039,7 +1039,7 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, ModalityDummyOptions]] = None,
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
