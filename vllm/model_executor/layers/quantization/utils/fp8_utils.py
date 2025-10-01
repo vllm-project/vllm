@@ -133,9 +133,7 @@ def _w8a8_triton_block_scaled_mm_fake(
 direct_register_custom_op(
     "w8a8_triton_block_scaled_mm_func",
     _w8a8_triton_block_scaled_mm_func,
-    mutates_args=[],
     fake_impl=_w8a8_triton_block_scaled_mm_fake,
-    dispatch_key="CUDA",
 )
 
 
