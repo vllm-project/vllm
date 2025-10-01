@@ -46,6 +46,7 @@ def _run_test(
         all_outputs = []
         for inputs in all_inputs:
             if "pixel_values" in inputs:
+                inputs.pop("input_ids")
                 pooled_output = hf_model.model.get_image_features(
                     **hf_model.wrap_device(inputs)).squeeze(0)
             else:
