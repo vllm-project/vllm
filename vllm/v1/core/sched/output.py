@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 from vllm._bc_linter import bc_linter_include
-from vllm.v1.structured_output import GrammarBitmaskPlaceholder
 
 if TYPE_CHECKING:
     import torch
@@ -19,6 +18,7 @@ if TYPE_CHECKING:
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
+    from vllm.v1.structured_output import GrammarBitmaskPlaceholder
 
 
 @bc_linter_include

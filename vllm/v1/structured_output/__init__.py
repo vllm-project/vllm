@@ -196,8 +196,7 @@ class StructuredOutputGateway:
         gateway = StructuredOutputGateway(task_queue,
                                           batch_validate_result_queue,
                                           grammar_init_notification_queue,
-                                          vllm_config,
-                                          bitmask_shm_name,
+                                          vllm_config, bitmask_shm_name,
                                           ready_flag_shm_name)
         gateway.run()
 
@@ -325,11 +324,13 @@ class StructuredOutputManager:
 
         self.vllm_config = vllm_config
         self.reasoner: Optional[ReasoningParser] = None
-        
+
         # Create shared memory names with data parallel rank
-        data_parallel_rank = str(self.vllm_config.parallel_config.data_parallel_rank)
+        data_parallel_rank = str(
+            self.vllm_config.parallel_config.data_parallel_rank)
         self.bitmask_shm_name = GRAMMAR_BITMASK_SHM_NAME + data_parallel_rank
-        self.ready_flag_shm_name = GRAMMAR_READY_FLAG_SHM_NAME + data_parallel_rank
+        self.ready_flag_shm_name = GRAMMAR_READY_FLAG_SHM_NAME \
+                                   + data_parallel_rank
 
         if not self.vllm_config.model_config.skip_tokenizer_init:
             self.tokenizer = init_tokenizer_from_configs(
@@ -421,7 +422,8 @@ class StructuredOutputManager:
         self.task_queue.put(task)
 
         # Return a placeholder that consumer can check
-        return GrammarBitmaskPlaceholder(self.bitmask_shm_name, self.ready_flag_shm_name)
+        return GrammarBitmaskPlaceholder(self.bitmask_shm_name,
+                                         self.ready_flag_shm_name)
 
     def submit_batch_accept_tokens(
             self, request_id_to_new_token_ids: list[tuple[str, list[int]]]):
