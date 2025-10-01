@@ -107,28 +107,27 @@ source to unblock the update process.
 
 ### FlashInfer
 
-Here is how to build and install it from source with `torch2.7.0+cu128` in vLLM [Dockerfile](https://github.com/vllm-project/vllm/blob/27bebcd89792d5c4b08af7a65095759526f2f9e1/docker/Dockerfile#L259-L271):
+After https://github.com/vllm-project/vllm/pull/25782, the pre-compiled
+FlashInfer wheel can be built using tools/flashinfer-build.sh script.
+The new wheel can then be uploaded to [PyTorch test
+index](https://download.pytorch.org/whl/test/cu128/flashinfer_python-0.3.1-cp39-abi3-linux_x86_64.whl) and used
+during the update
 
-```bash
-export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX'
-export FLASHINFER_ENABLE_SM90=1
-uv pip install --system \
-    --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.6.post1"
+During PyTorch 2.9 update, using the old FlashInfer wheel built for
+2.8 led to a crash with the following error:
+
 ```
-
-One caveat is that building FlashInfer from source adds approximately 30
-minutes to the vLLM build time. Therefore, it's preferable to cache the wheel in a
-public location for immediate installation, such as [this FlashInfer wheel link](https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl). For future releases, contact the PyTorch release
-team if you want to get the package published there.
+terminate called after throwing an instance of 'std::bad_array_new_length'
+```
 
 ### xFormers
 
 Similar to FlashInfer, here is how to build and install xFormers from source:
 
 ```bash
-export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
+export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
 MAX_JOBS=16 uv pip install --system \
-    --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
+    --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.32.post2"
 ```
 
 ## Update all the different vLLM platforms

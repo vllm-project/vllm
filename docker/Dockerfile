@@ -412,7 +412,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
         if [[ "${CUDA_VERSION}" == 12.8.* ]] && [ "$TARGETPLATFORM" = "linux/amd64" ]; then
             # NOTE: To make new precompiled wheels, see tools/flashinfer-build.sh
             echo "🏗️  Installing FlashInfer from pre-compiled wheel"
-            uv pip install --system https://wheels.vllm.ai/flashinfer-python/flashinfer_python-0.3.1-cp39-abi3-manylinux1_x86_64.whl \
+            uv pip install --system https://download.pytorch.org/whl/test/cu128/flashinfer_python-0.3.1-cp39-abi3-linux_x86_64.whl \
                 --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
             if [ "${FLASHINFER_AOT_COMPILE}" = "true" ]; then
                 # Download pre-compiled cubins
