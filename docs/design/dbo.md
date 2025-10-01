@@ -5,6 +5,21 @@ The core motivation of the DBO system in vLLM is to overlap the sparse all-to-al
 The Dual Batch Overlap system works by splitting the batch up in the model runner, creating two worker threads, and then running the model twice inside of each of these worker threads. When DBO is enabled, there are yield points within the FusedMoEModularKernel that will allow the two worker threads to ping-pong between each other so that when one is running compute, the other is waiting on communication. 
 
 The DBO system modifies the `GpuModelRunner` and `ModularKernel` along with adding two new sub-systems: `UBatchWrapper` and `UBatchContext`. `UBatchWrapper` is a wrapper around the model that is responsible for all of the thread and cudagraph management. `UBatchContext` is a wrapper around `ForwardContext` that allows the two UBatch threads to synchronize with each other.
+
+Below are the two overlap schedules that are currently implemented in vLLM.
+```
+Comp: |-A0₀-A1₀-S₀-||-MLP₁-||-MLP₀-||-A0₁-A1₁-S₁-|
+Comm: |-----D₁-----||--D₀--||--C₁--||-----C₀-----|
+Order: D₁ send, A0₀, A1₀, S₀, D₁ recv, D₀ send, MLP₁, D₀ recv,
+       C₁ send, MLP₀, C₁ recv, C₀ send, A0₁, A1₁, S₁, C₀ recv.
+MLP_OVERLAP = "mlp_overlap"
+
+Comp: |-A0₀-A1₀-||-MLP₁-||-S₁-MLP₀-||-S₀-A0₁-A1₁-|
+Comm: |----D₁---||--D₀--||----C₁---||-----C₀-----|
+Order: D₁ send, A0₀, A1₀, D₁ recv, D₀ send, MLP₁, D₀ recv,
+       C₁ send, S₁, MLP₀, C₁ recv, C₀ send, S₀, A0₁, A1₁, C₀ recv.
+MLP_SHARED_OVERLAP = "mlp_shared_overlap"
+```
 ## Running with DBO
 To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve command. This must be run in conjunction with `--data-parallel-size N` where N is greater than 1 and `--enable-expert-parallel`. Additionally, there are two configuration knobs.
 `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch.
