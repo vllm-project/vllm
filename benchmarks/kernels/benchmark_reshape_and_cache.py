@@ -129,10 +129,7 @@ def main(args):
         )
         rows.append([n_tok, "HDN", f"{lat * 1e6:.3f}"])
 
-    print(
-        f"Benchmark results for implementation cuda"
-        f" (measuring with {args.mode}):"
-    )
+    print(f"Benchmark results for implementation cuda (measuring with {args.mode}):")
     print(tabulate(rows, headers=["num_tokens", "layout", "latency (µs)"]))
 
 
