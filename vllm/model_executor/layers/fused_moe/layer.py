@@ -1160,6 +1160,9 @@ class FusedMoE(CustomOp):
                                    or self.use_deepep_ht_kernels
                                    or self.use_deepep_ll_kernels)
 
+        states_shape: tuple[int, ...]
+        logits_shape: tuple[int, ...]
+
         if self.use_dp_chunking:
             if vllm_config.parallel_config.enable_dbo:
                 states_shape = (2, moe.max_num_tokens, self.hidden_size)

@@ -691,7 +691,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         See `workspace_shapes` for a description of additional arguments.
         Returns a tuple of (workspace13, workspace2, output) tensors.
         """
-        # XXXXXXXXX rework this to be more obvious
+
+        # If chunking is not supported, set the CHUNK_SIZE to M so we
+        # get num_chunks == 1.
         CHUNK_SIZE = (M if not self.fused_experts.supports_chunking() else
                       envs.VLLM_FUSED_MOE_CHUNK_SIZE)
         num_chunks = cdiv(M, CHUNK_SIZE)
@@ -708,8 +710,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         ubatch_idx = dbo_current_ubatch_id()
         buffers = self.shared_buffers[ubatch_idx]
 
-        #print(f"WS {workspace13_shape, workspace2_shape, fused_out_shape}")
-
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         workspace13 = buffers.workspace13.get(workspace13_shape,
@@ -722,7 +722,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         # Construct the entire output that can then be processed in chunks.
         if num_chunks == 1 and prod(workspace13_shape) >= prod(
                 fused_out_shape):
-            # Reuse workspace13 for the output in the non-chunked case.
+            # Reuse workspace13 for the output in the non-chunked case as
+            # long as it is large enough.
             fused_out = _resize_cache(workspace13, fused_out_shape)
         else:
             fused_out = buffers.fused_out.get(fused_out_shape,
@@ -782,56 +783,25 @@ class FusedMoEModularKernel(torch.nn.Module):
             expert_num_tokens=c_expert_num_tokens,
             expert_num_tokens_cpu=c_expert_num_tokens_cpu)
 
-    def forward(
+    def _prepare(
         self,
         hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        inplace: bool = False,
-        activation: str = "silu",
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        global_num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+    ) -> tuple[
+            torch.Tensor,
+            Optional[torch.Tensor],
+            Optional[ExpertTokensMetadata],
+            torch.Tensor,
+            torch.Tensor,
+    ]:
         """
-        This function computes a Mixture of Experts (MoE) layer using two sets
-        of weights, w1 and w2, and top-k gating mechanism.
-
-        Parameters:
-        - hidden_states: (torch.Tensor): The input tensor to the MoE layer.
-        - w1 (torch.Tensor): The first set of expert weights.
-        - w2 (torch.Tensor): The second set of expert weights.
-        - topk_weights (torch.Tensor): The topk weights applied at the end of
-          the layer.
-        - topk_ids (torch.Tensor): A map of row to expert id.
-        - inplace (bool): If True, perform the operation in-place.
-          Defaults to False.
-        - activation (str): The activation function to apply after the first
-          MoE layer.
-        - global_num_experts (int): The total number of experts in the global
-          expert space.
-        - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-          from the global expert space to the local expert space of the expert
-          parallel shard.
-        - apply_router_weight_on_input (bool): When true, the topk weights are
-          applied directly on the inputs. This is only applicable when topk is
-          1.
-
-        Returns:
-        - torch.Tensor: The output tensor after applying the MoE layer.
+        The _prepare method is a wrapper around self.prepare_finalize.prepare
+        that handles DBO and async.
         """
-
-        if inplace and self.shared_experts is None:
-            output = hidden_states
-        else:
-            output = torch.zeros_like(hidden_states)
-
-        local_num_experts = w1.size(0)
-        if global_num_experts == -1:
-            global_num_experts = local_num_experts
-
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
@@ -885,70 +855,21 @@ class FusedMoEModularKernel(torch.nn.Module):
         topk_weights = (topk_weights if _expert_topk_weights is None else
                         _expert_topk_weights)
 
-        fused_out = None
+        return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
 
-        if a1q.numel() == 0:
-            # This happens when none of the tokens from the all2all reach this
-            # EP rank. Also, note that this is only relevant for CUDAGraph
-            # incompatible all2all kernels like the DeepEP high-throughput
-            # kernels. CUDAGraph compatible all2all kernels like the pplx
-            # kernels and the DeepEP low-latency kernels are always batched
-            # and can never run into the tensor.numel() == 0 case.
-            fused_out = torch.empty_like(a1q).to(dtype=hidden_states.dtype)
-        else:
-            _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
-
-            if self.fused_experts.supports_chunking():
-                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
-                num_chunks = cdiv(M, CHUNK_SIZE)
-            else:
-                CHUNK_SIZE = M  #a1q.size(0)
-                num_chunks = 1
-
-            def input_chunk_range(chunk_idx: int) -> tuple[int, int]:
-                if num_chunks == 1:
-                    return 0, a1q.size(0)
-                else:
-                    s = chunk_idx * CHUNK_SIZE
-                    e = min(s + CHUNK_SIZE, M)
-                    return s, e
-
-            workspace13, workspace2, fused_out = self._allocate_buffers(
-                hidden_states.dtype, a1q.device, M, N, K, top_k,
-                global_num_experts, local_num_experts, expert_tokens_meta)
-
-            #print(f"XXX {num_chunks}, {CHUNK_SIZE}, {M, N, K}")
-
-            for chunk_idx in range(num_chunks):
-                s, e = input_chunk_range(chunk_idx)
-
-                #print(f"S, E = {s, e}")
-
-                c_expert_tokens_meta = self._slice_expert_tokens_metadata(
-                    num_chunks, expert_tokens_meta, topk_ids[s:e],
-                    local_num_experts, expert_map)
-
-                c_fused_out = self._slice_output_tensor(
-                    fused_out, chunk_idx, num_chunks, CHUNK_SIZE, M)
-
-                self.fused_experts.apply(
-                    output=c_fused_out,
-                    hidden_states=a1q[s:e],
-                    w1=w1,
-                    w2=w2,
-                    topk_weights=topk_weights[s:e],
-                    topk_ids=topk_ids[s:e],
-                    activation=activation,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                    a1q_scale=_chunk_scales(a1q_scale, s, e),
-                    a2_scale=_chunk_scales(self.fused_experts.a2_scale, e, e),
-                    workspace13=workspace13,
-                    workspace2=workspace2,
-                    expert_tokens_meta=c_expert_tokens_meta,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                )
-
+    def _finalize(
+        self,
+        output: torch.Tensor,
+        fused_out: torch.Tensor,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """
+        The _finalize method is a wrapper around self.prepare_finalize.finalize
+        that handles DBO, async and shared expert overlap.
+        """
         shared_output: Optional[torch.Tensor] = None
 
         if not self.prepare_finalize.supports_async():
@@ -1000,3 +921,140 @@ class FusedMoEModularKernel(torch.nn.Module):
         else:
             assert shared_output is not None
             return shared_output, output
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        inplace: bool = False,
+        activation: str = "silu",
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """
+        This function computes a Mixture of Experts (MoE) layer using two sets
+        of weights, w1 and w2, and top-k gating mechanism.
+
+        Parameters:
+        - hidden_states: (torch.Tensor): The input tensor to the MoE layer.
+        - w1 (torch.Tensor): The first set of expert weights.
+        - w2 (torch.Tensor): The second set of expert weights.
+        - topk_weights (torch.Tensor): The topk weights applied at the end of
+          the layer.
+        - topk_ids (torch.Tensor): A map of row to expert id.
+        - inplace (bool): If True, perform the operation in-place.
+          Defaults to False.
+        - activation (str): The activation function to apply after the first
+          MoE layer.
+        - global_num_experts (int): The total number of experts in the global
+          expert space.
+        - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+          from the global expert space to the local expert space of the expert
+          parallel shard.
+        - apply_router_weight_on_input (bool): When true, the topk weights are
+          applied directly on the inputs. This is only applicable when topk is
+          1.
+
+        Returns:
+        - torch.Tensor: The output tensor after applying the MoE layer.
+        """
+
+        if inplace and self.shared_experts is None:
+            output = hidden_states
+        else:
+            output = torch.zeros_like(hidden_states)
+
+        local_num_experts = w1.size(0)
+        if global_num_experts == -1:
+            global_num_experts = local_num_experts
+
+        #
+        # Prepare
+        #
+        a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = (
+            self._prepare(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+            ))
+
+        _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
+
+        # If chunking is not supported, set the CHUNK_SIZE to M so we
+        # get num_chunks == 1.
+        CHUNK_SIZE = (M if not self.fused_experts.supports_chunking() else
+                      envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+        num_chunks = cdiv(M, CHUNK_SIZE)
+
+        def input_chunk_range(chunk_idx: int) -> tuple[int, int]:
+            if num_chunks == 1:
+                # Use a1q.size(0) here since batched format does not
+                # keep M in the first dimension.
+                return 0, a1q.size(0)
+            else:
+                s = chunk_idx * CHUNK_SIZE
+                e = min(s + CHUNK_SIZE, M)
+                return s, e
+
+        #
+        # Invoke Experts
+        #
+        if a1q.numel() == 0:
+            # This happens when none of the tokens from the all2all reach this
+            # EP rank. Also, note that this is only relevant for CUDAGraph
+            # incompatible all2all kernels like the DeepEP high-throughput
+            # kernels. CUDAGraph compatible all2all kernels like the pplx
+            # kernels and the DeepEP low-latency kernels are always batched
+            # and can never run into the tensor.numel() == 0 case.
+            fused_out = torch.empty_like(a1q).to(dtype=hidden_states.dtype)
+        else:
+            workspace13, workspace2, fused_out = self._allocate_buffers(
+                hidden_states.dtype, a1q.device, M, N, K, top_k,
+                global_num_experts, local_num_experts, expert_tokens_meta)
+
+            for chunk_idx in range(num_chunks):
+                s, e = input_chunk_range(chunk_idx)
+
+                c_expert_tokens_meta = self._slice_expert_tokens_metadata(
+                    num_chunks, expert_tokens_meta, topk_ids[s:e],
+                    local_num_experts, expert_map)
+
+                c_fused_out = self._slice_output_tensor(
+                    fused_out, chunk_idx, num_chunks, CHUNK_SIZE, M)
+
+                self.fused_experts.apply(
+                    output=c_fused_out,
+                    hidden_states=a1q[s:e],
+                    w1=w1,
+                    w2=w2,
+                    topk_weights=topk_weights[s:e],
+                    topk_ids=topk_ids[s:e],
+                    activation=activation,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    a1q_scale=_chunk_scales(a1q_scale, s, e),
+                    a2_scale=_chunk_scales(self.fused_experts.a2_scale, e, e),
+                    workspace13=workspace13,
+                    workspace2=workspace2,
+                    expert_tokens_meta=c_expert_tokens_meta,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
+
+        #
+        # Finalize
+        #
+        return self._finalize(
+            output,
+            fused_out,
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            apply_router_weight_on_input,
+        )
