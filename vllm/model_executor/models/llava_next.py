@@ -27,6 +27,7 @@ from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
+from .vision import get_num_selected_vision_tokens
 
 
 class LlavaNextImagePixelInputs(TensorSchema):
@@ -95,12 +96,12 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
 
-        base_feature_size = self._apply_feature_select_strategy(
-            hf_config.vision_feature_select_strategy,
+        base_feature_size = get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,
                 image_height=image_height,
             ),
+            hf_config.vision_feature_select_strategy,
         )
 
         num_patch_height, num_patch_width = get_anyres_image_grid_shape(
