@@ -172,8 +172,7 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
         tokenizer = self.info.get_tokenizer()
         dummy_token_id = 0
 
-        assert (tokenizer.convert_ids_to_tokens([dummy_token_id])
-                not in tokenizer.special_tokens_map.values())
+        assert dummy_token_id not in tokenizer.all_special_ids
 
         return dummy_token_id
 
