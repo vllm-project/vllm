@@ -8,12 +8,12 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
 
+import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
     ncclRedOpTypeEnum, ncclUniqueId)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-import vllm.envs as envs
 from vllm.utils import current_stream
 
 logger = init_logger(__name__)
