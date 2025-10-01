@@ -249,15 +249,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         chunk_seq_ids = []
         total_seq_lens = 0
         for i in range(reqs_start, len(seq_lens_cpu)):
-            total_seq_lens += seq_lens_cpu[i]
+            cur_seq_len = seq_lens_cpu[i].item()
+            total_seq_lens += cur_seq_len
             if total_seq_lens > max_prefill_buffer_size:
                 chunk_seq_ids.append((reqs_start, i))
                 reqs_start = i
-                total_seq_lens = 0
+                total_seq_lens = cur_seq_len
         if total_seq_lens > 0:
             chunk_seq_ids.append((reqs_start, len(seq_lens_cpu)))
-        print("chunk_seq_ids", chunk_seq_ids,
-              seq_lens_cpu[chunk_seq_ids[0][0]:])
         return chunk_seq_ids
 
     def build(self,
