@@ -48,7 +48,6 @@ def _cp_shard_positions_for_prefill(
     # Compute the token index ranges for the two shards handled by this rank
     chunk0_start = cp_rank * cp_shard_size
     chunk1_start = (2 * cp_size - cp_rank - 1) * cp_shard_size
-
     chunk0_arange = arange_np[chunk0_start:chunk0_start + cp_shard_size]
     chunk1_arange = arange_np[chunk1_start:chunk1_start + cp_shard_size]
 

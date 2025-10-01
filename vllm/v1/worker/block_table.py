@@ -10,6 +10,7 @@ from vllm.distributed.parallel_state import get_context_parallel_world_size
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.distributed.parallel_state import get_context_parallel_world_size
 
 logger = init_logger(__name__)
 
