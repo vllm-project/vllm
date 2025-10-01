@@ -1,6 +1,5 @@
 # Dual Batch Overlap
 
-
 ## Motivation
 
 The core motivation of the DBO system in vLLM is to overlap the sparse all-to-all communication in the MoE layer with the surrounding computation. This system currently only targets DP+EP deployments.
