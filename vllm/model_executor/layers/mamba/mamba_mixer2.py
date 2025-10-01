@@ -590,7 +590,7 @@ class MambaMixer2(MambaBase, CustomOp):
             _, current_first_idx_p = torch.split(
                 attn_metadata.current_first_token_block_idx,
                 [num_decodes, num_prefills],
-                dim=0)            
+                dim=0)
             _, seq_lens_completed_p = torch.split(
                 attn_metadata.seq_lens_completed, [num_decodes, num_prefills],
                 dim=0)
@@ -722,7 +722,7 @@ class MambaMixer2(MambaBase, CustomOp):
                     varlen_states[last_chunk_indices_p]
             else:
                 # update ssm states
-                # - varlen state is a (num_prefills, nheads, headdim, dstate) 
+                # - varlen state is a (num_prefills, nheads, headdim, dstate)
                 #   tensor
                 ssm_state[state_indices_tensor_p] = varlen_states
 
