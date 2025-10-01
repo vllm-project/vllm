@@ -663,5 +663,3 @@ class VllmBackend:
             return self.split_gm(*list_args)
 
         return copy_and_call
-
-
