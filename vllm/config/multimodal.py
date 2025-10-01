@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import field
 from typing import Any, Literal, Optional, Union
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -123,6 +123,27 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+
+    @field_validator("limit_per_prompt", mode="before")
+    @classmethod
+    def _validate_limit_per_prompt(
+        cls, value: dict[str, Union[int,
+                                    dict[str,
+                                         int]]]) -> dict[str, DummyOptions]:
+        for k, v in value.items():
+            # Handle legacy format where only count is specified
+            if isinstance(v, int):
+                v = {"count": v}
+            # Convert to the appropriate DummyOptions subclass
+            if k == "video":
+                value[k] = VideoDummyOptions(**v)
+            elif k == "image":
+                value[k] = ImageDummyOptions(**v)
+            elif k == "audio":
+                value[k] = AudioDummyOptions(**v)
+            else:
+                value[k] = BaseDummyOptions(**v)
+        return value
 
     def compute_hash(self) -> str:
         """

@@ -98,49 +98,6 @@ def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
     return optional_type(json.loads)(val)
 
 
-def parse_limit_mm_per_prompt(val: str):
-    """Parse limit-mm-per-prompt with support for configurable options."""
-    import json
-
-    from vllm.config.multimodal import (AudioDummyOptions, BaseDummyOptions,
-                                        ImageDummyOptions, VideoDummyOptions)
-
-    try:
-        parsed = json.loads(val)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"Invalid JSON format for --limit-mm-per-prompt: {e}") from e
-
-    if not isinstance(parsed, dict):
-        raise ValueError("--limit-mm-per-prompt must be a JSON object")
-
-    result = {}
-    for modality, options in parsed.items():
-        # Normalize int to dict first
-        if isinstance(options, int):
-            options = {"count": options}
-        elif not isinstance(options, dict):
-            raise ValueError(
-                f"Invalid options type for {modality}: {type(options)}. "
-                f"Must be int or dict.")
-
-        # Single path: create BaseDummyOptions from dict
-        try:
-            if modality == "video":
-                result[modality] = VideoDummyOptions(**options)
-            elif modality == "image":
-                result[modality] = ImageDummyOptions(**options)
-            elif modality == "audio":
-                result[modality] = AudioDummyOptions(**options)
-            else:
-                # Unknown modality - use BaseDummyOptions for OOT models
-                result[modality] = BaseDummyOptions(**options)
-        except TypeError as e:
-            raise ValueError(f"Invalid options for {modality}") from e
-
-    return result
-
-
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
     """Check if the type hint is a specific type."""
     return type_hint is type or get_origin(type_hint) is type
@@ -419,7 +376,7 @@ class EngineArgs:
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    limit_mm_per_prompt: dict[str, int] = \
+    limit_mm_per_prompt: dict[str, Union[int, dict[str, int]]] = \
         get_field(MultiModalConfig, "limit_per_prompt")
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str,
@@ -830,18 +787,6 @@ class EngineArgs:
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
-        # Override the parser for limit_per_prompt to support configurable
-        # options
-        multimodal_kwargs["limit_per_prompt"][
-            "type"] = parse_limit_mm_per_prompt
-        multimodal_kwargs["limit_per_prompt"]["help"] += (
-            "\n\nSupports both legacy count-only format and "
-            "configurable options format:"
-            "\n  Legacy: '{\"image\": 5, \"video\": 1}'"
-            "\n  Configurable: '{\"video\": {\"count\": 1, "
-            "\"num_frames\": 32}}'"
-            "\n  Mixed: '{\"image\": 5, \"video\": {\"count\": 1, "
-            "\"num_frames\": 32}}'")
         multimodal_group = parser.add_argument_group(
             title="MultiModalConfig",
             description=MultiModalConfig.__doc__,
