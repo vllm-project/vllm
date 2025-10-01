@@ -107,16 +107,13 @@ source to unblock the update process.
 
 ### FlashInfer
 
-After https://github.com/vllm-project/vllm/pull/25782, the pre-compiled
-FlashInfer wheel can be built using tools/flashinfer-build.sh script.
-The new wheel can then be uploaded to [PyTorch test
-index](https://download.pytorch.org/whl/test/cu128/flashinfer_python-0.3.1-cp39-abi3-linux_x86_64.whl) and used
-during the update
+After #25782, the pre-compiled FlashInfer wheel can be built using tools/flashinfer-build.sh
+script. The new wheel can then be uploaded to [PyTorch test index](https://download.pytorch.org/whl/test/cu128/flashinfer_python-0.3.1-cp39-abi3-linux_x86_64.whl) and used during the update.
 
 During PyTorch 2.9 update, using the old FlashInfer wheel built for
 2.8 led to a crash with the following error:
 
-```
+```bash
 terminate called after throwing an instance of 'std::bad_array_new_length'
 ```
 
