@@ -31,6 +31,8 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+
+
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
@@ -171,6 +173,7 @@ def _convert_req_index_to_global_index_kernel(
     # Store results
     out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
     tl.store(out_ptr_ij, out_val)
+
 
 
 def triton_convert_req_index_to_global_index(
@@ -366,6 +369,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         return metadata
 
 
+
 class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
     def __init__(
         self,
@@ -503,7 +507,6 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         ql_nope = ql_nope.transpose(0, 1)
 
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
-
         # TODO: handle index / kv_cache correctly
         topk_indices_global = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
@@ -525,7 +528,6 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 kv_cache_dtype=self.kv_cache_dtype,
                 scale=layer._k_scale,
             )
-
         if self.kv_cache_dtype != "fp8_ds_mla":
             attn_out = self._forward_bf16_kv(
                 q, kv_cache, topk_indices_global, attn_metadata
