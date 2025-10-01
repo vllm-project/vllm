@@ -695,7 +695,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         if isinstance(self.fused_experts, AiterExperts):
             workspace2 = None
         else:
-            workspace2 = self.workspace2_buffer.get(workspace2_shape,
+            workspace2 = buffers.workspace2.get(workspace2_shape,
                                                     device=a1.device,
                                                     dtype=workspace_dtype)
 
