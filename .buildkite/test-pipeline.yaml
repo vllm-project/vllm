@@ -845,7 +845,7 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
-    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58 --server-args '--tensor-parallel-size 2'
+    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
 
 - label: Blackwell Quantized MoE Test
   timeout_in_minutes: 60
