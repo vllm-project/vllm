@@ -1862,7 +1862,18 @@ class FlexibleArgumentParser(ArgumentParser):
                     "positional argument or in a config file instead of via "
                     "the `--model` option. "
                     "The `--model` option will be removed in v0.13.")
-                args = args[:model_idx] + args[model_idx + 1:]
+
+                # Move <model> to the front, e,g:
+                # [Before]
+                # vllm serve -tp 2 --model <model> --enforce-eager --port 8001
+                # [After]
+                # vllm serve <model> -tp 2 --enforce-eager --port 8001
+                args = [
+                    "serve",
+                    args[model_idx + 1],
+                    *args[1:model_idx],
+                    *args[model_idx + 2:],
+                ]
             except ValueError:
                 pass
 
