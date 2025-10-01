@@ -25,7 +25,10 @@ void dispatch_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
       if constexpr (!std::is_same_v<Int8Func, std::nullptr_t>) {
         int8_func(c, a, b, a_scales, b_scales, bias);
       } else {
-        TORCH_CHECK(false, "Int8 not supported for this architecture");
+        int32_t version_num = get_sm_version_num();
+        TORCH_CHECK(
+            false, "Int8 not supported on SM", version_num,
+            ". Use FP8 quantization instead, or run on older arch (SM < 100).");
       }
     }
   } else {
