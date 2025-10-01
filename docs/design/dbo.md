@@ -64,7 +64,7 @@ ubatch_context
 
 The `UBatchContext` class is a `ForwardContext` wrapper class that is used by the `UBatchWrapper` class to synchronize the two UBatch threads. It should only be instantiated by using `make_ubatch_contexts`.
 
-The `UBatchWrapper` class enables two UBatch threads, A and B, to alternate execution. When the `forward` method is invoked, thread A begins processing its part of the model. Upon reaching a `dbo_yield` call, thread A pauses, and thread B starts its execution. This "ping-pong" dynamic continues, with threads swapping at each `dbo_yield call`, until the model's execution is complete.
+When one of the `UBatch` threads reaches a `dbo_yield` call, it pauses, and starts the other thread which will run until it reaches the same `dbo_yield` call. This "ping-pong" dynamic continues, with threads swapping at each `dbo_yield call`, until the model's execution is complete.
 
 The current implementation has all `dbo_yield` and `dbo_maybe_run_recv_hook` calls in the `FusedMoEModularKernel.forward` method.
 
