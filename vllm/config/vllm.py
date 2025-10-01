@@ -329,11 +329,12 @@ class VllmConfig:
                     self.compilation_config.cudagraph_mode = \
                         CUDAGraphMode.FULL_AND_PIECEWISE
 
-                    # pooling models and encoder-decoder models
-                    # do not support full cudagraphs
+                    # pooling models, encoder-decoder models, and models with
+                    # chunked attention do not support full cudagraphs
                     if self.model_config is not None and \
                         (self.model_config.pooler_config is not None
-                         or self.model_config.is_encoder_decoder):
+                         or self.model_config.is_encoder_decoder
+                         or self.model_config.attention_chunk_size is not None):
                         self.compilation_config.cudagraph_mode = \
                             CUDAGraphMode.PIECEWISE
                 else:
