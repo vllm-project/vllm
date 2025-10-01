@@ -737,7 +737,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to allow HTTP redirects when fetching from media URLs.
     # Default to True
     "VLLM_MEDIA_URL_ALLOW_REDIRECTS":
-    lambda: int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1")),
+    lambda: bool(int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1"))),
 
     # Max number of workers for the thread pool handling
     # media bytes loading. Set to 1 to disable parallel processing.

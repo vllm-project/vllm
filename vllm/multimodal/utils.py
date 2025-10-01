@@ -143,7 +143,7 @@ class MediaConnector:
             data = connection.get_bytes(
                 url,
                 timeout=fetch_timeout,
-                allow_redirects=bool(envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS),
+                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
 
             return media_io.load_bytes(data)
@@ -174,7 +174,7 @@ class MediaConnector:
             data = await connection.async_get_bytes(
                 url,
                 timeout=fetch_timeout,
-                allow_redirects=bool(envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS),
+                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
             future = loop.run_in_executor(global_thread_pool,
                                           media_io.load_bytes, data)
