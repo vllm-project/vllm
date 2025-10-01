@@ -2492,7 +2492,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         use_padded_batch_for_eagle = self.speculative_config and \
             self.speculative_config.use_eagle() and \
-            not self.speculative_config.disable_padded_drafter_batch
+            not self.speculative_config.disable_padded_drafter_batch and \
+            not self.speculative_config.use_ngram()
         effective_drafter_max_model_len = self.max_model_len
         if effective_drafter_max_model_len is None:
             effective_drafter_max_model_len = self.model_config.max_model_len

@@ -461,6 +461,12 @@ class SpeculativeConfig:
                         self.target_parallel_config,
                         self.draft_tensor_parallel_size))
 
+        if self.use_ngram() and not self.disable_padded_drafter_batch:
+            logger.warning(
+                "padded_drafter_batch has to be disabled with ngram. "
+                "Setting it disable_padded_drafter_batch to True.")
+            self.disable_padded_drafter_batch = True
+
     @staticmethod
     def _maybe_override_draft_max_model_len(
         speculative_max_model_len: Optional[int],
@@ -617,6 +623,9 @@ class SpeculativeConfig:
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "ngram-eagle", "mtp")
+
+    def use_ngram(self) -> bool:
+        return self.method == "ngram" or self.method == "ngram-eagle"
 
     def __repr__(self) -> str:
         method = self.method
