@@ -111,7 +111,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
-            expert_num_tokens=expert_tokens_meta.expert_num_tokens,
+            expert_num_tokens=expert_tokens_meta.expert_num_tokens if expert_tokens_meta is not None else None,
             output_dtype=output.dtype,
             quant_config=self.quant_config,
             a1q_scale=a1q_scale,
