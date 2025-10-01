@@ -226,14 +226,12 @@ struct CopyWithScaleOp {
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void reshape_and_cache_kernel(
-    const scalar_t* __restrict__ key,  // [num_tokens, num_heads, head_size//x,
-                                       // x]
-    const scalar_t* __restrict__ value,  // [num_tokens, num_heads,
-                                         // head_size//x, x]
-    cache_t* __restrict__ key_cache,    // [num_blocks, num_heads, head_size//x,
-                                        // block_size, x]
-    cache_t* __restrict__ value_cache,  // [num_blocks, num_heads, head_size//x,
-                                        // x, block_size]
+    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
+    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
+    cache_t* __restrict__ key_cache,     // [num_blocks, num_heads, head_size/x,
+                                         // block_size, x]
+    cache_t* __restrict__ value_cache,   // [num_blocks, num_heads, head_size,
+                                         // block_size]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int key_stride, const int value_stride, const int num_heads,
     const int head_size, const int block_size, const int x,
@@ -270,20 +268,19 @@ __global__ void reshape_and_cache_kernel(
       head_idx * h_block_count * x * block_size + h_block * x * block_size +
       block_offset;
 
-  float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
   constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
+  float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
   CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+  float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+
   vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, x, 0, 1, k_op);
 
+  const scalar_t* __restrict__ value_src = value + src_value_start;
+  cache_t* __restrict__ value_dst = value_cache + tgt_value_start;
 #pragma unroll
   for (int i = 0; i < x; i++) {
-    scalar_t value_val = value[src_value_start + i];
-    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
-      value_cache[tgt_value_start + i * block_size] = value_val;
-    } else {
-      value_cache[tgt_value_start + i * block_size] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(value_val, *v_scale);
-    }
+    v_op(value_dst[i * block_size], value_src[i]);
   }
 }
 
