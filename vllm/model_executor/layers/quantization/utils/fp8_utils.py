@@ -185,15 +185,15 @@ direct_register_custom_op(
 )
 
 
-def _fp8_gemm_nt_op(q_input: torch.Tensor, x_scale: torch.Tensor,
+def _fp8_gemm_nt_op(q_input: torch.Tensor, input_scale: torch.Tensor,
                     weight: torch.Tensor, weight_scale: torch.Tensor,
                     output: torch.Tensor, use_deep_gemm_e8m0: bool) -> None:
-    fp8_gemm_nt((q_input, x_scale), (weight, weight_scale),
+    fp8_gemm_nt((q_input, input_scale), (weight, weight_scale),
                 output,
                 is_deep_gemm_e8m0_used=use_deep_gemm_e8m0)
 
 
-def _fp8_gemm_nt_op_fake(q_input: torch.Tensor, x_scale: torch.Tensor,
+def _fp8_gemm_nt_op_fake(q_input: torch.Tensor, input_scale: torch.Tensor,
                          weight: torch.Tensor, weight_scale: torch.Tensor,
                          output: torch.Tensor,
                          use_deep_gemm_e8m0: bool) -> None:
@@ -260,11 +260,9 @@ class W8A8BlockFp8LinearOp:
         if should_use_deepgemm_for_fp8_linear(output_dtype, weight,
                                               self.is_deep_gemm_supported):
             output = self._run_deepgemm(input_2d, weight, weight_scale)
-            if bias is not None:
-                output = output + bias
-            return output.to(dtype=input.dtype).view(*output_shape)
+        else:
+            output = self.w8a8_blockscale_op(input_2d, weight, weight_scale)
 
-        output = self.w8a8_blockscale_op(input_2d, weight, weight_scale)
         if bias is not None:
             output = output + bias
         return output.to(dtype=input.dtype).view(*output_shape)
@@ -276,12 +274,13 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.deepgemm_input_quant_op is not None
-        q_input, x_scale = self.deepgemm_input_quant_op(input_2d)
+        q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
         output = torch.empty((q_input.shape[0], weight.shape[0]),
                              dtype=torch.bfloat16,
                              device=q_input.device)
-        torch.ops.vllm.fp8_gemm_nt_op(q_input, x_scale, weight, weight_scale,
-                                      output, self.use_deep_gemm_e8m0)
+        torch.ops.vllm.fp8_gemm_nt_op(q_input, input_scale, weight,
+                                      weight_scale, output,
+                                      self.use_deep_gemm_e8m0)
         return output
 
     def _run_cutlass(
@@ -291,16 +290,17 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.input_quant_op is not None
-        q_input, x_scale = self.input_quant_op(input_2d)
+        q_input, input_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
-            output = torch.ops.vllm.padded_cutlass(
-                q_input, weight, x_scale, weight_scale,
-                list(self.weight_group_shape), input_2d.dtype)
+            return torch.ops.vllm.padded_cutlass(q_input, weight, input_scale,
+                                                 weight_scale,
+                                                 list(self.weight_group_shape),
+                                                 input_2d.dtype)
         else:
-            output = cutlass_scaled_mm(q_input, weight, x_scale, weight_scale,
-                                       list(self.weight_group_shape),
-                                       input_2d.dtype, False)
-        return output
+            return cutlass_scaled_mm(q_input, weight,
+                                     input_scale, weight_scale,
+                                     list(self.weight_group_shape),
+                                     input_2d.dtype, False)
 
     def _run_aiter(
         self,
@@ -309,11 +309,11 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.act_quant_group_shape == GroupShape(1, 128)
-        q_input, x_scale = aiter_per1x128_quant(
+        q_input, input_scale = aiter_per1x128_quant(
             input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
         return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale(
-            q_input, weight, x_scale, weight_scale, self.weight_group_shape,
-            input_2d.dtype)
+            q_input, weight, input_scale, weight_scale,
+            self.weight_group_shape, input_2d.dtype)
 
     def _run_triton(
         self,
@@ -322,10 +322,10 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.input_quant_op is not None
-        q_input, x_scale = self.input_quant_op(input_2d)
+        q_input, input_scale = self.input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
-            q_input, weight, x_scale, weight_scale, self.weight_group_shape,
-            input_2d.dtype)
+            q_input, weight, input_scale, weight_scale,
+            self.weight_group_shape, input_2d.dtype)
 
     def _dispatch_w8a8_blockscale_op(
         self,
