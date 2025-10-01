@@ -12,18 +12,18 @@ The DBO system modifies the `GpuModelRunner` and `ModularKernel` along with addi
 
 Below are the two overlap schedules that are currently implemented in vLLM.
 
-```text
-Comp: |-A0₀-A1₀-S₀-||-MLP₁-||-MLP₀-||-A0₁-A1₁-S₁-|
-Comm: |-----D₁-----||--D₀--||--C₁--||-----C₀-----|
-Order: D₁ send, A0₀, A1₀, S₀, D₁ recv, D₀ send, MLP₁, D₀ recv,
-       C₁ send, MLP₀, C₁ recv, C₀ send, A0₁, A1₁, S₁, C₀ recv.
-MLP_OVERLAP = "mlp_overlap"
+```python
+# Comp: |-A0₀-A1₀-S₀-||-MLP₁-||-MLP₀-||-A0₁-A1₁-S₁-|
+# Comm: |-----D₁-----||--D₀--||--C₁--||-----C₀-----|
+# Order: D₁ send, A0₀, A1₀, S₀, D₁ recv, D₀ send, MLP₁, D₀ recv,
+#        C₁ send, MLP₀, C₁ recv, C₀ send, A0₁, A1₁, S₁, C₀ recv.
+# MLP_OVERLAP = "mlp_overlap"
 
-Comp: |-A0₀-A1₀-||-MLP₁-||-S₁-MLP₀-||-S₀-A0₁-A1₁-|
-Comm: |----D₁---||--D₀--||----C₁---||-----C₀-----|
-Order: D₁ send, A0₀, A1₀, D₁ recv, D₀ send, MLP₁, D₀ recv,
-       C₁ send, S₁, MLP₀, C₁ recv, C₀ send, S₀, A0₁, A1₁, C₀ recv.
-MLP_SHARED_OVERLAP = "mlp_shared_overlap"
+# Comp: |-A0₀-A1₀-||-MLP₁-||-S₁-MLP₀-||-S₀-A0₁-A1₁-|
+# Comm: |----D₁---||--D₀--||----C₁---||-----C₀-----|
+# Order: D₁ send, A0₀, A1₀, D₁ recv, D₀ send, MLP₁, D₀ recv,
+#        C₁ send, S₁, MLP₀, C₁ recv, C₀ send, S₀, A0₁, A1₁, C₀ recv.
+# MLP_SHARED_OVERLAP = "mlp_shared_overlap"
 ```
 
 ## Running with DBO
