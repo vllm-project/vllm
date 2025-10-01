@@ -12,7 +12,7 @@ The DBO system modifies the `GpuModelRunner` and `ModularKernel` along with addi
 
 Below are the two overlap schedules that are currently implemented in vLLM.
 
-```
+```text
 Comp: |-A0₀-A1₀-S₀-||-MLP₁-||-MLP₀-||-A0₁-A1₁-S₁-|
 Comm: |-----D₁-----||--D₀--||--C₁--||-----C₀-----|
 Order: D₁ send, A0₀, A1₀, S₀, D₁ recv, D₀ send, MLP₁, D₀ recv,
