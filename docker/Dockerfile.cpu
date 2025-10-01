@@ -47,7 +47,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 ENV UV_HTTP_TIMEOUT=500
 
-# Install Python dependencies 
+# Install Python dependencies
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
@@ -164,11 +164,12 @@ ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./.buildkite/ ./.buildkite/
 
+# Create symlink for vllm-workspace to maintain CI compatibility
+RUN ln -sf /workspace /vllm-workspace
+
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e tests/vllm_test_utils
-
-ENTRYPOINT ["bash"]
 
 ######################### RELEASE IMAGE #########################
 FROM base AS vllm-openai
