@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, TypedDict, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import msgspec
 import numpy as np
@@ -1454,12 +1454,6 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
 class NixlKVConnectorStats(KVConnectorStats):
     """Container for transfer performance metrics"""
 
-    class TransferData(TypedDict):
-        transfer_duration: list[float]
-        post_duration: list[float]
-        bytes_transferred: list[float]
-        num_descriptors: list[int]
-
     def __post_init__(self):
         if not self.data:
             # Empty container init, no data is passed in.
@@ -1467,7 +1461,7 @@ class NixlKVConnectorStats(KVConnectorStats):
 
     def reset(self):
         # Must be serializable
-        self.data: NixlKVConnectorStats.TransferData = {
+        self.data: dict[str, list[float]] = {
             "transfer_duration": [],
             "post_duration": [],
             "bytes_transferred": [],
@@ -1491,10 +1485,8 @@ class NixlKVConnectorStats(KVConnectorStats):
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
-            # Make mypy happy
-            data_dict = cast(dict[str, list[float]], self.data)
             for k, v in other.data.items():
-                accumulator = data_dict[k]
+                accumulator = self.data[k]
                 assert isinstance(accumulator, list)
                 accumulator.extend(v)
         return self
