@@ -3,69 +3,46 @@
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass as standard_dataclass
 from dataclasses import field
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
+from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 
 
-@standard_dataclass
+@dataclass
 class BaseDummyOptions:
     """Base options for generating dummy data during profiling."""
-    count: int = 999
-
-    def __post_init__(self):
-        if self.count < 0:
-            raise ValueError("count must be non-negative")
+    count: int = Field(999, ge=0)
 
 
-@standard_dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class VideoDummyOptions(BaseDummyOptions):
     """Options for generating dummy video data during profiling."""
-    num_frames: Optional[int] = None
-    width: Optional[int] = None
-    height: Optional[int] = None
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.num_frames is not None and self.num_frames <= 0:
-            raise ValueError("num_frames must be positive")
-        if self.width is not None and self.width <= 0:
-            raise ValueError("width must be positive")
-        if self.height is not None and self.height <= 0:
-            raise ValueError("height must be positive")
+    num_frames: Optional[int] = Field(None, gt=0)
+    width: Optional[int] = Field(None, gt=0)
+    height: Optional[int] = Field(None, gt=0)
 
 
-@standard_dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class ImageDummyOptions(BaseDummyOptions):
     """Options for generating dummy image data during profiling."""
-    width: Optional[int] = None
-    height: Optional[int] = None
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.width is not None and self.width <= 0:
-            raise ValueError("width must be positive")
-        if self.height is not None and self.height <= 0:
-            raise ValueError("height must be positive")
+    width: Optional[int] = Field(None, gt=0)
+    height: Optional[int] = Field(None, gt=0)
 
 
-@standard_dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class AudioDummyOptions(BaseDummyOptions):
     """Options for generating dummy audio data during profiling."""
-    length: Optional[int] = None
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.length is not None and self.length <= 0:
-            raise ValueError("length must be positive")
+    length: Optional[int] = Field(None, gt=0)
 
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
+DummyOptions = Union[BaseDummyOptions, VideoDummyOptions, ImageDummyOptions,
+                     AudioDummyOptions]
 
 
 @config
@@ -73,7 +50,7 @@ MMCacheType = Literal["shm", "lru"]
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, BaseDummyOptions] = field(default_factory=dict)
+    limit_per_prompt: dict[str, DummyOptions] = field(default_factory=dict)
     """The maximum number of input items and options allowed per 
         prompt for each modality.
     Defaults to 999 for each modality.
