@@ -438,7 +438,8 @@ def fp8_w8a8_moe_quant_config(
                                     per_act_token_quant=per_act_token_quant,
                                     per_out_ch_quant=per_out_ch_quant,
                                     block_shape=block_shape)
-
+#    from vllm.platforms import current_platform
+#    return FusedMoEQuantConfig.make(current_platform.fp8_dtype(),
 
 def int8_w8a8_moe_quant_config(
     w1_scale: torch.Tensor,
@@ -618,6 +619,11 @@ class FusedMoEParallelConfig:
         return (self.use_all2all_kernels
                 and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
 
+    @property
+    def use_mori_kernels(self):
+        return (self.use_all2all_kernels
+                and envs.VLLM_ALL2ALL_BACKEND == "mori")
+
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
              vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":
@@ -793,6 +799,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_mori_kernels(self):
+        return self.moe_parallel_config.use_mori_kernels
 
     @property
     def use_flashinfer_cutlass_kernels(self):

@@ -9,7 +9,7 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import has_deep_ep, has_pplx
+from vllm.utils import has_deep_ep, has_pplx, has_mori
 from vllm.utils.flashinfer import has_flashinfer_all2all
 
 from .base_device_communicator import All2AllManagerBase, Cache
@@ -438,3 +438,205 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 self.prepare_workspace_tensor = None
                 self.mapping = None
                 self.initialized = False
+
+class MoriAll2AllManager(All2AllManagerBase):
+    """
+    All2All communication based on mori kernels.
+    """
+    def __init__(self, cpu_group):
+        assert has_mori(
+        ), "mori not found. Please follow https://github.com/ROCm/mori/blob/main/README.md#installation to install mori."  # noqa
+
+        super().__init__(cpu_group)
+        self.handle_cache = Cache()
+        self.config = None
+        self._op_handles = {}  # Cache for EpDispatchCombineOp instances
+        self._shmem_initialized = False
+        # Delay mori shmem initialization until first use
+        logger.debug(f"[rank {self.rank}] MoriAll2AllManager created, shmem will be initialized lazily")
+
+    def _ensure_shmem_initialized(self):
+        """Ensure mori's shared memory system is initialized (lazy initialization)"""
+        if self._shmem_initialized:
+            return
+
+        import mori.shmem
+        import torch.distributed as dist
+
+        try:
+            # Wait for PyTorch distributed to be ready
+            if not dist.is_initialized():
+                raise RuntimeError("PyTorch distributed not initialized yet")
+
+            # Check if we have a valid backend
+            backend = dist.get_backend()
+            if backend is None:
+                raise RuntimeError("No valid distributed backend found")
+
+            logger.debug(f"[rank {self.rank}] PyTorch distributed ready with backend: {backend}")
+
+            current_group = self.cpu_group if self.cpu_group is not None else dist.group.WORLD
+
+            # TODO(inhyeok): make group_name more reasonable
+            group_name = "default"
+            try:
+                import torch._C._distributed_c10d as c10d
+
+                # Try to unregister first in case it exists
+                try:
+                    c10d._unregister_process_group(group_name)
+                except:
+                    pass
+
+                # Register the current process group
+                c10d._register_process_group(group_name, current_group)
+                logger.debug(f"[rank {self.rank}] Registered process group '{group_name}'")
+
+                # Initialize mori shmem with the registered group
+                mori.shmem.shmem_torch_process_group_init(group_name)
+                logger.debug(f"[rank {self.rank}] Torch process group shmem initialization successful")
+                self._shmem_initialized = True
+                return
+
+            except Exception as torch_error:
+                logger.debug(f"[rank {self.rank}] Torch process group shmem init failed: {torch_error}")
+
+            self._shmem_initialized = True
+
+        except Exception as e:
+            logger.error(f"[rank {self.rank}] mori shmem initialization failed: {e}")
+            # Don't fail completely - mark as initialized to avoid retry loops
+            self._shmem_initialized = True
+            logger.warning(f"[rank {self.rank}] Continuing without mori shmem optimization")
+
+    def _make_mori_config(self, max_num_tokens: int, num_local_experts: int,
+                          experts_per_token: int, hidden_dim: int,
+                          scale_dim: int, scale_type_size: int,
+                          data_type: torch.dtype = torch.bfloat16,
+                          quant_dtype: torch.dtype = None):
+        """Create mori EpDispatchCombineConfig"""
+        import mori.ops.dispatch_combine as mori_ops
+        from mori.ops.dispatch_combine import EpDispatchCombineKernelType
+
+        # Determine data type size
+        dtype_to_size = {
+            torch.float32: 4,
+            torch.bfloat16: 2,
+            torch.float16: 2,
+        }
+        max_token_type_size = dtype_to_size.get(data_type, 2)
+
+        config = mori_ops.EpDispatchCombineConfig(
+            data_type=data_type if quant_dtype is None else quant_dtype,
+            rank=self.rank,
+            world_size=self.world_size,
+            hidden_dim=hidden_dim,
+            max_num_inp_token_per_rank=max_num_tokens,
+            num_experts_per_rank=num_local_experts,
+            num_experts_per_token=experts_per_token,
+
+            # Performance tuning parameters
+            # warp_num_per_block=8,
+            # block_num=80,
+            max_token_type_size=max_token_type_size,
+
+            # Quantization support
+            scale_dim=scale_dim,
+            scale_type_size=scale_type_size,
+
+            # Determine kernel type based on topology
+            kernel_type=(EpDispatchCombineKernelType.InterNode
+                        if self.internode
+                        else EpDispatchCombineKernelType.IntraNode)
+        )
+
+        return config
+
+    def get_handle(self, kwargs):
+        """
+        Get or create mori operation handle.
+        Args:
+            kwargs: Dictionary with keys:
+                - max_num_tokens: Maximum tokens per DP rank
+                - num_local_experts: Number of local experts
+                - experts_per_token: Number of experts per token (topk)
+                - hidden_dim: Hidden dimension size
+                - data_type: Tensor data type (optional, default bfloat16)
+        """
+        # Ensure shmem is initialized before creating handles
+        self._ensure_shmem_initialized()
+
+        import mori.ops.dispatch_combine as mori_ops
+
+        # Extract parameters
+        max_num_tokens = kwargs.get('max_num_tokens')
+        num_local_experts = kwargs.get('num_local_experts')
+        experts_per_token = kwargs.get('experts_per_token')
+        hidden_dim = kwargs.get('hidden_dim')
+        data_type = kwargs.get('data_type', torch.bfloat16)
+        scale_dim = kwargs.get('scale_dim')
+        scale_type_size = kwargs.get('scale_type_size')
+
+        # Validate required parameters
+        if any(param is None for param in [max_num_tokens, num_local_experts,
+                                          experts_per_token, hidden_dim]):
+            raise ValueError("Missing required parameters for mori handle creation")
+
+        # Create cache key
+        cache_key = (max_num_tokens, num_local_experts, experts_per_token,
+                    hidden_dim, data_type)
+
+        # Check cache first
+        if cache_key in self._op_handles:
+            return self._op_handles[cache_key]
+
+        # Create new mori configuration and operation
+        config = self._make_mori_config(
+            max_num_tokens=max_num_tokens,
+            num_local_experts=num_local_experts,
+            experts_per_token=experts_per_token,
+            hidden_dim=hidden_dim,
+            data_type=data_type,
+            scale_dim=scale_dim,
+            scale_type_size=scale_type_size,
+        )
+
+        # Create operation handle
+        op = mori_ops.EpDispatchCombineOp(config)
+
+        # Cache the handle
+        self._op_handles[cache_key] = op
+
+        logger.debug(f"[rank {self.dp_rank}] Created mori handle with config: "
+                    f"tokens={max_num_tokens}, experts={num_local_experts}, "
+                    f"topk={experts_per_token}, hidden={hidden_dim}")
+
+        return op
+
+    def dispatch(self, hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor):
+        raise NotImplementedError
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        """Clean up mori resources"""
+        try:
+            # Clear operation handle cache
+            self._op_handles.clear()
+
+            # Try to finalize mori shared memory if it was successfully initialized
+            if self._shmem_initialized:
+                try:
+                    import mori.shmem
+                    # Check if shmem is actually active before finalizing
+                    mori.shmem.shmem_finalize()
+                    logger.debug(f"[rank {self.dp_rank}] mori shmem finalized")
+                except Exception as shmem_error:
+                    logger.debug(f"[rank {self.dp_rank}] shmem finalize failed (may not have been active): {shmem_error}")
+
+            logger.debug(f"[rank {self.dp_rank}] mori resources cleaned up")
+
+        except Exception as e:
+            logger.warning(f"[rank {self.dp_rank}] Error during mori cleanup: {e}")

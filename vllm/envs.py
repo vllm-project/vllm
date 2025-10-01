@@ -157,7 +157,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
-    VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx",
+    VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx", "mori",
                                   "deepep_high_throughput",
                                   "deepep_low_latency",
                                   "allgather_reducescatter",
@@ -1241,12 +1241,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "allgather_reducescatter": all2all implementation based on allgather and
     #  reducescatter
     # - "pplx": use pplx kernels
+    # - "mori": use mori kernels (currently, only low-latency is supported)
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
     # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
     "VLLM_ALL2ALL_BACKEND":
     env_with_choices("VLLM_ALL2ALL_BACKEND", "allgather_reducescatter",
-                     ["naive", "pplx",
+                     ["naive", "pplx", "mori",
                      "deepep_high_throughput",
                      "deepep_low_latency",
                      "allgather_reducescatter",

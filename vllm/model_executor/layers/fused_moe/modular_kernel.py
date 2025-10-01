@@ -690,9 +690,14 @@ class FusedMoEModularKernel(torch.nn.Module):
         workspace13 = buffers.workspace13.get(workspace13_shape,
                                               device=a1.device,
                                               dtype=workspace_dtype)
-        workspace2 = buffers.workspace2.get(workspace2_shape,
-                                            device=a1.device,
-                                            dtype=workspace_dtype)
+        # aiter does not require intermediate workspace
+        from vllm.model_executor.layers.fused_moe import AiterExperts
+        if isinstance(self.fused_experts, AiterExperts):
+            workspace2 = None
+        else:
+            workspace2 = self.workspace2_buffer.get(workspace2_shape,
+                                                    device=a1.device,
+                                                    dtype=workspace_dtype)
 
         assert fused_out is None or fused_out.shape == fused_out_shape, (
             f"fused_out {fused_out.shape} but expected {fused_out_shape}")

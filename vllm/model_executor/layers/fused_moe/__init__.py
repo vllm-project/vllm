@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
+from vllm.model_executor.layers.fused_moe.aiter_experts import AiterExperts
 from vllm.triton_utils import HAS_TRITON
 
 _config: Optional[dict[str, Any]] = None
@@ -77,6 +78,7 @@ if HAS_TRITON:
         "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
         "BatchedTritonOrDeepGemmExperts",
+        "AiterExperts",
     ]
 else:
     # Some model classes directly use the custom ops. Add placeholders

@@ -3428,6 +3428,12 @@ def has_deep_gemm() -> bool:
     return _has_module("deep_gemm")
 
 
+def has_mori() -> bool:
+    """Whether the optional `mori` package is available."""
+
+    return _has_module("mori")
+
+
 def has_triton_kernels() -> bool:
     """Whether the optional `triton_kernels` package is available."""
 

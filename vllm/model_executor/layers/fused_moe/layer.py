@@ -41,7 +41,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (cdiv, direct_register_custom_op, has_deep_ep, has_pplx,
-                        round_up)
+                        has_mori, round_up)
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -56,6 +56,8 @@ if current_platform.is_cuda_alike():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
                                                  DeepEPLLPrepareAndFinalize)
+    if has_mori():
+        from .mori_prepare_finalize import MoriPrepareAndFinalize
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -207,6 +209,43 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 num_dispatchers=all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
             )
+        elif moe.use_mori_kernels:
+            use_fp8_dispatch = (
+                quant_config is not None
+                and quant_config.quant_dtype == current_platform.fp8_dtype()
+            )
+            scale_dim = 0
+            scale_type_size = 0
+            quant_dtype = None
+            if use_fp8_dispatch:
+                scale_dim = quant_config.scale_shape(
+                    moe.max_num_tokens,
+                    moe.hidden_dim,
+                )[-1]
+                scale_type_size = (
+                    torch.float32.itemsize
+                )  # aiter quantization uses float32 scale
+                quant_dtype = quant_config.quant_dtype
+
+            all_to_all_args = dict(
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                experts_per_token=moe.experts_per_token,
+                hidden_dim=moe.hidden_dim,
+                data_type=moe.in_dtype,
+                quant_dtype=quant_dtype,
+                scale_dim=scale_dim,
+                scale_type_size=scale_type_size,
+            )
+            handle = all2all_manager.get_handle(all_to_all_args)
+
+            prepare_finalize = MoriPrepareAndFinalize(
+                handle,
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=all2all_manager.world_size,
+                use_fp8_dispatch=use_fp8_dispatch,
+            )
 
         return prepare_finalize
 
@@ -347,7 +386,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         assert self.moe_quant_config is not None
-        if (prepare_finalize.activation_format ==
+        if self.moe.use_mori_kernels and is_rocm_aiter_moe_enabled():
+            from vllm.model_executor.layers.fused_moe import AiterExperts
+            logger.debug("AiterExperts for Mori integration %s", self.moe)
+            return AiterExperts(
+                max_num_tokens=self.moe.max_num_tokens,
+                quant_config=self.moe_quant_config,
+            )
+        elif (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
             logger.debug("BatchedTritonExperts %s", self.moe)
             return BatchedTritonExperts(
@@ -1147,6 +1193,7 @@ class FusedMoE(CustomOp):
         # Does it really need a batched buffer?
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
+                or self.moe_parallel_config.use_mori_kernels
                 or self.moe_config.use_flashinfer_cutlass_kernels):
             if vllm_config.parallel_config.enable_dbo:
                 self.batched_hidden_states = torch.zeros(
@@ -1214,6 +1261,10 @@ class FusedMoE(CustomOp):
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_mori_kernels(self):
+        return self.moe_parallel_config.use_mori_kernels
 
     @property
     def use_flashinfer_cutlass_kernels(self):
@@ -1792,7 +1843,7 @@ class FusedMoE(CustomOp):
         early.
         """
         return (self.use_pplx_kernels or self.use_deepep_ht_kernels
-                or self.use_deepep_ll_kernels)
+                or self.use_deepep_ll_kernels or self.use_mori_kernels)
 
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
@@ -1800,7 +1851,7 @@ class FusedMoE(CustomOp):
         The pplx combine kernel reduces across GPU ranks by default.
         """
         if (self.use_pplx_kernels or self.use_deepep_ht_kernels
-                or self.use_deepep_ll_kernels):
+                or self.use_deepep_ll_kernels or self.use_mori_kernels):
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
@@ -1995,12 +2046,14 @@ class FusedMoE(CustomOp):
 
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
+                or self.moe_parallel_config.use_mori_kernels
                 or _use_flashinfer_cutlass_kernels):
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1
             and not self.moe_parallel_config.use_deepep_ht_kernels
+            and not self.moe_parallel_config.use_mori_kernels
             and not self.moe_config.use_flashinfer_cutlass_kernels)
 
         # If there are shared experts but we are not using a modular kernel, the
