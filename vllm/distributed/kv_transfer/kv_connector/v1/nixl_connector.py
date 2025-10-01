@@ -1455,7 +1455,6 @@ class NixlKVConnectorStats(KVConnectorStats):
     """Container for transfer performance metrics"""
 
     class TransferData(TypedDict):
-        num_successful_transfers: int
         transfer_duration: list[float]
         post_duration: list[float]
         bytes_transferred: list[float]
@@ -1469,7 +1468,6 @@ class NixlKVConnectorStats(KVConnectorStats):
     def reset(self):
         # Must be serializable
         self.data: NixlKVConnectorStats.TransferData = {
-            "num_successful_transfers": 0,
             "transfer_duration": [],
             "post_duration": [],
             "bytes_transferred": [],
@@ -1482,7 +1480,6 @@ class NixlKVConnectorStats(KVConnectorStats):
         self.data["post_duration"].append(res.postDuration / 1e6)
         self.data["bytes_transferred"].append(res.totalBytes)
         self.data["num_descriptors"].append(res.descCount)
-        self.data["num_successful_transfers"] += 1
 
     def clone_and_reset(self) -> "NixlKVConnectorStats":
         old = copy.copy(self)
@@ -1490,19 +1487,16 @@ class NixlKVConnectorStats(KVConnectorStats):
         return old
 
     def is_empty(self) -> bool:
-        return self.data["num_successful_transfers"] == 0
+        return self.num_successful_transfers == 0
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
             # Make mypy happy
-            data_dict = cast(dict[str, Union[int, list[float]]], self.data)
+            data_dict = cast(dict[str, list[float]], self.data)
             for k, v in other.data.items():
-                if k == "num_successful_transfers":
-                    data_dict[k] += v
-                else:
-                    accumulator = data_dict[k]
-                    assert isinstance(accumulator, list)
-                    accumulator.extend(v)
+                accumulator = data_dict[k]
+                assert isinstance(accumulator, list)
+                accumulator.extend(v)
         return self
 
     def reduce(self) -> dict[str, Union[int, float]]:
@@ -1518,13 +1512,14 @@ class NixlKVConnectorStats(KVConnectorStats):
                 "Throughput (MB/s)": 0,
                 "Avg number of descriptors": 0,
             }
-        n = self.data["num_successful_transfers"]
 
         xfer_time = np.asarray(self.data["transfer_duration"])
         post_time = np.asarray(self.data["post_duration"])
         # Convert to MB for CLI logging.
         mb = np.asarray(self.data["bytes_transferred"]) / 2**20
         descs = np.asarray(self.data["num_descriptors"], dtype=np.uint32)
+        n = len(descs)
+        assert n == self.num_successful_transfers
 
         total_mb = mb.sum()
         avg_mb = total_mb / n
@@ -1542,3 +1537,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             "Throughput (MB/s)": round(throughput_mb_s, 3),
             "Avg number of descriptors": round(descs.mean(), 1),
         }
+
+    @property
+    def num_successful_transfers(self) -> int:
+        return len(self.data["transfer_duration"])
