@@ -8,6 +8,7 @@ import torch
 from vllm.attention.layer import Attention
 from vllm.config import ModelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               extend_all_queries_by_1,
@@ -97,6 +98,9 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self.attn_layer_names = list(draft_attn_layer_names)
 
 
+logger = init_logger(__name__)
+
+
 def update_propose_kwargs(arange: torch.Tensor, propose_kwargs: dict):
     """
     This function:
@@ -109,10 +113,12 @@ def update_propose_kwargs(arange: torch.Tensor, propose_kwargs: dict):
     target_token_ids = propose_kwargs["target_token_ids"]
     next_token_ids = propose_kwargs["next_token_ids"]
     target_positions = propose_kwargs["target_positions"]
-    token_indices_to_sample = cad.last_token_indices()
+    token_indices_to_sample = propose_kwargs["last_token_indices"]
+    if token_indices_to_sample is None:
+        token_indices_to_sample = cad.query_start_loc[1:] - 1
 
     # merge target_token_ids and next_token_ids
-    end_locs = cad.last_token_indices()
+    end_locs = token_indices_to_sample
     new_target_token_ids = extend_flat_seqs(seqs=target_token_ids,
                                             end_locs=end_locs,
                                             new_vals=next_token_ids)
@@ -123,14 +129,25 @@ def update_propose_kwargs(arange: torch.Tensor, propose_kwargs: dict):
                                             new_vals=positions_to_append)
 
     # update common_attn_metadata
-    new_cad: CommonAttentionMetadata = extend_all_queries_by_1(cad,
-                                                               arange=arange)
+    new_cad: CommonAttentionMetadata = extend_all_queries_by_1(
+        cad, arange=arange, last_token_indices=token_indices_to_sample)
+
+    # new token indices to sample incease by [+1, +2, +3, ..., +batch_size]
+    new_token_indices_to_sample = token_indices_to_sample \
+        + arange_like(token_indices_to_sample) + 1
+
+    logger.info("old last_token_indices: %s, new last_token_indices: %s.",
+                token_indices_to_sample, new_token_indices_to_sample)
 
     new_propose_kwargs = dict(
         target_token_ids=new_target_token_ids,
         target_positions=new_target_positions,
         next_token_ids=None,
-        last_token_indices=None,
+        last_token_indices=new_token_indices_to_sample,
         common_attn_metadata=new_cad,
     )
     return propose_kwargs | new_propose_kwargs
+
+
+def arange_like(x: torch.Tensor) -> torch.Tensor:
+    return torch.arange(x.shape[0], device=x.device)

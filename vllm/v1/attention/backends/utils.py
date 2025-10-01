@@ -86,9 +86,6 @@ class CommonAttentionMetadata:
     def batch_size(self) -> int:
         return self.seq_lens_cpu.shape[0]
 
-    def last_token_indices(self) -> torch.Tensor:
-        return self.query_start_loc[1:] - 1
-
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
@@ -105,8 +102,9 @@ def slice_query_start_locs(
         query_start_loc[request_slice.start]
 
 
-def extend_all_queries_by_1(common_attn_metadata: CommonAttentionMetadata,
-                            arange: torch.Tensor) -> CommonAttentionMetadata:
+def extend_all_queries_by_1(
+        common_attn_metadata: CommonAttentionMetadata, arange: torch.Tensor,
+        last_token_indices: torch.Tensor) -> CommonAttentionMetadata:
     """
     Creates a new CommonAttentionMetadata with all query lengths increased by 1.
     Also all seq lens are increased by 1.
@@ -119,9 +117,9 @@ def extend_all_queries_by_1(common_attn_metadata: CommonAttentionMetadata,
         + arange[:len(cad.query_start_loc)]
     new_seq_lens = cad.seq_lens + 1
     # slot mappings are extended (interleaved) by the next serial id
-    last_slot_mapping_ids = cad.slot_mapping[cad.last_token_indices()]
+    last_slot_mapping_ids = cad.slot_mapping[last_token_indices]
     new_slot_mapping = extend_flat_seqs(seqs=cad.slot_mapping,
-                                        end_locs=cad.last_token_indices(),
+                                        end_locs=last_token_indices,
                                         new_vals=last_slot_mapping_ids + 1)
     new_cad = CommonAttentionMetadata(
         query_start_loc=new_query_start_loc,

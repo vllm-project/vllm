@@ -194,7 +194,7 @@ class SpecDecodeBaseProposer:
         batch_size = common_attn_metadata.batch_size()
 
         if last_token_indices is None:
-            last_token_indices = common_attn_metadata.last_token_indices()
+            last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -280,6 +280,19 @@ class SpecDecodeBaseProposer:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
+        self.runner.log_tokens("draft input_ids", input_ids)
+        if self.runner.do_log:
+            logger.info("draft positions: %s", model_kwargs["positions"])
+            logger.info("draft position length: %s",
+                        model_kwargs["positions"].shape[0])
+            logger.info("draft last_token_indices: %s", last_token_indices)
+            logger.info("draft batch_descriptor: %s",
+                        forward_ctx_kwargs["batch_descriptor"])
+            logger.info("draft attn_metadata.slot_mapping: %s",
+                        attn_metadata.slot_mapping)
+            for _idx, _block in enumerate(attn_metadata.block_table):
+                logger.info("draft attn_metadata.block_table [%d]: %s", _idx,
+                            _block.tolist())
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
@@ -443,6 +456,15 @@ class SpecDecodeBaseProposer:
                     hidden_states = ret_hidden_states
                 else:
                     last_hidden_states, hidden_states = ret_hidden_states
+            self.runner.log_tokens("draft input_ids", input_ids)
+            if self.runner.do_log:
+                logger.info("draft positions: %s", model_kwargs["positions"])
+                logger.info("draft position length: %s",
+                            model_kwargs["positions"].shape[0])
+                logger.info("draft batch_descriptor: %s",
+                            forward_ctx_kwargs["batch_descriptor"])
+                # logger.info(f"draft attn_metadata={attn_metadata}")
+
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
@@ -450,6 +472,8 @@ class SpecDecodeBaseProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        for idx, tokens in enumerate(draft_token_ids):
+            self.runner.log_tokens(f"draft token ids {idx}", tokens)
         return draft_token_ids
 
     def set_input_ids_first_pass(self, target_token_ids: torch.Tensor,

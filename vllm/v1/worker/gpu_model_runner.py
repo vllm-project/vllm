@@ -174,11 +174,21 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
+    def log_tokens(self, msg: str, tokens: list[int]):
+        if not self.do_log:
+            return
+        logger.info("%s: %s", msg, [self.tokenizer.decode(t) for t in tokens])
+
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        self.do_log = True
+        if self.do_log:
+            from transformers import AutoTokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                vllm_config.model_config.model)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -2313,6 +2323,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
+        if self.do_log:
+            logger.info("======STEP======")
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
@@ -2383,6 +2395,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+        self.log_tokens("tgt input_ids", input_ids)
+        if self.do_log:
+            logger.info("tgt positions: %s", positions)
+            logger.info("tgt position length: %s", positions.shape[0])
+            logger.info("tgt logits_indices: %s", logits_indices)
+            logger.info("tgt batch_descriptor: %s", batch_descriptor)
+            _attn_metadata = list(attn_metadata.values())[0]
+            logger.info("tgt attn_metadata.slot_mapping: %s",
+                        _attn_metadata.slot_mapping)
+            for _idx, _block in enumerate(_attn_metadata.block_table):
+                logger.info("tgt attn_metadata.block_table [%d]: %s", _idx,
+                            _block.tolist())
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2446,6 +2470,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+        for idx, tokens in enumerate(sampler_output.sampled_token_ids):
+            self.log_tokens(f"Sampler output {idx}", tokens[tokens != -1])
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -2632,6 +2658,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
                 if self.speculative_config.disable_padded_drafter_batch:
+                    raise NotImplementedError(
+                        "This path cannot be reached using `vllm serve ...`")
                     token_indices_to_sample = None
                     common_attn_metadata, token_indices =\
                         self.drafter.prepare_inputs(
