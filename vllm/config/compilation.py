@@ -633,12 +633,14 @@ class CompilationConfig:
 
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition
-        if self.splitting_ops is None:
-            self.splitting_ops = list(self._attention_ops)
-        logger.debug(
-            "Using splitting_ops for inductor graph partition: %s",
-            self.splitting_ops,
-        )
+        use_inductor_graph_partition_msg = (
+            "When use_inductor_graph_partition=True, splitting_ops "
+            "are ignored and set to an empty list. Instead, "
+            "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
+            "used to annotate custom ops for graph partition.")
+        if self.splitting_ops is not None and len(self.splitting_ops) > 0:
+            logger.warning_once(use_inductor_graph_partition_msg)
+        self.splitting_ops = []
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion
