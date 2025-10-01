@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
 
+import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
     ncclRedOpTypeEnum, ncclUniqueId)
@@ -83,7 +84,7 @@ class PyNcclCommunicator:
         self.group = group
 
         # if world_size == 1, no need to create communicator
-        if self.world_size == 1:
+        if self.world_size == 1 or envs.VLLM_DISABLE_PYNCCL:
             self.available = False
             self.disabled = True
             return
