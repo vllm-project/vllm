@@ -581,8 +581,13 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
-        self.split_gm, self.piecewise_graphs = split_graph(
-            graph, self.compilation_config.splitting_ops)
+        if self.compilation_config.use_inductor_graph_partition:
+            # Let Inductor decide partitioning; avoid FX-level pre-splitting.
+            split_ops = []
+        else:
+            split_ops = self.compilation_config.splitting_ops or []
+
+        self.split_gm, self.piecewise_graphs = split_graph(graph, split_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 
