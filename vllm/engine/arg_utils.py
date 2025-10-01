@@ -915,15 +915,19 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+
         # This is a workaround to keep --cuda-graph-sizes in CLI, but this
         # field is actually removed from ShedulerConfig, and should be mapped
         # to cudagraph_capture_sizes and max_cudagraph_capture_size in
-        # CompilationConfig.
-        compilation_kwargs = get_kwargs(CompilationConfig)
-        scheduler_group.add_argument(
-            '--cuda-graph-sizes',
-            **compilation_kwargs["cudagraph_capture_sizes"],
-            deprecated=True)
+        # CompilationConfig. we hardcode this argument, as
+        # get_kwargs(CompilationConfig) doesn't work here.
+        scheduler_group.add_argument('--cuda-graph-sizes',
+                                     deprecated=True,
+                                     **{
+                                         "default": None,
+                                         "type": int,
+                                         "nargs": '+'
+                                     })
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)

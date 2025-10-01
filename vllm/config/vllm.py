@@ -583,11 +583,11 @@ class VllmConfig:
             if max_cudagraph_capture_size is None:
                 max_cudagraph_capture_size = min(
                     self.scheduler_config.max_num_seqs * 2, 512)
-            assert max_cudagraph_capture_size >= 1, "Maximum cudagraph size should be"\
-                                                    " greater than or equal to 1."
+            assert max_cudagraph_capture_size >= 1, (
+                "Maximum cudagraph size should be greater than or equal to 1.")
             batch_size_capture_list = [
                 i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
-            ] + list(range(8, max_graph_size + 1, 8))
+            ] + list(range(8, max_cudagraph_capture_size + 1, 8))
 
             if self.parallel_config.tensor_parallel_size > 1 and \
                 self.compilation_config.pass_config.enable_sequence_parallelism:
