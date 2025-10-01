@@ -177,22 +177,28 @@ class StructuredOutputGateway:
     """
 
     def __init__(self, task_queue, batch_validate_result_queue,
-                 grammar_init_notification_queue, vllm_config: VllmConfig):
+                 grammar_init_notification_queue, vllm_config: VllmConfig,
+                 bitmask_shm_name: str, ready_flag_shm_name: str):
         self.task_queue = task_queue
         self.batch_validate_result_queue = batch_validate_result_queue
         self.grammar_init_notification_queue = grammar_init_notification_queue
         self.vllm_config = vllm_config
+        self.bitmask_shm_name = bitmask_shm_name
+        self.ready_flag_shm_name = ready_flag_shm_name
         self.structured_output_executor: Optional[
             StructuredOutputExecutor] = None
 
     @staticmethod
     def run_gateway(task_queue, batch_validate_result_queue,
-                    grammar_init_notification_queue, vllm_config: VllmConfig):
+                    grammar_init_notification_queue, vllm_config: VllmConfig,
+                    bitmask_shm_name: str, ready_flag_shm_name: str):
         """Static method to run the gateway in a separate process."""
         gateway = StructuredOutputGateway(task_queue,
                                           batch_validate_result_queue,
                                           grammar_init_notification_queue,
-                                          vllm_config)
+                                          vllm_config,
+                                          bitmask_shm_name,
+                                          ready_flag_shm_name)
         gateway.run()
 
     def run(self):
@@ -204,7 +210,7 @@ class StructuredOutputGateway:
 
         # Attach to shared memory in child process
         self.bitmask_shm = shared_memory.SharedMemory(
-            name=GRAMMAR_BITMASK_SHM_NAME)
+            name=self.bitmask_shm_name)
 
         while True:
             try:
@@ -225,7 +231,7 @@ class StructuredOutputGateway:
                     else:
                         # Set the flag even on error so result() doesn't hang
                         flag_shm = shared_memory.SharedMemory(
-                            name=GRAMMAR_READY_FLAG_SHM_NAME)
+                            name=self.ready_flag_shm_name)
                         flag_shm.buf[0] = 1
                         flag_shm.close()
                 elif task.task_type == TaskType.BATCH_VALIDATE_TOKENS:
@@ -239,7 +245,7 @@ class StructuredOutputGateway:
                 elif task.task_type == TaskType.GRAMMAR_BITMASK:
                     # Signal flag even on error so result() doesn't hang
                     flag_shm = shared_memory.SharedMemory(
-                        name=GRAMMAR_READY_FLAG_SHM_NAME)
+                        name=self.ready_flag_shm_name)
                     flag_shm.buf[0] = 1
                     flag_shm.close()
                 elif task.task_type == TaskType.BATCH_VALIDATE_TOKENS:
@@ -301,7 +307,7 @@ class StructuredOutputGateway:
         # calls that act as memory barriers.
 
         # Set the flag to indicate bitmask is ready
-        flag_shm = shared_memory.SharedMemory(name=GRAMMAR_READY_FLAG_SHM_NAME)
+        flag_shm = shared_memory.SharedMemory(name=self.ready_flag_shm_name)
         flag_shm.buf[0] = 1
         flag_shm.close()
 
@@ -319,6 +325,11 @@ class StructuredOutputManager:
 
         self.vllm_config = vllm_config
         self.reasoner: Optional[ReasoningParser] = None
+        
+        # Create shared memory names with data parallel rank
+        data_parallel_rank = str(self.vllm_config.parallel_config.data_parallel_rank)
+        self.bitmask_shm_name = GRAMMAR_BITMASK_SHM_NAME + data_parallel_rank
+        self.ready_flag_shm_name = GRAMMAR_READY_FLAG_SHM_NAME + data_parallel_rank
 
         if not self.vllm_config.model_config.skip_tokenizer_init:
             self.tokenizer = init_tokenizer_from_configs(
@@ -354,11 +365,11 @@ class StructuredOutputManager:
 
         self._cleanup_existing_shared_memory()
         self.bitmask_shm = shared_memory.SharedMemory(
-            create=True, size=shm_size, name=GRAMMAR_BITMASK_SHM_NAME)
+            create=True, size=shm_size, name=self.bitmask_shm_name)
 
         # Create shared memory flag for bitmask ready signaling
         self.flag_shm = shared_memory.SharedMemory(
-            name=GRAMMAR_READY_FLAG_SHM_NAME, create=True, size=1)
+            name=self.ready_flag_shm_name, create=True, size=1)
         self.flag_shm.buf[0] = 0  # Initialize flag to 0 (not ready)
 
         # Create a partial config with only the required fields
@@ -375,7 +386,8 @@ class StructuredOutputManager:
             target=StructuredOutputGateway.run_gateway,
             name="StructuredOutputGateway",
             args=(self.task_queue, self.batch_validate_result_queue,
-                  self.grammar_init_notification_queue, partial_config),
+                  self.grammar_init_notification_queue, partial_config,
+                  self.bitmask_shm_name, self.ready_flag_shm_name),
             daemon=True)
         self.gateway_process.start()
 
@@ -409,7 +421,7 @@ class StructuredOutputManager:
         self.task_queue.put(task)
 
         # Return a placeholder that consumer can check
-        return GrammarBitmaskPlaceholder()
+        return GrammarBitmaskPlaceholder(self.bitmask_shm_name, self.ready_flag_shm_name)
 
     def submit_batch_accept_tokens(
             self, request_id_to_new_token_ids: list[tuple[str, list[int]]]):
@@ -544,13 +556,10 @@ class StructuredOutputManager:
             self.gateway_process.join()
 
         # Clean up shared memory
-        if hasattr(self, 'bitmask_shm'):
-            self.bitmask_shm.close()
-            self.bitmask_shm.unlink()
-
-        if hasattr(self, 'flag_shm'):
-            self.flag_shm.close()
-            self.flag_shm.unlink()
+        self.bitmask_shm.close()
+        self.bitmask_shm.unlink()
+        self.flag_shm.close()
+        self.flag_shm.unlink()
 
     def _cleanup_existing_shared_memory(self):
         """Clean up any existing shared memory segments from previous runs.
@@ -561,11 +570,11 @@ class StructuredOutputManager:
         # Try to unlink bitmask shared memory if it exists
         try:
             existing_bitmask_shm = shared_memory.SharedMemory(
-                name=GRAMMAR_BITMASK_SHM_NAME)
+                name=self.bitmask_shm_name)
             existing_bitmask_shm.close()
             existing_bitmask_shm.unlink()
-            logger.info("Cleaned up existing bitmask shared memory from "
-                        "previous run")
+            logger.debug("Cleaned up existing bitmask shared memory from "
+                         "previous run")
         except FileNotFoundError:
             # No existing shared memory, which is fine
             pass
@@ -575,11 +584,11 @@ class StructuredOutputManager:
         # Try to unlink flag shared memory if it exists
         try:
             existing_flag_shm = shared_memory.SharedMemory(
-                name=GRAMMAR_READY_FLAG_SHM_NAME)
+                name=self.ready_flag_shm_name)
             existing_flag_shm.close()
             existing_flag_shm.unlink()
-            logger.info("Cleaned up existing flag shared memory from "
-                        "previous run")
+            logger.debug("Cleaned up existing flag shared memory from "
+                         "previous run")
         except FileNotFoundError:
             # No existing shared memory, which is fine
             pass
@@ -594,14 +603,15 @@ class GrammarBitmaskPlaceholder:
     and shared memory to retrieve bitmask data.
     """
 
-    def __init__(self):
-        pass
+    def __init__(self, bitmask_shm_name: str, ready_flag_shm_name: str):
+        self.bitmask_shm_name = bitmask_shm_name
+        self.ready_flag_shm_name = ready_flag_shm_name
 
     def result(self) -> np.ndarray:
         import numpy as np
 
         # Poll the shared memory flag until it's set
-        flag_shm = shared_memory.SharedMemory(name=GRAMMAR_READY_FLAG_SHM_NAME)
+        flag_shm = shared_memory.SharedMemory(name=self.ready_flag_shm_name)
         while True:
             flag_value = flag_shm.buf[0]
 
@@ -612,7 +622,7 @@ class GrammarBitmaskPlaceholder:
 
         flag_shm.close()
 
-        bitmask_shm = shared_memory.SharedMemory(name=GRAMMAR_BITMASK_SHM_NAME)
+        bitmask_shm = shared_memory.SharedMemory(name=self.bitmask_shm_name)
         # Read shape info first
         shape_bytes = bytes(bitmask_shm.buf[:8])  # Create a copy of the bytes
         shape = np.frombuffer(shape_bytes, dtype=np.int32).copy()
