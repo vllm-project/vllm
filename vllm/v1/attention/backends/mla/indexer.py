@@ -171,7 +171,7 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.UNIFORM_BATCH
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     reorder_batch_threshold: int = 1
 

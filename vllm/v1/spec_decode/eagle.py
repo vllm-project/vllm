@@ -50,6 +50,7 @@ class EagleProposer:
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
+        assert self.speculative_config is not None
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
 
@@ -74,11 +75,16 @@ class EagleProposer:
             vllm_config.model_config)
 
         self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
+        self.draft_indexer_metadata_builder: Optional[
+            AttentionMetadataBuilder] = None
+        self.attn_layer_names: list[str] = []
+        self.indexer_layer_names: list[str] = []
 
         self.use_cuda_graph = (not current_platform.is_xpu()
                                and self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
-                               not self.vllm_config.model_config.enforce_eager)
+                               not self.vllm_config.model_config.enforce_eager
+                               and not self.speculative_config.enforce_eager)
         self.cudagraph_batch_sizes = list(
             reversed(self.vllm_config.compilation_config.
                      cudagraph_capture_sizes)) if self.use_cuda_graph else []

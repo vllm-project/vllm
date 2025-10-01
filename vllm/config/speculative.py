@@ -41,7 +41,8 @@ MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
 @dataclass
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
-
+    enforce_eager: Optional[bool] = None
+    """Override the default enforce_eager from model_config"""
     # General speculative decoding control
     num_speculative_tokens: SkipValidation[int] = None  # type: ignore
     """The number of speculative tokens, if provided. It will default to the
@@ -219,6 +220,11 @@ class SpeculativeConfig:
                 assert (
                     self.target_model_config
                     is not None), "target_model_config must be present for mtp"
+                if self.target_model_config.hf_text_config.model_type \
+                    == "deepseek_v32":
+                    # FIXME(luccafong): cudgraph with v32 MTP is not supported,
+                    # remove this when the issue is fixed.
+                    self.enforce_eager = True
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
                 # Align the quantization of draft model for cases such as
