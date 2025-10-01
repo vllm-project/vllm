@@ -10,7 +10,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         CrossAttentionSpec, FullAttentionSpec,
                                         KVCacheSpec, MambaSpec,
-                                        SlidingWindowSpec)
+                                        MLAAttentionSpec, SlidingWindowSpec)
 from vllm.v1.request import Request
 
 
@@ -141,6 +141,9 @@ class SingleTypeKVCacheManager(ABC):
         """
         num_cached_blocks = self.num_cached_block[request.request_id]
         num_full_blocks = num_tokens // self.block_size
+
+        if num_cached_blocks >= num_full_blocks:
+            return
 
         self.block_pool.cache_full_blocks(
             request=request,
@@ -656,6 +659,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
+    MLAAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,

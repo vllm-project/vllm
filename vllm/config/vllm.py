@@ -386,10 +386,6 @@ class VllmConfig:
                     "Encoder-decoder model detected: setting "
                     "`max_num_encoder_input_tokens` to encoder length (%s)",
                     self.scheduler_config.max_num_encoder_input_tokens)
-                self.scheduler_config.disable_chunked_mm_input = True
-                disable_chunked_prefill_reasons.append(
-                    "Encoder-decoder models do not support chunked prefill nor"
-                    " prefix caching; disabling both.")
                 if (self.model_config.architecture
                         == "WhisperForConditionalGeneration"
                         and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
@@ -400,7 +396,10 @@ class VllmConfig:
                         "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
                         "to 'spawn'.")
 
-        if disable_chunked_prefill_reasons:
+        # Disable prefix caching only if chunked prefill is explicitly disabled
+        # (and not merely unset)
+        if (self.scheduler_config.chunked_prefill_enabled is False
+                or disable_chunked_prefill_reasons):
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
@@ -581,9 +580,12 @@ class VllmConfig:
             not self.model_config.enforce_eager:
             cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
             if len(cuda_graph_sizes) == 1:
-                batch_size_capture_list = [1, 2, 4] + [
-                    i for i in range(8, cuda_graph_sizes[0] + 1, 8)
-                ]
+                max_graph_size = cuda_graph_sizes[0]
+                assert max_graph_size >= 1, "Maximum cudagraph size should be" \
+                                            " greater than or equal to 1."
+                batch_size_capture_list = [
+                    i for i in [1, 2, 4] if i <= max_graph_size
+                ] + list(range(8, max_graph_size + 1, 8))
             elif len(cuda_graph_sizes) > 1:
                 batch_size_capture_list = sorted(cuda_graph_sizes)
             else:
