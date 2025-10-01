@@ -64,7 +64,9 @@ class SpecDecodeBaseProposer:
         self.num_speculative_tokens = (
             self.speculative_config.num_speculative_tokens)
         self.max_num_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens)
+            vllm_config.scheduler_config.max_num_batched_tokens +
+            vllm_config.scheduler_config.max_num_seqs *
+            self.num_speculative_tokens)
         self.token_arange_np = np.arange(self.max_num_tokens)
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
