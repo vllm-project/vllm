@@ -16,20 +16,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
-import unittest
-from typing import ClassVar
-
 import numpy as np
+import pytest
 import torch
 from compressed_tensors.transform.utils.hadamard import (
     deterministic_hadamard_matrix)
 
 from vllm import _custom_ops as ops  # use existing nvfp4 gemm in vllm
 from vllm._custom_ops import fusedQuantizeNv
+from vllm.platforms import current_platform
 from vllm.qutlass_utils.utils import to_blocked
 
+if not torch.cuda.is_available():
+    pytest.skip("CUDA required for these tests.", allow_module_level=True)
 
+if not (current_platform.has_device_capability(100)
+        or current_platform.has_device_capability(120)):
+    pytest.skip(
+        reason="Tests require compute capability 10.0 (100) or 12.0 (120).",
+        allow_module_level=True,
+    )
+
+
+# ----- Helpers -----
 def get_hadamard_matrix(group_size: int, dtype: torch.dtype,
                         device: torch.device):
     return (
@@ -167,120 +176,89 @@ def _forward_quantize_ref(x: torch.Tensor, h: torch.Tensor, rot_size: int):
     )
 
 
-@unittest.skipUnless(torch.cuda.is_available(),
-                     "CUDA required for these tests")
-class Test(unittest.TestCase):
-    dtype: ClassVar[torch.dtype]
-    device: ClassVar[torch.device]
+DTYPE = torch.bfloat16
+DEVICE = torch.device("cuda:0")
+ROT_SIZES = [16, 32, 64, 128]
+GLOBAL_SCALES = [6.0]
 
-    @classmethod
-    def setUpClass(cls):
-        seed = 0
-        np.random.seed(seed)
-        torch.random.manual_seed(seed)
-        cls.dtype = torch.bfloat16
-        cls.device = torch.device("cuda:0")
-
-    def test_fused_quantization(self):
-        dtype, device = self.dtype, self.device
-
-        def _absmax_nv_case(rot_size: int, global_scale_value: float):
-            h = get_hadamard_matrix(rot_size, dtype, device)
-            x = torch.randn(2, 4096, 4096, dtype=dtype, device=device) * 25.0
-            global_scale = torch.tensor([global_scale_value], device=device)
-
-            xh_dq_ref, _, _ = _forward_quantize_ref(x, h, rot_size)
-
-            xh_e2m1, xh_e4m3 = fusedQuantizeNv(x, h, global_scale)
-            xh_e4m3 = xh_e4m3.reshape(2, 4096, 4096 // 16)
-            xh_dq, *_ = _dq_fp4(xh_e2m1, xh_e4m3, alpha=global_scale_value)
-
-            torch.testing.assert_close(xh_dq, xh_dq_ref, rtol=0.34, atol=100)
-            assert (xh_dq != xh_dq_ref).float().mean() <= 1e-1
-
-            m, n, k = 504, 4096 * 2, 4096
-            a = torch.randn(m, k, dtype=dtype, device=device) * 25.0
-            b = torch.randn(n, k, dtype=dtype, device=device) * 25.0
-
-            a_e2m1, a_e4m3 = fusedQuantizeNv(a, h, global_scale)
-            b_e2m1, b_e4m3 = fusedQuantizeNv(b, h, global_scale)
-
-            a_dq, *_ = _dq_fp4(a_e2m1, a_e4m3[:m, :k], alpha=1.0)
-            b_dq, *_ = _dq_fp4(b_e2m1, b_e4m3[:n, :k], alpha=1.0)
-            out_ref = a_dq @ b_dq.transpose(-2, -1)
-
-            a_scale_block = to_blocked(a_e4m3).view(-1, k // 16)
-            b_scale_block = to_blocked(b_e4m3).view(-1, k // 16)
-            alpha = torch.tensor([1.0], device=device)
-            out = ops.cutlass_scaled_fp4_mm(
-                a_e2m1,
-                b_e2m1,
-                a_scale_block,
-                b_scale_block,
-                alpha,
-                torch.bfloat16,
-            )
-            assert out.equal(out_ref.to(dtype=out.dtype))
-
-        for rs in (16, 32, 64, 128):
-            _absmax_nv_case(rot_size=rs, global_scale_value=6.0)
-
-    def run_problem(self, m, n, k, rot_size):
-        print(m, n, k)
-        a = torch.randn(m, k, dtype=self.dtype, device=self.device) * 25.0
-        b = torch.randn(n, k, dtype=self.dtype, device=self.device) * 25.0
-        hadamard_matrix = get_hadamard_matrix(rot_size, self.dtype,
-                                              self.device)
-        global_scale = torch.tensor([1.0], device=self.device)
-
-        a_e2m1, a_e4m3 = fusedQuantizeNv(a, hadamard_matrix, global_scale)
-        b_e2m1, b_e4m3 = fusedQuantizeNv(b, hadamard_matrix, global_scale)
-
-        a_dq, *_ = _dq_fp4(a_e2m1, a_e4m3[:m, :k], alpha=1.0)
-        b_dq, *_ = _dq_fp4(b_e2m1, b_e4m3[:n, :k], alpha=1.0)
-        out_ref = a_dq @ b_dq.transpose(-2, -1)
-
-        a_scale_block = to_blocked(a_e4m3).view(-1, k // 16)
-        b_scale_block = to_blocked(b_e4m3).view(-1, k // 16)
-        alpha = torch.tensor([1.0], device=self.device)
-        out = ops.cutlass_scaled_fp4_mm(a_e2m1, b_e2m1, a_scale_block,
-                                        b_scale_block, alpha, torch.bfloat16)
-        assert out.equal(out_ref.to(dtype=out.dtype))
-
-    def test_llama_shapes(self):
-        print()
-        MODELS = {
-            " 7B": [
-                (4096, 3 * 4096),
-                (4096, 4096),
-                (4096, 2 * 10752),
-                (10752, 4096),
-            ],
-            "13B": [
-                (5120, 3 * 5120),
-                (5120, 5120),
-                (5120, 2 * 13568),
-                (13568, 5120),
-            ],
-            "33B": [
-                (6656, 3 * 6656),
-                (6656, 6656),
-                (6656, 2 * 17664),
-                (17664, 6656),
-            ],
-            "70B": [
-                (8192, 3 * 8192),
-                (8192, 8192),
-                (8192, 2 * 21760),
-                (21760, 8192),
-            ],
-        }
-        for _, layers in MODELS.items():
-            for layer in layers:
-                for batch in [1, 16]:
-                    for rot_size in [16, 32, 64, 128]:
-                        self.run_problem(batch, layer[1], layer[0], rot_size)
+LLAMA_MODELS = {
+    "7B": [(4096, 3 * 4096), (4096, 4096), (4096, 2 * 10752), (10752, 4096)],
+    "13B": [(5120, 3 * 5120), (5120, 5120), (5120, 2 * 13568), (13568, 5120)],
+    "33B": [(6656, 3 * 6656), (6656, 6656), (6656, 2 * 17664), (17664, 6656)],
+    "70B": [(8192, 3 * 8192), (8192, 8192), (8192, 2 * 21760), (21760, 8192)],
+}
 
 
-if __name__ == "__main__":
-    unittest.main()
+@pytest.fixture(autouse=True)
+def _seed_each_test():
+    current_platform.seed_everything(0)
+    np.random.seed(0)
+    torch.random.manual_seed(0)
+
+
+@pytest.mark.parametrize("rot_size", ROT_SIZES)
+@pytest.mark.parametrize("global_scale_value", GLOBAL_SCALES)
+@torch.inference_mode()
+def test_fused_quantization(rot_size: int, global_scale_value: float):
+    dtype, device = DTYPE, DEVICE
+    h = get_hadamard_matrix(rot_size, dtype, device)
+    x = torch.randn(2, 4096, 4096, dtype=dtype, device=device) * 25.0
+    global_scale = torch.tensor([global_scale_value], device=device)
+
+    xh_dq_ref, _, _ = _forward_quantize_ref(x, h, rot_size)
+    xh_e2m1, xh_e4m3 = fusedQuantizeNv(x, h, global_scale)
+    xh_e4m3 = xh_e4m3.reshape(2, 4096, 4096 // 16)
+    xh_dq, *_ = _dq_fp4(xh_e2m1, xh_e4m3, alpha=global_scale_value)
+
+    torch.testing.assert_close(xh_dq, xh_dq_ref, rtol=0.34, atol=100)
+    assert (xh_dq != xh_dq_ref).float().mean() <= 1e-1
+
+    m, n, k = 504, 4096 * 2, 4096
+    a = torch.randn(m, k, dtype=dtype, device=device) * 25.0
+    b = torch.randn(n, k, dtype=dtype, device=device) * 25.0
+
+    a_e2m1, a_e4m3 = fusedQuantizeNv(a, h, global_scale)
+    b_e2m1, b_e4m3 = fusedQuantizeNv(b, h, global_scale)
+
+    a_dq, *_ = _dq_fp4(a_e2m1, a_e4m3[:m, :k], alpha=1.0)
+    b_dq, *_ = _dq_fp4(b_e2m1, b_e4m3[:n, :k], alpha=1.0)
+    out_ref = a_dq @ b_dq.transpose(-2, -1)
+
+    a_scale_block = to_blocked(a_e4m3).view(-1, k // 16)
+    b_scale_block = to_blocked(b_e4m3).view(-1, k // 16)
+    alpha = torch.tensor([1.0], device=device)
+    out = ops.cutlass_scaled_fp4_mm(a_e2m1, b_e2m1, a_scale_block,
+                                    b_scale_block, alpha, torch.bfloat16)
+    assert out.equal(out_ref.to(dtype=out.dtype))
+
+
+@pytest.mark.parametrize("model", list(LLAMA_MODELS.keys()))
+@pytest.mark.parametrize("layer_idx", [0, 1, 2, 3])
+@pytest.mark.parametrize("batch", [1, 16])
+@pytest.mark.parametrize("rot_size", ROT_SIZES)
+@torch.inference_mode()
+def test_llama_shapes(model: str, layer_idx: int, batch: int, rot_size: int):
+    dtype, device = DTYPE, DEVICE
+    m = batch
+    k, n = LLAMA_MODELS[model][layer_idx]
+
+    h = get_hadamard_matrix(rot_size, dtype, device)
+
+    a = torch.randn(m, k, dtype=dtype, device=device) * 25.0
+    b = torch.randn(n, k, dtype=dtype, device=device) * 25.0
+
+    global_scale = torch.tensor([1.0], device=device)
+
+    a_e2m1, a_e4m3 = fusedQuantizeNv(a, h, global_scale)
+    b_e2m1, b_e4m3 = fusedQuantizeNv(b, h, global_scale)
+
+    a_dq, *_ = _dq_fp4(a_e2m1, a_e4m3[:m, :k], alpha=1.0)
+    b_dq, *_ = _dq_fp4(b_e2m1, b_e4m3[:n, :k], alpha=1.0)
+    out_ref = a_dq @ b_dq.transpose(-2, -1)
+
+    a_scale_block = to_blocked(a_e4m3).view(-1, k // 16)
+    b_scale_block = to_blocked(b_e4m3).view(-1, k // 16)
+    alpha = torch.tensor([1.0], device=device)
+    out = ops.cutlass_scaled_fp4_mm(a_e2m1, b_e2m1, a_scale_block,
+                                    b_scale_block, alpha, torch.bfloat16)
+    assert out.equal(out_ref.to(dtype=out.dtype))

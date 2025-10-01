@@ -32,7 +32,7 @@ endif()
 message(STATUS "[QUTLASS] QuTLASS is available at ${qutlass_SOURCE_DIR}")
 
 cuda_archs_loose_intersection(QUTLASS_ARCHS "12.0a;10.0a" "${CUDA_ARCHS}")
-if(QUTLASS_ARCHS)
+if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND QUTLASS_ARCHS)
 
   if(QUTLASS_ARCHS MATCHES "12\\.0a")
     set(QUTLASS_TARGET_CC 120)
@@ -82,5 +82,12 @@ if(QUTLASS_ARCHS)
   )
 
 else()
-  message(STATUS "[QUTLASS] skipping (no 12.0a/10.0a in CUDA_ARCHS='${CUDA_ARCHS}')")
+  if("${CMAKE_CUDA_COMPILER_VERSION}" VERSION_LESS "12.8")
+    message(STATUS
+      "[QUTLASS] Skipping build: CUDA 12.8 or newer is required (found ${CMAKE_CUDA_COMPILER_VERSION}).")
+  else()
+    message(STATUS
+      "[QUTLASS] Skipping build: no supported arch (12.0a / 10.0a) found in "
+      "CUDA_ARCHS='${CUDA_ARCHS}'.")
+  endif()
 endif()
