@@ -581,7 +581,7 @@ class VllmBackend:
 
         if self.compilation_config.use_inductor_graph_partition:
             # Let Inductor decide partitioning; avoid FX-level pre-splitting.
-            split_ops = []
+            split_ops: list[str] = []
         else:
             split_ops = self.compilation_config.splitting_ops or []
 
