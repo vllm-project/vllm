@@ -515,5 +515,34 @@ def mp_function(**kwargs):
 
 
 def test_caplog_mp_fork(caplog_vllm, caplog_mp_fork):
-    pass
-    # TODO
+    with caplog_vllm.at_level(logging.DEBUG), caplog_mp_fork():
+        import multiprocessing
+
+        ctx = multiprocessing.get_context("fork")
+        p = ctx.Process(
+            target=mp_function,
+            name=f"SubProcess{1}",
+            kwargs={"a": "AAAA", "b": "BBBBB"},
+        )
+        p.start()
+        p.join()
+
+    assert "AAAA" in caplog_vllm.text
+    assert "BBBBB" in caplog_vllm.text
+
+
+def test_caplog_mp_spawn(caplog_mp_spawn):
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
+        import multiprocessing
+
+        ctx = multiprocessing.get_context("spawn")
+        p = ctx.Process(
+            target=mp_function,
+            name=f"SubProcess{1}",
+            kwargs={"a": "AAAA", "b": "BBBBB"},
+        )
+        p.start()
+        p.join()
+
+    assert "AAAA" in log_holder.text
+    assert "BBBBB" in log_holder.text

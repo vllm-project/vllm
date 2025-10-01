@@ -1070,7 +1070,7 @@ def caplog_vllm(temporary_enable_log_propagate, caplog):
     yield caplog
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture()
 def caplog_mp_fork():
     """
     This fixture enables capturing logs from a forked MP subprocess.
@@ -1115,7 +1115,7 @@ class LogHolder:
         self.text = None
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture()
 def caplog_mp_spawn(tmp_path, monkeypatch):
     """
     This fixture enables capturing logs from a forked MP subprocess.
