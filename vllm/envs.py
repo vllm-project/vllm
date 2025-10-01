@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION: bool = False
+    VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
@@ -896,6 +897,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda:
     (os.getenv("VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION", "False").lower() in
              ("true", "1")),
+
+    # Disable pynccl (using torch.distributed instead)
+    "VLLM_DISABLE_PYNCCL":
+    lambda:
+    (os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")),
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":
