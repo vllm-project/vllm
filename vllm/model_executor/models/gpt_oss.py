@@ -28,7 +28,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
-from .interfaces import SupportsPP
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -613,7 +613,7 @@ class GptOssModel(nn.Module):
                                             weights, stacked_params_mapping)
 
 
-class GptOssForCausalLM(nn.Module, SupportsPP):
+class GptOssForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
     packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -638,6 +638,24 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
             ".down_proj_bias": ".w2_bias",
         },
     )
+
+    def get_packed_modules_mapping(self) -> dict[str, list[str]]:
+        # This method generates and returns a dictionary mapping packed module
+        # names to lists of their corresponding submodule names. It includes
+        # both static mappings and dynamic mappings for expert layers, where
+        # the expert indices are expanded based on the configured number
+        # of routed experts.
+
+        expert_params_mapping = self.get_expert_mapping()
+
+        packed_modules_mapping = self.packed_modules_mapping.copy()
+
+        packed_modules_mapping["experts"] = [
+            weight_name.rstrip(".")
+            for _, weight_name, _, _ in expert_params_mapping
+        ]
+
+        return packed_modules_mapping
 
     def __init__(
         self,
@@ -676,6 +694,16 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_local_experts, # FIXME: self.config.n_routed_experts if in config
+            num_redundant_experts=0)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

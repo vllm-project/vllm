@@ -18,7 +18,7 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         remove_adapter, set_adapter_mapping)
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
+from vllm.lora.layers import BaseLayerWithLoRA, FusedMoEWithLoRA, LoRAMapping
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
@@ -217,6 +217,8 @@ class LoRAModel(AdapterModel):
             for lora_module in modules.keys():  # noqa
                 module_name, _, _ = parse_fine_tuned_lora_name(
                     lora_module, weights_mapper)
+                if "base_layer" in lora_module:
+                    continue
                 part_name = module_name.split(".")[-1]
                 if part_name not in expected_lora_modules:
                     unexpected_modules.append(module_name)
@@ -414,6 +416,35 @@ class LoRAModelManager(AdapterModelManager):
                     raise ValueError(
                         f"Adapter bias cannot be used for {module_name}"
                         " without --enable-lora-bias.")
+                # Note (gnovack) - If MOE lora weights are not split into num_experts chunks, we split them here
+                if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(module_lora.lora_a):
+                    # Handle FSDP file format where experts.base_layer is the gate_up_proj and experts is the down_proj
+                    gate_up_proj_lora = self._get_lora_layer_weights(lora_model, module_name + ".base_layer")
+                    down_proj_lora = module_lora
+                    num_experts = module_lora.lora_a.shape[-1] // module_lora.rank
+                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=-1)
+                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=-1)
+
+                    gate_proj_b = gate_up_proj_lora.lora_b[..., ::2].chunk(num_experts, dim=0)
+                    up_proj_b = gate_up_proj_lora.lora_b[..., 1::2].chunk(num_experts, dim=0)
+
+                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=-1)
+                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=0)
+
+                    lora_a = []
+                    lora_b = []
+                    for i in range(num_experts):
+                        lora_a.append(gate_proj_a[i])
+                        lora_a.append(down_proj_a[i])
+                        lora_a.append(up_proj_a[i])
+
+                        lora_b.append(gate_proj_b[i])
+                        lora_b.append(down_proj_b[i])
+                        lora_b.append(up_proj_b[i])
+
+                    module_lora.lora_a = lora_a
+                    module_lora.lora_b = lora_b
+
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
                                 module_lora.embeddings_tensor,
                                 module_lora.bias)

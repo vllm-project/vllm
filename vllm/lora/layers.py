@@ -1496,7 +1496,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             return wrapper
 
-        m_fused_moe_fn = modular_triton_fused_moe(use_fp8_w8a8=True if quant_config.get_name()=="fp8" else False,
+        m_fused_moe_fn = modular_triton_fused_moe(use_fp8_w8a8=True if quant_config and quant_config.get_name()=="fp8" else False,
                                                   use_int8_w8a8=False,
                                                   use_int8_w8a16=False,
                                                   use_int4_w4a16=False,
