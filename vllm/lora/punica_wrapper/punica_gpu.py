@@ -225,7 +225,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default, refer to:
             # https://github.com/triton-lang/triton/issues/1387
-            buffer = torch.zeros(  # type: ignore
+            # Note: buffer is zeroed inside the shrink op
+            buffer = torch.empty(  # type: ignore
                 (len(output_slices), x.size(0), r),
                 dtype=torch.float32,
                 device=x.device,
