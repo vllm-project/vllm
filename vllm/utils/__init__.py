@@ -1855,13 +1855,16 @@ class FlexibleArgumentParser(ArgumentParser):
 
         # Check for --model in command line arguments first
         if args and args[0] == "serve":
-            model_in_cli_args = any(arg == '--model' for arg in args)
-
-            if model_in_cli_args:
-                raise ValueError(
+            try:
+                model_idx = args.index("--model")
+                logger.warning(
                     "With `vllm serve`, you should provide the model as a "
                     "positional argument or in a config file instead of via "
-                    "the `--model` option.")
+                    "the `--model` option. "
+                    "The `--model` option will be removed in v0.13.")
+                args = args[:model_idx] + args[model_idx + 1:]
+            except ValueError:
+                pass
 
         if '--config' in args:
             args = self._pull_args_from_config(args)
