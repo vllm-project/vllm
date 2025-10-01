@@ -420,7 +420,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal):
 
         text_model_type = self.config.get_text_config().model_type
         self.image_pad_token_id = IMAGE_PAD_TOKEN_ID_MAP[text_model_type]
-        self.vision_buckets = VisionBuckets(is_batch_based=False)
+        self.vision_buckets = VisionBuckets(self)
 
         # TODO(Isotr0py): PP support
         # self.make_empty_intermediate_tensors = (
