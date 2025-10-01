@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument(
         "--num-speculative-tokens-per-method",
-        type=str,
+        type=json.loads,
         default='{"ngram": 2, "eagle": 2}',
     )
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
@@ -126,20 +126,17 @@ def main(args):
             "prompt_lookup_min": args.prompt_lookup_min,
         }
     elif args.method == "ngram-eagle":
-        num_speculative_tokens_per_method = json.loads(
-            args.num_speculative_tokens_per_method
-        )
         eagle_dir = args.eagle_dir
         if eagle_dir is None:
             eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
         args.num_spec_tokens = max(
-            num_speculative_tokens_per_method["ngram"],
-            num_speculative_tokens_per_method["eagle"],
+            args.num_speculative_tokens_per_method["ngram"],
+            args.num_speculative_tokens_per_method["eagle"],
         )
         speculative_config = {
             "method": "ngram-eagle",
             "model": eagle_dir,
-            "num_speculative_tokens_per_method": num_speculative_tokens_per_method,
+            "num_speculative_tokens_per_method": args.num_speculative_tokens_per_method,
             "prompt_lookup_max": args.prompt_lookup_max,
             "prompt_lookup_min": args.prompt_lookup_min,
         }
