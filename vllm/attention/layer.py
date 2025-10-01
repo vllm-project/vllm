@@ -20,8 +20,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -95,6 +94,7 @@ class Attention(nn.Module, AttentionLayerBase):
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
         use_mla: bool = False,
+        use_sparse: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -155,6 +155,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self._o_scale_float: Optional[float] = None
 
         self.use_mla = use_mla
+        self.use_sparse = use_sparse
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -187,7 +188,8 @@ class Attention(nn.Module, AttentionLayerBase):
                                                  kv_cache_dtype,
                                                  block_size,
                                                  use_mla=use_mla,
-                                                 has_sink=self.has_sink)
+                                                 has_sink=self.has_sink,
+                                                 use_sparse=use_sparse)
         else:
             self.attn_backend = attn_backend
 
@@ -277,9 +279,8 @@ class Attention(nn.Module, AttentionLayerBase):
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
         if self.calculate_kv_scales:
-            attn_metadata = get_forward_context().attn_metadata
-            if attn_metadata.enable_kv_scales_calculation:
-                self.calc_kv_scales(query, key, value)
+            torch.ops.vllm.maybe_calc_kv_scales(query, key, value,
+                                                self.layer_name)
 
         output_dtype = query.dtype
         if self.query_quant is not None:
@@ -552,6 +553,44 @@ def maybe_save_kv_layer_to_connector(
     assert isinstance(attn_metadata, dict)
     connector.save_kv_layer(layer_name, kv_cache_layer,
                             attn_metadata[layer_name])
+
+
+def maybe_calc_kv_scales(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    layer_name: str,
+) -> None:
+
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+
+    if attn_metadata is None or not getattr(
+            attn_metadata, 'enable_kv_scales_calculation', False):
+        return
+
+    self = forward_context.no_compile_layers[layer_name]
+    self.calc_kv_scales(query, key, value)
+
+
+def maybe_calc_kv_scales_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="maybe_calc_kv_scales",
+    op_func=maybe_calc_kv_scales,
+    mutates_args=["query", "key", "value"],
+    fake_impl=maybe_calc_kv_scales_fake,
+)
 
 
 def unified_attention(
