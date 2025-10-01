@@ -319,16 +319,18 @@ class InductorAdaptor(CompilerInterface):
                 nonlocal file_path
                 compiled_fn = inductor_compiled_graph.current_callable
                 file_path = compiled_fn.__code__.co_filename  # noqa
-                if not file_path.startswith(self.base_cache_dir):
+                if (not file_path.startswith(self.base_cache_dir)
+                        and compiled_fn.__closure__ is not None):
                     # hooked in the align_inputs_from_check_idxs function
                     # in torch/_inductor/utils.py
                     for cell in compiled_fn.__closure__:
                         if not callable(cell.cell_contents):
                             continue
-                        if cell.cell_contents.__code__.co_filename.startswith(
-                                self.base_cache_dir):
+                        closure_code = cell.cell_contents.__code__
+                        filename = closure_code.co_filename
+                        if filename.startswith(self.base_cache_dir):
                             # this is the real file path compiled from Inductor
-                            file_path = cell.cell_contents.__code__.co_filename
+                            file_path = filename
                             break
                 return inductor_compiled_graph
 
@@ -346,18 +348,19 @@ class InductorAdaptor(CompilerInterface):
                     nonlocal file_path
                     compiled_fn = inductor_compiled_graph.current_callable
                     file_path = compiled_fn.__code__.co_filename  # noqa
-                    if not file_path.startswith(self.base_cache_dir):
+                    if (not file_path.startswith(self.base_cache_dir)
+                            and compiled_fn.__closure__ is not None):
                         # hooked in the align_inputs_from_check_idxs function
                         # in torch/_inductor/utils.py
                         for cell in compiled_fn.__closure__:
                             if not callable(cell.cell_contents):
                                 continue
-                            code = cell.cell_contents.__code__
-                            if code.co_filename.startswith(
-                                    self.base_cache_dir):
+                            closure_code = cell.cell_contents.__code__
+                            filename = closure_code.co_filename
+                            if filename.startswith(self.base_cache_dir):
                                 # this is the real file path
                                 # compiled from Inductor
-                                file_path = code.co_filename
+                                file_path = filename
                                 break
                     hash_str = inductor_compiled_graph._fx_graph_cache_key
                 return output

@@ -6,6 +6,7 @@ import torch
 import vllm
 from vllm.compilation.counter import compilation_counter
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.compilation import CompilationLevel
 from vllm.utils import _is_torch_equal_or_newer
 
 
@@ -150,10 +151,11 @@ def test_splitting_ops_dynamic():
         # inductor graph partition is only available in PyTorch 2.9+.
         # this is a fast config check so we are not using pytest.skip.
         config = VllmConfig(compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
             use_inductor_graph_partition=True,
             splitting_ops=["silly_attention"]))
-        # should ignore splitting_ops
-        assert config.compilation_config.splitting_ops == []
+        # should preserve user-specified splitting_ops
+        assert config.compilation_config.splitting_ops == ["silly_attention"]
 
     # When attn_fusion pass enabled.
     config = VllmConfig(compilation_config=CompilationConfig(

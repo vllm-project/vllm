@@ -182,10 +182,8 @@ class CompilerManager:
                 f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
         ops = self.compilation_config.splitting_ops
         if self.compilation_config.use_inductor_graph_partition:
-            if ops is None:
-                ops = list(self.compilation_config._attention_ops)
-                self.compilation_config.splitting_ops = ops
-            context = _inductor_partition_rule_context(ops)
+            # Use splitting_ops configured in set_splitting_ops_for_v1()
+            context = _inductor_partition_rule_context(ops or [])
         else:
             context = nullcontext()
 
