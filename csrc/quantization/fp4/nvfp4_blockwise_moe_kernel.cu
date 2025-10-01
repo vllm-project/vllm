@@ -367,7 +367,7 @@ constexpr auto SF_DTYPE = at::ScalarType::Float8_e4m3fn;
   CHECK_CONTIGUOUS(x, m);     \
   CHECK_TYPE(x, st, m)
 
-void cutlass_fp4_group_mm(
+void cutlass_fp4_group_mm_sm100a(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
     const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
