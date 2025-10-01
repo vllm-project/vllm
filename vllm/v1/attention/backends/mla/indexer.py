@@ -204,7 +204,7 @@ def split_prefill_chunks(seq_lens_cpu: torch.Tensor,
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.UNIFORM_BATCH
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     reorder_batch_threshold: int = 1
 
