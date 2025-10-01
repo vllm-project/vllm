@@ -85,7 +85,7 @@ def test_quantfp8_group_multidimensional(seed: int, use_ue8m0: bool) -> None:
     group_size = 64
 
     # Test with 3D input
-    batch1, batch2, hidden_dim = 4, 8, 512
+    batch1, batch2, hidden_dim = 4, 8, 1024
     x_3d = torch.randn(
         (batch1, batch2, hidden_dim), dtype=torch.bfloat16, device="cuda") * 8
 
@@ -105,7 +105,7 @@ def test_quantfp8_group_multidimensional(seed: int, use_ue8m0: bool) -> None:
                             column_major_scales=True,
                             use_ue8m0=use_ue8m0)
     _, scales_col = quant_op_col.forward_native(x_3d.clone())
-    assert scales_col.shape == (batch1, hidden_dim // group_size, batch2)
+    assert scales_col.shape == (batch1, batch2, hidden_dim // group_size)
 
     # Test with 4D input
     batch1, batch2, batch3, hidden_dim = 2, 3, 4, 256
