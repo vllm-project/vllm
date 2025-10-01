@@ -1687,6 +1687,15 @@ def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,
                                                      kv_cache_dtype)
 
 
+def cp_gather_indexer_k_quant_cache(kv_cache: torch.Tensor,
+                                    dst_k: torch.Tensor,
+                                    dst_scale: torch.Tensor,
+                                    block_table: torch.Tensor,
+                                    cu_seq_lens: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.cp_gather_indexer_k_quant_cache(
+        kv_cache, dst_k, dst_scale, block_table, cu_seq_lens)
+
+
 def get_device_attribute(attribute: int, device: int) -> int:
     return torch.ops._C_cuda_utils.get_device_attribute(attribute, device)
 
