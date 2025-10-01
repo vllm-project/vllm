@@ -536,7 +536,9 @@ __global__ void indexer_k_quant_and_cache_kernel(
   for (int i = 0; i < VEC_SIZE; i++) {
     amax = fmaxf(amax, fabsf(float(k_val_ptr[i])));
   }
+#ifndef USE_ROCM
   __syncwarp();
+#endif
 
   // Reduced amax
   for (int mask = 16; mask > 0; mask /= 2) {
@@ -546,7 +548,9 @@ __global__ void indexer_k_quant_and_cache_kernel(
     amax = fmaxf(amax, __shfl_xor_sync(unsigned(-1), amax, mask));
 #endif
   }
+#ifndef USE_ROCM
   __syncwarp();
+#endif
   float scale = fmaxf(amax, 1e-4) / 448.0f;
   if (use_ue8m0) {
     scale = exp2f(ceilf(log2f(scale)));
