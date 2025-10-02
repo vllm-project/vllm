@@ -16,7 +16,8 @@ import torch
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.processor import cached_processor_from_config
+from vllm.transformers_utils.processor import (DYNAMIC_KEYS,
+                                               cached_processor_from_config)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
 from vllm.utils import (flatten_2d_lists, full_groupby,
@@ -1413,11 +1414,23 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         Call the HF processor on the prompt text and
         associated multi-modal data.
+        Supports splitting static (cache-affecting) vs
+        dynamic (per-request) kwargs.
         """
+        static_mm_processor_kwargs, dynamic_mm_processor_kwargs = \
+            self._split_static_dynamic_mm_kwargs(mm_kwargs)
+        # use static kwargs to get (and possibly cache) the processor
+        hf_processor = self.info.get_hf_processor(**static_mm_processor_kwargs)
+        # merge static and dynamic kwargs(such as fps) for actual call
+        merge_mm_kwargs = {**static_mm_processor_kwargs,
+                           **tok_kwargs}
+        if dynamic_mm_processor_kwargs:
+            merge_mm_kwargs.update(dynamic_mm_processor_kwargs)
+
         return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+            hf_processor,
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            dict(**merge_mm_kwargs),
         )
 
     def _hf_processor_applies_updates(
@@ -2024,6 +2037,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
+        # split static and dynamic kwargs
+        full_mm_processor_kwargs = dict(hf_processor_mm_kwargs)
+
+        static_mm_processor_kwargs, dynamic_mm_processor_kwargs = self._split_static_dynamic_mm_kwargs(hf_processor_mm_kwargs)
+
         mm_items = self._to_mm_items(mm_data)
 
         if tokenization_kwargs is None:
@@ -2036,7 +2054,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         ) = self._cached_apply_hf_processor(
             prompt,
             mm_items,
-            hf_processor_mm_kwargs,
+            hf_processor_mm_kwargs=static_mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
         )
@@ -2063,6 +2081,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_hashes=mm_info.hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
+
+    @staticmethod
+    def _split_static_dynamic_mm_kwargs(
+        mm_kwargs: Mapping[str, object],
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        static, dynamic = {}, {}
+        for k, v in mm_kwargs.items():
+            if k in DYNAMIC_KEYS:
+                dynamic[k] = v
+            else:
+                static[k] = v
+        return static, dynamic
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):

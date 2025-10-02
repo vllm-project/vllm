@@ -452,6 +452,7 @@ class MultiModalDataParser:
     def _parse_video_data(
         self,
         data: ModalityData[VideoItem],
+        io_overrides: Optional[dict[str, Any]] = None,
     ) -> Optional[ModalityDataItems[Any, Any]]:
         if data is None:
             return VideoProcessorItems(None)
