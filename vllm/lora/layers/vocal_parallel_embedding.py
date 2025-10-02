@@ -102,7 +102,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index,
                             0, :lora_b.shape[0], :lora_b.shape[1]].copy_(
                                 lora_b, non_blocking=True)
-        if embeddings_tensor is not None:
+        if embeddings_tensor is not None and self.embeddings_tensors.shape[
+                1] > 0:
             self.embeddings_tensors[
                 index,
                 :embeddings_tensor.shape[0],
