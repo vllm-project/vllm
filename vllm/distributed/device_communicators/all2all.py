@@ -510,8 +510,10 @@ class MoriAll2AllManager(All2AllManagerBase):
                 logger.debug(
                     "[rank %s] torch process group shmem init failed: %s",
                     self.rank, torch_error)
-
-            self._shmem_initialized = True
+                self._shmem_initialized = True
+                logger.warning(
+                    "[rank %s] Continuing without mori shmem optimization",
+                    self.rank)
 
         except Exception as e:
             logger.error("[rank %s] mori shmem initialization failed: %s",

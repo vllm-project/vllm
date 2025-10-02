@@ -88,9 +88,9 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         Args:
             a1: Input hidden states [num_tokens, hidden_dim]
-            a1_scale: Input activation scales
             topk_weights: Top-k routing weights [num_experts, experts_per_token]
             topk_ids: Top-k expert indices [num_experts, experts_per_token]
+            apply_router_weight_on_input: Whether to apply router weight
             quant_config: Quantization config
 
         Returns:
