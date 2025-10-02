@@ -467,16 +467,9 @@ __global__ void concat_and_cache_ds_mla_kernel(
                               fmaxf(fabsf(vals[6]), fabsf(vals[7]))));
 
   // Warp-level reduction to find the max absolute value in each half-warp
-  if (lane_idx < 16) {
 #pragma unroll
-    for (int offset = 8; offset > 0; offset /= 2) {
-      max_abs = fmaxf(max_abs, __shfl_xor_sync(0x0000FFFF, max_abs, offset));
-    }
-  } else {
-#pragma unroll
-    for (int offset = 8; offset > 0; offset /= 2) {
-      max_abs = fmaxf(max_abs, __shfl_xor_sync(0xFFFF0000, max_abs, offset));
-    }
+  for (int offset = 8; offset > 0; offset /= 2) {
+    max_abs = fmaxf(max_abs, VLLM_SHFL_XOR_SYNC_WIDTH(max_abs, offset, 16));
   }
 
   // Compute the scale for the tile
