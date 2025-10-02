@@ -365,8 +365,7 @@ run_serving_tests() {
       continue
     fi
 
-    server_command="$server_envs python3 \
-      -m vllm.entrypoints.openai.api_server \
+    server_command="$server_envs vllm serve \
       $server_args"
 
     # run the server
