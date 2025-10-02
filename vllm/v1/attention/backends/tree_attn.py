@@ -52,7 +52,7 @@ class TreeAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TREE_ATTN_VLLM_V1"
+        return "TREE_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["TreeAttentionImpl"]:
@@ -68,6 +68,7 @@ class TreeAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
@@ -165,7 +166,8 @@ class TreeAttentionMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.kv_cache_spec = kv_cache_spec
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
         self.block_size = kv_cache_spec.block_size
 
         spec_config = vllm_config.speculative_config

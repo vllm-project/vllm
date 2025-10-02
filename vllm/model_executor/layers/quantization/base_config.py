@@ -128,7 +128,7 @@ class QuantizationConfig(ABC):
     @staticmethod
     def get_from_keys_or(config: dict[str, Any], keys: list[str],
                          default: Any) -> Any:
-        """Get a optional value from the model's quantization config."""
+        """Get an optional value from the model's quantization config."""
         try:
             return QuantizationConfig.get_from_keys(config, keys)
         except ValueError:
@@ -161,4 +161,10 @@ class QuantizationConfig(ABC):
             structure of the qconfig) to vllm model structure
         """
         # TODO (@kylesayrs): add implementations for all subclasses
+        pass
+
+    def maybe_update_config(self, model_name: str):  # noqa: B027
+        """
+        Interface to update values after config initialization.
+        """
         pass

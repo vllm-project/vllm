@@ -24,6 +24,14 @@ class VerifyAndUpdateConfig:
         raise NotImplementedError
 
 
+class Gemma3TextModelConfig:
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        hf_config = vllm_config.model_config.hf_config
+        hf_config.is_causal = not hf_config.use_bidirectional_attention
+
+
 class GteNewModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
@@ -237,45 +245,32 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
         }
 
 
-class GraniteMoeHybridModelConfig(VerifyAndUpdateConfig):
-
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config
-        config.max_seq_len_to_capture = config.max_model_len
-        logger.info(
-            "Setting max_seq_len_to_capture to %d "
-            "to ensure that CUDA graph capture "
-            "covers sequences of length up to max_model_len.",
-            config.max_model_len)
-
-
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        decoding_config = vllm_config.decoding_config
-        if decoding_config.reasoning_backend == "":
-            decoding_config.reasoning_backend = "GptOss"
+        structured_outputs_config = vllm_config.structured_outputs_config
+        if structured_outputs_config.reasoning_parser == "":
+            structured_outputs_config.reasoning_parser = "openai_gptoss"
 
-        # Increase the max capture size from 512 to 1024 for performance.
+        # Increase the max capture size from 512 to 992 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
-        # from 67 to 83.
+        # from 67 to 81.
         scheduler_config = vllm_config.scheduler_config
         if len(scheduler_config.cuda_graph_sizes) == 1:
             max_capture_size = scheduler_config.cuda_graph_sizes[0]
             # FIXME(woosuk): When using full cuda graph with FA3, the max
             # supported size is 992.
-            if max_capture_size < 1024:
+            if max_capture_size < 992:
                 cuda_graph_sizes = [1, 2, 4]
                 # Step size 8 for small batch sizes
                 cuda_graph_sizes += [i for i in range(8, 256, 8)]
                 # Step size 16 for larger batch sizes
-                cuda_graph_sizes += [i for i in range(256, 1025, 16)]
+                cuda_graph_sizes += [i for i in range(256, 993, 16)]
                 scheduler_config.cuda_graph_sizes = cuda_graph_sizes
                 logger.info(
                     "Overriding max cuda graph capture size to "
-                    "%d for performance.", 1024)
+                    "%d for performance.", 992)
 
 
 class MambaModelConfig(VerifyAndUpdateConfig):
@@ -304,7 +299,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         # TODO(tdoublep): remove as full cuda graph support is added
         FCG_NOT_SUPPORTED_MODELS = [
-            "Lfm2ForCausalLM", "MiniMaxText01ForCausalLM"
+            "Lfm2ForCausalLM",
+            "MiniMaxText01ForCausalLM",
         ]
 
         if (model_config.architecture not in FCG_NOT_SUPPORTED_MODELS
@@ -350,8 +346,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             block_size=1,
             num_kv_heads=model_config.get_num_kv_heads(parallel_config),
             head_size=model_config.get_head_size(),
-            dtype=kv_cache_dtype,
-            use_mla=model_config.use_mla).page_size_bytes
+            dtype=kv_cache_dtype).page_size_bytes
 
         model_cls, _ = ModelRegistry.resolve_model_cls(
             model_config.architecture,
@@ -405,10 +400,36 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 "exactly equal.", mamba_padding_pct)
 
 
+class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
+
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Updated fp8 cache to custom "fp8_ds_mla" format for DeepSeekV32
+        """
+        hf_config = vllm_config.model_config.hf_config
+
+        # Mirror the check in vllm/model_executor/models/deepseek_v2.py
+        is_v32 = hasattr(hf_config, "index_topk")
+        assert is_v32
+
+        # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
+        #   "auto")
+        cache_config = vllm_config.cache_config
+        if cache_config.cache_dtype == "auto" or \
+            cache_config.cache_dtype.startswith("fp8"):
+            cache_config.cache_dtype = "fp8_ds_mla"
+            logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
+        if cache_config.cache_dtype == "bfloat16":
+            cache_config.cache_dtype = "auto"
+            logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
+    "Gemma3TextModel": Gemma3TextModelConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
@@ -416,9 +437,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
-    "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "MambaForCausalLM": MambaModelConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
+    "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
 }

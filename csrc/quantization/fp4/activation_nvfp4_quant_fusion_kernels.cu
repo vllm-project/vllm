@@ -26,271 +26,48 @@
 #include "dispatch_utils.h"
 
 #include "cuda_utils.h"
+#include "launch_bounds_utils.h"
+#include "nvfp4_utils.cuh"
 
 namespace vllm {
 
-// Get type2 from type or vice versa (applied to half and bfloat16)
-template <typename T>
-struct TypeConverter {
-  using Type = half2;
-};  // keep for generality
-
-template <>
-struct TypeConverter<half2> {
-  using Type = c10::Half;
-};
-
-template <>
-struct TypeConverter<c10::Half> {
-  using Type = half2;
-};
-
-template <>
-struct TypeConverter<__nv_bfloat162> {
-  using Type = c10::BFloat16;
-};
-
-template <>
-struct TypeConverter<c10::BFloat16> {
-  using Type = __nv_bfloat162;
-};
-
-#define ELTS_PER_THREAD 8
-
-constexpr int CVT_FP4_ELTS_PER_THREAD = 8;
-constexpr int CVT_FP4_SF_VEC_SIZE = 16;
-
-// Convert 8 float32 values into 8 e2m1 values (represented as one uint32_t).
-inline __device__ uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  uint32_t val;
-  asm volatile(
-      "{\n"
-      ".reg .b8 byte0;\n"
-      ".reg .b8 byte1;\n"
-      ".reg .b8 byte2;\n"
-      ".reg .b8 byte3;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte0, %2, %1;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte1, %4, %3;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte2, %6, %5;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte3, %8, %7;\n"
-      "mov.b32 %0, {byte0, byte1, byte2, byte3};\n"
-      "}"
-      : "=r"(val)
-      : "f"(array[0]), "f"(array[1]), "f"(array[2]), "f"(array[3]),
-        "f"(array[4]), "f"(array[5]), "f"(array[6]), "f"(array[7]));
-  return val;
-#else
-  return 0;
-#endif
+// silu in float32
+__device__ __forceinline__ float silu(float x) {
+  return __fdividef(x, (1.f + __expf(-x)));
 }
 
-// Convert 4 float2 values into 8 e2m1 values (represented as one uint32_t).
-inline __device__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  uint32_t val;
-  asm volatile(
-      "{\n"
-      ".reg .b8 byte0;\n"
-      ".reg .b8 byte1;\n"
-      ".reg .b8 byte2;\n"
-      ".reg .b8 byte3;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte0, %2, %1;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte1, %4, %3;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte2, %6, %5;\n"
-      "cvt.rn.satfinite.e2m1x2.f32   byte3, %8, %7;\n"
-      "mov.b32 %0, {byte0, byte1, byte2, byte3};\n"
-      "}"
-      : "=r"(val)
-      : "f"(array[0].x), "f"(array[0].y), "f"(array[1].x), "f"(array[1].y),
-        "f"(array[2].x), "f"(array[2].y), "f"(array[3].x), "f"(array[3].y));
-  return val;
-#else
-  return 0;
-#endif
+__device__ __forceinline__ float2 silu2(float2 x) {
+  return make_float2(silu(x.x), silu(x.y));
 }
-
-// Fast reciprocal.
-inline __device__ float reciprocal_approximate_ftz(float a) {
-  float b;
-  asm volatile("rcp.approx.ftz.f32 %0, %1;\n" : "=f"(b) : "f"(a));
-  return b;
-}
-
-template <class SFType, int CVT_FP4_NUM_THREADS_PER_SF>
-__device__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(int rowIdx, int colIdx,
-                                                       int numCols,
-                                                       SFType* SFout) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  static_assert(CVT_FP4_NUM_THREADS_PER_SF == 1 ||
-                CVT_FP4_NUM_THREADS_PER_SF == 2);
-
-  // One pair of threads write one SF to global memory.
-  // TODO: stage through smem for packed STG.32
-  // is it better than STG.8 from 4 threads ?
-  if (threadIdx.x % CVT_FP4_NUM_THREADS_PER_SF == 0) {
-    // SF vector index (16 elements share one SF in the K dimension).
-    int32_t kIdx = colIdx / CVT_FP4_NUM_THREADS_PER_SF;
-    int32_t mIdx = rowIdx;
-
-    // SF layout [numMTiles, numKTiles, 32 (mTile), 4 (mTile), 4(kTile)]
-    // --> index [mTileIdx, kTileIdx, outerMIdx, innerMIdx, innerKIdx]
-
-    int32_t mTileIdx = mIdx / (32 * 4);
-    // SF vector size 16.
-    int factor = CVT_FP4_SF_VEC_SIZE * 4;
-    int32_t numKTiles = (numCols + factor - 1) / factor;
-    int64_t mTileStride = numKTiles * 32 * 4 * 4;
-
-    int32_t kTileIdx = (kIdx / 4);
-    int64_t kTileStride = 32 * 4 * 4;
-
-    // M tile layout [32, 4] is column-major.
-    int32_t outerMIdx = (mIdx % 32);
-    int64_t outerMStride = 4 * 4;
-
-    int32_t innerMIdx = (mIdx % (32 * 4)) / 32;
-    int64_t innerMStride = 4;
-
-    int32_t innerKIdx = (kIdx % 4);
-    int64_t innerKStride = 1;
-
-    // Compute the global offset.
-    int64_t SFOffset = mTileIdx * mTileStride + kTileIdx * kTileStride +
-                       outerMIdx * outerMStride + innerMIdx * innerMStride +
-                       innerKIdx * innerKStride;
-
-    return reinterpret_cast<uint8_t*>(SFout) + SFOffset;
-  }
-#endif
-  return nullptr;
-}
-
-// Define a 16 bytes packed data type.
-template <class Type>
-struct PackedVec {
-  typename TypeConverter<Type>::Type elts[4];
-};
-
-template <>
-struct PackedVec<__nv_fp8_e4m3> {
-  __nv_fp8x2_e4m3 elts[8];
-};
 
 template <class Type>
-__inline__ __device__ PackedVec<Type> compute_silu(PackedVec<Type>& vec,
-                                                   PackedVec<Type>& vec2) {
+__inline__ __device__ PackedVec<Type> compute_silu_mul(PackedVec<Type>& vec,
+                                                       PackedVec<Type>& vec2) {
   PackedVec<Type> result;
+  using packed_type = typename TypeConverter<Type>::Type;
+
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
-    if constexpr (std::is_same_v<Type, c10::Half>) {
-      half2 val(0.5f, 0.5f);
-      half2 t0 = __hmul2(vec.elts[i], val);
-      half2 t1 = __hfma2(h2tanh(t0), val, val);
-      half2 t2 = __hmul2(vec.elts[i], t1);
-      result.elts[i] = __hmul2(t2, vec2.elts[i]);
+    // silu_mul in float32
+    if constexpr (std::is_same_v<Type, half>) {
+      float2 silu_vec = silu2(__half22float2(vec.elts[i]));
+      result.elts[i] =
+          __float22half2_rn(__fmul2_rn(silu_vec, __half22float2(vec2.elts[i])));
     } else {
-      __nv_bfloat162 val(0.5f, 0.5f);
-      __nv_bfloat162 t0 = __hmul2(vec.elts[i], val);
-      __nv_bfloat162 t1 = __hfma2(h2tanh(t0), val, val);
-      __nv_bfloat162 t2 = __hmul2(vec.elts[i], t1);
-      result.elts[i] = __hmul2(t2, vec2.elts[i]);
+      float2 silu_vec = silu2(__bfloat1622float2(vec.elts[i]));
+      result.elts[i] = __float22bfloat162_rn(
+          __fmul2_rn(silu_vec, __bfloat1622float2(vec2.elts[i])));
     }
   }
   return result;
 }
 
-// Quantizes the provided PackedVec into the uint32_t output
-template <class Type, bool UE8M0_SF = false>
-__device__ uint32_t silu_and_cvt_warp_fp16_to_fp4(PackedVec<Type>& vec,
-                                                  PackedVec<Type>& vec2,
-                                                  float SFScaleVal,
-                                                  uint8_t* SFout) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-  PackedVec<Type> out_silu = compute_silu(vec, vec2);
-  // Get absolute maximum values among the local 8 values.
-  auto localMax = __habs2(out_silu.elts[0]);
-
-  // Local maximum value.
-  #pragma unroll
-  for (int i = 1; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
-    localMax = __hmax2(localMax, __habs2(out_silu.elts[i]));
-  }
-
-  // Get the absolute maximum among all 16 values (two threads).
-  localMax = __hmax2(__shfl_xor_sync(uint32_t(-1), localMax, 1), localMax);
-  // Get the final absolute maximum values.
-  float vecMax = float(__hmax(localMax.x, localMax.y));
-
-  // Get the SF (max value of the vector / max value of e2m1).
-  // maximum value of e2m1 = 6.0.
-  // TODO: use half as compute data type.
-  float SFValue = SFScaleVal * (vecMax * reciprocal_approximate_ftz(6.0f));
-  // 8 bits representation of the SF.
-  uint8_t fp8SFVal;
-  // Write the SF to global memory (STG.8).
-  if constexpr (UE8M0_SF) {
-    // Extract the 8 exponent bits from float32.
-    // float 32bits = 1 sign bit + 8 exponent bits + 23 mantissa bits.
-    uint32_t tmp = reinterpret_cast<uint32_t&>(SFValue) >> 23;
-    fp8SFVal = tmp & 0xff;
-    // Convert back to fp32.
-    reinterpret_cast<uint32_t&>(SFValue) = tmp << 23;
-  } else {
-    // Here SFValue is always positive, so E4M3 is the same as UE4M3.
-    __nv_fp8_e4m3 tmp = __nv_fp8_e4m3(SFValue);
-    reinterpret_cast<__nv_fp8_e4m3&>(fp8SFVal) = tmp;
-    // Convert back to fp32.
-    SFValue = float(tmp);
-  }
-  // Get the output scale.
-  // Recipe: final_scale = reciprocal(fp32(fp8(SFValue * SFScaleVal))) *
-  //                       reciprocal(SFScaleVal))
-  float outputScale =
-      SFValue != 0 ? reciprocal_approximate_ftz(
-                         SFValue * reciprocal_approximate_ftz(SFScaleVal))
-                   : 0.0f;
-
-  if (SFout) {
-    // Write the SF to global memory (STG.8).
-    *SFout = fp8SFVal;
-  }
-
-  // Convert the input to float.
-  float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD / 2];
-
-  #pragma unroll
-  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
-    if constexpr (std::is_same_v<Type, c10::Half>) {
-      fp2Vals[i] = __half22float2(out_silu.elts[i]);
-    } else {
-      fp2Vals[i] = __bfloat1622float2(out_silu.elts[i]);
-    }
-    fp2Vals[i].x *= outputScale;
-    fp2Vals[i].y *= outputScale;
-  }
-
-  // Convert to e2m1 values.
-  uint32_t e2m1Vec = fp32_vec_to_e2m1(fp2Vals);
-
-  // Write the e2m1 values to global memory.
-  return e2m1Vec;
-#else
-  return 0;
-#endif
-}
-
 // Use UE4M3 by default.
 template <class Type, bool UE8M0_SF = false>
-__global__ void
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(1024, 4) silu_and_cvt_fp16_to_fp4(
-#else
-silu_and_cvt_fp16_to_fp4(
-#endif
-    int32_t numRows, int32_t numCols, Type const* in, float const* SFScale,
-    uint32_t* out, uint32_t* SFout) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+__global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
+    silu_mul_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
+                             float const* SFScale, uint32_t* out,
+                             uint32_t* SFout) {
   using PackedVec = PackedVec<Type>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
@@ -316,53 +93,56 @@ silu_and_cvt_fp16_to_fp4(
       // Get the output tensor offset.
       // Same as inOffset because 8 elements are packed into one uint32_t.
       int64_t outOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
-      ;
       auto& out_pos = out[outOffset];
+
+      // Compute silu and mul
+      PackedVec out_silu_mul = compute_silu_mul(in_vec, in_vec2);
 
       auto sf_out =
           cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
                                              CVT_FP4_NUM_THREADS_PER_SF>(
               rowIdx, colIdx, numCols, SFout);
 
-      out_pos = silu_and_cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(
-          in_vec, in_vec2, SFScaleVal, sf_out);
+      out_pos = cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(out_silu_mul, SFScaleVal,
+                                                     sf_out);
     }
   }
-#endif
 }
 
 }  // namespace vllm
 
-void silu_and_mul_nvfp4_quant(torch::Tensor& output,  // [..., d]
-                              torch::Tensor& output_sf,
-                              torch::Tensor& input,  // [..., 2 * d]
-                              torch::Tensor& input_sf) {
-  TORCH_CHECK(input.dtype() == torch::kFloat16 ||
-              input.dtype() == torch::kBFloat16);
+void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
+                                     torch::Tensor& output_sf,
+                                     torch::Tensor& input,  // [..., 2 * d]
+                                     torch::Tensor& input_sf) {
   int32_t m = input.size(0);
   int32_t n = input.size(1) / 2;
+
   TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
+  TORCH_CHECK(input.scalar_type() == at::ScalarType::Half ||
+                  input.scalar_type() == at::ScalarType::BFloat16,
+              "Unsupported input data type for quantize_to_fp4.");
+
   int multiProcessorCount =
       get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
+
   auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());
   auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
   auto output_ptr = static_cast<int64_t*>(output.data_ptr());
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
   dim3 block(std::min(int(n / ELTS_PER_THREAD), 1024));
-  int const numBlocksPerSM = 2048 / block.x;
+  int const numBlocksPerSM =
+      vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
   dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
+
   VLLM_DISPATCH_HALF_TYPES(
-      input.scalar_type(), "act_and_mul_quant_kernel", [&] {
-        auto input_ptr = reinterpret_cast<scalar_t const*>(input.data_ptr());
-        VLLM_DISPATCH_BYTE_TYPES(
-            output.scalar_type(), "fused_act_and_mul_quant_kernel_nvfp4_type",
-            [&] {
-              vllm::silu_and_cvt_fp16_to_fp4<scalar_t>
-                  <<<grid, block, 0, stream>>>(
-                      m, n, input_ptr, input_sf_ptr,
-                      reinterpret_cast<uint32_t*>(output_ptr),
-                      reinterpret_cast<uint32_t*>(sf_out));
-            });
+      input.scalar_type(), "silu_and_mul_nvfp4_quant_kernel", [&] {
+        using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
+        auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
+        vllm::silu_mul_cvt_fp16_to_fp4<cuda_type><<<grid, block, 0, stream>>>(
+            m, n, input_ptr, input_sf_ptr,
+            reinterpret_cast<uint32_t*>(output_ptr),
+            reinterpret_cast<uint32_t*>(sf_out));
       });
 }

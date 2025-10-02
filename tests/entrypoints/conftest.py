@@ -184,7 +184,7 @@ def sample_enum_json_schema():
 
 
 @pytest.fixture
-def sample_guided_choice():
+def sample_structured_outputs_choices():
     return [
         "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",
         "Ruby", "Swift", "Kotlin"
@@ -211,22 +211,8 @@ def zephyr_lora_files():
 
 
 @pytest.fixture(scope="session")
-def zephyr_lora_added_tokens_files(zephyr_lora_files):
-    """Create zephyr LoRA files with added tokens once per test session."""
-    import shutil
-    from tempfile import TemporaryDirectory
-
-    from transformers import AutoTokenizer
-
-    tmp_dir = TemporaryDirectory()
-    tmp_model_dir = f"{tmp_dir.name}/zephyr"
-    shutil.copytree(zephyr_lora_files, tmp_model_dir)
-    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceH4/zephyr-7b-beta")
-    # Copy tokenizer to adapter and add some unique tokens
-    # 32000, 32001, 32002
-    added = tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"],
-                                 special_tokens=True)
-    assert added == 3
-    tokenizer.save_pretrained(tmp_model_dir)
-    yield tmp_model_dir
-    tmp_dir.cleanup()
+def opt125_lora_files() -> str:
+    """Download opt-125m LoRA files once per test session."""
+    from huggingface_hub import snapshot_download
+    return snapshot_download(
+        repo_id="peft-internal-testing/opt-125m-dummy-lora")

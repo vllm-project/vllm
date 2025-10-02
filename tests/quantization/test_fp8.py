@@ -60,8 +60,8 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str,
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
-    # vllm_runner.apply_model() relies on V0 internals.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
+    # `LLM.apply_model` requires pickling a function.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(model_id, kv_cache_dtype="fp8") as llm:
 
         def check_model(model):
@@ -104,8 +104,8 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
-    # vllm_runner.apply_model() relies on V0 internals.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
+    # `LLM.apply_model` requires pickling a function.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     if force_marlin:
         monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
