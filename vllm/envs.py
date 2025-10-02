@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION: bool = False
+    VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
@@ -174,7 +175,7 @@ if TYPE_CHECKING:
                                                  "NONE"] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
-    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
@@ -897,6 +898,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     (os.getenv("VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION", "False").lower() in
              ("true", "1")),
 
+    # Disable pynccl (using torch.distributed instead)
+    "VLLM_DISABLE_PYNCCL":
+    lambda:
+    (os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")),
+
     # If set, use the V1 code path.
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
@@ -1330,7 +1336,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # consumer. This is only applicable when using NixlConnector in a
     # disaggregated decode-prefill setup.
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
-    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120")),
+    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")),
 
     # Controls whether or not to use cudnn prefill
     "VLLM_USE_CUDNN_PREFILL":
