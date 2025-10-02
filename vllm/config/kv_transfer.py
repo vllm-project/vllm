@@ -61,6 +61,10 @@ class KVTransferConfig:
     """The Python module path to dynamically load the KV connector from.
     Only supported in V1."""
 
+    kv_load_retry_policy: Literal["local", "abort"] = "local"
+    """Policy for handling KV cache load failures. 'local' retries failed loads
+    by recomputing locally. 'abort' aborts requests that encounter load failures."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

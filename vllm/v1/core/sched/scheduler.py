@@ -922,20 +922,27 @@ class Scheduler(SchedulerInterface):
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
 
+        stopped_running_reqs: set[Request] = set()
+        stopped_preempted_reqs: set[Request] = set()
         failed_kv_load_req_ids = None
+
         if kv_connector_output and kv_connector_output.invalid_block_ids:
             # These blocks contain externally computed tokens that failed to
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
-            failed_kv_load_req_ids = self._handle_invalid_blocks(
-                kv_connector_output.invalid_block_ids
+            (
+                failed_kv_load_req_ids,
+                stopped_running,
+                stopped_preempted,
+            ) = self._handle_invalid_blocks(
+                kv_connector_output.invalid_block_ids, outputs
             )
+            stopped_running_reqs.update(stopped_running)
+            stopped_preempted_reqs.update(stopped_preempted)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
-        stopped_running_reqs: set[Request] = set()
-        stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
@@ -1464,9 +1471,21 @@ class Scheduler(SchedulerInterface):
 
         return affected_req_ids, total_affected_tokens
 
-    def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
-        total_requests_to_reschedule = 0
-        total_tokens_to_reschedule = 0
+    def _handle_invalid_blocks(
+        self, invalid_block_ids: set[int], outputs: dict[int, list[EngineCoreOutput]]
+    ) -> tuple[set[str], set[Request], set[Request]]:
+        """
+        Handle blocks that failed to load from KV connector.
+
+        Behavior depends on kv_load_retry_policy:
+        - "local": retry by recomputing affected tokens locally
+        - "abort": abort affected requests with error
+        """
+        retry_policy = (
+            self.vllm_config.kv_transfer_config.kv_load_retry_policy
+            if self.vllm_config.kv_transfer_config
+            else "local"
+        )
 
         # --- Handle async KV loads (WAITING_FOR_REMOTE_KVS) ---
         async_load_reqs = (
@@ -1480,29 +1499,70 @@ class Scheduler(SchedulerInterface):
             )
         )
 
-        total_requests_to_reschedule += len(async_affected_req_ids)
-        total_tokens_to_reschedule += num_tokens_to_reschedule
-
-        # Mark requests with async KV load failures; they will be rescheduled
-        # once loading completes
-        self.failed_recving_kv_req_ids |= async_affected_req_ids
-
         # --- Handle sync KV loads (running requests) ---
-        sync_affected_req_ids, num_tokens_to_reschedule = (
+        sync_affected_req_ids, num_tokens_to_reschedule_sync = (
             self._update_requests_with_invalid_blocks(self.running, invalid_block_ids)
         )
 
-        total_requests_to_reschedule += len(sync_affected_req_ids)
-        total_tokens_to_reschedule += num_tokens_to_reschedule
+        all_affected_req_ids = async_affected_req_ids | sync_affected_req_ids
+        total_tokens_to_reschedule = (
+            num_tokens_to_reschedule + num_tokens_to_reschedule_sync
+        )
 
-        if total_requests_to_reschedule:
-            logger.warning(
-                "Recovered from KV load failure: "
-                "%d request(s) rescheduled (%d tokens affected).",
-                total_requests_to_reschedule,
-                total_tokens_to_reschedule,
-            )
+        stopped_running_reqs: set[Request] = set()
+        stopped_preempted_reqs: set[Request] = set()
+
+        if retry_policy == "abort":
+            # abort all affected requests
+            for req_id in all_affected_req_ids:
+                request = self.requests.get(req_id)
+                if request is not None:
+                    # track which queue the request is in before we abort it
+                    if request.status == RequestStatus.RUNNING:
+                        stopped_running_reqs.add(request)
+                    else:
+                        stopped_preempted_reqs.add(request)
+
+                    # now abort and free the request
+                    request.status = RequestStatus.FINISHED_ABORTED
+                    kv_transfer_params = self._free_request(request)
+                    outputs[request.client_index].append(
+                        EngineCoreOutput(
+                            request_id=req_id,
+                            new_token_ids=[],
+                            finish_reason=request.get_finished_reason(),
+                            new_logprobs=None,
+                            new_prompt_logprobs_tensors=None,
+                            pooling_output=None,
+                            stop_reason=None,
+                            events=request.take_events(),
+                            kv_transfer_params=kv_transfer_params,
+                            trace_headers=request.trace_headers,
+                            num_cached_tokens=request.num_cached_tokens,
+                        )
+                    )
+
+            if all_affected_req_ids:
+                logger.error(
+                    "KV load failures with abort policy: "
+                    "%d request(s) aborted (%d tokens affected).",
+                    len(all_affected_req_ids),
+                    total_tokens_to_reschedule,
+                )
+        else:
+            # local retry policy - reschedule
+            # Mark requests with async KV load failures; they will be rescheduled
+            # once loading completes
+            self.failed_recving_kv_req_ids |= async_affected_req_ids
+
+            if all_affected_req_ids:
+                logger.warning(
+                    "Recovered from KV load failure: "
+                    "%d request(s) rescheduled (%d tokens affected).",
+                    len(all_affected_req_ids),
+                    total_tokens_to_reschedule,
+                )
 
         # Return the IDs of affected running requests to skip in
-        # update_from_output.
-        return sync_affected_req_ids
+        # update_from_output, plus the stopped request sets.
+        return sync_affected_req_ids, stopped_running_reqs, stopped_preempted_reqs

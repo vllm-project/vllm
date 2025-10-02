@@ -12,8 +12,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger = logging.getLogger("uvicorn.error")
 
 
 @asynccontextmanager
@@ -185,7 +184,34 @@ async def stream_service_response(
     async with client_info["client"].stream(
         "POST", endpoint, json=req_data, headers=headers
     ) as response:
-        response.raise_for_status()
+        logger.info(
+            "Decode server response status: %s for request %s",
+            response.status_code,
+            request_id,
+        )
+
+        # handle error responses
+        if response.status_code >= 400:
+            error_body = await response.aread()
+            try:
+                import json
+
+                error_data = json.loads(error_body)
+                logger.error(
+                    "Decode server error %d for request %s: %s",
+                    response.status_code,
+                    request_id,
+                    error_data.get("error", {}).get("message", "no message"),
+                )
+            except json.JSONDecodeError:
+                logger.error(
+                    "Decode server error %d for request %s: %s",
+                    response.status_code,
+                    request_id,
+                    error_body.decode("utf-8"),
+                )
+            response.raise_for_status()
+
         async for chunk in response.aiter_bytes():
             yield chunk
 
@@ -216,10 +242,36 @@ async def _handle_completions(api: str, request: Request):
 
         # Stream response from decode service
         async def generate_stream():
+            chunk_count = 0
             async for chunk in stream_service_response(
                 decode_client_info, api, req_data, request_id=request_id
             ):
+                chunk_count += 1
+                # parse SSE data to log key fields
+                chunk_str = chunk.decode("utf-8")
+                if chunk_str.startswith("data: "):
+                    import json
+
+                    try:
+                        data = json.loads(chunk_str[6:])
+                        if isinstance(data, dict) and "choices" in data:
+                            for choice in data["choices"]:
+                                finish_reason = choice.get("finish_reason")
+                                if finish_reason:
+                                    logger.info(
+                                        "Chunk %d request %s: finish_reason=%s",
+                                        chunk_count,
+                                        request_id,
+                                        finish_reason,
+                                    )
+                    except json.JSONDecodeError:
+                        pass
                 yield chunk
+            logger.info(
+                "Decode stream completed: %d chunks for request %s",
+                chunk_count,
+                request_id,
+            )
 
         return StreamingResponse(generate_stream(), media_type="application/json")
 
