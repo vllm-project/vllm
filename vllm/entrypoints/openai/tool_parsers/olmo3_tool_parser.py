@@ -66,8 +66,10 @@ class Olmo3PythonicToolParser(ToolParser):
         """
         original_model_output = model_output
         # Remove xml tags.
-        model_output = (model_output.replace("<function_calls>", "").replace(
-            "</function_calls>", "").strip())
+        match = re.search(r"<function_calls>(.*?)</function_calls>",
+                          model_output, re.DOTALL)
+        if match:
+            model_output = match.group(1).strip()
         # Make the newline separated function calls into a list.
         model_output = ", ".join([
             line.strip() for line in model_output.splitlines() if line.strip()
@@ -132,8 +134,7 @@ class Olmo3PythonicToolParser(ToolParser):
             if current_text.startswith("<function_calls>"):
                 current_text = current_text[len("<function_calls>"):]
             if current_text.endswith("</function_calls>"):
-                current_text = current_text[:current_text.
-                                            rfind("</function_calls>")]
+                current_text = current_text[:-len("</function_calls>")]
 
             valid_and_added_text = _make_valid_python(current_text)
             if valid_and_added_text is None:
