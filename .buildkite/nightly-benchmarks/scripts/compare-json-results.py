@@ -317,7 +317,7 @@ if __name__ == "__main__":
     plot = args.plot
     # For Plot feature, assign y axis from one of info_cols
     y_axis_index = info_cols.index(args.xaxis) if args.xaxis in info_cols else 6
-    with open("perf_comparison.html", "a") as text_file:
+    with open("perf_comparison.html", "w") as text_file:
         for i in range(len(data_cols_to_compare)):
             output_df, raw_data_cols = compare_data_columns(
                 files,
@@ -341,7 +341,7 @@ if __name__ == "__main__":
                     f"Expected subset: {filtered_info_cols}, "
                     f"but DataFrame has: {list(output_df.columns)}"
                 )
-            output_df_sorted = output_df.sort_values(by=existing_group_cols)
+            #output_df_sorted = output_df.sort_values(by=existing_group_cols)
             output_df_sorted = output_df.sort_values(by=args.xaxis)
             output_groups = output_df_sorted.groupby(existing_group_cols, dropna=False)
             for name, group in output_groups:
