@@ -248,6 +248,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 use_fp8=use_fp8,
             )
 
+            print(f"MAX NUM TOKENS = {moe.max_num_tokens}")
+
             handle = all2all_manager.get_handle(all_to_all_args)
             prepare_finalize = DeepEPHybridPrepareAndFinalize(
                 handle,
@@ -1303,6 +1305,7 @@ class FusedMoE(CustomOp):
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
         )
+        print(f"VLLM_MOE_DP_CHUNK_SIZE={envs.VLLM_MOE_DP_CHUNK_SIZE}")
         self.moe_config: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
