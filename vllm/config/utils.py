@@ -8,9 +8,9 @@ import inspect
 import json
 import pathlib
 import textwrap
-from collections.abc import Mapping, Sequence, Set
-from dataclasses import MISSING, Field, field, fields, is_dataclass
-from typing import TYPE_CHECKING, Any, TypeVar
+from collections.abc import Iterable, Mapping, Sequence, Set
+from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import regex as re
 from typing_extensions import runtime_checkable

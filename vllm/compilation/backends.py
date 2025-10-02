@@ -500,6 +500,7 @@ class VllmBackend:
                 with open(filepath) as f:
                     hash_content.append(f.read())
             except Exception:
+                logger.warning("Failed to read file %s", filepath)
                 continue
         code_hash = hashlib.sha256(
             "\n".join(hash_content).encode()).hexdigest()
