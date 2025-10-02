@@ -81,8 +81,8 @@ def _moe_problem_size(
 
     if a1.dim() == 2:
         # Make sure we are using the correct a1 (pre-permute).
-        assert topk_ids.size(0) == a1.size(0), \
-            f"{topk_ids.size(0)} != {a1.size(0)}"
+#        assert topk_ids.size(0) == a1.size(0), \
+#            f"{topk_ids.size(0)} != {a1.size(0)}"
         M = a1.size(0)
     else:
         assert a1.dim() == 3

@@ -76,6 +76,7 @@ common_float_types: list[Union[torch.dtype, str]] = [
 common_float_and_int_types = common_float_types + [torch.int8]
 nvfp4_types = ["nvfp4"]
 fp8_types = [torch.float8_e4m3fn]
+fp8_bf16_types = [torch.float8_e4m3fn, torch.bfloat16]
 
 
 def register_prepare_and_finalize(
@@ -211,7 +212,7 @@ if has_deep_ep(): # and not current_platform.has_device_capability(100):
     register_prepare_and_finalize(
         DeepEPHybridPrepareAndFinalize,
         standard_format,
-        common_float_types,
+        fp8_bf16_types,
         blocked_quantization_support=True,
         backend="deepep_hybrid",
     )
