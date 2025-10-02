@@ -190,6 +190,7 @@ def run_model(
         return output.cpu()
 
 
+# TODO use_inductor_cg_partition both true and false
 def test_multi_graph_piecewise_compile_outputs_equal():
     outputs = []
 
@@ -237,6 +238,7 @@ def test_multi_graph_piecewise_compile_outputs_equal():
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
             level=CompilationLevel.NO_COMPILATION,
+            use_inductor_graph_partition=False,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.NONE
