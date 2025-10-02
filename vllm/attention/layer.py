@@ -153,7 +153,6 @@ class Attention(nn.Module, AttentionLayerBase):
         # the quant op after this attention layer.
         self._o_scale_float: Optional[float] = None
 
-        
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads

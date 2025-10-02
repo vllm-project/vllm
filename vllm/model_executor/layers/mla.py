@@ -145,7 +145,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
 
         q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
             positions, q[..., self.qk_nope_head_dim:], k_pe)
-        
+
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(hidden_states, q_c, positions,
                                          self.rotary_emb)
