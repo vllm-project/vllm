@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import hashlib
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 import safetensors
@@ -55,10 +55,7 @@ class ReqMeta:
 
 @dataclass
 class SharedStorageConnectorMetadata(KVConnectorMetadata):
-    requests: list[ReqMeta]
-
-    def __init__(self):
-        self.requests = []
+    requests: list[ReqMeta] = field(default_factory=list)
 
     def add_request(
         self,

@@ -1160,11 +1160,12 @@ class EngineArgs:
 
         # Set default arguments for V1 Engine.
         self._set_default_args(usage_context, model_config)
-        # Disable chunked prefill for POWER (ppc64le)/ARM/s390x CPUs in V1
+        # Disable chunked prefill for POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture(
-        ) in (CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM):
-            logger.info("Chunked prefill is not supported for ARM and POWER "
-                        "and S390X CPUs; "
+        ) in (CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM,
+              CpuArchEnum.RISCV):
+            logger.info("Chunked prefill is not supported for ARM and POWER, "
+                        "S390X and RISC-V CPUs; "
                         "disabling it for V1 backend.")
             self.enable_chunked_prefill = False
         assert self.enable_chunked_prefill is not None
@@ -1367,6 +1368,7 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
+            is_encoder_decoder=model_config.is_encoder_decoder,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,

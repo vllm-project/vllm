@@ -26,7 +26,8 @@ def run_gpqa_eval(model_name: str, base_url: str) -> float:
     # Build the command to run the evaluation
     cmd = [
         sys.executable, "-m", "gpt_oss.evals", "--eval", "gpqa", "--model",
-        model_name, "--reasoning-effort", "low", "--base-url", base_url
+        model_name, "--reasoning-effort", "low", "--base-url", base_url,
+        "--n-threads", "200"
     ]
 
     try:
@@ -72,8 +73,6 @@ def test_gpqa_correctness(request):
 
     # Add standard server arguments
     server_args.extend([
-        "--max-model-len",
-        "32768",
         "--trust-remote-code",
     ])
 

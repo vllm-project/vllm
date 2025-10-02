@@ -70,6 +70,7 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
+    "DeepseekV32ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
     "Dots1ForCausalLM": ("dots1", "Dots1ForCausalLM"),
     "Ernie4_5ForCausalLM": ("ernie45", "Ernie4_5ForCausalLM"),
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
@@ -306,9 +307,10 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
-    "TransformersModel": ("transformers", "TransformersModel"),
+    "TransformersEmbeddingModel": ("transformers_pooling", "TransformersEmbeddingModel"),  # noqa: E501
+    "TransformersForSequenceClassification": ("transformers_pooling", "TransformersForSequenceClassification"),  # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
-    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
 }
 # yapf: enable
 

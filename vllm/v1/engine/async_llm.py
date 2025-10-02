@@ -290,7 +290,7 @@ class AsyncLLM(EngineClient):
             return queue
 
         # Fan out child requests (for n>1).
-        parent_request = ParentRequest(request_id, params)
+        parent_request = ParentRequest(request_id, request.sampling_params)
         for idx in range(params.n):
             request_id, params = parent_request.get_child_info(idx)
             child_request = request if idx == params.n - 1 else copy(request)
