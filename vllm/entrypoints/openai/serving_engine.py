@@ -247,11 +247,10 @@ class OpenAIServing:
     async def _get_processor(self) -> Processor:
         if not hasattr(self, "_processor"):
             vllm_config = await self.engine_client.get_vllm_config()
-            if vllm_config.model_config.skip_tokenizer_init:
+            if self.model_config.skip_tokenizer_init:
                 tokenizer = None
             else:
-                tokenizer = init_tokenizer_from_configs(
-                    vllm_config.model_config)
+                tokenizer = init_tokenizer_from_configs(self.model_config)
             self._processor = Processor(vllm_config, tokenizer)
         return self._processor
 
