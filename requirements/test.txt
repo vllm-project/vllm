@@ -251,11 +251,27 @@ gitdb==4.0.12
 gitpython==3.1.44
     # via mlflow-skinny
 google-api-core==2.24.2
-    # via opencensus
+    # via
+    #   google-cloud-core
+    #   google-cloud-storage
+    #   opencensus
 google-auth==2.40.2
     # via
     #   databricks-sdk
     #   google-api-core
+    #   google-cloud-core
+    #   google-cloud-storage
+    #   runai-model-streamer-gcs
+google-cloud-core==2.4.3
+    # via google-cloud-storage
+google-cloud-storage==3.4.0
+    # via runai-model-streamer-gcs
+google-crc32c==1.7.1
+    # via
+    #   google-cloud-storage
+    #   google-resumable-media
+google-resumable-media==2.7.2
+    # via google-cloud-storage
 googleapis-common-protos==1.70.0
     # via google-api-core
 graphene==3.4.3
@@ -890,6 +906,7 @@ requests==2.32.3
     #   docker
     #   evaluate
     #   google-api-core
+    #   google-cloud-storage
     #   huggingface-hub
     #   lightly
     #   lm-eval
@@ -929,6 +946,8 @@ rtree==1.4.0
     # via torchgeo
 runai-model-streamer==0.14.0
     # via -r requirements/test.in
+runai-model-streamer-gcs==0.14.0
+    # via runai-model-streamer
 runai-model-streamer-s3==0.14.0
     # via runai-model-streamer
 s3transfer==0.10.3
