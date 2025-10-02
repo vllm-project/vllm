@@ -55,8 +55,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP, SupportsQuant)
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
-                    flatten_bn, make_empty_intermediate_tensors_factory,
-                    maybe_prefix)
+                    make_empty_intermediate_tensors_factory, maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -291,12 +290,12 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def _get_mm_fields_config(
         self,
-        hf_inputs,
-        hf_processor_mm_kwargs,
-        num_image_patches: torch.Tensor = None,
-    ):
+        hf_inputs: "BatchFeature",
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
         # HF Processors always return a mask but vLLM doesn't need it
         hf_inputs.pop("attention_mask", None)
+        num_image_patches = hf_inputs.get("num_image_patches")
         mm_fields = {
             key: MultiModalFieldConfig.flat_from_sizes("image",
                                                        num_image_patches)
@@ -304,6 +303,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         }
         mm_fields["image_embeds"] = MultiModalFieldConfig.flat_from_sizes(
             "image", num_image_patches)
+
+        # Keep `num_patches` as batched, as it always has `bs` as first dim
+        mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
+        mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched("image")
         mm_fields["num_image_patches"] = MultiModalFieldConfig.batched("image")
         return mm_fields
 
@@ -318,7 +321,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         Apply the HF processor on the prompt text and multi-modal data
         together.
 
-        In addition, return whether prompt replacements have been applied.
+        In contrast to the base class, this method always returns
+        `mm_token_type_ids` from HF processor. Additionally, return whether
+        prompt replacements have been applied.
         """
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
         processor_data["return_mm_token_type_ids"] = True
@@ -330,14 +335,16 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             tok_kwargs=tokenization_kwargs,
         )
         processed_data.update(passthrough_data)
-
         prompt_ids, = processed_data.pop("input_ids").tolist()
-        mm_token_type_ids = processed_data.pop(
-            "mm_token_type_ids"
-        ) if "mm_token_type_ids" in processed_data else processed_data.pop(
-            "token_type_ids")  # for gemma3 only
 
-        return prompt_ids, processed_data, mm_token_type_ids
+        is_update_applied = self._hf_processor_applies_updates(
+            prompt_text=prompt_text,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
+        )
+
+        return prompt_ids, processed_data, is_update_applied
 
     def apply(
         self,
@@ -364,17 +371,21 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             # into string
             prompt = hf_processor.decode(prompt)
 
-        (prompt_ids, processed_data,
-         mm_token_type_ids) = self._apply_hf_processor_text_mm(
-             prompt_text=prompt,
-             mm_items=mm_items,
-             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-             tokenization_kwargs=tokenization_kwargs,
-         )
+        # Bypass cached processor and always apply to the full set of mm inputs
+        prompt_ids, processed_data, _ = self._apply_hf_processor_text_mm(
+            prompt_text=prompt,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
+        )
 
-        # HF processor will return `mm_token_type_ids` from which
-        # we can infer mm_placeholders. Until then hardcode to make code run
-        # Below tested on Llava. Prompts and `mm_token_type_ids` are always bs=1
+        # For gemma3 we check `token_type_ids` as the key
+        token_type_key = "mm_token_type_ids" if "mm_token_type_ids" \
+            in processed_data else "token_type_ids"
+        mm_token_type_ids = processed_data.pop(token_type_key)
+
+        # We can infer vLLM style placeholder from token type ids, if we split
+        # it for each input `mm_data`.
         mm_positions = torch.where(mm_token_type_ids == 1)[1]
         images = mm_items.get_items("image", ImageProcessorItems)
         multimodal_config = self.info.ctx.model_config.multimodal_config
@@ -403,14 +414,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             ]
             mm_placeholders = {"image": ranges}
 
-        num_image_patches = torch.tensor(
-            mm_tokens_per_modality["num_image_patches"]
-        ) if "num_image_patches" in mm_tokens_per_modality else None
-        processed_data['num_image_patches'] = num_image_patches
+        processed_data['num_image_patches'] = torch.tensor(
+            mm_tokens_per_modality["num_image_patches"])
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             processed_data,
-            self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
-                                       num_image_patches),
+            self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
         )
 
         # Use overrides if provided; fallback to data-dependent hashing.
@@ -468,9 +476,6 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             self.ignore_unexpected_suffixes.append(".bias")
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
-        # TODO: @raushan, use the public `model.set_attn_implementation()`
-        # method once its checks are fixed in Transformers.
-        self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(
                 self.config,
@@ -478,6 +483,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
+        self.model.set_attn_implementation({"text_config": "vllm"})
         self.pipeline_parallel()
         self.tensor_parallel()
 
@@ -755,17 +761,6 @@ class TransformersForCausalLM(TransformersBase):
         return logits
 
 
-def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
-    """Flatten until a list of tensors can be concatenated then do concat"""
-
-    def _can_concat(x: list[torch.Tensor]):
-        return len(set(map(lambda _x: _x.shape[1:], x))) == 1
-
-    if _can_concat(x):
-        return torch.concat(x)
-    return flatten_and_concat(flatten_bn(x))
-
-
 @MULTIMODAL_REGISTRY.register_processor(
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
@@ -843,9 +838,6 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
                 pixel_values, **kwargs)
 
             if isinstance(vision_embeddings, torch.Tensor):
-                if isinstance(num_image_patches, list):
-                    num_image_patches = torch.cat(num_image_patches)
-
                 if vision_embeddings.ndim == 2:
                     vision_embeddings = vision_embeddings.unsqueeze(0)
 
