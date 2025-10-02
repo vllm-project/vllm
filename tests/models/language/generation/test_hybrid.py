@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
 
@@ -400,8 +400,8 @@ def test_apc_single_prompt(
     except ValueError:
         pass
 
-    compare_operator: Callable = check_logprobs_close if num_logprobs > 0 \
-                                            else check_outputs_equal
+    compare_operator: Callable[..., Any] = check_logprobs_close \
+          if num_logprobs > 0 else check_outputs_equal
 
     MULTIPLE = 300
 
@@ -466,8 +466,8 @@ def test_apc_single_prompt_block_align_alignment(
     except ValueError:
         pass
 
-    compare_operator: Callable = check_logprobs_close if num_logprobs > 0 \
-                                            else check_outputs_equal
+    compare_operator: Callable[..., Any] = check_logprobs_close \
+                    if num_logprobs > 0 else check_outputs_equal
 
     MULTIPLE = 300
 
@@ -548,8 +548,8 @@ def test_apc_multiple_prompts_all_cached_outputs(
     except ValueError:
         pass
 
-    compare_operator: Callable = check_logprobs_close if num_logprobs > 0 \
-                                            else check_outputs_equal
+    compare_operator: Callable[..., Any] = check_logprobs_close \
+        if num_logprobs > 0 else check_outputs_equal
 
     MULTIPLE = 300
 
@@ -615,8 +615,8 @@ def test_apc_multiple_prompts_block_align_alignment(
     except ValueError:
         pass
 
-    compare_operator: Callable = check_logprobs_close if num_logprobs > 0 \
-                                            else check_outputs_equal
+    compare_operator: Callable[..., Any] = check_logprobs_close \
+        if num_logprobs > 0 else check_outputs_equal
 
     MULTIPLE = 300
 
@@ -686,8 +686,8 @@ def test_apc_multiple_prompts_partial_cached_outputs(
     except ValueError:
         pass
 
-    compare_operator: Callable = check_logprobs_close if num_logprobs > 0 \
-                                            else check_outputs_equal
+    compare_operator: Callable[..., Any] = check_logprobs_close \
+        if num_logprobs > 0 else check_outputs_equal
 
     MULTIPLE = 300
 
