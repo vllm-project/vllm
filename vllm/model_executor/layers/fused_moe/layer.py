@@ -221,10 +221,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             quant_dtype = None
             if use_fp8_dispatch:
                 assert quant_config is not None
-                scale_dim = quant_config.scale_shape(
+                temp = quant_config.scale_shape(
                     moe.max_num_tokens,
                     moe.hidden_dim,
-                )[-1]
+                )
+                if temp is not None:
+                    scale_dim = temp[-1]
                 scale_type_size = (torch.float32.itemsize
                                    )  # aiter quantization uses float32 scale
                 quant_dtype = quant_config.quant_dtype
