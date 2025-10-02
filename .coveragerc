@@ -1,5 +1,6 @@
 [run]
 source = vllm
+relative_files = True
 omit =
     */tests/*
     */test_*
@@ -11,6 +12,14 @@ omit =
     */examples/*
     */benchmarks/*
     */docs/*
+
+[paths]
+# Normalize all variants of the vllm package location to the single canonical "vllm" path
+source =
+    vllm
+    /vllm-workspace/vllm
+    */site-packages/vllm
+    */dist-packages/vllm
 
 [report]
 exclude_lines =
