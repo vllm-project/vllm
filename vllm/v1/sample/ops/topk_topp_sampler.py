@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from typing import Optional
 
 import torch
@@ -74,15 +73,12 @@ class TopKTopPSampler(nn.Module):
             self.forward = self.forward_cpu
         elif (logprobs_mode not in ("processed_logits", "processed_logprobs")
               and current_platform.is_rocm()
-              and os.getenv("VLLM_ROCM_USE_AITER_SAMPLER", "0") == "1"):
+              and envs.VLLM_ROCM_USE_AITER_SAMPLER):
             try:
                 import importlib
 
                 importlib.import_module("aiter.ops.sampling")
-                from aiter.ops.triton.topk import topk as triton_topk
-
                 self.aiter_ops = torch.ops.aiter
-                self.triton_topk = triton_topk
                 logger.info_once(
                     "Using aiter sampler on ROCm (lazy import, sampling-only)."
                 )
