@@ -199,6 +199,7 @@ def split_json_by_tp_pp(
 
     return saved_paths
 
+
 def _add_limit_line(fig, y_value, label):
     # Visible dashed line + annotation
     fig.add_hline(
@@ -211,18 +212,28 @@ def _add_limit_line(fig, y_value, label):
     # Optional: add a legend item (as a transparent helper trace)
     if plot and plotly_found:
         import plotly.graph_objects as go
-        fig.add_trace(go.Scatter(
-            x=[None], y=[None],
-            mode="lines",
-            line=dict(dash="dash",
-                  color="red" if "ttft" in label.lower() else "blue"),
-            name=f"{label}"
-        ))
+
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="lines",
+                line=dict(
+                    dash="dash", color="red" if "ttft" in label.lower() else "blue"
+                ),
+                name=f"{label}",
+            )
+        )
 
 
 def _find_concurrency_col(df: pd.DataFrame) -> str:
-    for c in ["# of max concurrency.", "# of max concurrency", "Max Concurrency",
-              "max_concurrency", "Concurrency"]:
+    for c in [
+        "# of max concurrency.",
+        "# of max concurrency",
+        "Max Concurrency",
+        "max_concurrency",
+        "Concurrency",
+    ]:
         if c in df.columns:
             return c
     # Fallback: guess an integer-like column (harmless if unused)
@@ -231,15 +242,26 @@ def _find_concurrency_col(df: pd.DataFrame) -> str:
             return c
     return "# of max concurrency."
 
-def _highlight_threshold(df: pd.DataFrame, threshold: float) -> "pd.io.formats.style.Styler":
+
+def _highlight_threshold(
+    df: pd.DataFrame, threshold: float
+) -> "pd.io.formats.style.Styler":
     """Highlight numeric per-configuration columns with value <= threshold."""
     conc_col = _find_concurrency_col(df)
-    key_cols = [c for c in ["Model", "Dataset Name", "Input Len", "Output Len", conc_col] if c in df.columns]
-    conf_cols = [c for c in df.columns if c not in key_cols and not str(c).startswith("Ratio")]
+    key_cols = [
+        c
+        for c in ["Model", "Dataset Name", "Input Len", "Output Len", conc_col]
+        if c in df.columns
+    ]
+    conf_cols = [
+        c for c in df.columns if c not in key_cols and not str(c).startswith("Ratio")
+    ]
     conf_cols = [c for c in conf_cols if pd.api.types.is_numeric_dtype(df[c])]
     return df.style.map(
-        lambda v: "background-color:#e6ffe6;font-weight:bold;" if pd.notna(v) and v <= threshold else "",
-        subset=conf_cols
+        lambda v: "background-color:#e6ffe6;font-weight:bold;"
+        if pd.notna(v) and v <= threshold
+        else "",
+        subset=conf_cols,
     )
 
 
@@ -271,11 +293,18 @@ if __name__ == "__main__":
         default="p99",
         help="take median|p99 for latency like TTFT/TPOT",
     )
-    parser.add_argument("--ttft-max-ms", type=float, default=3000.0,
-                    help="Reference limit for TTFT plots (ms)")
-    parser.add_argument("--tpot-max-ms", type=float, default=100.0,
-                    help="Reference limit for TPOT plots (ms)")
-
+    parser.add_argument(
+        "--ttft-max-ms",
+        type=float,
+        default=3000.0,
+        help="Reference limit for TTFT plots (ms)",
+    )
+    parser.add_argument(
+        "--tpot-max-ms",
+        type=float,
+        default=100.0,
+        help="Reference limit for TPOT plots (ms)",
+    )
 
     args = parser.parse_args()
 
@@ -342,29 +371,39 @@ if __name__ == "__main__":
                     f"Expected subset: {filtered_info_cols}, "
                     f"but DataFrame has: {list(output_df.columns)}"
                 )
-            #output_df_sorted = output_df.sort_values(by=existing_group_cols)
+            # output_df_sorted = output_df.sort_values(by=existing_group_cols)
             output_df_sorted = output_df.sort_values(by=args.xaxis)
             output_groups = output_df_sorted.groupby(existing_group_cols, dropna=False)
             for name, group in output_groups:
-                group_name = ",".join(map(str, name)).replace(",", "_").replace("/","-")
+                group_name = (
+                    ",".join(map(str, name)).replace(",", "_").replace("/", "-")
+                )
                 group_html_name = "perf_comparison_" + group_name + ".html"
 
                 metric_name = str(data_cols_to_compare[i]).lower()
                 if "tok/s" in metric_name:
                     html = group.to_html()
                 elif "ttft" in metric_name:
-                    styler = (
-                      _highlight_threshold(group, args.ttft_max_ms)
-                      .format({c: "{:.2f}" for c in group.select_dtypes("number").columns}, na_rep="—")
+                    styler = _highlight_threshold(group, args.ttft_max_ms).format(
+                        {c: "{:.2f}" for c in group.select_dtypes("number").columns},
+                        na_rep="—",
                     )
-                    html = styler.to_html(table_attributes='border="1" class="dataframe"')
-                elif "tpot" in metric_name or "median" in metric_name or "p99" in metric_name:
-                    styler = (
-                      _highlight_threshold(group, args.tpot_max_ms)
-                      .format({c: "{:.2f}" for c in group.select_dtypes("number").columns}, na_rep="—")
+                    html = styler.to_html(
+                        table_attributes='border="1" class="dataframe"'
                     )
-                    html = styler.to_html(table_attributes='border="1" class="dataframe"')
-                
+                elif (
+                    "tpot" in metric_name
+                    or "median" in metric_name
+                    or "p99" in metric_name
+                ):
+                    styler = _highlight_threshold(group, args.tpot_max_ms).format(
+                        {c: "{:.2f}" for c in group.select_dtypes("number").columns},
+                        na_rep="—",
+                    )
+                    html = styler.to_html(
+                        table_attributes='border="1" class="dataframe"'
+                    )
+
                 text_file.write(html_msgs_for_data_cols[i])
                 text_file.write(html)
                 with open(group_html_name, "a") as sub_text_file:
@@ -382,7 +421,9 @@ if __name__ == "__main__":
                             var_name="Configuration",
                             value_name=data_cols_to_compare[i],
                         )
-                        title = data_cols_to_compare[i] + " vs " + info_cols[y_axis_index]
+                        title = (
+                            data_cols_to_compare[i] + " vs " + info_cols[y_axis_index]
+                        )
                         # Create Plotly line chart
                         fig = px.line(
                             df_melted,
@@ -396,9 +437,17 @@ if __name__ == "__main__":
                         # ---- Add threshold lines based on metric name ----
                         if "ttft" in metric_name:
                             _add_limit_line(fig, args.ttft_max_ms, "TTFT limit")
-                        elif "tpot" in metric_name or "median" in metric_name or "p99" in metric_name :
+                        elif (
+                            "tpot" in metric_name
+                            or "median" in metric_name
+                            or "p99" in metric_name
+                        ):
                             _add_limit_line(fig, args.tpot_max_ms, "TPOT limit")
 
                         # Export to HTML
-                        text_file.write(fig.to_html(full_html=True, include_plotlyjs="cdn"))
-                        sub_text_file.write(fig.to_html(full_html=True, include_plotlyjs="cdn"))
+                        text_file.write(
+                            fig.to_html(full_html=True, include_plotlyjs="cdn")
+                        )
+                        sub_text_file.write(
+                            fig.to_html(full_html=True, include_plotlyjs="cdn")
+                        )
