@@ -173,6 +173,21 @@ def test_custom_compile_config(
     run_model(compilation_config, model, **model_kwargs)
 
 
+@pytest.mark.parametrize(
+    "optimization_level",
+    [CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE],
+)
+def test_fp8_kv_scale_compile(optimization_level: int):
+    model = "Qwen/Qwen2-0.5B"
+    model_kwargs = {
+        "quantization": "fp8",
+        "kv_cache_dtype": "fp8_e4m3",
+        "calculate_kv_scales": True,
+        "max_model_len": 512,
+    }
+    run_model(optimization_level, model, **model_kwargs)
+
+
 MODELS_FP8: list[tuple[str, dict[str, Any], _Backend]] = []
 MODELS_FP4: list[tuple[str, dict[str, Any], _Backend]] = []
 MODELS: list[tuple[str, dict[str, Any], _Backend]] = []  # tp-only
@@ -214,29 +229,12 @@ if current_platform.is_cuda():
 elif current_platform.is_rocm():
     MODELS_FP8 += [("amd/Llama-3.1-8B-Instruct-FP8-KV", {}, _Backend.TRITON_ATTN)]
 
-
-@pytest.mark.parametrize(
-    "optimization_level",
-    [CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE],
-)
-def test_fp8_kv_scale_compile(optimization_level: int):
-    model = "Qwen/Qwen2-0.5B"
-    model_kwargs = {
-        "quantization": "fp8",
-        "kv_cache_dtype": "fp8_e4m3",
-        "calculate_kv_scales": True,
-        "max_model_len": 512,
-    }
-    run_model(optimization_level, model, **model_kwargs)
-
-
 INDUCTOR_GRAPH_PARTITION = (
-    [False, True] if (is_torch_equal_or_newer("2.9.0.dev")) else [False]
+    [True, False] if (is_torch_equal_or_newer("2.9.0.dev")) else [False]
 )
 
 # TODO(luka) test both in nightly
-# TODO(luka) change to -
-CUSTOM_OPS_FP8 = ["+quant_fp8"]  # , "+quant_fp8"]
+CUSTOM_OPS_FP8 = ["-quant_fp8"]  # , "+quant_fp8"]
 
 
 @pytest.mark.parametrize(
@@ -308,11 +306,8 @@ def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
 @pytest.mark.parametrize(
     "model_name, model_kwargs, backend, custom_ops",
     # Toggle RMSNorm and QuantFP8 for FP8 models
-    list(
-        flat_product(
-            MODELS_FP8, custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM)
-        )
-    )
+    list(flat_product(MODELS_FP8, ["+quant_fp8,+rms_norm"]))
+    # custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM))) # TODO
     # Toggle RMSNorm for FP4 models and unquant models
     + list(flat_product(MODELS_FP4 + MODELS, CUSTOM_OPS_RMS_NORM)),
 )
