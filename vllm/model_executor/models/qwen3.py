@@ -277,8 +277,9 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
+        "unembed_tokens": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
+    embedding_padding_modules = ["lm_head", "unembed_tokens"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
