@@ -1776,13 +1776,14 @@ class FusedMoE(CustomOp):
         if use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
-            grouped_topk_impl = grouped_topk
             if is_rocm_aiter_moe_enabled():
                 if not is_rocm_aiter_fusion_shared_expert_enabled():
                     assert num_fused_shared_experts == 0
                 grouped_topk_impl = partial(
                     grouped_topk_aiter,
                     num_fused_shared_experts=num_fused_shared_experts)
+            else:
+                grouped_topk_impl = grouped_topk
             topk_weights, topk_ids = grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
