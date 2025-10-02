@@ -367,7 +367,7 @@ class CompilationConfig:
     FULL_AND_PIECEWISE instead.
     """
 
-    use_inductor_graph_partition: bool = False
+    use_inductor_graph_partition: bool = is_torch_equal_or_newer("2.9.0")
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
