@@ -65,7 +65,6 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         length_from_prompt_token_ids_or_embeds, round_up,
                         supports_dynamo)
 from vllm.utils.jsontree import json_map_leaves
-from vllm.utils.nano_split import prepare_nano_split_and_set_hooks
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -103,6 +102,7 @@ from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.nano_batch_split import nano_ubatch_split
 from vllm.v1.worker.ubatch_splitting import (check_ubatch_thresholds,
                                              ubatch_split)
 from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
@@ -1069,12 +1069,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         uniform_decode = \
             (max_num_scheduled_tokens == self.uniform_decode_query_len) and \
             (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-        ubatch_slices, num_tokens_after_padding = \
-            ubatch_split(num_scheduled_tokens,
-                         num_tokens_unpadded,
-                         num_tokens_padded,
-                         uniform_decode=uniform_decode,
-                         vllm_config=self.vllm_config)
+        if self.compilation_config.enable_nano_batch_split:
+            ubatch_slices, num_tokens_after_padding = \
+                nano_ubatch_split(
+                    num_scheduled_tokens,
+                    num_tokens_unpadded,
+                    num_tokens_padded)
+        else:
+            ubatch_slices, num_tokens_after_padding = \
+                ubatch_split(num_scheduled_tokens,
+                            num_tokens_unpadded,
+                            num_tokens_padded,
+                            uniform_decode=uniform_decode,
+                            vllm_config=self.vllm_config)
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -1290,12 +1297,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
                 max_num_scheduled_tokens, ubatch_slices,
                 num_tokens_after_padding, use_cascade_attn)
-
-    def _prepare_nano_split(self, scheduler_output: "SchedulerOutput"):
-        prepare_nano_split_and_set_hooks(scheduler_output=scheduler_output,
-                                         input_batch=self.input_batch,
-                                         attn_groups=self.attn_groups,
-                                         kv_cache_config=self.kv_cache_config)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -2000,11 +2001,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                Optional[IntermediateTensors], dict[str, Any]]:
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if ubatch_slices:
+        if ubatch_slices and self.parallel_config.enable_dbo:
             assert num_tokens_after_padding is not None
             num_input_tokens = int(num_tokens_after_padding[0].item() * 2)
             self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-        elif ubatch_slices is None:
+        else:
             num_input_tokens = self._get_num_input_tokens(num_scheduled_tokens)
             num_pad, num_tokens_after_padding = self.get_dp_padding(
                 num_input_tokens)
@@ -2369,7 +2370,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # This is currently to get around the assert in the DPMetadata
         # where it wants `num_tokens_across_dp` to align with `num_tokens`
-        if ubatch_slices is not None:
+        if ubatch_slices is not None and self.parallel_config.enable_dbo:
             num_input_tokens = ubatch_slices[0].num_tokens
 
         # Run the model.
@@ -3674,7 +3675,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.vllm_config,
                     self.device,
                     num_metadata_builders=1
-                    if not self.parallel_config.enable_dbo else 2,
+                    if not self.parallel_config.enable_dbo
+                    and not self.compilation_config.enable_nano_batch_split
+                    else 2,
                 )
 
                 attn_groups.append(attn_group)

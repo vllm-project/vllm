@@ -43,7 +43,6 @@ class FakeModule(torch.nn.Module):
 def get_split_config(
     batch_size: int,
     num_tokens: list[int],
-    cached_seqlens: list[int],
     max_num_nano_batches: int,
     min_nano_split_tokens: int,
 ) -> NanoSplitConfig:

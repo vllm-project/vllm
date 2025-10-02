@@ -205,15 +205,10 @@ class NanoSplitManager:
         self,
         batch_size: int,
         num_tokens: list[int],
-        cached_seqlens: list[int],
     ) -> NanoSplitConfig:
-        self.cached_config = get_split_config(
-            batch_size,
-            num_tokens,
-            cached_seqlens,
-            self.max_num_nano_batches,
-            self.min_nano_split_tokens,
-        )
+        self.cached_config = get_split_config(batch_size, num_tokens,
+                                              self.max_num_nano_batches,
+                                              self.min_nano_split_tokens)
         return self.cached_config
 
     def set_hooks(self,
@@ -240,12 +235,11 @@ def get_callable(
 def prepare_nano_split(
     batch_size: int,
     num_tokens: list[int],
-    cached_seqlens: list[int],
 ) -> NanoSplitConfig:
     global _split_manager
     if _split_manager is None:
         raise ValueError("Split manager not initialized")
-    return _split_manager.prepare(batch_size, num_tokens, cached_seqlens)
+    return _split_manager.prepare(batch_size, num_tokens)
 
 
 def set_op_hook(op_hook: Callable[[NanoOpInfo],
