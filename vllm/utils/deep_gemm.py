@@ -9,7 +9,7 @@ from __future__ import annotations
 import functools
 import importlib
 import os
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, NoReturn, Optional
 
 import torch
 
@@ -136,9 +136,12 @@ def fp8_gemm_nt(*args, **kwargs):
     _lazy_init()
     if _fp8_gemm_nt_impl is None:
         return _missing(*args, **kwargs)
-    return _fp8_gemm_nt_impl(*args,
-                             disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
-                             **kwargs)
+    if "is_deep_gemm_e8m0_used" in kwargs:
+        use_ue8m0 = kwargs["is_deep_gemm_e8m0_used"]
+        del kwargs["is_deep_gemm_e8m0_used"]
+    else:
+        use_ue8m0 = is_deep_gemm_e8m0_used()
+    return _fp8_gemm_nt_impl(*args, disable_ue8m0_cast=not use_ue8m0, **kwargs)
 
 
 def m_grouped_fp8_gemm_nt_contiguous(*args, **kwargs):
@@ -301,9 +304,13 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     return 1 - sim
 
 
-def should_use_deepgemm_for_fp8_linear(output_dtype: torch.dtype,
-                                       weight: torch.Tensor):
-    return (is_deep_gemm_supported() and output_dtype == torch.bfloat16
+def should_use_deepgemm_for_fp8_linear(
+        output_dtype: torch.dtype,
+        weight: torch.Tensor,
+        supports_deep_gemm: Optional[bool] = None):
+    if supports_deep_gemm is None:
+        supports_deep_gemm = is_deep_gemm_supported()
+    return (supports_deep_gemm and output_dtype == torch.bfloat16
             and weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
 
 
