@@ -2128,6 +2128,7 @@ if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
                                 global_scale: torch.Tensor):
         return xh_e2m1, xh_e4m3
 
+
 def fusedQuantizeNv(
         a: torch.Tensor, b: torch.Tensor,
         global_scale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
