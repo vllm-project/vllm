@@ -471,8 +471,7 @@ class InputPreprocessor:
         decoder_inputs: SingletonInputs
 
         if inputs["type"] == "multimodal":  # Multimodal data inputs
-            if not ("encoder_prompt" in inputs
-                    and "encoder_prompt_token_ids" in inputs):
+            if "encoder_prompt_token_ids" not in inputs:
                 raise RuntimeError("You should register an encoder-decoder "
                                    "multi-modal processor for encoder-decoder "
                                    "models.")
