@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utils for determining which subset of model tests belong to a specific
 modality, getting all combinations (similar to pytest's parametrization),
 handling multimodal placeholder substitution, and so on.
@@ -41,7 +42,7 @@ def get_filtered_test_settings(
             else:
                 assert test_info.prompt_formatter is not None
 
-            # Everything looks okay; keep if this is has correct proc handling
+            # Everything looks okay; keep if this is correct proc handling
             if (test_info.distributed_executor_backend
                     is not None) == new_proc_per_test:
                 matching_tests[test_name] = test_info

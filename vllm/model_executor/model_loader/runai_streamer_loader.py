@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: SIM117
-import glob
 import os
 from collections.abc import Generator
 from typing import Optional
@@ -9,15 +9,14 @@ import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import LoadConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig
+from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import (
-    initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     runai_safetensors_weights_iterator)
-from vllm.transformers_utils.s3_utils import glob as s3_glob
-from vllm.transformers_utils.utils import is_s3
+from vllm.transformers_utils.runai_utils import (is_runai_obj_uri,
+                                                 list_safetensors)
 
 
 class RunaiModelStreamerLoader(BaseModelLoader):
@@ -54,27 +53,22 @@ class RunaiModelStreamerLoader(BaseModelLoader):
 
         If the model is not local, it will be downloaded."""
 
-        is_s3_path = is_s3(model_name_or_path)
+        is_object_storage_path = is_runai_obj_uri(model_name_or_path)
         is_local = os.path.isdir(model_name_or_path)
         safetensors_pattern = "*.safetensors"
         index_file = SAFE_WEIGHTS_INDEX_NAME
 
-        hf_folder = (model_name_or_path if
-                     (is_local or is_s3_path) else download_weights_from_hf(
+        hf_folder = (model_name_or_path if (is_local or is_object_storage_path)
+                     else download_weights_from_hf(
                          model_name_or_path,
                          self.load_config.download_dir,
                          [safetensors_pattern],
                          revision,
                          ignore_patterns=self.load_config.ignore_patterns,
                      ))
-        if is_s3_path:
-            hf_weights_files = s3_glob(path=hf_folder,
-                                       allow_pattern=[safetensors_pattern])
-        else:
-            hf_weights_files = glob.glob(
-                os.path.join(hf_folder, safetensors_pattern))
+        hf_weights_files = list_safetensors(path=hf_folder)
 
-        if not is_local and not is_s3_path:
+        if not is_local and not is_object_storage_path:
             download_safetensors_index_file_from_hf(
                 model_name_or_path, index_file, self.load_config.download_dir,
                 revision)
@@ -100,21 +94,11 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Download model if necessary"""
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_model(self, vllm_config: VllmConfig,
-                   model_config: ModelConfig) -> nn.Module:
-        """Perform streaming of the model to destination"""
-        device_config = vllm_config.device_config
-        target_device = torch.device(device_config.device)
-        with set_default_torch_dtype(model_config.dtype):
-            with target_device:
-                model = initialize_model(vllm_config=vllm_config)
-
-            model_weights = model_config.model
-            if hasattr(model_config, "model_weights"):
-                model_weights = model_config.model_weights
-            model.load_weights(
-                self._get_weights_iterator(model_weights,
-                                           model_config.revision))
-
-            process_weights_after_loading(model, model_config, target_device)
-        return model.eval()
+    def load_weights(self, model: nn.Module,
+                     model_config: ModelConfig) -> None:
+        """Load weights into a model."""
+        model_weights = model_config.model
+        if hasattr(model_config, "model_weights"):
+            model_weights = model_config.model_weights
+        model.load_weights(
+            self._get_weights_iterator(model_weights, model_config.revision))

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
@@ -14,6 +15,7 @@ def is_activation_quantization_format(format: str) -> bool:
         CompressionFormat.naive_quantized.value,
         CompressionFormat.int_quantized.value,
         CompressionFormat.float_quantized.value,
+        CompressionFormat.nvfp4_pack_quantized.value
     ]
     return format in _ACTIVATION_QUANTIZATION_FORMATS
 
@@ -92,7 +94,7 @@ def find_matched_target(
     config that a layer corresponds to.
 
     Recall that a compressed-tensors configs has a concept of
-    config_groups, where each layer can be quantized with with a different
+    config_groups, where each layer can be quantized with a different
     scheme.
 
     targets in each config_group will be a list of either layer names

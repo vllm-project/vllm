@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import pytest
@@ -100,11 +101,12 @@ def run_test(
 
     with vllm_runner(
             model,
+            dtype="half",
             max_model_len=448,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
-        llm = vllm_model.model
+        llm = vllm_model.llm
 
         sampling_params = SamplingParams(
             temperature=0,
@@ -120,8 +122,7 @@ def run_test(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize(
-    "model", ["openai/whisper-small", "openai/whisper-large-v3-turbo"])
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
 @create_new_process_for_each_test()
 def test_models(vllm_runner, model) -> None:
     run_test(

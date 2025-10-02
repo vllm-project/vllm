@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import TYPE_CHECKING
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
@@ -29,7 +30,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     # Worker-side methods
     # ==============================
     def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+                      **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -60,7 +61,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self._lmcache_engine.wait_for_layer_load(layer_name)
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+                      attn_metadata: "AttentionMetadata",
+                      **kwargs: Any) -> None:
         """
         Start saving the a layer of KV cache from vLLM's paged buffer 
         to the connector. This is called from within attention layer to
@@ -86,6 +88,22 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         self._lmcache_engine.wait_for_save()
 
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        """
+        Notifies worker-side connector ids of requests that have
+        finished generating tokens.
+
+        Returns:
+            ids of requests that have finished asynchronous transfer
+            (requests that previously returned True from request_finished()),
+            tuple of (sending/saving ids, recving/loading ids).
+            The finished saves/sends req ids must belong to a set provided in a
+            call to this method (this call or a prior one).
+        """
+        return self._lmcache_engine.get_finished(finished_req_ids)
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -93,7 +111,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -131,3 +149,20 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         return self._lmcache_engine.build_connector_meta(scheduler_output)
+
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """
+        Called when a request has finished, before its blocks are freed.
+
+        Returns:
+            True if the request is being saved/sent asynchronously and blocks
+            should not be freed until the request_id is returned from
+            get_finished().
+            Optional KVTransferParams to be included in the request outputs
+            returned by the engine.
+        """
+        return self._lmcache_engine.request_finished(request, block_ids)

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers for building inputs that can be leveraged for different test types.
 """
 from collections.abc import Iterable
@@ -202,6 +203,9 @@ def build_embedding_inputs_from_test_info(
 
     images = [asset.pil_image for asset in image_assets]
     embeds = test_info.convert_assets_to_embeddings(image_assets)
+    if test_info.dtype != "auto":
+        dtype = getattr(torch, test_info.dtype)  # type: ignore
+        embeds = [e.to(dtype=dtype) for e in embeds]
     assert len(images) == len(model_prompts)
 
     inputs = build_single_image_inputs(images, model_prompts, size_wrapper)
@@ -246,7 +250,7 @@ def build_video_inputs_from_test_info(
 
 def apply_image_size_scaling(image, size: Union[float, tuple[int, int]],
                              size_type: SizeType):
-    """Applies a size scaler to one image; this can be a an image size factor,
+    """Applies a size scaler to one image; this can be an image size factor,
     which scales the image while maintaining the aspect ratio"""
     # Special case for embeddings; if it's a tensor, it's only valid if we
     # are considering size factors at constant scale, i.e., we just clone

@@ -1,7 +1,4 @@
----
-title: KServe
----
-[](){ #deployment-kserve }
+# KServe
 
 vLLM can be deployed with [KServe](https://github.com/kserve/kserve) on Kubernetes for highly scalable distributed model serving.
 

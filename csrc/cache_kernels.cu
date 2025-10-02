@@ -1,10 +1,12 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 
 #include "cuda_utils.h"
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
+#include "quantization/vectorization_utils.cuh"
 
 #ifdef USE_ROCM
   #include "quantization/fp8/amd/quant_utils.cuh"
@@ -14,6 +16,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cfloat>  // FLT_MIN
 #include <map>
 #include <vector>
 
@@ -261,14 +264,26 @@ __global__ void reshape_and_cache_kernel(
   }
 }
 
+// Used by vectorization_utils to copy/convert one element
+template <typename OutT, typename InT, Fp8KVCacheDataType kv_dt>
+struct CopyWithScaleOp {
+  float scale;
+
+  __device__ __forceinline__ void operator()(OutT& dst, const InT src) const {
+    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      dst = static_cast<OutT>(src);
+    } else {
+      dst = fp8::scaled_convert<OutT, InT, kv_dt>(src, scale);
+    }
+  }
+};
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void reshape_and_cache_flash_kernel(
     const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
-    cache_t* __restrict__ key_cache,     // [num_blocks, block_size, num_heads,
-                                         // head_size]
-    cache_t* __restrict__ value_cache,   // [num_blocks, block_size, num_heads,
-                                         // head_size]
+    cache_t* __restrict__ key_cache,     // NHD or HND, shape see comments below
+    cache_t* __restrict__ value_cache,   // same above
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int64_t block_stride, const int64_t page_stride,
     const int64_t head_stride, const int64_t key_stride,
@@ -282,25 +297,58 @@ __global__ void reshape_and_cache_flash_kernel(
   }
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
-  const int n = num_heads * head_size;
-  for (int i = threadIdx.x; i < n; i += blockDim.x) {
-    const int64_t src_key_idx = token_idx * key_stride + i;
-    const int64_t src_value_idx = token_idx * value_stride + i;
-    const int head_idx = i / head_size;
-    const int head_offset = i % head_size;
-    const int64_t tgt_key_value_idx = block_idx * block_stride +
-                                      block_offset * page_stride +
-                                      head_idx * head_stride + head_offset;
-    scalar_t tgt_key = key[src_key_idx];
-    scalar_t tgt_value = value[src_value_idx];
-    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
-      key_cache[tgt_key_value_idx] = tgt_key;
-      value_cache[tgt_key_value_idx] = tgt_value;
-    } else {
-      key_cache[tgt_key_value_idx] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, *k_scale);
-      value_cache[tgt_key_value_idx] =
-          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_value, *v_scale);
+  const int n_elems = num_heads * head_size;
+
+  // pointers to the beginning of the source row for this token.
+  const scalar_t* __restrict__ key_src = key + token_idx * key_stride;
+  const scalar_t* __restrict__ value_src = value + token_idx * value_stride;
+
+  // find the start position inside the kv-cache for this token.
+  cache_t* __restrict__ key_dst =
+      key_cache + block_idx * block_stride + block_offset * page_stride;
+  cache_t* __restrict__ value_dst =
+      value_cache + block_idx * block_stride + block_offset * page_stride;
+
+  // this is true for the NHD layout where `head_stride == head_size`
+  const bool is_contiguous_heads = (head_stride == head_size);
+
+  float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
+  float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
+  constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+  if (is_contiguous_heads) {
+    // NHD layout
+    // kv cache: [num_blocks, block_size, num_heads, head_size]
+    vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, n_elems, threadIdx.x,
+                                       blockDim.x, k_op);
+
+    vectorize_with_alignment<VEC_SIZE>(value_src, value_dst, n_elems,
+                                       threadIdx.x, blockDim.x, v_op);
+
+  } else {
+    // HND layout: heads are strided, but each head_size segment is contiguous
+    // kv cache: [num_blocks, num_heads, block_size, head_size]
+    const int lane = threadIdx.x & 31;     // 0..31 within warp
+    const int warp_id = threadIdx.x >> 5;  // warp index within block
+    const int warps_per_block = blockDim.x >> 5;
+
+    for (int head = warp_id; head < num_heads; head += warps_per_block) {
+      const scalar_t* __restrict__ k_src_h = key_src + head * head_size;
+      const scalar_t* __restrict__ v_src_h = value_src + head * head_size;
+
+      cache_t* __restrict__ k_dst_h =
+          key_dst + static_cast<int64_t>(head) * head_stride;
+      cache_t* __restrict__ v_dst_h =
+          value_dst + static_cast<int64_t>(head) * head_stride;
+
+      // within each head, let the 32 threads of the warp perform the vector
+      // copy
+      vectorize_with_alignment<VEC_SIZE>(k_src_h, k_dst_h, head_size, lane, 32,
+                                         k_op);
+
+      vectorize_with_alignment<VEC_SIZE>(v_src_h, v_dst_h, head_size, lane, 32,
+                                         v_op);
     }
   }
 }
@@ -349,6 +397,180 @@ __global__ void concat_and_cache_mla_kernel(
   copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
 }
 
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void concat_and_cache_ds_mla_kernel(
+    const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
+    const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
+    cache_t* __restrict__ kv_cache,  // [num_blocks, block_size, (kv_lora_rank
+                                     // + pe_dim)]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int block_stride,                    //
+    const int entry_stride,                    //
+    const int kv_c_stride,                     //
+    const int k_pe_stride,                     //
+    const int kv_lora_rank,                    //
+    const int pe_dim,                          //
+    const int block_size,                      //
+    const float* scale                         //
+) {
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0) {
+    return;
+  }
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+  const int64_t dst_idx_start =
+      block_idx * block_stride + block_offset * entry_stride;
+
+  // Create 4 tile scales in shared memory
+  __shared__ float smem[20];
+  float* shard_abs_max = smem;
+  float* tile_scales = smem + 16;
+
+  // For the NoPE part, each tile of 128 elements is handled by 4 warps
+  // (128 threads). There are 4 total tiles, so 16 warps (512 threads).
+  // The first thread of the first warp in each tile writes the scale
+  // value for the tile. The RoPE part (last 64 elements) is handled
+  // by another 2 warps (64 threads).
+  // So in total, we use 18 warps (576 threads) per block.
+
+  // Cast kv_cache to 16_bit for RoPE values
+  scalar_t* kv_cache_16bit =
+      reinterpret_cast<scalar_t*>(&kv_cache[dst_idx_start]);
+
+  // The last 64 threads handle the RoPE part
+  if (threadIdx.x >= kv_lora_rank) {
+    const int8_t pe_idx = threadIdx.x - kv_lora_rank;
+    const int64_t src_idx = token_idx * k_pe_stride + pe_idx;
+    // RoPE values start after the packed 8-bit NoPE values and the
+    // 32-bit scales
+    const int64_t dst_idx = kv_lora_rank / 2 + 8 + pe_idx;
+    kv_cache_16bit[dst_idx] = k_pe[src_idx];
+    return;
+  }
+
+  // Determine the scale for each chunk of NoPE
+  const int16_t tile_idx = threadIdx.x >> 7;
+  const int16_t warp_idx = (threadIdx.x & 127) >> 5;
+  const int16_t lane_idx = threadIdx.x & 31;
+
+  // Load the NoPE element for this thread into registers
+  const int64_t src_idx = token_idx * kv_c_stride + threadIdx.x;
+  const scalar_t src_val = kv_c[src_idx];
+
+  // Warp-level reduction to find the max absolute value in the warp
+  float max_abs = fabsf(src_val);
+#pragma unroll
+  for (int offset = 16; offset > 0; offset /= 2) {
+#ifdef USE_ROCM
+    max_abs = fmaxf(max_abs, __shfl_down_sync(UINT64_MAX, max_abs, offset));
+#else
+    max_abs = fmaxf(max_abs, __shfl_down_sync(0xFFFFFFFF, max_abs, offset));
+#endif
+  }
+
+  // The first lane of each warp in each tile writes the max_abs of this part
+  // of the tile to shared memory
+  if (lane_idx == 0) {
+    shard_abs_max[tile_idx * 4 + warp_idx] = max_abs;
+  }
+  __syncthreads();
+
+  // The first lane of the first warp in each tile computes the scale for the
+  // tile and writes it to shared memory and to kv_cache
+  if (warp_idx == 0 && lane_idx == 0) {
+    float4 shard_abs_max_vec =
+        reinterpret_cast<float4*>(shard_abs_max)[tile_idx];
+    float tile_scale = fmaxf(fmaxf(shard_abs_max_vec.x, shard_abs_max_vec.y),
+                             fmaxf(shard_abs_max_vec.z, shard_abs_max_vec.w)) /
+                       448.f;
+
+    // Avoid division by zero in `scaled_convert`
+    tile_scales[tile_idx] = fmaxf(tile_scale, FLT_MIN);
+    float* kv_cache_32bit = reinterpret_cast<float*>(&kv_cache[dst_idx_start]);
+    const uint64_t dst_idx = kv_lora_rank / 4 + tile_idx;
+    kv_cache_32bit[dst_idx] = tile_scales[tile_idx];
+  }
+
+  __syncthreads();
+
+  // Now all threads in the block scale and write their element
+  const float scale_val = tile_scales[tile_idx];
+  const int64_t dst_idx = dst_idx_start + threadIdx.x;
+  kv_cache[dst_idx] =
+      fp8::scaled_convert<uint8_t, scalar_t, Fp8KVCacheDataType::kFp8E4M3>(
+          src_val, scale_val);
+}
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void indexer_k_quant_and_cache_kernel(
+    const scalar_t* __restrict__ k,  // [num_tokens, head_dim]
+    cache_t* __restrict__ kv_cache,  // [num_blocks, block_size, cache_stride]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int head_dim,                        // dimension of each head
+    const int quant_block_size,                // quantization block size
+    const int cache_block_size,                // cache block size
+    const int cache_stride,  // stride for each token in kv_cache
+    const bool use_ue8m0     // use ue8m0 scale format
+) {
+  constexpr int VEC_SIZE = 4;
+  const int64_t token_idx = blockIdx.x;
+  const int64_t head_dim_idx = (blockIdx.y * blockDim.y * blockDim.x +
+                                threadIdx.y * blockDim.x + threadIdx.x) *
+                               VEC_SIZE;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  const int64_t block_idx = slot_idx / cache_block_size;
+  const int64_t block_offset = slot_idx % cache_block_size;
+
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0 || (head_dim_idx >= head_dim)) {
+    return;
+  }
+
+  float2 k_val = (reinterpret_cast<const float2*>(
+      k))[(token_idx * head_dim + head_dim_idx) / VEC_SIZE];
+  scalar_t* k_val_ptr = reinterpret_cast<scalar_t*>(&k_val);
+  float amax = 0.0f;
+  for (int i = 0; i < VEC_SIZE; i++) {
+    amax = fmaxf(amax, fabsf(float(k_val_ptr[i])));
+  }
+#ifndef USE_ROCM
+  __syncwarp();
+#endif
+
+  // Reduced amax
+  for (int mask = 16; mask > 0; mask /= 2) {
+#ifdef USE_ROCM
+    amax = fmaxf(amax, __shfl_xor_sync(uint64_t(-1), amax, mask));
+#else
+    amax = fmaxf(amax, __shfl_xor_sync(unsigned(-1), amax, mask));
+#endif
+  }
+#ifndef USE_ROCM
+  __syncwarp();
+#endif
+  float scale = fmaxf(amax, 1e-4) / 448.0f;
+  if (use_ue8m0) {
+    scale = exp2f(ceilf(log2f(scale)));
+  }
+
+  const int64_t dst_offset = block_idx * cache_block_size * cache_stride +
+                             block_offset * head_dim + head_dim_idx;
+  for (int i = 0; i < VEC_SIZE; i++) {
+    kv_cache[dst_offset + i] =
+        fp8::scaled_convert<cache_t, scalar_t, kv_dt>(k_val_ptr[i], scale);
+  }
+  if (threadIdx.x == 0) {
+    const int64_t dst_scale_idx =
+        block_idx * cache_block_size * cache_stride +
+        cache_block_size * head_dim +
+        (block_offset * head_dim + head_dim_idx) * 4 / quant_block_size;
+    reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
+  }
+}
+
 }  // namespace vllm
 
 // KV_T is the data type of key and value tensors.
@@ -391,7 +613,7 @@ void reshape_and_cache(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
-                             CALL_RESHAPE_AND_CACHE)
+                             CALL_RESHAPE_AND_CACHE);
 }
 
 // KV_T is the data type of key and value tensors.
@@ -462,6 +684,18 @@ void reshape_and_cache_flash(
           kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,   \
           reinterpret_cast<const float*>(scale.data_ptr()));
 
+// KV_T is the data type of key and value tensors.
+// CACHE_T is the stored data type of kv-cache.
+#define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T, CACHE_T, KV_DTYPE)           \
+  vllm::concat_and_cache_ds_mla_kernel<KV_T, CACHE_T, KV_DTYPE>         \
+      <<<grid, block, 0, stream>>>(                                     \
+          reinterpret_cast<KV_T*>(kv_c.data_ptr()),                     \
+          reinterpret_cast<KV_T*>(k_pe.data_ptr()),                     \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
+          slot_mapping.data_ptr<int64_t>(), block_stride, entry_stride, \
+          kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,   \
+          reinterpret_cast<const float*>(scale.data_ptr()));
+
 void concat_and_cache_mla(
     torch::Tensor& kv_c,          // [num_tokens, kv_lora_rank]
     torch::Tensor& k_pe,          // [num_tokens, pe_dim]
@@ -484,20 +718,44 @@ void concat_and_cache_mla(
   int pe_dim = k_pe.size(1);
   int block_size = kv_cache.size(1);
 
-  TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
+  if (kv_cache_dtype == "fp8_ds_mla") {
+    TORCH_CHECK(kv_lora_rank == 512, "kv_lora_rank must be 512 for fp8_ds_mla");
+    TORCH_CHECK(pe_dim == 64, "pe_dim must be 64 for fp8_ds_mla");
+    TORCH_CHECK(kv_cache.size(2) == 656 / kv_cache.itemsize(),
+                "kv_cache.size(2) must be 656 bytes for fp8_ds_mla");
+    TORCH_CHECK(kv_c.itemsize() == 2,
+                "kv_c.itemsize() must be 2 for fp8_ds_mla");
+    TORCH_CHECK(k_pe.itemsize() == 2,
+                "k_pe.itemsize() must be 2 for fp8_ds_mla");
+  } else {
+    TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
+  }
 
   int kv_c_stride = kv_c.stride(0);
   int k_pe_stride = k_pe.stride(0);
   int block_stride = kv_cache.stride(0);
   int entry_stride = kv_cache.stride(1);
 
-  dim3 grid(num_tokens);
-  dim3 block(std::min(kv_lora_rank, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(kv_c));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  DISPATCH_BY_KV_CACHE_DTYPE(kv_c.dtype(), kv_cache_dtype,
-                             CALL_CONCAT_AND_CACHE_MLA);
+  if (kv_cache_dtype == "fp8_ds_mla") {
+    dim3 grid(num_tokens);
+    // For the NoPE part, each tile of 128 elements is handled by 4 warps
+    // (128 threads). There are 4 total tiles, so 16 warps (512 threads).
+    // The first thread of the first warp in each tile writes the scale
+    // value for the tile. The RoPE part (last 64 elements) is handled
+    // by another 2 warps (64 threads).
+    // So in total, we use 18 warps (576 threads) per block.
+    dim3 block(576);
+    DISPATCH_BY_KV_CACHE_DTYPE(kv_c.dtype(), kv_cache_dtype,
+                               CALL_CONCAT_AND_CACHE_DS_MLA);
+  } else {
+    dim3 grid(num_tokens);
+    dim3 block(std::min(kv_lora_rank, 512));
+    DISPATCH_BY_KV_CACHE_DTYPE(kv_c.dtype(), kv_cache_dtype,
+                               CALL_CONCAT_AND_CACHE_MLA);
+  }
 }
 
 namespace vllm {
@@ -578,9 +836,9 @@ void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
 namespace vllm {
 
 // grid is launched with dimensions (batch, num_splits)
-template <typename scalar_t>
-__global__ void gather_cache(
-    const scalar_t* __restrict__ src_cache,   // [NUM_BLOCKS, BLOCK_SIZE,
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void gather_and_maybe_dequant_cache(
+    const cache_t* __restrict__ src_cache,    // [NUM_BLOCKS, BLOCK_SIZE,
                                               // ENTRIES...]
     scalar_t* __restrict__ dst,               // [TOT_TOKENS, ENTRIES...]
     const int32_t* __restrict__ block_table,  // [BATCH, BLOCK_INDICES]
@@ -588,6 +846,7 @@ __global__ void gather_cache(
     const int32_t block_size, const int32_t entry_size,
     const int64_t block_table_stride, const int64_t cache_block_stride,
     const int64_t cache_entry_stride, const int64_t dst_entry_stride,
+    const float* __restrict__ scale,
     const int32_t* __restrict__ seq_starts) {  // Optional: starting offsets per
                                                // batch
 
@@ -629,10 +888,16 @@ __global__ void gather_cache(
     if (partial_block_size) full_blocks_end -= 1;
   }
 
-  auto copy_entry = [&](const scalar_t* __restrict__ _src,
+  auto copy_entry = [&](const cache_t* __restrict__ _src,
                         scalar_t* __restrict__ _dst) {
-    for (int i = threadIdx.x; i < entry_size; i += blockDim.x)
-      _dst[i] = _src[i];
+    for (int i = threadIdx.x; i < entry_size; i += blockDim.x) {
+      if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+        _dst[i] = static_cast<scalar_t>(_src[i]);
+      } else {
+        _dst[i] =
+            fp8::scaled_convert<scalar_t, cache_t, kv_dt>(_src[i], *scale);
+      }
+    }
   };
 
   for (int pid = split_start; pid < full_blocks_end; ++pid) {
@@ -659,8 +924,144 @@ __global__ void gather_cache(
 }  // namespace vllm
 
 // Macro to dispatch the kernel based on the data type.
-#define CALL_GATHER_CACHE(CPY_DTYPE)                                    \
-  vllm::gather_cache<CPY_DTYPE><<<grid, block, 0, stream>>>(            \
+// SCALAR_T is the data type of the destination tensor.
+// CACHE_T is the stored data type of kv-cache.
+// KV_DTYPE is the real data type of kv-cache.
+#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)                      \
+  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE>         \
+      <<<grid, block, 0, stream>>>(                                         \
+          reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),                 \
+          reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                      \
+          block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
+          block_size, entry_size, block_table_stride, cache_block_stride,   \
+          cache_entry_stride, dst_entry_stride,                             \
+          reinterpret_cast<const float*>(scale.data_ptr()), seq_starts_ptr);
+
+// Gather sequences from the cache into the destination tensor.
+//  - cu_seq_lens contains the cumulative sequence lengths for each batch
+//  - block_table contains the cache block indices for each sequence
+//  - Optionally, seq_starts (if provided) offsets the starting block index by
+//  (seq_starts[bid] / page_size)
+void gather_and_maybe_dequant_cache(
+    torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
+    torch::Tensor const& dst,          // [TOT_TOKENS, ENTRIES...]
+    torch::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
+    torch::Tensor const& cu_seq_lens,  // [BATCH+1]
+    int64_t batch_size, const std::string& kv_cache_dtype,
+    torch::Tensor const& scale,
+    std::optional<torch::Tensor> seq_starts = std::nullopt) {
+  at::cuda::OptionalCUDAGuard device_guard(src_cache.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  int32_t block_size = src_cache.size(1);
+  int32_t entry_size = src_cache.flatten(2, -1).size(2);
+
+  TORCH_CHECK(block_table.dtype() == torch::kInt32,
+              "block_table must be int32");
+  TORCH_CHECK(cu_seq_lens.dtype() == torch::kInt32,
+              "cu_seq_lens must be int32");
+  if (seq_starts.has_value()) {
+    TORCH_CHECK(seq_starts.value().dtype() == torch::kInt32,
+                "seq_starts must be int32");
+  }
+
+  TORCH_CHECK(src_cache.device() == dst.device(),
+              "src_cache and dst must be on the same device");
+  TORCH_CHECK(src_cache.device() == block_table.device(),
+              "src_cache and block_table must be on the same device");
+  TORCH_CHECK(src_cache.device() == cu_seq_lens.device(),
+              "src_cache and cu_seq_lens must be on the same device");
+  if (seq_starts.has_value()) {
+    TORCH_CHECK(src_cache.device() == seq_starts.value().device(),
+                "src_cache and seq_starts must be on the same device");
+  }
+
+  int64_t block_table_stride = block_table.stride(0);
+  int64_t cache_block_stride = src_cache.stride(0);
+  int64_t cache_entry_stride = src_cache.stride(1);
+  int64_t dst_entry_stride = dst.stride(0);
+
+  // Decide on the number of splits based on the batch size.
+  int num_splits = batch_size > 128 ? 2 : batch_size > 64 ? 4 : 16;
+  dim3 grid(batch_size, num_splits);
+  dim3 block(1024);
+
+  const int32_t* seq_starts_ptr =
+      seq_starts.has_value() ? seq_starts.value().data_ptr<int32_t>() : nullptr;
+
+  DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype, CALL_GATHER_CACHE);
+}
+
+namespace vllm {
+template <typename scalar_t>
+// Note(hc): The cp_gather_cache allows seq_starts to no longer be divisible by
+// block_size.
+__global__ void cp_gather_cache(
+    const scalar_t* __restrict__ src_cache,   // [NUM_BLOCKS, BLOCK_SIZE,
+                                              // ENTRY_SIZE]
+    scalar_t* __restrict__ dst,               // [TOT_TOKENS, ENTRY_SIZE]
+    const int32_t* __restrict__ block_table,  // [BATCH, BLOCK_INDICES]
+    const int32_t* __restrict__ cu_seq_lens,  // [BATCH+1]
+    const int32_t block_size, const int32_t entry_size,
+    const int64_t block_table_stride, const int64_t cache_block_stride,
+    const int64_t cache_entry_stride, const int64_t dst_entry_stride,
+    const int32_t* __restrict__ seq_starts  // Optional: starting offsets per
+                                            // batch
+) {
+  const int64_t bid = blockIdx.x;  // Batch ID
+  const int32_t num_splits = gridDim.y;
+  const int32_t split = blockIdx.y;
+  const int32_t seq_start = cu_seq_lens[bid];
+  const int32_t seq_end = cu_seq_lens[bid + 1];
+  const int32_t seq_len = seq_end - seq_start;
+  const int32_t tot_slots = seq_len;
+  const int32_t split_slots = cuda_utils::ceil_div(tot_slots, num_splits);
+
+  const int32_t split_start = split * split_slots;
+  const int32_t split_end = min((split + 1) * split_slots, tot_slots);
+
+  const bool is_active_split = (split_start < tot_slots);
+
+  if (!is_active_split) return;
+
+  // Adjust the pointer for the block_table for this batch.
+  // If seq_starts is provided, compute an offset based on it
+  const int32_t batch_offset = bid * block_table_stride;
+  int32_t offset = split_start;
+  if (seq_starts != nullptr) {
+    offset += seq_starts[bid];
+  }
+  int32_t offset_div = offset / block_size;
+  offset = offset % block_size;
+  const int32_t* batch_block_table = block_table + batch_offset;
+
+  // Adjust dst pointer based on the cumulative sequence lengths.
+  dst += seq_start * dst_entry_stride;
+
+  auto copy_entry = [&](const scalar_t* __restrict__ _src,
+                        scalar_t* __restrict__ _dst) {
+    for (int i = threadIdx.x; i < entry_size; i += blockDim.x)
+      _dst[i] = _src[i];
+  };
+
+  for (int pid = split_start; pid < split_end; ++pid) {
+    auto block_id = batch_block_table[offset_div];
+    auto block_start_ptr = src_cache + block_id * cache_block_stride;
+    auto block_dst_ptr = dst + pid * dst_entry_stride;
+    copy_entry(block_start_ptr + offset * cache_entry_stride, block_dst_ptr);
+    offset += 1;
+    // bump to next block
+    if (offset == block_size) {
+      offset_div += 1;
+      offset = 0;
+    }
+  }
+}
+}  // namespace vllm
+
+// Macro to dispatch the kernel based on the data type.
+#define CALL_CP_GATHER_CACHE(CPY_DTYPE)                                 \
+  vllm::cp_gather_cache<CPY_DTYPE><<<grid, block, 0, stream>>>(         \
       reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()),               \
       reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),                     \
       block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
@@ -670,9 +1071,9 @@ __global__ void gather_cache(
 // Gather sequences from the cache into the destination tensor.
 //  - cu_seq_lens contains the cumulative sequence lengths for each batch
 //  - block_table contains the cache block indices for each sequence
-//  - Optionally, seq_starts (if provided) offsets the starting block index by
-//  (seq_starts[bid] / page_size)
-void gather_cache(
+//  - Optionally, seq_starts (if provided) offsets the starting slot index by
+//  seq_starts[bid]
+void cp_gather_cache(
     torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
     torch::Tensor const& dst,          // [TOT_TOKENS, ENTRIES...]
     torch::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
@@ -723,12 +1124,51 @@ void gather_cache(
       seq_starts.has_value() ? seq_starts.value().data_ptr<int32_t>() : nullptr;
 
   if (dtype_bits == 32) {
-    CALL_GATHER_CACHE(uint32_t);
+    CALL_CP_GATHER_CACHE(uint32_t);
   } else if (dtype_bits == 16) {
-    CALL_GATHER_CACHE(uint16_t);
+    CALL_CP_GATHER_CACHE(uint16_t);
   } else if (dtype_bits == 8) {
-    CALL_GATHER_CACHE(uint8_t);
+    CALL_CP_GATHER_CACHE(uint8_t);
   } else {
     TORCH_CHECK(false, "Unsupported data type width: ", dtype_bits);
   }
+}
+
+// Macro to dispatch the kernel based on the data type.
+#define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)         \
+  vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>       \
+      <<<grid, block, 0, stream>>>(                                     \
+          reinterpret_cast<KV_T*>(k.data_ptr()),                        \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),              \
+          slot_mapping.data_ptr<int64_t>(), head_dim, quant_block_size, \
+          cache_block_size, cache_stride, use_ue8m0);
+
+void indexer_k_quant_and_cache(
+    torch::Tensor& k,             // [num_tokens, head_dim]
+    torch::Tensor& kv_cache,      // [num_blocks, block_size, cache_stride]
+    torch::Tensor& slot_mapping,  // [num_tokens]
+    int64_t quant_block_size,     // quantization block size
+    const std::string& scale_fmt) {
+  int num_tokens = k.size(0);
+  int head_dim = k.size(1);
+  int cache_block_size = kv_cache.size(1);
+  int cache_stride = kv_cache.size(2);
+  bool use_ue8m0 = scale_fmt == "ue8m0";
+
+  TORCH_CHECK(k.device() == kv_cache.device(),
+              "k and kv_cache must be on the same device");
+  TORCH_CHECK(k.device() == slot_mapping.device(),
+              "k and slot_mapping must be on the same device");
+  TORCH_CHECK(head_dim % quant_block_size == 0,
+              "head_dim must be divisible by quant_block_size");
+
+  constexpr int vec_size = 4;
+  dim3 grid(num_tokens, (head_dim + quant_block_size * vec_size - 1) /
+                            (quant_block_size * vec_size));
+  dim3 block(32, vec_size);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(k));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), "fp8_e4m3",
+                             CALL_INDEXER_K_QUANT_AND_CACHE);
 }

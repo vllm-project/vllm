@@ -86,6 +86,7 @@ D = s_a s_b \widehat A \widehat B
 ```
 
 Epilogue parameters:
+
 - `scale_a` is the scale for activations, can be per-tensor (scalar) or per-token (column-vector).
 - `scale_b` is the scale for weights, can be per-tensor (scalar) or per-channel (row-vector).
 
@@ -135,7 +136,7 @@ That is precomputed and stored in `azp_with_adj` as a row-vector.
 Epilogue parameters:
 
 - `scale_a` is the scale for activations, can be per-tensor (scalar) or per-token (column-vector).
-  - Generally this will be per-tensor as the zero-points are per-tensor.
+    - Generally this will be per-tensor as the zero-points are per-tensor.
 - `scale_b` is the scale for weights, can be per-tensor (scalar) or per-channel (row-vector).
 - `azp_with_adj` is the precomputed zero-point term ($` z_a J_a \widehat B `$), is per-channel (row-vector).
 - `bias` is the bias, is always per-channel (row-vector).
@@ -152,7 +153,7 @@ That means the zero-point term $` z_a J_a \widehat B `$ becomes an outer product
 Epilogue parameters:
 
 - `scale_a` is the scale for activations, can be per-tensor (scalar) or per-token (column-vector).
-  - Generally this will be per-token as the zero-points are per-token.
+    - Generally this will be per-token as the zero-points are per-token.
 - `scale_b` is the scale for weights, can be per-tensor (scalar) or per-channel (row-vector).
 - `azp_adj` is the precomputed zero-point adjustment term ($` \mathbf 1 \widehat B `$), is per-channel (row-vector).
 - `azp` is the zero-point (`z_a`), is per-token (column-vector).

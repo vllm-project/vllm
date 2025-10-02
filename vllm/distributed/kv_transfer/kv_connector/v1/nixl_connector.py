@@ -1,35 +1,50 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import copy
+import logging
 import math
+import queue
 import threading
 import time
 import uuid
 from collections import defaultdict
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import msgspec
+import numpy as np
 import torch
 import zmq
 
 from vllm import envs
+from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorStats)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
+from vllm.distributed.utils import divide
+from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.utils import make_zmq_path, make_zmq_socket, round_down
+from vllm.platforms import _Backend, current_platform
+from vllm.utils import make_zmq_path, make_zmq_socket
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
-    from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
+
+Transfer = tuple[int, float]  # (xfer_handle, start_time)
+EngineId = str
+ReqId = str
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -43,6 +58,25 @@ except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
 
+try:
+    from nixl._api import nixl_agent_config
+except ImportError:
+    nixl_agent_config = None
+    logger.warning("NIXL agent config is not available")
+
+# Supported platforms and types of kv transfer buffer.
+# {device: tuple of supported kv buffer types}
+_NIXL_SUPPORTED_DEVICE = {
+    "cuda": (
+        "cuda",
+        "cpu",
+    ),
+    "tpu": ("cpu", ),
+    "xpu": ("cpu", ),
+}
+# support for oot platform by providing mapping in current_platform
+_NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
+
 
 class NixlAgentMetadata(
         msgspec.Struct,
@@ -53,6 +87,9 @@ class NixlAgentMetadata(
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
     num_blocks: int
+    block_lens: list[int]
+    attn_backend_name: str
+    kv_cache_layout: str
 
 
 @dataclass
@@ -62,42 +99,76 @@ class ReqMeta:
     remote_host: str
     remote_port: int
     remote_engine_id: str
+    tp_size: int
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
-        self.requests: dict[str, ReqMeta] = {}
+        self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
+        self.reqs_to_save: dict[ReqId, ReqMeta] = {}
+        self.reqs_to_send: dict[ReqId, float] = {}
+        self.reqs_in_batch: set[ReqId] = set()
 
     def add_new_req(
         self,
-        request_id: str,
+        request_id: ReqId,
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
+        load_remote_cache: bool = True,
+        save_to_host: bool = False,
     ):
-        self.requests[request_id] = ReqMeta(
+        # save and load are mutually exclusive
+        assert load_remote_cache ^ save_to_host
+        _req = ReqMeta(
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
+            # P workers don't need to receive tp_size from proxy here.
+            tp_size=kv_transfer_params.get("tp_size", 1),
         )
+        if save_to_host:
+            self.reqs_to_save[request_id] = _req
+        if load_remote_cache:
+            self.reqs_to_recv[request_id] = _req
 
 
 class NixlConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
-        self.engine_id = vllm_config.kv_transfer_config.engine_id
+        assert vllm_config.kv_transfer_config.engine_id is not None
+        self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler : Optional[NixlConnectorScheduler] = \
-                NixlConnectorScheduler(vllm_config, str(self.engine_id))
+            self.connector_scheduler: Optional[NixlConnectorScheduler] = \
+                NixlConnectorScheduler(vllm_config, self.engine_id)
             self.connector_worker: Optional[NixlConnectorWorker] = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = NixlConnectorWorker(
-                vllm_config, str(self.engine_id))
+                vllm_config, self.engine_id)
+
+    ############################################################
+    # Class Methods
+    ############################################################
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
+        if vllm_config.model_config is None:
+            logger.warning_once("Unable to detect current VLLM config. "
+                                "Fallback to default kv cache layout.")
+            return None
+        use_mla = vllm_config.model_config.use_mla
+        if use_mla:
+            # return None when we have mla
+            # as the layout should not matter in that case,
+            # which fallback to the default behavior.
+            return None
+        logger.info_once("NixlConnector setting KV cache "
+                         "layout to HND for better xfer performance.")
+        return "HND"
 
     ############################################################
     # Scheduler Side Methods
@@ -105,7 +176,7 @@ class NixlConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
             self, request: "Request",
-            num_computed_tokens: int) -> tuple[int, bool]:
+            num_computed_tokens: int) -> tuple[Optional[int], bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
@@ -139,11 +210,27 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        assert self.connector_worker is not None
+        self.connector_worker.set_host_xfer_buffer_ops(copy_operation)
+
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+            cls,
+            data: Optional[dict[str,
+                                Any]] = None) -> Optional[KVConnectorStats]:
+        return NixlKVConnectorStats(data=data) if data is not None \
+            else NixlKVConnectorStats()
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -161,8 +248,15 @@ class NixlConnector(KVConnectorBase_V1):
         pass
 
     def wait_for_save(self):
-        """NixlConnector does not save explicitly."""
-        pass
+        assert self.connector_worker is not None
+        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        if self.connector_worker.use_host_buffer and \
+           self.connector_worker.copy_blocks:
+            self.connector_worker.save_kv_to_host(self._connector_metadata)
+
+    def shutdown(self):
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
 
 
 class NixlConnectorScheduler:
@@ -171,13 +265,24 @@ class NixlConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        self.engine_id = engine_id
+        self.engine_id: EngineId = engine_id
+        self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        self.side_channel_port = (
+            envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
+            vllm_config.parallel_config.data_parallel_rank *
+            vllm_config.parallel_config.tensor_parallel_size)
+        self.use_host_buffer = \
+            vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
-        # Requests that need to start recv.
+        # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+        self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
+        self._reqs_need_save: dict[ReqId, tuple[Request, list[int]]] = {}
+        # Reqs to send and their expiration time
+        self._reqs_need_send: dict[ReqId, float] = {}
+        self._reqs_in_batch: set[ReqId] = set()
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -185,13 +290,13 @@ class NixlConnectorScheduler:
         """
         For remote prefill, pull all prompt blocks from remote
         asynchronously relative to engine execution.
-        
+
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
         Returns:
-            * the number of tokens that can be loaded from the 
+            * the number of tokens that can be loaded from the
               external KV cache beyond what is already computed.
             * true if the external KV cache tokens will be loaded
               asynchronously (between scheduler steps).
@@ -205,21 +310,9 @@ class NixlConnectorScheduler:
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
-            assert num_computed_tokens % self.block_size == 0
-            rounded_num_prompt_tokens = round_down(
-                len(request.prompt_token_ids), self.block_size)
-            count = max(rounded_num_prompt_tokens - num_computed_tokens, 0)
+            count = len(request.prompt_token_ids) - num_computed_tokens
             if count > 0:
                 return count, True
-
-            # NOTE: if count is 0 here, we have less than block_size
-            # tokens to pull after subtracting the local prefix cache hit.
-            # The remote only sends fully computed blocks, so there is
-            # nothing to transfer but we still need to notify the
-            # prefill worker so that the remote blocks are freed.
-            if all(p in params for p in ("remote_engine_id", "remote_host",
-                                         "remote_port")):
-                self._reqs_need_recv[request.request_id] = (request, [])
 
         # No remote prefill for this request.
         return 0, False
@@ -234,13 +327,38 @@ class NixlConnectorScheduler:
             "num_external_tokens=%s, kv_transfer_params=%s",
             num_external_tokens, params)
 
-        if params is not None and params.get("do_remote_prefill"):
+        if not params:
+            return
+
+        if params.get("do_remote_decode"):
+            self._reqs_in_batch.add(request.request_id)
+        if self.use_host_buffer and params.get("do_remote_decode"):
+            # NOTE: when accelerator is not directly supported by Nixl,
+            # prefilled blocks need to be saved to host memory before transfer.
+
+            # save all blocks
+            block_ids = blocks.get_block_ids()[0]
+            # TODO: skip the blocks that are already in the host xfer buffer.
+            # Currently, the host xfer buffer block is 1-to-1 mapped to device
+            # kv blocks, so host blocks won't be flushed as long as its device
+            # block is not overwritten; and it will be safe to skip saving them
+            # to host xfer buffer.
+            if block_ids:
+                self._reqs_need_save[request.request_id] = \
+                    (request, block_ids)
+        elif params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
                                              "remote_port")):
+                    # If remote_blocks and num_external_tokens = 0, we have
+                    # a full prefix cache hit on the D worker. We need to call
+                    # send_notif in _read_blocks to free the memory on the P.
+                    local_block_ids = (blocks.get_unhashed_block_ids()
+                                       if num_external_tokens > 0 else [])
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (
-                        request, blocks.get_unhashed_block_ids())
+                        request, local_block_ids)
+
                 else:
                     logger.warning(
                         "Got invalid KVTransferParams: %s. This "
@@ -259,23 +377,32 @@ class NixlConnectorScheduler:
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
-            # For the case where there are no remote blocks to pull
-            # (block_ids is empty), we don't need to schedule
-            # an async read on the worker side.
-            if not block_ids:
-                logger.debug(
-                    "Skipping adding request %s to NixlConnectorMetadata, "
-                    "as there are no remote blocks to pull", req_id)
-                continue
-
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
+                load_remote_cache=True,
+                save_to_host=False,
             )
+
+        for req_id, (req, block_ids) in self._reqs_need_save.items():
+            assert req.kv_transfer_params is not None
+            meta.add_new_req(
+                request_id=req_id,
+                local_block_ids=block_ids,
+                kv_transfer_params=req.kv_transfer_params,
+                load_remote_cache=False,
+                save_to_host=True,
+            )
+
+        meta.reqs_to_send = self._reqs_need_send
+        meta.reqs_in_batch = self._reqs_in_batch
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
+        self._reqs_need_save.clear()
+        self._reqs_in_batch = set()
+        self._reqs_need_send = {}
 
         return meta
 
@@ -288,31 +415,47 @@ class NixlConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        from vllm.v1.request import RequestStatus
 
         params = request.kv_transfer_params
         logger.debug(
             "NIXLConnector request_finished, request_status=%s, "
             "kv_transfer_params=%s", request.status, params)
+        if not params:
+            return False, None
 
-        if (params is None or not params.get("do_remote_decode")
+        if params.get("do_remote_prefill"):
+            # If do_remote_prefill is still True when the request is finished,
+            # update_state_after_alloc must not have been called (the request
+            # must have been aborted before it was scheduled).
+            # To avoid stranding the prefill blocks in the prefill instance,
+            # we must add empty block_ids to _reqs_need_recv so that our
+            # worker side will notify and free blocks in the prefill instance.
+            self._reqs_need_recv[request.request_id] = (request, [])
+            params["do_remote_prefill"] = False
+            return False, None
+
+        if (not params.get("do_remote_decode")
                 or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
             return False, None
 
-        # Get computed blocks.
-        all_full = request.num_computed_tokens % self.block_size == 0
-        computed_block_ids = block_ids if all_full else block_ids[:-1]
+        # TODO: check whether block_ids actually ever be 0. If not we could
+        # remove the conditional below
+        delay_free_blocks = len(block_ids) > 0
 
-        # If prompt < block_size, no xfer so free blocks immediately.
-        delay_free_blocks = len(computed_block_ids) > 0
+        if delay_free_blocks:
+            # Prefill request on remote. It will be read from D upon completion
+            self._reqs_need_send[request.request_id] = time.perf_counter(
+            ) + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
-            remote_block_ids=computed_block_ids,
+            remote_block_ids=block_ids,
             remote_engine_id=self.engine_id,
-            remote_host=envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
-            remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,
-        )
+            remote_host=self.side_channel_host,
+            remote_port=self.side_channel_port,
+            tp_size=self.vllm_config.parallel_config.tensor_parallel_size)
 
 
 class NixlConnectorWorker:
@@ -325,72 +468,151 @@ class NixlConnectorWorker:
         logger.info("Initializing NIXL wrapper")
         logger.info("Initializing NIXL worker %s", engine_id)
 
+        # Config.
+        self.vllm_config = vllm_config
+        self.block_size = vllm_config.cache_config.block_size
+
+        self.nixl_backends = \
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "backends", ["UCX"])
         # Agent.
-        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
-        # Map of engine_id -> agent_name.
-        self._remote_agents: dict[str, str] = {}
+        non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
+        if nixl_agent_config is None:
+            config = None
+        else:
+            config = nixl_agent_config(backends=self.nixl_backends) if len(
+                non_ucx_backends) > 0 else nixl_agent_config(num_threads=8)
+
+        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
+        # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
+        self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
+
+        # NIXL handshake port.
+        # NOTE(rob): Within a DP group, each DP rank gets its own
+        # base port (which is sent in the KVTransferParams).
+        # Each TP rank listens/queries on the base_port + tp_rank.
+        self.side_channel_port: int = (
+            envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
+            vllm_config.parallel_config.data_parallel_rank *
+            vllm_config.parallel_config.tensor_parallel_size)
 
         # Metadata.
-        self.engine_id = engine_id
-        self.rank = get_tensor_model_parallel_rank()
+        self.engine_id: EngineId = engine_id
+        self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
+        self.num_blocks = 0
 
         # KV Caches and nixl tracking data.
-        self.kv_caches: dict[str, torch.Tensor] = {}
+        self.device_type = current_platform.device_type
+        self.kv_buffer_device: str = \
+            vllm_config.kv_transfer_config.kv_buffer_device
+        if self.device_type not in _NIXL_SUPPORTED_DEVICE:
+            raise RuntimeError(f"{self.device_type} is not supported.")
+        elif self.kv_buffer_device not in _NIXL_SUPPORTED_DEVICE[
+                self.device_type]:
+            raise RuntimeError(
+                f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
+                "is not supported.")
+        self.device_kv_caches: dict[str, torch.Tensor] = {}
 
-        # Map of engine_id -> kv_caches_base_addr
-        self.kv_caches_base_addr: dict[str, list[int]] = {}
+        # cpu kv buffer for xfer
+        # used when device memory can not be registered under nixl
+        self.host_xfer_buffers: dict[str, torch.Tensor] = {}
+        self.use_host_buffer = self.kv_buffer_device == "cpu"
+        # support for oot platform which can't register nixl memory
+        # type based on kv_buffer_device
+        self.nixl_memory_type = current_platform.get_nixl_memory_type()
+        if self.nixl_memory_type is None:
+            if self.kv_buffer_device == "cuda":
+                self.nixl_memory_type = "VRAM"
+            elif self.kv_buffer_device == "cpu":
+                self.nixl_memory_type = "DRAM"
+        if self.nixl_memory_type is None:
+            raise RuntimeError(
+                f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
+                "is not supported.")
+
+        # Note: host xfer buffer ops when use_host_buffer is True
+        self.copy_blocks: Optional[CopyBlocksOp] = None
+
+        # Map of engine_id -> kv_caches_base_addr. For TP case, each local
+        # rank will still only pull from a single remote TP worker.
+        self.kv_caches_base_addr: dict[EngineId, list[int]] = {}
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
         self.num_regions = 0
         self.num_layers = 0
 
-        # nixl_prepped_dlist_handle (int).
+        # nixl_prepped_dlist_handle.
         self.src_xfer_side_handle: int = 0
         # Map of engine_id -> nixl_prepped_dlist_handle (int)].
-        self.dst_xfer_side_handles: dict[str, int] = {}
+        self.dst_xfer_side_handles: dict[EngineId, int] = {}
 
-        # Map of engine_id -> num_blocks.
-        self.dst_num_blocks: dict[str, int] = {}
+        # Map of engine_id -> num_blocks. All ranks in the same deployment will
+        # have the same number of blocks.
+        self.dst_num_blocks: dict[EngineId, int] = {}
         self._registered_descs: list[Any] = []
 
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers: defaultdict[str, list[Any]] = defaultdict(
-            list[Any])
+        self._recving_metadata: dict[ReqId, ReqMeta] = {}
+        self._recving_transfers = defaultdict[ReqId, list[Transfer]](list)
+        # Track the expiration time of requests that are waiting to be sent.
+        self._reqs_to_send: dict[ReqId, float] = {}
+        # Set of requests that have been part of a batch, regardless of status.
+        self._reqs_to_process: set[ReqId] = set()
 
-        # Complete transfer tracker. Used by the rank 0 to track finished
-        # transactions on ranks 1 to N-1.
-        # [req_id -> count]
-        self._done_recving_count: defaultdict[str,
-                                              int] = defaultdict(lambda: 0)
-        self._done_sending_count: defaultdict[str,
-                                              int] = defaultdict(lambda: 0)
-
-        # Background thread for establishing new connections.
+        # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
+        # Background thread for initializing new NIXL handshakes.
+        self._handshake_initiation_executor = ThreadPoolExecutor(
+            # NIXL is not guaranteed to be thread-safe, limit 1 worker.
+            max_workers=1,
+            thread_name_prefix="vllm-nixl-handshake-initiator")
+        self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
+        self._handshake_futures: dict[EngineId, Future[dict[int, str]]] = {}
+        # Protects _handshake_futures and _remote_agents.
+        self._handshake_lock = threading.RLock()
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
 
         # TODO(mgoin): remove this once we have hybrid memory allocator
         # Optimization for models with local attention (Llama 4)
         # List of block window sizes for each layer for local attention
         self.block_window_per_layer: list[Optional[int]] = []
+        self.use_mla = self.model_config.use_mla
+
+        backend = get_attn_backend(self.model_config.get_head_size(),
+                                   self.model_config.dtype,
+                                   self.cache_config.cache_dtype,
+                                   self.block_size,
+                                   use_mla=self.use_mla)
+        self.backend_name = backend.get_name()
+        attn_backend = backend_name_to_enum(self.backend_name)
+        self._use_flashinfer = attn_backend == _Backend.FLASHINFER
+        self._use_pallas = attn_backend == _Backend.PALLAS
+        self.kv_cache_layout = get_kv_cache_layout()
+        logger.debug("Detected attention backend %s", self.backend_name)
+        logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
+
+        self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
+        # With heterogeneous TP, P must wait for all assigned D TP workers to
+        # finish reading before safely freeing the blocks.
+        self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+        self.xfer_stats = NixlKVConnectorStats()
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
-                                 ready_event: threading.Event, rank: int):
+                                 ready_event: threading.Event, base_port: int,
+                                 tp_rank: int):
         """Background thread for getting new NIXL handshakes."""
         # NOTE(rob): this is a simple implementation. We will move
-        # to a better approach like an ETCD server in the future.
-
-        # NOTE(rob): to support heterogeneous TP, we will have to
-        # move this into the scheduler rather than worker, since
-        # each rank needs the metadata of all other ranks (whereas
-        # in this setup, each rank only gets one other rank's meta.
+        # to a better approach via HTTP endpoint soon.
 
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(metadata)
@@ -400,11 +622,7 @@ class NixlConnectorWorker:
 
         # Listen for new requests for metadata.
         host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        # NOTE(rob): we need each rank to have a unique port. This
-        # hack to keeps us moving. We will switch when moving to etcd
-        # or where we have a single ZMQ socket in the scheduler.
-        port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT + rank
-        path = make_zmq_path("tcp", host, port)
+        path = make_zmq_path("tcp", host, base_port + tp_rank)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
@@ -415,64 +633,133 @@ class NixlConnectorWorker:
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
 
-    def _nixl_handshake(self, host: str, port: int):
+    def _nixl_handshake(
+        self,
+        host: str,
+        port: int,
+        remote_tp_size: int,
+        expected_engine_id: str,
+    ) -> dict[int, str]:
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
+
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-        path = make_zmq_path("tcp", host, port + self.rank)
-        logger.debug("Querying metadata on path: %s", path)
+
+        # Handshake only with the remote TP rank that current local rank will
+        # pull from. With homogeneous TP it happens to be the same rank_i.
+        tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
+        p_remote_rank = self.tp_rank // tp_ratio
+        path = make_zmq_path("tcp", host, port + p_remote_rank)
+        logger.debug("Querying metadata on path: %s at remote rank %s", path,
+                     p_remote_rank)
+
+        # Send query for the request.
         with zmq_ctx(zmq.REQ, path) as sock:
-            # Send query for the request.
             sock.send(GET_META_MSG)
             metadata_bytes = sock.recv()
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
             metadata = decoder.decode(metadata_bytes)
             got_metadata_time = time.perf_counter()
-
-            # Register Remote agent.
-            self.add_remote_agent(metadata)
-            setup_agent_time = time.perf_counter()
-
             logger.debug("NIXL handshake: get metadata took: %s",
                          got_metadata_time - start_time)
+
+            # Ensure engine id matches.
+            if metadata.engine_id != expected_engine_id:
+                raise RuntimeError(f"Remote NIXL agent engine ID mismatch. "
+                                   f"Expected {expected_engine_id},"
+                                   f"received {metadata.engine_id}.")
+
+            # Register Remote agent.
+            remote_agent_name = self.add_remote_agent(metadata, p_remote_rank,
+                                                      remote_tp_size)
+            setup_agent_time = time.perf_counter()
             logger.debug("NIXL handshake: add agent took: %s",
                          setup_agent_time - got_metadata_time)
+
+        # Remote rank -> agent name.
+        return {p_remote_rank: remote_agent_name}
+
+    def initialize_host_xfer_buffer(
+            self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """
+        Initialize transfer buffer in CPU mem for accelerators
+        NOT directly supported by NIXL (e.g., tpu)
+        """
+        xfer_buffers: dict[str, torch.Tensor] = {}
+        try:
+            for layer_name, kv_cache in kv_caches.items():
+                kv_shape = kv_cache.shape
+                kv_dtype = kv_cache.dtype
+                xfer_buffers[layer_name] = torch.empty(kv_shape,
+                                                       dtype=kv_dtype,
+                                                       device="cpu")
+        except MemoryError as e:
+            logger.error("NIXLConnectorWorker gets %s.", e)
+            raise
+
+        self.host_xfer_buffers = xfer_buffers
+
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        """Assign copy (d2h, h2d) operations when host buffer is used."""
+        # Set a no-op if the host buffer is not cpu.
+        if self.kv_buffer_device != "cpu":
+            return
+        assert self.use_host_buffer
+        self.copy_blocks = copy_operation
+
+    def _background_nixl_handshake(self, req_id: str,
+                                   remote_engine_id: EngineId, meta: ReqMeta):
+        # Do NIXL handshake in background and add to _ready_requests when done.
+        fut = self._handshake_futures.get(remote_engine_id)
+        if fut is None:
+            fut = self._handshake_initiation_executor.submit(
+                self._nixl_handshake, meta.remote_host, meta.remote_port,
+                meta.tp_size, remote_engine_id)
+            self._handshake_futures[remote_engine_id] = fut
+
+            def done_callback(f: Future[dict[int, str]], eid=remote_engine_id):
+                with self._handshake_lock:
+                    del self._handshake_futures[eid]
+                    try:
+                        self._remote_agents[eid] = f.result()
+                    except Exception:
+                        logger.exception("Handshake with %s failed", eid)
+
+            fut.add_done_callback(done_callback)
+
+        # TODO: handle failure state of future in the
+        # callback, we want to fail the request in this case.
+        def request_ready(_f: Future[Any], entry=(req_id, meta)):
+            self._ready_requests.put(entry)
+
+        fut.add_done_callback(request_ready)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
-        _, first_kv_cache = next(iter(kv_caches.items()))
-        kv_elem_size = first_kv_cache.element_size()
-
-        # TODO(tms): Find a more robust way to detect and handle MLA
-        use_mla = len(first_kv_cache.shape) == 3
-        if use_mla:
-            # MLA case.
-            self.num_blocks = first_kv_cache.shape[0]
-            block_rank = 2  # [block_size, latent_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
+        if self.use_host_buffer:
+            self.initialize_host_xfer_buffer(kv_caches=kv_caches)
+            assert len(self.host_xfer_buffers) == len(kv_caches), (
+                f"host_buffer: {len(self.host_xfer_buffers)}, "
+                f"kv_caches: {len(kv_caches)}")
+            xfer_buffers = self.host_xfer_buffers
         else:
-            # [2 (k and v), num_blocks, ...]
-            self.num_blocks = first_kv_cache.shape[1]
-            block_rank = 3  # [block_size, kv_heads, head_dim]
-            block_shape = first_kv_cache.shape[-block_rank:]
+            xfer_buffers = kv_caches
+            assert not self.host_xfer_buffers, (
+                "host_xfer_buffer should not be initialized when "
+                f"kv_buffer_device is {self.kv_buffer_device}")
 
-        # TODO(tms): self.block_len needs to be per-layer for sliding window,
-        # hybrid attn, etc
-        self.block_len = kv_elem_size * math.prod(block_shape)
+        logger.info(
+            "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, "
+            "use_host_buffer: %s", self.use_mla, self.kv_buffer_device,
+            self.use_host_buffer)
 
-        logger.debug("Registering KV_Caches. use_mla: %s, shape %s", use_mla,
-                     first_kv_cache.shape)
-        logger.debug("num_blocks: %s, block_shape: %s", self.num_blocks,
-                     block_shape)
-        logger.debug("Per layer kv cache size: %s", first_kv_cache.shape)
-        self.dst_num_blocks[self.engine_id] = self.num_blocks
-        self.kv_caches = kv_caches
-        kv_caches_base_addr = []
         caches_data = []
+        # With hybrid allocator, layers can share a kv cache tensor
+        seen_base_addresses = []
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
@@ -480,20 +767,113 @@ class NixlConnectorWorker:
         # are non-contiguous (it's not locally guaranteed that they will be)
         # Disadvantage is that the encoded NixlAgentMetadata is now larger
         # (roughly 8KB vs 5KB).
-        for cache_or_caches in kv_caches.values():
-            # Normalize to always be a list of caches
-            cache_list = [cache_or_caches] if use_mla else cache_or_caches
+        # Conversely for FlashInfer, K and V are registered in the same region
+        # to better exploit the memory layout (ie num_blocks is the first dim).
+        split_k_and_v = not (self.use_mla or self._use_pallas
+                             or self._use_flashinfer)
+        tensor_size_bytes = None
+        # Enable different block lengths for different layers when MLA is used.
+        self.block_len_per_layer = list[int]()
+        self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
+        for layer_name, cache_or_caches in xfer_buffers.items():
+            cache_list = cache_or_caches if split_k_and_v else [
+                cache_or_caches
+            ]
+
             for cache in cache_list:
                 base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len
-                caches_data.append((base_addr, region_len, self.rank, ""))
-                kv_caches_base_addr.append(base_addr)
-        self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
-        self.num_regions = len(caches_data)
-        self.num_layers = len(self.kv_caches.keys())
+                if base_addr in seen_base_addresses:
+                    continue
 
-        # TODO(mgoin): remove this once we have hybrid memory allocator
-        # Optimization for models with local attention (Llama 4)
+                seen_base_addresses.append(base_addr)
+                curr_tensor_size_bytes = cache.numel() * cache.element_size()
+
+                if tensor_size_bytes is None:
+                    tensor_size_bytes = curr_tensor_size_bytes
+                    self.num_blocks = cache.shape[0]
+
+                assert cache.shape[0] == self.num_blocks, \
+                    "All kv cache tensors must have the same number of blocks"
+
+                self.block_len_per_layer.append(curr_tensor_size_bytes //
+                                                self.num_blocks)
+                self.slot_size_per_layer.append(self.block_len_per_layer[-1] //
+                                                self.block_size)
+
+                if not self.use_mla:
+                    # Different kv cache shape is not supported by HeteroTP
+                    assert tensor_size_bytes == curr_tensor_size_bytes, \
+                        "All kv cache tensors must have the same size"
+                caches_data.append(
+                    (base_addr, curr_tensor_size_bytes, self.tp_rank, ""))
+
+        logger.debug("Different block lengths collected: %s",
+                     set(self.block_len_per_layer))
+        assert len(self.block_len_per_layer) == len(seen_base_addresses)
+        assert self.num_blocks != 0
+
+        self.kv_caches_base_addr[self.engine_id] = seen_base_addresses
+        self.num_regions = len(caches_data)
+        self.num_layers = len(xfer_buffers.keys())
+
+        descs = self.nixl_wrapper.get_reg_descs(caches_data,
+                                                self.nixl_memory_type)
+        logger.debug("Registering descs: %s", caches_data)
+        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+        logger.debug("Done registering descs")
+        self._registered_descs.append(descs)
+
+        self.device_kv_caches = kv_caches
+        self.dst_num_blocks[self.engine_id] = self.num_blocks
+        if self._use_flashinfer:
+            for i in range(len(self.slot_size_per_layer)):
+                assert self.slot_size_per_layer[i] % 2 == 0
+                self.slot_size_per_layer[i] //= 2
+
+            # NOTE (NickLucche) When FlashInfer is used, memory is registered
+            # with joint KV for each block. This minimizes the overhead in
+            # registerMem allowing faster descs queries. In order to be able to
+            # split on kv_heads dim as required by heterogeneous TP, one must
+            # be able to index K/V separately. Hence we double the number
+            # of 'virtual' regions here and halve `block_len` below.
+            self.num_regions *= 2
+
+        # Register local/src descr for NIXL xfer.
+        blocks_data = []
+        for i, base_addr in enumerate(seen_base_addresses):
+            kv_block_len = self.get_backend_aware_kv_block_len(layer_idx=i)
+            # NOTE With heter-TP, more blocks are prepared than what are
+            # needed as self.num_blocks >= nixl_agent_meta.num_blocks. We
+            # could create fewer, but then _get_block_descs_ids needs to
+            # select agent_meta.num_blocks instead of self.num_blocks for
+            # local descr, and that makes handling regular flow less clean.
+            for block_id in range(self.num_blocks):
+                block_offset = block_id * self.block_len_per_layer[i]
+                addr = base_addr + block_offset
+                # (addr, len, device id)
+                blocks_data.append((addr, kv_block_len, self.tp_rank))
+
+            if self._use_flashinfer:
+                # Separate and interleave K/V regions to maintain the same
+                # descs ordering. This is needed for selecting contiguous heads
+                # when split across TP ranks.
+                for block_id in range(self.num_blocks):
+                    block_offset = block_id * self.block_len_per_layer[i]
+                    addr = base_addr + block_offset
+                    # Register addresses for V cache (K registered first).
+                    v_addr = addr + kv_block_len
+                    blocks_data.append((v_addr, kv_block_len, self.tp_rank))
+        logger.debug("Created %s blocks for src engine %s and rank %s",
+                     len(blocks_data), self.engine_id, self.tp_rank)
+
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
+                                                 self.nixl_memory_type)
+        # NIXL_INIT_AGENT to be used for preparations of local descs.
+        self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist(
+            "NIXL_INIT_AGENT", descs)
+
+        # TODO(mgoin): Hybrid memory allocator is currently disabled for
+        # models with local attention (Llama 4). Can remove this once enabled.
         if self.vllm_config.model_config.hf_config.model_type == "llama4":
             from transformers import Llama4TextConfig
             assert isinstance(self.vllm_config.model_config.hf_text_config,
@@ -512,150 +892,275 @@ class NixlConnectorWorker:
                          self.block_window_per_layer)
             assert len(self.block_window_per_layer) == self.num_layers
 
-        descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
-        logger.debug("Registering descs: %s", caches_data)
-        self.nixl_wrapper.register_memory(descs)
-        logger.debug("Done registering descs")
-
-        self._registered_descs.append(descs)
-
         # After KV Caches registered, listen for new connections.
         metadata = NixlAgentMetadata(
             engine_id=self.engine_id,
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
             num_blocks=self.num_blocks,
-        )
+            block_lens=self.block_len_per_layer,
+            attn_backend_name=self.backend_name,
+            kv_cache_layout=self.kv_cache_layout)
         ready_event = threading.Event()
         self._nixl_handshake_listener_t = threading.Thread(
             target=self._nixl_handshake_listener,
-            args=(metadata, ready_event, self.rank),
+            args=(metadata, ready_event, self.side_channel_port, self.tp_rank),
             daemon=True,
             name="nixl_handshake_listener")
         self._nixl_handshake_listener_t.start()
-        ready_event.wait()
+        ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
-    def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
+    def add_remote_agent(self,
+                         nixl_agent_meta: NixlAgentMetadata,
+                         remote_tp_rank: int = 0,
+                         remote_tp_size: int = 1) -> str:
+        """
+        Add the remote NIXL agent and prepare the descriptors for reading cache
+        blocks from remote.
+
+        In particular, handle both homogeneous and heterogeneous TP. The former
+        requires local rank_i to read from remote rank_i. 
+        The latter, assuming D.world_size > P.world_size, requires that two or 
+        more local TP worker share the xfer from a single TP worker.
+
+        Here's an example (non-MLA case):
+
+        rank_offset     p_remote_tp_rank
+        (kv split no)    
+        --------------------------------
+            0                 0      Worker0  ---- 1st half of KV ----> Worker0  [ KV Cache ]
+                                                                        /
+            1                 0      Worker1  ---- 2nd half of KV -----/
+
+            0                 1      Worker2  ---- 1st half of KV ----> Worker1  [ KV Cache ]
+                                                                        /
+            1                 1      Worker3  ---- 2nd half of KV -----/
+
+
+                                Decoder TP workers                     Prefix TP workers
+                                  (world_size=4)                         (world_size=2)
+                                                 tp_ratio = 4 // 2 = 2                  
+                                
+        Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, kv_heads, block_size, head_dim]  
+        then D-Worker_j has [2, num_blocksD, kv_heads//tp_ratio, block_size, head_dim]. Mind the "HND" layout format.
+        Assuming num_blocksD >= num_blocksP, D-Worker0 reads from P-Worker0 by preparing the kv_heads//tp_ratio 
+        first heads from all the slots of all the blocks. D-Worker1 will do the same, but reading the second split
+        along the kv_heads dimension, and so forth until "tp_ratio" D TP workers have pulled from P-Worker0.   
+        
+        Note that the above will also hold true for the homogeneous TP case, where tp_ratio evaluates to 1.
+
+        Regarding MLA case, the cache is replicated across TP workers so the rank_offset will just always be 0
+        so that the whole cache is shared by "tp_ratio" D TP workers.
+        """ # noqa: E501
         engine_id = nixl_agent_meta.engine_id
-        assert engine_id != self.engine_id, "Conflict engine id found!"
-        if engine_id in self._remote_agents:
-            return
+        # TODO re-evaluate refreshing for scaling/recovery
+        if remote_tp_rank in self._remote_agents.get(engine_id, {}):
+            return self._remote_agents[engine_id][remote_tp_rank]
 
-        self._remote_agents[engine_id] = self.nixl_wrapper.add_remote_agent(
+        if engine_id not in self._tp_size:
+            self._tp_size[engine_id] = remote_tp_size
+        else:
+            assert self._tp_size[engine_id] == remote_tp_size
+        # TODO We may eventually want to skip enforcing the same attn backend.
+        assert nixl_agent_meta.attn_backend_name == self.backend_name
+
+        remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata)
+
+        # Number of D TP workers reading from a single P TP worker. This is
+        # 1 when P and D `--tensor-parallel-size` match.
+        tp_ratio = divide(self._tp_size[self.engine_id],
+                          self._tp_size[engine_id])
+        assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
+        assert not self._use_pallas or tp_ratio == 1, \
+               "TPU (pallas_v1) DOES NOT support heterogeneous TP yet."
+
+        # Handle tp_size>num_kv_heads: replicate KV cache.
+        total_num_kv_heads = self.model_config.get_total_num_kv_heads()
+        is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
+
+        remote_block_len = nixl_agent_meta.block_lens[0]
+        if self.use_mla or is_kv_replicated:
+            # With replicated KV cache, only the number of blocks can differ.
+            assert self.block_len_per_layer == nixl_agent_meta.block_lens, \
+                "KV cache sizes must match between P and D when replicated"
+            remote_block_size = remote_block_len // (
+                self.slot_size_per_layer[0])
+        else:
+            # When MLA is not used, this is a list of the same block length
+            for block_len in nixl_agent_meta.block_lens:
+                assert block_len == remote_block_len, \
+                    "All remote layers must have the same block size"
+            remote_block_size = remote_block_len // (
+                self.slot_size_per_layer[0] * tp_ratio)
+            if self._use_flashinfer:
+                # With flashinfer, KV are sent in the same message.
+                remote_block_size //= 2
+            if tp_ratio > 1:
+                # Heterogeneous TP expects same kv_cache_layout.
+                assert nixl_agent_meta.kv_cache_layout == self.kv_cache_layout
+                if self.device_type == "xpu":
+                    raise ValueError(
+                        "Heterogeneous TP is not supported on XPU")
+
+            assert remote_block_len == self.block_len_per_layer[0] * tp_ratio, (
+                "Remote P worker KV layer cache must be of shape [2, N, "
+                "local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
+            )
+
+        assert self.block_size == remote_block_size, (
+            "Remote P worker with different page/block size is not supported "
+            f"{self.block_size=}, {remote_block_size=}")
+
+        # Create dst descs and xfer side handles. TP workers have same #blocks.
+        if engine_id in self.dst_num_blocks:
+            assert self.dst_num_blocks[engine_id] == nixl_agent_meta.num_blocks
+        else:
+            self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
+
+        blocks_data = []
+        # With homogeneous TP, D pulls the whole kv cache from corresponding
+        # rank. With heterogeneous TP, prepare the descriptors by splitting the
+        # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
+        # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
         self.kv_caches_base_addr[
             engine_id] = nixl_agent_meta.kv_caches_base_addr
 
-        # Create src descs and xfer side handles.
-        blocks_data = []
-        for base_addr in self.kv_caches_base_addr[self.engine_id]:
-            for block_id in range(self.num_blocks):
-                block_offset = block_id * self.block_len
-                # (addr, len, device id)
-                blocks_data.append(
-                    (base_addr + block_offset, self.block_len, self.rank))
-        logger.debug("Created %s blocks for src engine %s and rank %s",
-                     len(blocks_data), self.engine_id, self.rank)
-
-        # Register with NIXL.
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
-        self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist(
-            "NIXL_INIT_AGENT", descs)
-
-        # Create dst descs and xfer side handles.
-        self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
-        blocks_data = []
-        for base_addr in self.kv_caches_base_addr[engine_id]:
+        assert len(nixl_agent_meta.kv_caches_base_addr) == len(
+            self.block_len_per_layer)
+        # Register all remote blocks, but only the corresponding kv heads.
+        for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+            kv_block_len = self.get_backend_aware_kv_block_len(layer_idx=i)
+            rank_offset = self.tp_rank % tp_ratio * kv_block_len \
+                if not (self.use_mla or is_kv_replicated) else 0
             for block_id in range(nixl_agent_meta.num_blocks):
-                block_offset = block_id * self.block_len
+                block_offset = block_id * nixl_agent_meta.block_lens[i]
+                # For each block, grab the heads chunk belonging to rank_i
+                # of size remote_nheads // tp_ratio, which correspond to
+                # self.block_len == remote_block_len//tp_ratio bytes.
+                addr = base_addr + block_offset + rank_offset
                 # (addr, len, device id)
-                blocks_data.append(
-                    (base_addr + block_offset, self.block_len, self.rank))
-        logger.debug("Created %s blocks for dst engine %s and rank %s",
-                     len(blocks_data), engine_id, self.rank)
+                blocks_data.append((addr, kv_block_len, remote_tp_rank))
+
+            if self._use_flashinfer:
+                # With FlashInfer index V separately to allow head splitting.
+                for block_id in range(nixl_agent_meta.num_blocks):
+                    block_offset = block_id * nixl_agent_meta.block_lens[i]
+                    addr = base_addr + block_offset + rank_offset
+                    v_addr = addr + nixl_agent_meta.block_lens[i] // 2
+                    blocks_data.append((v_addr, kv_block_len, remote_tp_rank))
+
+        logger.debug(
+            "Created %s blocks for dst engine %s with remote rank %s and "
+            "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
+            self.tp_rank)
 
         # Register with NIXL.
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
+                                                 self.nixl_memory_type)
         self.dst_xfer_side_handles[
             engine_id] = self.nixl_wrapper.prep_xfer_dlist(
-                self._remote_agents[engine_id], descs)
+                remote_agent_name, descs)
+
+        return remote_agent_name
+
+    def sync_recved_kv_to_device(self, req_id: str, meta: ReqMeta):
+        """copy recved kv from host buffer to device."""
+        assert self.use_host_buffer
+        assert self.copy_blocks is not None
+
+        local_block_ids = meta.local_block_ids
+        self.copy_blocks(self.host_xfer_buffers, self.device_kv_caches,
+                         local_block_ids, local_block_ids, "h2d")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "synced recved kv of request[%s] to device kv buffer,"
+                "local_block_ids: %s. ", req_id,
+                ",".join(map(str, meta.local_block_ids)))
+
+    def save_kv_to_host(self, metadata: NixlConnectorMetadata):
+        """copy kv from device to host buffer."""
+        assert self.use_host_buffer
+        assert self.copy_blocks is not None
+
+        for req_id, meta in metadata.reqs_to_save.items():
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "save_load_kv for request[%s] to host xfer buffer."
+                    "local_block_ids: %s. ", req_id,
+                    ",".join(map(str, meta.local_block_ids)))
+            # blocking
+            self.copy_blocks(self.device_kv_caches, self.host_xfer_buffers,
+                             meta.local_block_ids, meta.local_block_ids, "d2h")
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
-        Get requests that are done sending or recving.
-
-        In TP>1 setup, each rank exchanges KVs with its counterpart
-        ranks independently. get_finished() runs in a worker creates
-        the done_sending and done_recving sets that are sent to the
-        scheduler via ModelRunnerOutput by Rank 0. To ensure trnxs
-        are done before adding to finished, Ranks 1 to N-1 communicate
-        to Rank 0 once their transaction is done + Rank 0 returns
-        finished sets to Scheduler only once all ranks are done.
+        Get requests that are done sending or recving on this specific worker.
+        The scheduler process (via the MultiprocExecutor) will use this output
+        to track which workers are done.
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
-                "and %s requests done recving", self.rank, len(done_sending),
-                len(done_recving))
+                "and %s requests done recving", self.tp_rank,
+                len(done_sending), len(done_recving))
 
-        if self.world_size == 1:
-            return done_sending, done_recving
-
-        # Rank 0: get finished from all other ranks.
-        if self.rank == 0:
-            for req_id in done_sending:
-                self._done_sending_count[req_id] += 1
+        if self.use_host_buffer:
             for req_id in done_recving:
-                self._done_recving_count[req_id] += 1
+                meta = self._recving_metadata.pop(req_id)
+                assert meta, f"{req_id} not found in recving_metadata list"
+                self.sync_recved_kv_to_device(req_id, meta)
 
-            # Keep track of how many other ranks have finished.
-            other_ranks_finished_ids: list[str] = []
-            for i in range(1, self.world_size):
-                other_ranks_finished_ids.extend(
-                    self.tp_group.recv_object(src=i))
-            for req_id in other_ranks_finished_ids:
-                if (req_id in self._done_recving_count
-                        or req_id in self._recving_transfers):
-                    self._done_recving_count[req_id] += 1
-                else:
-                    self._done_sending_count[req_id] += 1
+        # Handle timeout to avoid stranding blocks on remote.
+        now = time.perf_counter()
+        while self._reqs_to_send:
+            req_id, expires = next(iter(self._reqs_to_send.items()))
+            # Sorted dict, oldest requests are put first so we can exit early.
+            if now < expires:
+                break
+            count = self.consumer_notification_counts_by_req.pop(req_id, 0)
+            logger.warning(
+                "Releasing expired KV blocks for request %s which were "
+                "retrieved by %d decode worker(s) within %d seconds.", req_id,
+                count, envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
+            self._reqs_to_process.remove(req_id)
+            del self._reqs_to_send[req_id]
+            done_sending.add(req_id)
 
-            # Return ids that finished on all ranks to the scheduler.
-            all_done_recving: set[str] = set()
-            for req_id in list(self._done_recving_count.keys()):
-                if self._done_recving_count[req_id] == self.world_size:
-                    del self._done_recving_count[req_id]
-                    all_done_recving.add(req_id)
-
-            all_done_sending: set[str] = set()
-            for req_id in list(self._done_sending_count.keys()):
-                if self._done_sending_count[req_id] == self.world_size:
-                    del self._done_sending_count[req_id]
-                    all_done_sending.add(req_id)
-
-            return all_done_sending, all_done_recving
-
-        # Ranks 1 to N-1: send finished ids to Rank 0.
-        else:
-            finished_req_ids = list(done_recving.union(done_sending))
-            self.tp_group.send_object(finished_req_ids, dst=0)
-
-            # Unused as only Rank 0 results are sent to scheduler.
-            return done_sending, done_recving
+        return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
-        """Get req_ids which got a remote xfer message."""
-
+        """
+        Get req_ids which got a remote xfer message. When multiple consumers
+        are reading from the same producer (heterogeneous TP scenario), wait
+        for all consumers to be done pulling.
+        """
         notified_req_ids: set[str] = set()
-        for req_ids in self.nixl_wrapper.get_new_notifs().values():
-            for req_id in req_ids:
-                assert req_id not in notified_req_ids
-                notified_req_ids.add(req_id.decode("utf-8"))
+        for notifs in self.nixl_wrapper.get_new_notifs().values():
+            for notif in notifs:
+                req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
+                if (req_id not in self._reqs_to_send
+                        and req_id not in self._reqs_to_process):
+                    logger.error(
+                        "Potentially invalid KV blocks for "
+                        "unrecognized request %s were retrieved by "
+                        "a decode worker. They may have expired.", req_id)
+                    continue
+
+                self.consumer_notification_counts_by_req[req_id] += 1
+                # Wait all consumers (D) to be done reading before freeing.
+                if self.consumer_notification_counts_by_req[req_id] == int(
+                        tp_ratio):
+                    notified_req_ids.add(req_id)
+                    del self.consumer_notification_counts_by_req[req_id]
+                    self._reqs_to_process.remove(req_id)
+                    self._reqs_to_send.pop(req_id, None)
         return notified_req_ids
 
-    def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
+    def _pop_done_transfers(
+            self, transfers: dict[str, list[tuple[int, float]]]) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
         Args:
@@ -665,23 +1170,22 @@ class NixlConnectorWorker:
         """
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
-            running_reqs = []
-            for handle in handles:
+            in_progress = False
+            for handle, _xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
-                    # TODO ptarasiewicz: why abort is throwing errors?
-                    # self.nixl_wrapper.release_xfer_handle(handle)
+                    self.nixl_wrapper.release_xfer_handle(handle)
+                    # TODO (NickLucche) Get from NIXL telemetry once integrated
+                    self.xfer_stats.record_transfer()
+                elif xfer_state == "PROC":
+                    in_progress = True
                     continue
-                if xfer_state == "PROC":
-                    running_reqs.append(handle)
                 else:
                     raise RuntimeError("Transfer failed with state %s",
                                        xfer_state)
-            if len(running_reqs) == 0:
+            if not in_progress:
                 done_req_ids.add(req_id)
                 del transfers[req_id]
-            else:
-                transfers[req_id] = running_reqs
         return done_req_ids
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
@@ -689,34 +1193,58 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        for req_id, meta in metadata.requests.items():
+        for req_id, meta in metadata.reqs_to_recv.items():
+            remote_engine_id = meta.remote_engine_id
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
-                meta.remote_engine_id, len(meta.local_block_ids),
+                remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
-            self._read_blocks(
-                request_id=req_id,
-                dst_engine_id=meta.remote_engine_id,
-                local_block_ids=meta.local_block_ids,
-                remote_block_ids=meta.remote_block_ids,
-                remote_host=meta.remote_host,
-                remote_port=meta.remote_port,
-            )
+            if self.use_host_buffer:
+                self._recving_metadata[req_id] = meta
+            if remote_engine_id not in self._remote_agents:
+                # Initiate handshake with remote engine to exchange metadata.
+                with self._handshake_lock:
+                    if remote_engine_id not in self._remote_agents:
+                        self._background_nixl_handshake(
+                            req_id, remote_engine_id, meta)
+                        continue
 
-    def _read_blocks(
-        self,
-        local_block_ids: list[int],
-        remote_block_ids: list[int],
-        remote_host: str,
-        remote_port: int,
-        dst_engine_id: str,
-        request_id: str,
-    ):
-        # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
-        if dst_engine_id not in self._remote_agents:
-            self._nixl_handshake(remote_host, remote_port)
+            # Handshake already completed, start async read xfer.
+            self._read_blocks_for_req(req_id, meta)
 
+        # Start transfers for requests whose handshakes have now finished.
+        while not self._ready_requests.empty():
+            self._read_blocks_for_req(*self._ready_requests.get_nowait())
+
+        # Keep around the requests that have been part of a batch. This is
+        # needed because async scheduling pushes the misalignment between the
+        # moment in which requests expiration is set (P side) and the moment in
+        # which blocks are read from D. As P can now more easily lag behind D
+        # while processing the next batch, we make sure to only set an
+        # expiration for requests that have not been read from D yet.
+        for req_id in metadata.reqs_in_batch:
+            self._reqs_to_process.add(req_id)
+
+        # Add to requests that are waiting to be read and track expiration.
+        for req_id, expiration_time in metadata.reqs_to_send.items():
+            if req_id in self._reqs_to_process:
+                self._reqs_to_send[req_id] = expiration_time
+
+    def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
+        logger.debug(
+            "Remote agent %s available, calling _read_blocks for req %s",
+            meta.remote_engine_id, req_id)
+        self._read_blocks(
+            request_id=req_id,
+            dst_engine_id=meta.remote_engine_id,
+            local_block_ids=meta.local_block_ids,
+            remote_block_ids=meta.remote_block_ids,
+        )
+
+    def _read_blocks(self, local_block_ids: list[int],
+                     remote_block_ids: list[int], dst_engine_id: str,
+                     request_id: str):
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
@@ -727,12 +1255,19 @@ class NixlConnectorWorker:
         # saturate IB with heterogeneous TP sizes. We should remove the staging
         # blocks until we are ready.
 
+        # Number of D TP workers that will read from dst P. Propagate tp_ratio
+        # on notification so that dst worker can wait before freeing blocks.
+        tp_ratio = self._tp_size[
+            self.engine_id] // self._tp_size[dst_engine_id]
+        notif_id = f"{request_id}:{tp_ratio}".encode()
+
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
-            self.nixl_wrapper.send_notif(dst_engine_id,
-                                         notif_msg=request_id.encode("utf-8"))
+            remote_rank = self.tp_rank // tp_ratio
+            agent_name = self._remote_agents[dst_engine_id][remote_rank]
+            self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
@@ -745,9 +1280,13 @@ class NixlConnectorWorker:
         local_xfer_side_handle = self.src_xfer_side_handle
         remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
 
+        # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
+        # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
+        # workers will issue xfers to parts of the P worker remote kv caches.
+
         # Get descs ids.
-        local_block_descs_ids: list[int] = []
-        remote_block_descs_ids: list[int] = []
+        local_block_descs_ids: np.ndarray
+        remote_block_descs_ids: np.ndarray
         if not self.block_window_per_layer:
             # Default case: assume global attention
             remote_block_descs_ids = self._get_block_descs_ids(
@@ -757,6 +1296,8 @@ class NixlConnectorWorker:
         else:
             # TODO(mgoin): remove this once we have hybrid memory allocator
             # Optimization for models with local attention (Llama 4)
+            local_descs_list = []
+            remote_descs_list = []
             for layer_idx, block_window in enumerate(
                     self.block_window_per_layer):
                 # For each layer:
@@ -776,8 +1317,11 @@ class NixlConnectorWorker:
                 layer_remote_desc_ids = self._get_block_descs_ids(
                     dst_engine_id, layer_remote_block_ids, layer_idx)
 
-                local_block_descs_ids.extend(layer_local_desc_ids)
-                remote_block_descs_ids.extend(layer_remote_desc_ids)
+                local_descs_list.append(layer_local_desc_ids)
+                remote_descs_list.append(layer_remote_desc_ids)
+
+            local_block_descs_ids = np.concatenate(local_descs_list)
+            remote_block_descs_ids = np.concatenate(remote_descs_list)
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
@@ -788,27 +1332,27 @@ class NixlConnectorWorker:
             local_block_descs_ids,
             remote_xfer_side_handle,
             remote_block_descs_ids,
-            notif_msg=request_id.encode("utf-8"),
+            notif_msg=notif_id,
         )
 
         # Begin async xfer.
         self.nixl_wrapper.transfer(handle)
 
         # Use handle to check completion in future step().
-        self._recving_transfers[request_id].append(handle)
+        self._recving_transfers[request_id].append(
+            (handle, time.perf_counter()))
 
     def _get_block_descs_ids(self,
                              engine_id: str,
                              block_ids: list[int],
-                             layer_idx: Optional[int] = None) -> list[int]:
+                             layer_idx: Optional[int] = None) -> np.ndarray:
         """
         Get the descs ids for a set of block ids.
         If layer_idx is provided, we use the region_ids for the given layer.
         Otherwise, we use all regions.
         """
-
         if layer_idx is None:
-            region_ids = range(self.num_regions)
+            region_ids = np.arange(self.num_regions)
         else:
             assert layer_idx < self.num_layers
             if self.num_layers < self.num_regions:
@@ -816,20 +1360,68 @@ class NixlConnectorWorker:
                 # the regions are organized as [K0, V0, K1, V1, ...]
                 # and we select K_i and V_i
                 assert 2 * self.num_layers == self.num_regions
-                region_ids = range(2 * layer_idx, 2 * layer_idx + 2)
+                region_ids = np.arange(2 * layer_idx, 2 * layer_idx + 2)
             else:
                 # Otherwise, we assume we have MLA and select i-th layer
                 assert self.num_layers == self.num_regions
-                region_ids = range(layer_idx, layer_idx + 1)
+                region_ids = np.arange(layer_idx, layer_idx + 1)
 
         num_blocks = self.dst_num_blocks[engine_id]
 
         # Compute the desc ids for each block.
-        descs_ids: list[int] = []
-        for reg_id in region_ids:
-            for block_id in block_ids:
-                descs_ids.append(reg_id * num_blocks + block_id)
-        return descs_ids
+        region_ids = region_ids[:, None]
+        block_ids = np.array(block_ids)[None, :]
+        descs_ids = region_ids * num_blocks + block_ids
+        return descs_ids.flatten()
+
+    def get_backend_aware_kv_block_len(self, layer_idx: int):
+        """
+        Get the block length for one K/V element (K and V have the same size).
+
+        For FA and other backends, this is equal to the length of the whole 
+        block, as K and V are in separate regions.
+        For FlashInfer, this is half the length of the whole block, as K and V
+        share the same region.
+        """
+        if self._use_flashinfer:
+            # For indexing only half (either just the K or V part).
+            block_len = self.block_len_per_layer[layer_idx] // 2
+        else:
+            block_len = self.block_len_per_layer[layer_idx]
+        return block_len
+
+    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
+        """
+        Get the KV transfer stats for the connector.
+        """
+        # Clear stats for next iteration
+        if not self.xfer_stats.is_empty():
+            return self.xfer_stats.clone_and_reset()
+        return None
+
+    def shutdown(self):
+        """Shutdown the connector worker."""
+        self._handshake_initiation_executor.shutdown(wait=False)
+        if self._nixl_handshake_listener_t is not None:
+            self._nixl_handshake_listener_t.join(timeout=0)
+            self._nixl_handshake_listener_t = None
+        for handles in self._recving_transfers.values():
+            for handle, _ in handles:
+                self.nixl_wrapper.release_xfer_handle(handle)
+        self._recving_transfers.clear()
+        if self.src_xfer_side_handle:
+            self.nixl_wrapper.release_dlist_handle(self.src_xfer_side_handle)
+            self.src_xfer_side_handle = 0
+        for dst_xfer_side_handle in self.dst_xfer_side_handles.values():
+            self.nixl_wrapper.release_dlist_handle(dst_xfer_side_handle)
+        self.dst_xfer_side_handles.clear()
+        for remote_agents in self._remote_agents.values():
+            for agent_name in remote_agents.values():
+                self.nixl_wrapper.remove_remote_agent(agent_name)
+        self._remote_agents.clear()
+        for desc in self._registered_descs:
+            self.nixl_wrapper.deregister_memory(desc)
+        self._registered_descs.clear()
 
 
 @contextlib.contextmanager
@@ -849,3 +1441,39 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+
+
+@dataclass
+class NixlKVConnectorStats(KVConnectorStats):
+    """Container for transfer performance metrics"""
+
+    def __post_init__(self):
+        if "num_successful_transfers" not in self.data:
+            self.data["num_successful_transfers"] = 0
+
+    def reset(self):
+        self.data = {"num_successful_transfers": 0}
+
+    def record_transfer(self):
+        # TODO: record actual transfer stats when available
+        self.data["num_successful_transfers"] += 1
+
+    def clone_and_reset(self) -> "NixlKVConnectorStats":
+        old = copy.copy(self)
+        self.reset()
+        return old
+
+    def is_empty(self) -> bool:
+        return self.data["num_successful_transfers"] == 0
+
+    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        if not other.is_empty():
+            self.data["num_successful_transfers"] += other.data[
+                "num_successful_transfers"]
+        return self
+
+    def reduce(self) -> dict[str, Union[int, float]]:
+        # TODO: reduce stats to a single value, calculate latency/throughput
+        return {
+            "num_successful_transfers": self.data["num_successful_transfers"]
+        }

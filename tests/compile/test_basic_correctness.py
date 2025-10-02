@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import dataclasses
@@ -19,10 +20,9 @@ class TestSetting:
     tp_size: int
     attn_backend: str
     method: str
-    fullgraph: bool
 
 
-# we cannot afford testing the full Catesian product
+# we cannot afford testing the full Cartesian product
 # of all models and all levels
 @pytest.mark.parametrize(
     "test_setting",
@@ -30,52 +30,53 @@ class TestSetting:
         # basic llama model
         TestSetting(
             model="meta-llama/Llama-3.2-1B-Instruct",
-            model_args=[],
+            model_args=["--max-model-len", "2048"],
             pp_size=2,
             tp_size=2,
-            attn_backend="FLASHINFER",
+            attn_backend="FLASH_ATTN",
             method="generate",
-            fullgraph=True,
         ),
         # llama model with quantization
         TestSetting(
             model="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            model_args=["--quantization", "gptq"],
+            model_args=["--quantization", "gptq", "--max-model-len", "2048"],
             pp_size=1,
             tp_size=1,
             attn_backend="FLASH_ATTN",
             method="generate",
-            fullgraph=True,
         ),
         # MoE model
         TestSetting(
             model="ibm/PowerMoE-3b",
-            model_args=[],
+            model_args=["--max-model-len", "2048"],
             pp_size=1,
             tp_size=2,
             attn_backend="FLASH_ATTN",
             method="generate",
-            fullgraph=True,
         ),
         # embedding model
         TestSetting(
             model="BAAI/bge-multilingual-gemma2",
-            model_args=["--task", "embed", "--dtype", "bfloat16"],
+            model_args=[
+                "--runner",
+                "pooling",
+                "--dtype",
+                "bfloat16",
+                "--max-model-len",
+                "2048",
+            ],
             pp_size=1,
             tp_size=1,
             attn_backend="FLASH_ATTN",
             method="encode",
-            fullgraph=True,
         ),
-        # encoder-based embedding model (BERT)
         TestSetting(
             model="BAAI/bge-base-en-v1.5",
-            model_args=["--task", "embed"],
+            model_args=["--runner", "pooling"],
             pp_size=1,
             tp_size=1,
-            attn_backend="XFORMERS",
+            attn_backend="FLASH_ATTN",
             method="encode",
-            fullgraph=True,
         ),
         # vision language model
         TestSetting(
@@ -85,9 +86,9 @@ class TestSetting:
             tp_size=1,
             attn_backend="FLASH_ATTN",
             method="generate_with_image",
-            fullgraph=False,
         ),
-    ])
+    ],
+)
 def test_compile_correctness(
     monkeypatch: pytest.MonkeyPatch,
     test_setting: TestSetting,
@@ -101,9 +102,8 @@ def test_compile_correctness(
     tp_size = test_setting.tp_size
     attn_backend = test_setting.attn_backend
     method = test_setting.method
-    fullgraph = test_setting.fullgraph
-    if cuda_device_count_stateless() != pp_size * tp_size:
-        pytest.skip(f"Need exactly {pp_size}*{tp_size} CUDA gpus but got "
+    if cuda_device_count_stateless() < pp_size * tp_size:
+        pytest.skip(f"Need at least {pp_size}*{tp_size} CUDA gpus but got "
                     f"{cuda_device_count_stateless()}")
 
     with monkeypatch.context() as m:
@@ -141,9 +141,5 @@ def test_compile_correctness(
         ]:
             all_args.append(final_args + [f"-O{level}"])
             all_envs.append({})
-            if level != CompilationLevel.DYNAMO_ONCE and not fullgraph:
-                # "DYNAMO_ONCE" will always use fullgraph
-                all_envs[-1][
-                    "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "0"  # type: ignore
 
         compare_all_settings(model, all_args * 3, all_envs, method=method)

@@ -83,13 +83,13 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
   explicit FP16Vec16(const void* ptr)
       : reg((__m256i)_mm256_loadu_si256((__m256i*)ptr)) {}
 
-  // non-temproal load
+  // non-temporal load
   explicit FP16Vec16(bool, void* ptr)
       : reg(_mm256_stream_load_si256((__m256i*)ptr)) {}
 
   explicit FP16Vec16(const FP32Vec16&);
 
-  void save(void* ptr) const { *reinterpret_cast<__m256i*>(ptr) = reg; }
+  void save(void* ptr) const { _mm256_storeu_si256((__m256i*)ptr, reg); }
 
   void save(void* ptr, const int elem_num) const {
     constexpr uint32_t M = 0xFFFFFFFF;
@@ -120,13 +120,13 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
   explicit BF16Vec16(const void* ptr)
       : reg((__m256i)_mm256_loadu_si256((__m256i*)ptr)) {}
 
-  // non-temproal load
+  // non-temporal load
   explicit BF16Vec16(bool, void* ptr)
       : reg(_mm256_stream_load_si256((__m256i*)ptr)) {}
 
   explicit BF16Vec16(const FP32Vec16&);
 
-  void save(void* ptr) const { *reinterpret_cast<__m256i*>(ptr) = reg; }
+  void save(void* ptr) const { _mm256_storeu_si256((__m256i*)ptr, reg); }
 
   void save(void* ptr, const int elem_num) const {
     constexpr uint32_t M = 0xFFFFFFFF;
@@ -180,8 +180,8 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
             (__m128i)vec8_data.reg, 1)) {}
 
   void save(void* ptr) const {
-    *reinterpret_cast<__m256i*>(ptr) = reg_low;
-    *reinterpret_cast<__m256i*>((__m256i*)ptr + 1) = reg_high;
+    _mm256_storeu_si256((__m256i*)ptr, reg_low);
+    _mm256_storeu_si256((__m256i*)ptr + 1, reg_high);
   }
 };
 #endif
@@ -327,7 +327,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   // normal load
   explicit FP32Vec16(const float* ptr) : reg(_mm512_loadu_ps(ptr)) {}
 
-  // non-temproal load
+  // non-temporal load
   explicit FP32Vec16(bool, void* ptr)
       : reg((__m512)_mm512_stream_load_si512(ptr)) {}
 
@@ -576,7 +576,7 @@ struct INT8Vec64 : public Vec<INT8Vec64> {
   // normal load
   explicit INT8Vec64(void* ptr) : reg(_mm512_loadu_epi8(ptr)) {}
 
-  // non-temproal load
+  // non-temporal load
   explicit INT8Vec64(bool, void* ptr) : reg(_mm512_stream_load_si512(ptr)) {}
 
   void save(void* ptr) const { _mm512_storeu_epi8(ptr, reg); }
@@ -587,7 +587,7 @@ struct INT8Vec64 : public Vec<INT8Vec64> {
     _mm512_mask_storeu_epi8(ptr, mask, reg);
   }
 
-  // non-temproal save
+  // non-temporal save
   void nt_save(int8_t* ptr) { _mm512_stream_si512((__m512i*)ptr, reg); }
 };
 #endif

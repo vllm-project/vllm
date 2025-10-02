@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+from transformers import DbrxConfig
 
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
@@ -21,9 +24,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
@@ -358,7 +359,7 @@ class DbrxModel(nn.Module):
         else:
             assert intermediate_tensors
             hidden_states = intermediate_tensors["hidden_states"]
-        for block in self.blocks[self.start_layer:self.end_layer]:
+        for block in islice(self.blocks, self.start_layer, self.end_layer):
             hidden_states = block(position_ids, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -436,6 +437,7 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
             org_num_embeddings=config.vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
@@ -459,10 +461,8 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

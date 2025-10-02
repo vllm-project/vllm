@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import json
@@ -8,8 +9,6 @@ from contextlib import suppress
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-# downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 
 from ...utils import RemoteOpenAIServer
 
@@ -17,7 +16,6 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # technically this needs Mistral-7B-v0.1 as base, but we're not testing
 # generation quality here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 BADREQUEST_CASES = [
     (
@@ -48,11 +46,6 @@ BADREQUEST_CASES = [
 
 
 @pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
-
-
-@pytest.fixture(scope="module")
 def monkeypatch_module():
     from _pytest.monkeypatch import MonkeyPatch
     mpatch = MonkeyPatch()
@@ -60,22 +53,17 @@ def monkeypatch_module():
     mpatch.undo()
 
 
-@pytest.fixture(scope="module", params=[False, True])
+@pytest.fixture(scope="module", params=[True])
 def server_with_lora_modules_json(request, monkeypatch_module,
                                   zephyr_lora_files):
 
     use_v1 = request.param
-    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
+    assert use_v1
+    monkeypatch_module.setenv('VLLM_USE_V1', '1')
 
     # Define the json format LoRA module configurations
     lora_module_1 = {
         "name": "zephyr-lora",
-        "path": zephyr_lora_files,
-        "base_model_name": MODEL_NAME
-    }
-
-    lora_module_2 = {
-        "name": "zephyr-lora2",
         "path": zephyr_lora_files,
         "base_model_name": MODEL_NAME
     }
@@ -91,7 +79,6 @@ def server_with_lora_modules_json(request, monkeypatch_module,
         "--enable-lora",
         "--lora-modules",
         json.dumps(lora_module_1),
-        json.dumps(lora_module_2),
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -128,7 +115,6 @@ async def test_static_lora_lineage(client: openai.AsyncOpenAI,
                for lora_model in lora_models)
     assert all(lora_model.parent == MODEL_NAME for lora_model in lora_models)
     assert lora_models[0].id == "zephyr-lora"
-    assert lora_models[1].id == "zephyr-lora2"
 
 
 @pytest.mark.asyncio
@@ -216,7 +202,7 @@ async def test_dynamic_lora_badrequests(client: openai.AsyncOpenAI, tmp_path,
 @pytest.mark.asyncio
 async def test_multiple_lora_adapters(client: openai.AsyncOpenAI, tmp_path,
                                       zephyr_lora_files):
-    """Validate that many loras can be dynamically registered and inferenced 
+    """Validate that many loras can be dynamically registered and inferenced
     with concurrently"""
 
     # This test file configures the server with --max-cpu-loras=2 and this test
@@ -313,3 +299,37 @@ async def test_loading_invalid_adapters_does_not_break_others(
         prompt=["Hello there", "Foo bar bazz buzz"],
         max_tokens=5,
     )
+
+
+@pytest.mark.asyncio
+async def test_beam_search_with_lora_adapters(
+    client: openai.AsyncOpenAI,
+    tmp_path,
+    zephyr_lora_files,
+):
+    """Validate that async beam search can be used with lora."""
+
+    async def load_and_run_adapter(adapter_name: str):
+        await client.post("load_lora_adapter",
+                          cast_to=str,
+                          body={
+                              "lora_name": adapter_name,
+                              "lora_path": str(zephyr_lora_files)
+                          })
+        for _ in range(3):
+            await client.completions.create(
+                model=adapter_name,
+                prompt=["Hello there", "Foo bar bazz buzz"],
+                max_tokens=5,
+                extra_body=dict(use_beam_search=True),
+            )
+
+    lora_tasks = []
+    for i in range(3):
+        lora_tasks.append(
+            asyncio.create_task(load_and_run_adapter(f"adapter_{i}")))
+
+    results, _ = await asyncio.wait(lora_tasks)
+
+    for r in results:
+        assert not isinstance(r, Exception), f"Got exception {r}"

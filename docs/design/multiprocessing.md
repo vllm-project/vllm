@@ -7,8 +7,8 @@ page for information on known issues and how to solve them.
 
 ## Introduction
 
-!!! warning
-    The source code references are to the state of the code at the time of writing in December, 2024.
+!!! important
+    The source code references are to the state of the code at the time of writing in December 2024.
 
 The use of Python multiprocessing in vLLM is complicated by:
 
@@ -22,13 +22,13 @@ This document describes how vLLM deals with these challenges.
 
 [Python multiprocessing methods](https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods) include:
 
-- `spawn` - spawn a new Python process. This will be the default as of Python
-  3.14. In macOS, this is already the default.
+- `spawn` - spawn a new Python process. The default on Windows and macOS.
 
-- `fork` - Use `os.fork()` to fork the Python interpreter. This is the default
-  in Python versions prior to 3.14.
+- `fork` - Use `os.fork()` to fork the Python interpreter. The default on
+  Linux for Python versions prior to 3.14.
 
 - `forkserver` - Spawn a server process that will fork a new process on request.
+  The default on Linux for Python version 3.14 and newer.
 
 ### Tradeoffs
 
@@ -77,7 +77,7 @@ The `multiproc_xpu_executor` forces the use of `spawn`.
 
 There are other miscellaneous places hard-coding the use of `spawn`:
 
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L135>
+- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/distributed/device_communicators/all_reduce_utils.py#L135>
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/entrypoints/openai/api_server.py#L184>
 
 Related PRs:
@@ -123,7 +123,7 @@ what is happening. First, a log message from vLLM:
 WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
     initialized. We must use the `spawn` multiprocessing start method. Setting
     VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
-    https://docs.vllm.ai/en/latest/usage/debugging.html#python-multiprocessing
+    https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing
     for more information.
 ```
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -109,7 +110,7 @@ class StructuredOutputBackend(ABC):
 
         Args:
             request_type (StructuredOutputOptions): The type of structured
-              output request.
+                output request.
             grammar_spec (str): The grammar specification to compile.
 
         Returns:
@@ -123,7 +124,7 @@ class StructuredOutputBackend(ABC):
 
         Args:
             max_num_seqs (int): The maximum number of sequences for which
-              to allocate the bitmask.
+                to allocate the bitmask.
         """
 
     @abstractmethod

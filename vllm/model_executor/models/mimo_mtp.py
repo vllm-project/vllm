@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/model_executor/models/deepseek_mtp.py
@@ -29,12 +30,10 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2DecoderLayer
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .utils import maybe_prefix
@@ -118,6 +117,9 @@ class MiMoMultiTokenPredictor(nn.Module):
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -140,12 +142,10 @@ class MiMoMultiTokenPredictor(nn.Module):
         self,
         hidden_states: torch.Tensor,
         lm_head: ParallelLMHead,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         self.mtp_layers[str(self.mtp_start_layer_idx + spec_step_idx)]
-        logits = self.logits_processor(lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(lm_head, hidden_states)
         return logits
 
 
@@ -158,41 +158,33 @@ class MiMoMTP(nn.Module):
                                              prefix=maybe_prefix(
                                                  prefix, "model"))
         self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                      self.config.hidden_size)
+                                      self.config.hidden_size,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
 
-        self.sampler = get_sampler()
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        previous_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         assert spec_step_idx == 0, "mimo_mtp only support predict one token now"
-        hidden_states = self.model(input_ids, positions,
-                                   previous_hidden_states, inputs_embeds,
-                                   spec_step_idx)
+        hidden_states = self.model(input_ids, positions, hidden_states,
+                                   inputs_embeds, spec_step_idx)
         return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> Optional[torch.Tensor]:
         return self.model.compute_logits(hidden_states, self.lm_head,
-                                         sampling_metadata, spec_step_idx)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+                                         spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -251,6 +243,15 @@ class MiMoMTP(nn.Module):
 
     def map_model_name_to_mtp_param_name(self, name: str) -> str:
         import regex as re
+
+        # append mtp_start_layer_idx
+        pattern = r"(model\.mtp_layers\.)(\d+)(\.)"
+        match = re.match(pattern, name)
+        if match:
+            original_num = int(match.group(2))
+            new_num = original_num + self.config.num_hidden_layers
+            name = name.replace(match.group(), f"{match.group(1)}{new_num}.")
+        # check for early turn
         name_without_prefix = [
             "token_layernorm", "hidden_layernorm", "input_proj",
             "final_layernorm"
@@ -258,10 +259,11 @@ class MiMoMTP(nn.Module):
         for sub_name in name_without_prefix:
             if sub_name in name:
                 return name
-        pattern = r"model.mtp_layers.(\d+)."
-        group = re.match(pattern, name)
-        if group is not None:
-            name = name.replace(group.group(), group.group() + "mtp_block.")
+        # add mtp_block
+        pattern = r"(model\.mtp_layers\.\d+\.)"
+        match = re.match(pattern, name)
+        if match:
+            name = name.replace(match.group(), match.group() + "mtp_block.")
         return name
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:

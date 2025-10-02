@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .quark_scheme import QuarkScheme
 from .quark_w4a4_mxfp4 import QuarkW4A4MXFP4

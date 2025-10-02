@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch.nn import Parameter
@@ -8,8 +9,11 @@ from torch.nn import Parameter
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
+                                                         FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
+    UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
@@ -23,7 +27,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
     check_marlin_supports_layer, check_moe_marlin_supports_layer,
     marlin_make_empty_g_idx, marlin_make_workspace_new,
-    marlin_moe_permute_scales, marlin_permute_scales,
+    marlin_moe_permute_scales, marlin_permute_bias, marlin_permute_scales,
     moe_awq_to_marlin_zero_points, verify_marlin_supported,
     verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -140,13 +144,16 @@ class AWQMarlinConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
+            if is_layer_skipped_awq(
+                    prefix, getattr(self, "modules_to_not_convert", [])):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            return AWQMoEMethod(self)
+            return AWQMoEMethod(self, layer.moe_config)
         return None
 
     @classmethod
@@ -298,6 +305,9 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         layer.g_idx = marlin_make_empty_g_idx(device)
         layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
+        if hasattr(layer, "bias") and layer.bias is not None:
+            layer.bias.data = marlin_permute_bias(layer.bias)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -320,7 +330,12 @@ class AWQMarlinLinearMethod(LinearMethodBase):
 
 class AWQMoEMethod(FusedMoEMethodBase):
 
-    def __init__(self, quant_config: AWQMarlinConfig):
+    def __init__(
+        self,
+        quant_config: AWQMarlinConfig,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.quant_config = quant_config
         if self.quant_config.weight_bits != 4:
             raise ValueError("AWQMoEMethod only supports 4bit now.")
@@ -464,6 +479,16 @@ class AWQMoEMethod(FusedMoEMethodBase):
             num_bits=self.quant_config.weight_bits)
         replace_parameter(layer, "w2_qzeros", marlin_w2_zp)
 
+        if hasattr(layer, "w13_bias") and layer.w13_bias is not None:
+            layer.w13_bias.data = marlin_permute_bias(layer.w13_bias)
+
+        if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
+            layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
+
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        return None
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -478,18 +503,24 @@ class AWQMoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-    ) -> torch.Tensor:
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        assert self.fused_experts is None
+
+        if enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `AWQMoEMethod` yet.")
+
         assert activation == "silu", "Only SiLU activation is supported."
 
-        if apply_router_weight_on_input:
-            raise NotImplementedError(
-                "Apply router weight on input is not supported for"
-                "fused Marlin MoE method.")
-
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -499,18 +530,23 @@ class AWQMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         return torch.ops.vllm.fused_marlin_moe(
             x,
             layer.w13_qweight,
             layer.w2_qweight,
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
             layer.w13_scales,
             layer.w2_scales,
             router_logits,
             topk_weights,
             topk_ids,
             quant_type_id=self.quant_type.id,
+            apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             w1_zeros=layer.w13_qzeros,

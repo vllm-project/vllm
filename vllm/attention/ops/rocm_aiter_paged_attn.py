@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import aiter as rocm_aiter
@@ -80,8 +81,8 @@ class AITERPagedAttention(PagedAttention):
                 blocksparse_head_sliding_step=blocksparse_head_sliding_step)
 
         if "fp8" in kv_cache_dtype:
-            key_cache = key_cache.view(torch.float8_e4m3fnuz)
-            value_cache = value_cache.view(torch.float8_e4m3fnuz)
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
 
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention

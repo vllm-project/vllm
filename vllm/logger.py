@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Logging configuration for vLLM."""
 import datetime
 import json
@@ -19,9 +20,10 @@ VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
 VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
+VLLM_LOGGING_STREAM = envs.VLLM_LOGGING_STREAM
 
 _FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
-           "[%(filename)s:%(lineno)d] %(message)s")
+           "[%(fileinfo)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 DEFAULT_LOGGING_CONFIG = {
@@ -37,7 +39,7 @@ DEFAULT_LOGGING_CONFIG = {
             "class": "logging.StreamHandler",
             "formatter": "vllm",
             "level": VLLM_LOGGING_LEVEL,
-            "stream": "ext://sys.stdout",
+            "stream": VLLM_LOGGING_STREAM,
         },
     },
     "loggers": {
@@ -50,6 +52,12 @@ DEFAULT_LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False
 }
+
+
+@lru_cache
+def _print_debug_once(logger: Logger, msg: str, *args: Hashable) -> None:
+    # Set the stacklevel to 2 to print the original caller's line info
+    logger.debug(msg, *args, stacklevel=2)
 
 
 @lru_cache
@@ -68,24 +76,39 @@ class _VllmLogger(Logger):
     """
     Note:
         This class is just to provide type information.
-        We actually patch the methods directly on the {class}`logging.Logger`
+        We actually patch the methods directly on the [`logging.Logger`][]
         instance to avoid conflicting with other libraries such as
         `intel_extension_for_pytorch.utils._logger`.
     """
 
+    def debug_once(self, msg: str, *args: Hashable) -> None:
+        """
+        As [`debug`][logging.Logger.debug], but subsequent calls with
+        the same message are silently dropped.
+        """
+        _print_debug_once(self, msg, *args)
+
     def info_once(self, msg: str, *args: Hashable) -> None:
         """
-        As {meth}`info`, but subsequent calls with the same message
-        are silently dropped.
+        As [`info`][logging.Logger.info], but subsequent calls with
+        the same message are silently dropped.
         """
         _print_info_once(self, msg, *args)
 
     def warning_once(self, msg: str, *args: Hashable) -> None:
         """
-        As {meth}`warning`, but subsequent calls with the same message
-        are silently dropped.
+        As [`warning`][logging.Logger.warning], but subsequent calls with
+        the same message are silently dropped.
         """
         _print_warning_once(self, msg, *args)
+
+
+# Pre-defined methods mapping to avoid repeated dictionary creation
+_METHODS_TO_PATCH = {
+    "debug_once": _print_debug_once,
+    "info_once": _print_info_once,
+    "warning_once": _print_warning_once,
+}
 
 
 def _configure_vllm_root_logger() -> None:
@@ -130,12 +153,7 @@ def init_logger(name: str) -> _VllmLogger:
 
     logger = logging.getLogger(name)
 
-    methods_to_patch = {
-        "info_once": _print_info_once,
-        "warning_once": _print_warning_once,
-    }
-
-    for method_name, method in methods_to_patch.items():
+    for method_name, method in _METHODS_TO_PATCH.items():
         setattr(logger, method_name, MethodType(method, logger))
 
     return cast(_VllmLogger, logger)

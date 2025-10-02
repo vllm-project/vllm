@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
 import torch.nn as nn
@@ -37,19 +38,23 @@ class MedusaProposer:
         self,
         target_hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
+    ) -> list[list[int]]:
         # Generate blocks and compute logits
         blocks = self.model(target_hidden_states)
-        logits = self.model.compute_logits(blocks, None)
+        logits = self.model.compute_logits(blocks)
 
         # Get draft tokens and transpose the result
+        # TODO(woosuk): OPTIMIZATION: Return GPU tensor without GPU-CPU
+        # synchronization.
         draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
         return [list(row) for row in zip(*draft_tokens)]
 
     def load_model(self, target_model: nn.Module) -> None:
-        self.model = get_model(vllm_config=self.vllm_config,
-                               model_config=self.vllm_config.
-                               speculative_config.draft_model_config)
+        from vllm.compilation.backends import set_model_tag
+        with set_model_tag("medusa_head"):
+            self.model = get_model(vllm_config=self.vllm_config,
+                                   model_config=self.vllm_config.
+                                   speculative_config.draft_model_config)
 
     @torch.inference_mode()
     def dummy_run(self, num_tokens: int) -> None:

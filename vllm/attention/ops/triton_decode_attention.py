@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/sgl-project/sglang/blob/9f635ea50de920aa507f486daafba26a5b837574/python/sglang/srt/layers/attention/triton_ops/decode_attention.py
@@ -30,6 +31,8 @@ It supports page size >= 1.
 
 import logging
 
+from packaging import version
+
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -39,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Only print the following warnings when triton version < 3.2.0.
 # The issue won't affect performance or accuracy.
-if triton.__version__ < '3.2.0':
+if version.parse(triton.__version__) < version.parse('3.2.0'):
     logger.warning(
         "The following error message 'operation scheduled before its operands' "
         "can be ignored.")
@@ -471,12 +474,14 @@ def _decode_grouped_att_m_fwd(
 def _fwd_kernel_stage2(
     Mid_O,
     o,
+    lse,
     B_Seqlen,
     stride_mid_ob,
     stride_mid_oh,
     stride_mid_os,
     stride_obs,
     stride_oh,
+    stride_lse_bs,
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
@@ -522,12 +527,18 @@ def _fwd_kernel_stage2(
         acc / e_sum,
         mask=mask_d,
     )
+    lse_val = e_max + tl.log(e_sum)
+    tl.store(
+        lse + cur_batch * stride_lse_bs + cur_head,
+        lse_val,
+    )
 
 
 def _decode_softmax_reducev_fwd(
     logits,
     q,
     o,
+    lse,
     v_buffer,
     b_seq_len,
     num_kv_splits,
@@ -552,12 +563,14 @@ def _decode_softmax_reducev_fwd(
     _fwd_kernel_stage2[grid](
         logits,
         o,
+        lse,
         b_seq_len,
         logits.stride(0),
         logits.stride(1),
         logits.stride(2),
         o.stride(0),
         o.stride(1),
+        lse.stride(0),
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
@@ -572,6 +585,7 @@ def decode_attention_fwd_normal(
     k_buffer,
     v_buffer,
     o,
+    lse,
     req_to_token,
     b_seq_len,
     attn_logits,
@@ -592,7 +606,7 @@ def decode_attention_fwd_normal(
         page_size,
         logit_cap,
     )
-    _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, b_seq_len,
+    _decode_softmax_reducev_fwd(attn_logits, q, o, lse, v_buffer, b_seq_len,
                                 num_kv_splits)
 
 
@@ -601,6 +615,7 @@ def decode_attention_fwd_grouped(
     k_buffer,
     v_buffer,
     o,
+    lse,
     req_to_token,
     b_seq_len,
     attn_logits,
@@ -621,7 +636,7 @@ def decode_attention_fwd_grouped(
         page_size,
         logit_cap,
     )
-    _decode_softmax_reducev_fwd(attn_logits, q, o, v_buffer, b_seq_len,
+    _decode_softmax_reducev_fwd(attn_logits, q, o, lse, v_buffer, b_seq_len,
                                 num_kv_splits)
 
 
@@ -630,6 +645,7 @@ def decode_attention_fwd(
     k_buffer,
     v_buffer,
     o,
+    lse,
     req_to_token,
     b_seq_len,
     attn_logits,
@@ -648,6 +664,7 @@ def decode_attention_fwd(
             k_buffer,
             v_buffer,
             o,
+            lse,
             req_to_token,
             b_seq_len,
             attn_logits,
@@ -663,6 +680,7 @@ def decode_attention_fwd(
             k_buffer,
             v_buffer,
             o,
+            lse,
             req_to_token,
             b_seq_len,
             attn_logits,

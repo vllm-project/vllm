@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -13,16 +14,19 @@ from einops import rearrange, repeat
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.model_executor import SamplingMetadata
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+from vllm.model_executor.models.transformers import replace_linear_class
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, MultiModalUUIDDict,
+                                    NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, MultiModalHashes,
+                                        BaseProcessingInfo,
+                                        MultiModalProcessingInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
@@ -33,35 +37,41 @@ from vllm.transformers_utils.processors.deepseek_vl2 import (
     DeepseekVLV2Processor)
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils import is_list_of
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
 
 
-class DeepseekVL2ImagePixelInputs(TypedDict):
+class DeepseekVL2ImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - p: Number of patches
+        - c: Number of channels (3)
+        - h: Height of each image
+        - w: Width of each image
+    """
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
-    """
-    images_spatial_crop: torch.Tensor
-    """
-    Shape: `(batch_size * num_images, 2)`
-    """
+    data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                    TensorShape("bn", "p", 3, "h", "w", dynamic_dims={"p"})]
+    images_spatial_crop: Annotated[torch.Tensor, TensorShape("bn", 2)]
 
 
-class DeepseekVL2VImageEmbeddingInputs(TypedDict):
+class DeepseekVL2VImageEmbeddingInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - f: Image feature size
+        - h: Hidden size (must match language model backbone)
+    """
     type: Literal["image_embeds"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
-    """
+    data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                    TensorShape("bn", "f", "h")]
 
 
 DeepseekVL2ImageInputs = Union[DeepseekVL2ImagePixelInputs,
@@ -203,28 +213,27 @@ class DeepseekVL2MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(prompt=prompt, **mm_data),
-                mm_kwargs,
-            )
-            target_dtype = self.info.ctx.model_config.dtype
-            pixel_values = processed_outputs.pop("pixel_values").to(
-                target_dtype)
-            # split pixel values into patches corresponding to each image
-            images_spatial_crop = processed_outputs["images_spatial_crop"]
-            patches_per_image = [
-                x.prod().item() + 1 for x in images_spatial_crop
-            ]
-            pixel_values = pixel_values.split(patches_per_image)
-            processed_outputs["pixel_values"] = pixel_values
-        else:
+        if not mm_data:
             tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(prompt,
-                                          add_special_tokens=True,
-                                          return_tensors="pt")
+            return tokenizer(prompt,
+                             add_special_tokens=True,
+                             return_tensors="pt")
+
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
+        pixel_values = processed_outputs["pixel_values"]
+        # split pixel values into patches corresponding to each image
+        images_spatial_crop = processed_outputs["images_spatial_crop"]
+        patches_per_image = [x.prod().item() + 1 for x in images_spatial_crop]
+        pixel_values = pixel_values.split(patches_per_image)
+        processed_outputs["pixel_values"] = pixel_values
 
         return processed_outputs
 
@@ -243,7 +252,7 @@ class DeepseekVL2MultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -279,9 +288,9 @@ class DeepseekVL2MultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+        tokenization_kwargs: Mapping[str, object],
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
@@ -291,14 +300,16 @@ class DeepseekVL2MultiModalProcessor(
                 prompt=prompt,
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                return_mm_hashes=return_mm_hashes,
+                tokenization_kwargs=tokenization_kwargs,
+                mm_uuids=mm_uuids,
             )
 
         return super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            return_mm_hashes=return_mm_hashes,
+            tokenization_kwargs=tokenization_kwargs,
+            mm_uuids=mm_uuids,
         )
 
 
@@ -311,6 +322,13 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
         "language.": "language_model.",
     })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -327,7 +345,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         model_config = vllm_config.model_config
         tokenizer = cached_tokenizer_from_config(model_config)
-        self.image_token_id = tokenizer.vocab[_IMAGE_TOKEN]
+        self.image_token_id: int = tokenizer.vocab[_IMAGE_TOKEN]
 
         self.vision = self._init_vision_module(self.vision_config,
                                                quant_config,
@@ -341,7 +359,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         embed_std = 1 / torch.sqrt(
             torch.tensor(self.projector_config.n_embed, dtype=torch.float32))
         if self.tile_tag == "2D":
-            # <|view_separator|>, <|\n|>
+            # <|view_seperator|>, <|\n|>
             self.image_newline = nn.Parameter(
                 torch.randn(self.projector_config.n_embed) * embed_std)
             # This is a typo in original implementation
@@ -369,6 +387,41 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
+    def _get_parent_and_attr(self, root: torch.nn.Module, dotted_name: str):
+        """Return (parent_module, final_attr_name) for a dotted module path."""
+        names = dotted_name.split('.')
+        parent = root
+        for n in names[:-1]:
+            parent = getattr(parent, n)
+        return parent, names[-1]
+
+    #patch for timm ViT instance to support tensor parallel
+    def patch_vit_for_tp(self, vit: torch.nn.Module,
+                         quant_config: QuantizationConfig):
+        try:
+            import timm
+        except ImportError as e:
+            raise ImportError("Please install timm") from e
+
+        for name, module in vit.named_modules():
+            if isinstance(module, nn.Linear):
+                parent, attr_name = self._get_parent_and_attr(vit, name)
+                if isinstance(parent, timm.layers.Mlp) and attr_name == "fc1":
+                    new_linear = replace_linear_class(module,
+                                                      "colwise",
+                                                      quant_config,
+                                                      prefix=name)
+                    setattr(parent, attr_name, new_linear)
+                elif isinstance(parent,
+                                timm.layers.Mlp) and attr_name == "fc2":
+                    new_linear = replace_linear_class(module,
+                                                      "rowwise",
+                                                      quant_config,
+                                                      prefix=name)
+                    setattr(parent, attr_name, new_linear)
+
+        return vit
+
     def _init_vision_module(
         self,
         vision_config: VisionEncoderConfig,
@@ -378,8 +431,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # TODO: refactor vision model through timm wrapper from transformers
         try:
             import timm
-        except ImportError:
-            raise ImportError("Please install timm") from ImportError
+        except ImportError as e:
+            raise ImportError("Please install timm") from e
 
         with set_default_torch_dtype(torch.float16):
             model = timm.create_model(
@@ -390,48 +443,11 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 dynamic_img_pad=True,
             )
 
+        if get_tensor_model_parallel_world_size() > 1:
+            model = self.patch_vit_for_tp(model, quant_config)
+
         model = model.to(dtype=torch.get_default_dtype())
         return model
-
-    def _validate_pixel_values(
-        self, data: Union[torch.Tensor, list[torch.Tensor]]
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
-
-        h = w = self.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape[1:])
-
-            if actual_dims != expected_dims:
-                expected_expr = ("num_patches", *map(str, expected_dims))
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
-    def _validate_images_spatial_crop(
-        self, data: Union[torch.Tensor, list[torch.Tensor]]
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
-        expected_dims = 2
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = d.size(-1)
-
-            if actual_dims != expected_dims:
-                expected_expr = str(expected_dims)
-                raise ValueError(
-                    f"The expected shape of image sizes per image per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[DeepseekVL2ImageInputs]:
@@ -443,25 +459,18 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return None
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
-            if not isinstance(images_spatial_crop, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image sizes. "
-                                 f"Got type: {type(images_spatial_crop)}")
-
-            return DeepseekVL2ImagePixelInputs(
-                type="pixel_values",
-                data=self._validate_pixel_values(flatten_bn(pixel_values)),
-                images_spatial_crop=self._validate_images_spatial_crop(
-                    flatten_bn(images_spatial_crop, concat=True)))
+            expected_h = expected_w = self.vision_config.image_size
+            return DeepseekVL2ImagePixelInputs(type="pixel_values",
+                                               data=flatten_bn(pixel_values),
+                                               images_spatial_crop=flatten_bn(
+                                                   images_spatial_crop,
+                                                   concat=True),
+                                               resolve_bindings={
+                                                   "h": expected_h,
+                                                   "w": expected_w,
+                                               })
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
-
             return DeepseekVL2VImageEmbeddingInputs(
                 type="image_embeds",
                 data=flatten_bn(image_embeds),
@@ -587,25 +596,13 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.image_token_id)
-        return inputs_embeds
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -617,14 +614,6 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
-
         hidden_states = self.language_model(input_ids,
                                             positions,
                                             intermediate_tensors,
@@ -635,10 +624,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

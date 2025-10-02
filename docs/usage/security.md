@@ -12,16 +12,19 @@ All communications between nodes in a multi-node vLLM deployment are **insecure 
 
 The following options control inter-node communications in vLLM:
 
-1. **Environment Variables:**
-   - `VLLM_HOST_IP`: Sets the IP address for vLLM processes to communicate on
+#### 1. **Environment Variables:**
 
-2. **KV Cache Transfer Configuration:**
-   - `--kv-ip`: The IP address for KV cache transfer communications (default: 127.0.0.1)
-   - `--kv-port`: The port for KV cache transfer communications (default: 14579)
+- `VLLM_HOST_IP`: Sets the IP address for vLLM processes to communicate on
 
-3. **Data Parallel Configuration:**
-   - `data_parallel_master_ip`: IP of the data parallel master (default: 127.0.0.1)
-   - `data_parallel_master_port`: Port of the data parallel master (default: 29500)
+#### 2. **KV Cache Transfer Configuration:**
+
+- `--kv-ip`: The IP address for KV cache transfer communications (default: 127.0.0.1)
+- `--kv-port`: The port for KV cache transfer communications (default: 14579)
+
+#### 3. **Data Parallel Configuration:**
+
+- `data_parallel_master_ip`: IP of the data parallel master (default: 127.0.0.1)
+- `data_parallel_master_port`: Port of the data parallel master (default: 29500)
 
 ### Notes on PyTorch Distributed
 
@@ -31,6 +34,7 @@ refer to the [PyTorch Security
 Guide](https://github.com/pytorch/pytorch/security/policy#using-distributed-features).
 
 Key points from the PyTorch security guide:
+
 - PyTorch Distributed features are intended for internal communication only
 - They are not built for use in untrusted environments or networks
 - No authorization protocol is included for performance reasons
@@ -39,19 +43,28 @@ Key points from the PyTorch security guide:
 
 ### Security Recommendations
 
-1. **Network Isolation:**
-   - Deploy vLLM nodes on a dedicated, isolated network
-   - Use network segmentation to prevent unauthorized access
-   - Implement appropriate firewall rules
+#### 1. **Network Isolation:**
 
-2. **Configuration Best Practices:**
-   - Always set `VLLM_HOST_IP` to a specific IP address rather than using defaults
-   - Configure firewalls to only allow necessary ports between nodes
+- Deploy vLLM nodes on a dedicated, isolated network
+- Use network segmentation to prevent unauthorized access
+- Implement appropriate firewall rules
 
-3. **Access Control:**
-   - Restrict physical and network access to the deployment environment
-   - Implement proper authentication and authorization for management interfaces
-   - Follow the principle of least privilege for all system components
+#### 2. **Configuration Best Practices:**
+
+- Always set `VLLM_HOST_IP` to a specific IP address rather than using defaults
+- Configure firewalls to only allow necessary ports between nodes
+
+#### 3. **Access Control:**
+
+- Restrict physical and network access to the deployment environment
+- Implement proper authentication and authorization for management interfaces
+- Follow the principle of least privilege for all system components
+
+### 4. **Restrict Domains Access for Media URLs:**
+
+Restrict domains that vLLM can access for media URLs by setting
+`--allowed-media-domains` to prevent Server-Side Request Forgery (SSRF) attacks.
+(e.g. `--allowed-media-domains upload.wikimedia.org github.com www.bogotobogo.com`)
 
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 

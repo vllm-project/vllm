@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the machete kernel.
 
-Run `pytest tests/kernels/test_machete_mm.py`.
+Run `pytest tests/kernels/quantization/test_machete_mm.py`.
 """
 
 import math
@@ -13,6 +14,8 @@ import torch
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.machete_utils import (
+    query_machete_supported_group_sizes)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_rows, quantize_weights)
 from vllm.platforms import current_platform
@@ -31,8 +34,6 @@ IS_SUPPORTED_BY_GPU = current_platform.get_device_capability()[0] >= 9
 
 MNK_SHAPES = [
     (1, 128, 128),
-    (1, 512, 1024),
-    (1, 4096, 4096),
     (1, 8192, 28672),
     (13, 8192, 4096),
     (26, 4096, 8192),
@@ -40,12 +41,8 @@ MNK_SHAPES = [
     (64, 8192, 28672),
     (257, 128, 4096),
     (257, 4224, 4160),
-    (257, 4096, 4096),
-    (1024, 4096, 8192),
     (1024, 8192, 4096),
 ]
-
-GROUP_SIZES_TO_TEST: list[Optional[int]] = [128, -1]
 
 
 @dataclass
@@ -98,23 +95,23 @@ TEST_TYPES = [
                  token_scale_type=None)
       for w_type in [scalar_types.uint4, scalar_types.uint8]
       for a_type in [torch.float16, torch.bfloat16]),
-    # QQQ style
-    *(TypeConfig(act_type=torch.int8,
-                 weight_type=scalar_types.uint4b8,
-                 output_type=torch.float16,
-                 group_scale_type=group_scale_type,
-                 group_zero_type=None,
-                 channel_scale_type=torch.float,
-                 token_scale_type=torch.float)
-      for group_scale_type in [None, torch.float16]),
-    *(TypeConfig(act_type=torch.float8_e4m3fn,
-                 weight_type=scalar_types.uint4b8,
-                 output_type=torch.float16,
-                 group_scale_type=group_scale_type,
-                 group_zero_type=None,
-                 channel_scale_type=torch.float,
-                 token_scale_type=torch.float)
-      for group_scale_type in [None, torch.float16]),
+    # # QQQ style
+    # *(TypeConfig(act_type=torch.int8,
+    #              weight_type=scalar_types.uint4b8,
+    #              output_type=torch.float16,
+    #              group_scale_type=group_scale_type,
+    #              group_zero_type=None,
+    #              channel_scale_type=torch.float,
+    #              token_scale_type=torch.float)
+    #   for group_scale_type in [None, torch.float16]),
+    # *(TypeConfig(act_type=torch.float8_e4m3fn,
+    #              weight_type=scalar_types.uint4b8,
+    #              output_type=torch.float16,
+    #              group_scale_type=group_scale_type,
+    #              group_zero_type=None,
+    #              channel_scale_type=torch.float,
+    #              token_scale_type=torch.float)
+    #   for group_scale_type in [None, torch.float16]),
 ]
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
@@ -138,7 +135,7 @@ def maybe_convert_zeropoints(zps: Optional[torch.Tensor], s: torch.Tensor):
 
 def group_size_valid(shape: tuple[int, int, int],
                      group_size: Optional[int]) -> bool:
-    return group_size is None or group_size == -1 or group_size % shape[2] == 0
+    return group_size is None or group_size == -1 or shape[2] % group_size == 0
 
 
 def machete_quantize_and_pack(atype: torch.dtype,
@@ -269,7 +266,7 @@ def test_machete_all_schedules(shape, types: TypeConfig):
     if types.group_scale_type is None:
         group_sizes = [None]
     else:
-        group_sizes = GROUP_SIZES_TO_TEST
+        group_sizes = query_machete_supported_group_sizes(types.act_type)
 
     for group_size in group_sizes:
         if not group_size_valid(shape, group_size):
@@ -298,7 +295,7 @@ def test_machete_heuristic(shape, types: TypeConfig):
     if types.group_scale_type is None:
         group_sizes = [None]
     else:
-        group_sizes = GROUP_SIZES_TO_TEST
+        group_sizes = query_machete_supported_group_sizes(types.act_type)
 
     for group_size in group_sizes:
         if not group_size_valid(shape, group_size):

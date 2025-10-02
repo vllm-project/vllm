@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from copy import deepcopy
 from unittest.mock import MagicMock
@@ -10,6 +11,8 @@ from pydantic import TypeAdapter
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionToolsParam)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+
+pytestmark = pytest.mark.cpu_test
 
 EXAMPLE_TOOLS = [
     {
@@ -67,11 +70,11 @@ EXAMPLE_TOOLS = [
 def _compile_and_check(tools: list[ChatCompletionToolsParam], sample_output,
                        should_match: bool):
     self = MagicMock(tool_choice="required", tools=tools)
-    schema = ChatCompletionRequest._get_guided_json_from_tool(self)
+    schema = ChatCompletionRequest._get_json_schema_from_tool(self)
     assert isinstance(schema, dict)
 
     # use build_regex_from_schema used in JSONLogitsProcessor to create Guide
-    from outlines_core.fsm.json_schema import build_regex_from_schema
+    from outlines_core.json_schema import build_regex_from_schema
     regex = build_regex_from_schema(json.dumps(schema))
     compiled = re.compile(regex)
     matches = compiled.fullmatch(json.dumps(sample_output)) is not None
@@ -217,7 +220,7 @@ VALID_TOOLS = [t[0] for t in VALID_TOOL_OUTPUTS]
                 }
             }, {}], False),
     ])
-def test_guided_json(sample_output, should_match):
+def test_structured_outputs_json(sample_output, should_match):
     _compile_and_check(tools=TypeAdapter(
         list[ChatCompletionToolsParam]).validate_python(EXAMPLE_TOOLS),
                        sample_output=sample_output,
@@ -272,8 +275,9 @@ def update_parameters_empty_dict(
 @pytest.mark.parametrize(
     "update_parameters",
     [update_parameters_none, update_parameters_empty_dict])
-def test_guided_json_without_parameters(sample_output, should_match,
-                                        update_parameters):
+def test_structured_outputs_json_without_parameters(sample_output,
+                                                    should_match,
+                                                    update_parameters):
     updated_tools = [deepcopy(EXAMPLE_TOOLS[0])]
     tools = TypeAdapter(
         list[ChatCompletionToolsParam]).validate_python(updated_tools)

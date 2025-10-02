@@ -1,0 +1,113 @@
+{% set loop_messages = messages %}
+{% if tools %}
+    {% set weekday_map = {'Monday': '星期一', 'Tuesday': '星期二', 'Wednesday': '星期三', 'Thursday': '星期四', 'Friday': '星期五', 'Saturday': '星期六', 'Sunday': '星期日'} %}
+    {% set weekday_cn = weekday_map[strftime_now('%A')] %}
+    {% set datetime_str = strftime_now('%Y-%m-%d %H:%M:%S') %}
+    {% set datetime_str = datetime_str + ' ' + weekday_cn %}
+    {% for message in loop_messages %}
+        {% if 'content' in message %}
+            {% set content = message['content'] %}
+        {% else %}
+            {% set content = '' %}
+        {% endif %}
+        {% if loop.index0 == 0 %}
+            {% set content_tmp = '你是一位函数组合专家。你会得到一个问题和一组可能的函数。根据问题，你需要进行一个或多个函数/工具调用以实现目的。
+如果没有一个函数可以使用，请直接使用自然语言回复用户，以助手：开头。
+如果给定的问题缺少函数所需的参数，请使用自然语言进行提问，向用户询问必要信息，以助手：开头。
+如果调用结果已经足够回答用户问题，请对历史结果进行总结，使用自然语言回复用户，以助手：开头。
+你应该只在工具调用部分返回函数调用。如果你决定调用任何函数，你必须将其格式化为<tool_calls>[{"name": "func_name1", "arguments": {"argument1": "value1", "argument2": "value2"}},...]</tool_calls>。你不应该在回复中包含任何其他文本。以下是你可以调用的函数列表，格式为JSON。
+' %}
+            {% set content_tmp = content_tmp + '
+' + tools | tojson + '
+' %}
+            {% if message['role'] == 'system' %}
+                {% set content_tmp = content_tmp + '
+额外要求：
+' + content + '
+
+如果你决定返回函数调用，请将其格式化为<tool_calls>[{"name": "func_name1", "arguments": {"argument1": "value1", "argument2": "value2"}},...]</tool_calls>，不得包含其他文本。如果额外要求里有格式要求，请忽略，以此处为准。
+否则，请参考开头说的三种情况，以助手：开头进行回复。
+
+如果额外要求里有时间信息，就以额外要求里的时间为准，否则，参考当前时间：' + datetime_str %}
+                {% set content = '<|startoftext|>' + content_tmp + '<|extra_4|>' %}
+            {% elif message['role'] == 'user' %}
+                {% set content_tmp = content_tmp + '
+如果你决定返回函数调用，请将其格式化为<tool_calls>[{"name": "func_name1", "arguments": {"argument1": "value1", "argument2": "value2"}},...]</tool_calls>，不得包含其他文本。
+否则，请参考开头说的三种情况，以助手：开头进行回复。
+
+当前时间：' + datetime_str %}
+                {% set content_tmp = '<|startoftext|>' + content_tmp + '<|extra_4|>'%}
+                {% set content = content_tmp + '用户：' + content + '<|extra_0|>' %}
+            {% endif %}
+        {% else %}
+            {% if message['role'] == 'user' %}
+                {% set content = '用户：' + content + '<|extra_0|>' %}
+            {% elif message['role'] == 'assistant' %}
+                {% if 'tool_calls' in message %}
+                    {% set tool_calls = message['tool_calls'] %}
+                    {% set ns = namespace(tool_calls="[") %}
+                    {% for tool_call in tool_calls %}
+                        {% set function = tool_call['function'] %}
+                        {% set name = function['name'] %}
+                        {% set ns.tool_calls = ns.tool_calls + '{"name": "' + name + '", '%}
+                        {% set arguments = function['arguments'] %}
+                        {% if arguments is not string %}
+                            {% set arguments = arguments | tojson %}
+                        {% endif %}
+                        {% set ns.tool_calls = ns.tool_calls + '"arguments": ' + arguments + '}' %}
+                        {% if not loop.last %}
+                            {% set ns.tool_calls = ns.tool_calls + ', '%}
+                        {% endif %}
+                    {% endfor %}
+                    {% set ns.tool_calls = ns.tool_calls + ']' %}
+                    {% set content = content + '<tool_calls>' + ns.tool_calls + '</tool_calls>' %}
+                {% else %}
+                    {% set content = '助手：' + content %}
+                {% endif %}
+                {% set content = content + '<|eos|>' %}
+            {% elif message['role'] == 'tool' %}
+                {% if content is not string %}
+                    {set content = content | tojson }
+                {% endif %}
+                {% set content = '<tool_response>' + content + '</tool_response>' %}
+                {% set content = content + '<|extra_0|>' %}
+            {% endif %}
+        {% endif %}
+    {{- content -}}
+    {% endfor %}
+{% else %}
+    {% set context = {'has_head': true} %}
+    {% for message in loop_messages %}
+        {% if 'content' in message %}
+            {% set content = message['content'] %}
+        {% else %}
+            {% set content = '' %}
+        {% endif %}
+        {% if loop.index0 == 0 %}
+            {% if content == '' %}
+                {% set _ = context.update({'has_head': false}) %}
+            {% elif message['role'] == 'system' %}
+                {% set content = '<|startoftext|>' + content + '<|extra_4|>' %}
+            {% endif %}
+        {% endif %}
+        {% if message['role'] == 'user' %}
+            {% if loop.index0 == 1 and not context.has_head %}
+                {% set content = '<|startoftext|>' + content %}
+            {% endif %}
+            {% if loop.index0 == 1 and context.has_head %}
+                {% set content = content + '<|extra_0|>' %}
+            {% else %}
+                {% set content = '<|startoftext|>' + content + '<|extra_0|>' %}
+            {% endif %}
+        {% elif message['role'] == 'assistant' %}
+            {% set content = content + '<|eos|>' %}
+        {% elif message['role'] == 'tool' %}
+            {% set content = content + '<|extra_0|>' %}
+        {% endif %}
+        {{- content -}}
+    {% endfor %}
+{% endif %}
+{%- if enable_thinking is defined and enable_thinking is false %}
+    {{- '<think>\n\n</think>\n' }}
+{%- endif %}
+

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from vllm.sequence import Logprob
+from vllm.logprobs import Logprob
+from vllm.lora.request import LoRARequest
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
@@ -16,9 +18,10 @@ class BeamSearchSequence:
     The text field is optional and will only be filled when the sequence is
     about to be returned to the user.
     """
-    # The tokens includes the prompt.
+    # The tokens include the prompt.
     tokens: list[int]
     logprobs: list[dict[int, Logprob]]
+    lora_request: Optional[LoRARequest] = None
     cum_logprob: float = 0.0
     text: Optional[str] = None
     finish_reason: Optional[str] = None
@@ -41,6 +44,7 @@ class BeamSearchInstance:
     def __init__(
         self,
         prompt_tokens: list[int],
+        lora_request: Optional[LoRARequest] = None,
         logprobs: Optional[list[dict[int, Logprob]]] = None,
         **kwargs,
     ):
@@ -48,6 +52,7 @@ class BeamSearchInstance:
             BeamSearchSequence(
                 tokens=prompt_tokens,
                 logprobs=[] if logprobs is None else list(logprobs),
+                lora_request=lora_request,
                 **kwargs,
             )
         ]

@@ -1,6 +1,33 @@
 #!/bin/bash
 set -xe
 
+# Parse command line arguments
+KV_BUFFER_DEVICE="cuda"  # Default to cuda
+PREFILL_GPU_ID=4         # Default GPU IDs
+DECODE_GPU_ID=5
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --kv_buffer_device)
+      KV_BUFFER_DEVICE="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option $1"
+      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>]"
+      exit 1
+      ;;
+  esac
+done
+
+echo "Running edge case tests with kv_buffer_device=$KV_BUFFER_DEVICE (GPUs: $PREFILL_GPU_ID, $DECODE_GPU_ID)"
+
+# Build the kv-transfer-config once
+if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
+  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+else
+  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}"
+fi
+
 # Models to run
 MODELS=(
     "Qwen/Qwen3-0.6B"
@@ -50,16 +77,15 @@ run_tests_for_model() {
 
   # Get model-specific arguments
   local model_args=$(get_model_args "$model_name")
-  
+
   # Start prefill instance
   PREFILL_PORT=8001
 
-  BASE_CMD="CUDA_VISIBLE_DEVICES=0 VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve $model_name \
+  BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve $model_name \
   --port $PREFILL_PORT \
   --enforce-eager \
-  --disable-log-requests \
   --gpu-memory-utilization 0.2 \
-  --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
+  --kv-transfer-config '$KV_CONFIG'"
 
   if [ -n "$model_args" ]; then
   FULL_CMD="$BASE_CMD $model_args"
@@ -73,12 +99,11 @@ run_tests_for_model() {
   DECODE_PORT=8002
 
   # Build the command with or without model-specific args
-  BASE_CMD="CUDA_VISIBLE_DEVICES=1 VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve $model_name \
+  BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve $model_name \
   --port $DECODE_PORT \
   --enforce-eager \
-  --disable-log-requests \
   --gpu-memory-utilization 0.2 \
-  --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
+  --kv-transfer-config '$KV_CONFIG'"
 
   if [ -n "$model_args" ]; then
   FULL_CMD="$BASE_CMD $model_args"

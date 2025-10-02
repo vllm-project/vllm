@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Types for writing multimodal model tests."""
 from collections.abc import Iterable
 from enum import Enum
@@ -10,8 +11,8 @@ from pytest import MarkDecorator
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from vllm.config import TaskOption
-from vllm.sequence import SampleLogprobs
+from vllm.config import RunnerOption
+from vllm.logprobs import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .....conftest import (AUDIO_ASSETS, IMAGE_ASSETS, HfRunner, ImageAsset,
@@ -100,7 +101,7 @@ class VLMTestInfo(NamedTuple):
     # Function for converting ImageAssets to image embeddings;
     # We need to define this explicitly for embedding tests
     convert_assets_to_embeddings: Optional[Callable[[ImageTestAssets],
-                                                    torch.Tensor]] = None
+                                                    list[torch.Tensor]]] = None
 
     # Exposed options for vLLM runner; we change these in a several tests,
     # but the defaults are derived from VllmRunner & the engine defaults
@@ -108,7 +109,7 @@ class VLMTestInfo(NamedTuple):
     enforce_eager: bool = True
     max_model_len: int = 1024
     max_num_seqs: int = 256
-    task: TaskOption = "auto"
+    runner: RunnerOption = "auto"
     tensor_parallel_size: int = 1
     vllm_runner_kwargs: Optional[dict[str, Any]] = None
 
@@ -136,12 +137,12 @@ class VLMTestInfo(NamedTuple):
     # Default expandable params per test; these defaults can be overridden in
     # instances of this object; the complete set of test cases for the model
     # is all combinations of .models + all fields below
-    max_tokens: Union[int, tuple[int]] = 128
-    num_logprobs: Union[int, tuple[int]] = 5
-    dtype: Union[str, Union[list[str], tuple[str, ...]]] = "auto"
-    distributed_executor_backend: Optional[Union[str, Iterable[str]]] = None
+    max_tokens: int = 128
+    num_logprobs: int = 5
+    dtype: str = "auto"
+    distributed_executor_backend: Optional[str] = None
     # Only expanded in video tests
-    num_video_frames: Union[int, tuple[int]] = 16
+    num_video_frames: int = 16
 
     # Fixed image sizes / image size factors; most tests use image_size_factors
     # The values provided for these two fields will be stacked and expanded
@@ -172,7 +173,7 @@ class VLMTestInfo(NamedTuple):
             "enforce_eager": self.enforce_eager,
             "max_model_len": self.max_model_len,
             "max_num_seqs": self.max_num_seqs,
-            "task": self.task,
+            "runner": self.runner,
             "tensor_parallel_size": self.tensor_parallel_size,
             "vllm_runner_kwargs": self.vllm_runner_kwargs,
             "hf_output_post_proc": self.hf_output_post_proc,

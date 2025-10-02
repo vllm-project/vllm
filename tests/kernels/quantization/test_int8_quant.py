@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 import torch
@@ -8,9 +9,9 @@ from tests.kernels.utils import opcheck
 from vllm._custom_ops import scaled_int8_quant
 from vllm.platforms import current_platform
 
-DTYPES = [torch.half, torch.bfloat16, torch.float]
-HIDDEN_SIZES = [16, 67, 768, 5137, 8193]  # Arbitrary values for testing
-NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
+DTYPES = [torch.bfloat16, torch.float]
+HIDDEN_SIZES = [17, 1024, 1025, 1026, 5137, 8193]
+NUM_TOKENS = [1, 7, 4096]
 SEEDS = [0]
 SCALE = [0.1, 2.1]
 

@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Core test implementation to be shared across modalities."""
 from typing import Any, Callable, Optional
 
 import torch
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from vllm.config import TaskOption
+from vllm.config import RunnerOption
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .....conftest import HfRunner, VllmRunner
@@ -36,12 +37,12 @@ def run_test(
     vllm_runner_kwargs: Optional[dict[str, Any]],
     hf_model_kwargs: Optional[dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
-    task: TaskOption = "auto",
+    runner: RunnerOption = "auto",
     distributed_executor_backend: Optional[str] = None,
     tensor_parallel_size: int = 1,
     vllm_embeddings: Optional[torch.Tensor] = None,
 ):
-    """Modality agnostic test test executor for comparing HF/vLLM outputs."""
+    """Modality agnostic test executor for comparing HF/vLLM outputs."""
     # In the case of embeddings, vLLM takes separate input tensors
     vllm_inputs = vllm_embeddings if vllm_embeddings is not None else inputs
 
@@ -61,15 +62,16 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
 
-    vllm_runner_kwargs_: dict[str, Any] = {
-        "disable_mm_preprocessor_cache": True,
-    }
+    vllm_runner_kwargs_: dict[str, Any] = {"mm_processor_cache_gb": 0}
     if model_info.tokenizer:
         vllm_runner_kwargs_["tokenizer_name"] = model_info.tokenizer
     if model_info.tokenizer_mode:
         vllm_runner_kwargs_["tokenizer_mode"] = model_info.tokenizer_mode
     if model_info.hf_overrides:
         vllm_runner_kwargs_["hf_overrides"] = model_info.hf_overrides
+    if model_info.skip_tokenizer_init:
+        vllm_runner_kwargs_[
+            "skip_tokenizer_init"] = model_info.skip_tokenizer_init
 
     if vllm_runner_kwargs:
         vllm_runner_kwargs_.update(vllm_runner_kwargs)
@@ -82,9 +84,9 @@ def run_test(
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=enforce_eager,
-                     task=task,
+                     runner=runner,
                      **vllm_runner_kwargs_) as vllm_model:
-        tokenizer = vllm_model.model.get_tokenizer()
+        tokenizer = vllm_model.llm.get_tokenizer()
 
         vllm_kwargs: dict[str, Any] = {}
         if get_stop_token_ids is not None:

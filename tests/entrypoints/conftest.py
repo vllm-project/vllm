@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -183,7 +184,7 @@ def sample_enum_json_schema():
 
 
 @pytest.fixture
-def sample_guided_choice():
+def sample_structured_outputs_choices():
     return [
         "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",
         "Ruby", "Swift", "Kotlin"
@@ -200,3 +201,18 @@ table: "table_1" | "table_2"
 condition: column "=" number
 number: "1" | "2"
 """)
+
+
+@pytest.fixture(scope="session")
+def zephyr_lora_files():
+    """Download zephyr LoRA files once per test session."""
+    from huggingface_hub import snapshot_download
+    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+
+
+@pytest.fixture(scope="session")
+def opt125_lora_files() -> str:
+    """Download opt-125m LoRA files once per test session."""
+    from huggingface_hub import snapshot_download
+    return snapshot_download(
+        repo_id="peft-internal-testing/opt-125m-dummy-lora")

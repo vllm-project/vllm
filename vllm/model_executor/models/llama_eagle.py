@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -26,11 +28,12 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
     def __init__(
         self,
-        config: LlamaConfig,
+        vllm_config: VllmConfig,
         disable_input_layernorm: bool,
         prefix: str = "",
+        config: Optional[LlamaConfig] = None,
     ) -> None:
-        super().__init__(config, prefix=prefix)
+        super().__init__(vllm_config, prefix=prefix, config=config)
 
         # Skip the input_layernorm
         # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427
@@ -54,24 +57,26 @@ class LlamaModel(nn.Module):
             speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
-        # if PP disabled then draft will share embed with target
-        if get_pp_group().world_size > 1:
-            self.embed_tokens = VocabParallelEmbedding(
-                self.config.vocab_size,
-                self.config.hidden_size,
-                prefix=maybe_prefix(prefix, "embed_tokens"),
-            )
+        self.embed_tokens = VocabParallelEmbedding(
+            self.config.vocab_size,
+            self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
+        )
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
-                self.config,
+                vllm_config,
                 i == 0,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                config=self.config,
             ) for i in range(self.config.num_hidden_layers)
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
                                   self.config.hidden_size,
                                   bias=False)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -134,6 +139,11 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         nn.Module.__init__(self)
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
+        # Ensure draft_vocab_size is set
+        # default to the base vocab size when absent
+        if getattr(self.config, "draft_vocab_size", None) is None:
+            base_vocab_size = getattr(self.config, "vocab_size", None)
+            self.config.draft_vocab_size = base_vocab_size
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
         self.model = LlamaModel(vllm_config=vllm_config,
@@ -144,23 +154,32 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 scale=logit_scale)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if inputs_embeds is not None:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support multimodal inputs yet."
+            )
         return self.model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+
+        def transform(inputs):
+            name, loaded_weight = inputs
+            if "lm_head" not in name:
+                name = "model." + name
+            return name, loaded_weight
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,
         )
-
-        model_weights = {}
-        for name, loaded_weight in weights:
-            if "lm_head" not in name:
-                name = "model." + name
-            model_weights[name] = loaded_weight
-        return loader.load_weights(model_weights.items())
+        loader.load_weights(map(transform, weights))

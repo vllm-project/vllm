@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
 from vllm.inputs import zip_enc_dec_prompts
 from vllm.inputs.parse import parse_and_batch_prompt
+
+pytestmark = pytest.mark.cpu_test
 
 STRING_INPUTS = [
     '',

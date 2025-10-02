@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for InternVL's multimodal preprocessing kwargs."""
 from collections.abc import Mapping
 from typing import Optional
@@ -67,7 +68,8 @@ def _run_check(
     # Ensure we have the right number of placeholders per num_crops size
     image_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = processed_inputs["mm_kwargs"]["pixel_values_flat"].shape
+    pixel_shape = processed_inputs["mm_kwargs"].get_data(
+    )["pixel_values_flat"].shape
 
     assert img_tok_count == 256 * total_expected_num_patches
     assert pixel_shape[0] == total_expected_num_patches

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -16,7 +17,6 @@ if TYPE_CHECKING:
 ])
 @pytest.mark.parametrize("ATTN_BACKEND", [
     "FLASH_ATTN",
-    "FLASHINFER",
 ])
 @create_new_process_for_each_test()
 def test_pp_cudagraph(

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 import random
@@ -127,7 +128,7 @@ if __name__ == "__main__":
     print(f"initialized! My rank is {my_rank}")
 
     config = KVTransferConfig(
-        kv_connector='PyNcclConnector',
+        kv_connector='P2pNcclConnector',
         kv_buffer_device='cuda',
         kv_buffer_size=1e9,
         kv_rank=my_rank,

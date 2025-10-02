@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test model set-up and weight loading for llmcompressor-quantized models.
 
 Run `pytest tests/quantization/test_compressed_tensors.py`.
@@ -13,9 +14,12 @@ from compressed_tensors.quantization import QuantizationType
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensors24, CompressedTensorsLinearMethod,
+    CompressedTensorsW4A4Fp4, CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A16Fp4, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    cutlass_fp4_supported)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     sparse_cutlass_supported)
 from vllm.platforms import current_platform
@@ -39,11 +43,9 @@ ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
 
 
 @pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 @pytest.mark.parametrize(
@@ -171,10 +173,11 @@ def test_compressed_tensors_w8a8_logprobs(
 
     dtype = "bfloat16"
 
-    # skip language translation prompt for the static per tensor asym model
-    if (model_path ==
-            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym"
-        ):  # noqa: E501
+    # skip language translation prompt for the static per tensor models
+    if model_path in (
+            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Sym",
+            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym",
+    ):
         example_prompts = example_prompts[0:-1]
 
     with hf_runner(model_path, dtype=dtype) as hf_model:
@@ -354,6 +357,9 @@ def test_compressed_tensors_fp8(vllm_runner):
         assert output
 
 
+@pytest.mark.skipif(
+    not current_platform.is_kv_cache_dtype_supported("fp8", None),
+    reason="FP8 KV cache is not supported on this device.")
 @pytest.mark.skipif(not current_platform.is_cuda(),
                     reason="This test is skipped on non-CUDA platform.")
 def test_compressed_tensors_kv_cache(vllm_runner):
@@ -650,9 +656,13 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
         assert output
 
 
-def test_compressed_tensors_nvfp4a16(vllm_runner):
-    # run weight only example
-    model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP4"
+@pytest.mark.parametrize(
+    "args",
+    [("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16",
+      CompressedTensorsW4A16Fp4),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4)])
+def test_compressed_tensors_nvfp4(vllm_runner, args):
+    model, scheme = args
     with vllm_runner(model, enforce_eager=True) as llm:
 
         def check_model(model):
@@ -661,10 +671,74 @@ def test_compressed_tensors_nvfp4a16(vllm_runner):
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method,
                               CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW4A16Fp4)
+            if isinstance(qkv_proj.scheme, scheme) or isinstance(
+                    qkv_proj.scheme,
+                    CompressedTensorsW4A16Fp4) and not cutlass_fp4_supported():
+                assert True
+            else:
+                raise AssertionError("FP4 Scheme Mismatch")
+
             assert qkv_proj.scheme.group_size == 16
 
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         print(output)
         assert output
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.has_device_capability(90),
+    reason="W4A8 FP8 is not yet supported on this GPU type.",
+)
+@pytest.mark.parametrize("args", [
+    ("czhu-cohere/TinyLlama-1.1B-Chat-v1.0-W4A8-e2e", CompressedTensorsW4A8Fp8)
+])
+def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
+    model, scheme = args
+    with vllm_runner(model, enforce_eager=True) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            o_proj = layer.self_attn.o_proj
+            gate_up_proj = layer.mlp.gate_up_proj
+            down_proj = layer.mlp.down_proj
+
+            for proj in (qkv_proj, o_proj, gate_up_proj, down_proj):
+                assert isinstance(proj.quant_method,
+                                  CompressedTensorsLinearMethod)
+                assert isinstance(proj.scheme, scheme)
+
+                assert proj.weight_packed.dtype is torch.int32
+                assert proj.weight_scale.dtype is torch.float8_e4m3fn
+                assert proj.weight_chan_scale.dtype is torch.float32
+                assert proj.scheme.group_size == 128
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        print(output)
+        assert output
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(),
+                    reason="This test is skipped on non-CUDA platform.")
+@pytest.mark.parametrize("model,prompt,exp_perplexity", [
+    (
+        "nm-testing/Llama-3.2-1B-Instruct-spinquantR1R2R4-w4a16",
+        "Flat is better than nested.\nSparse is better than dense.",
+        150.0,
+    ),
+    (
+        "nm-testing/Llama-3.2-1B-Instruct-quip-w4a16",
+        "Flat is better than nested.\nSparse is better than dense.",
+        150.0,
+    ),
+])
+def test_compressed_tensors_transforms_perplexity(vllm_runner, model, prompt,
+                                                  exp_perplexity):
+    with vllm_runner(model, enforce_eager=True) as llm:
+        perplexity = llm.generate_prompt_perplexity([prompt])[0]
+        print(perplexity)
+        assert perplexity <= exp_perplexity

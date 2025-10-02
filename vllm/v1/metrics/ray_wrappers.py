@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from typing import Optional, Union
 
-from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
@@ -11,6 +11,7 @@ try:
     from ray.util.metrics import Metric
 except ImportError:
     ray_metrics = None
+import regex as re
 
 
 class RayPrometheusMetric:
@@ -30,7 +31,32 @@ class RayPrometheusMetric:
 
             self.metric.set_default_tags(labelskwargs)
 
+        if labels:
+            if len(labels) != len(self.metric._tag_keys):
+                raise ValueError(
+                    "Number of labels must match the number of tag keys. "
+                    f"Expected {len(self.metric._tag_keys)}, got {len(labels)}"
+                )
+
+            self.metric.set_default_tags(
+                dict(zip(self.metric._tag_keys, labels)))
+
         return self
+
+    @staticmethod
+    def _get_sanitized_opentelemetry_name(name: str) -> str:
+        """
+        For compatibility with Ray + OpenTelemetry, the metric name must be 
+        sanitized. In particular, this replaces disallowed character (e.g., ':')
+        with '_' in the metric name.
+        Allowed characters: a-z, A-Z, 0-9, _
+
+        # ruff: noqa: E501
+        Ref: https://github.com/open-telemetry/opentelemetry-cpp/blob/main/sdk/src/metrics/instrument_metadata_validator.cc#L22-L23
+        Ref: https://github.com/ray-project/ray/blob/master/src/ray/stats/metric.cc#L107
+        """
+
+        return re.sub(r"[^a-zA-Z0-9_]", "_", name)
 
 
 class RayGaugeWrapper(RayPrometheusMetric):
@@ -40,8 +66,15 @@ class RayGaugeWrapper(RayPrometheusMetric):
     def __init__(self,
                  name: str,
                  documentation: Optional[str] = "",
-                 labelnames: Optional[list[str]] = None):
+                 labelnames: Optional[list[str]] = None,
+                 multiprocess_mode: Optional[str] = ""):
+
+        # All Ray metrics are keyed by WorkerId, so multiprocess modes like
+        # "mostrecent", "all", "sum" do not apply. This logic can be manually
+        # implemented at the observability layer (Prometheus/Grafana).
+        del multiprocess_mode
         labelnames_tuple = tuple(labelnames) if labelnames else None
+        name = self._get_sanitized_opentelemetry_name(name)
         self.metric = ray_metrics.Gauge(name=name,
                                         description=documentation,
                                         tag_keys=labelnames_tuple)
@@ -63,6 +96,7 @@ class RayCounterWrapper(RayPrometheusMetric):
                  documentation: Optional[str] = "",
                  labelnames: Optional[list[str]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
+        name = self._get_sanitized_opentelemetry_name(name)
         self.metric = ray_metrics.Counter(name=name,
                                           description=documentation,
                                           tag_keys=labelnames_tuple)
@@ -83,6 +117,7 @@ class RayHistogramWrapper(RayPrometheusMetric):
                  labelnames: Optional[list[str]] = None,
                  buckets: Optional[list[float]] = None):
         labelnames_tuple = tuple(labelnames) if labelnames else None
+        name = self._get_sanitized_opentelemetry_name(name)
         boundaries = buckets if buckets else []
         self.metric = ray_metrics.Histogram(name=name,
                                             description=documentation,
@@ -110,9 +145,6 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _counter_cls = RayCounterWrapper
     _histogram_cls = RayHistogramWrapper
     _spec_decoding_cls = RaySpecDecodingProm
-
-    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        super().__init__(vllm_config, engine_index)
 
     @staticmethod
     def _unregister_vllm_metrics():

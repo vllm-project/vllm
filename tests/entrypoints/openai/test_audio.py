@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 
@@ -22,6 +23,8 @@ MAXIMUM_AUDIOS = 2
 @pytest.fixture(scope="module")
 def server():
     args = [
+        "--dtype",
+        "float32",
         "--max-model-len",
         "2048",
         "--max-num-seqs",

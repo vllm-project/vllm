@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -6,13 +7,21 @@ import os
 from abc import abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
-from typing import Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Union
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import import_from_path, is_list_of
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                                  DeltaMessage,
+                                                  ResponsesRequest)
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
+else:
+    ChatCompletionRequest = Any
+    DeltaMessage = Any
+    ResponsesRequest = Any
+    AnyTokenizer = Any
 
 logger = init_logger(__name__)
 
@@ -25,7 +34,7 @@ class ReasoningParser:
     It is used to extract reasoning content from the model output.
     """
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
         self.model_tokenizer = tokenizer
 
     @cached_property
@@ -35,7 +44,7 @@ class ReasoningParser:
         return self.model_tokenizer.get_vocab()
 
     @abstractmethod
-    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
 
@@ -65,8 +74,10 @@ class ReasoningParser:
 
     @abstractmethod
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+        self,
+        model_output: str,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
+    ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
 
@@ -124,7 +135,7 @@ class ReasoningParserManager:
     def _register_module(
         cls,
         module: type,
-        module_name: Optional[Union[str, list[str]]] = None,
+        module_name: Union[str, list[str]] | None = None,
         force: bool = True,
     ) -> None:
         if not issubclass(module, ReasoningParser):
@@ -144,7 +155,7 @@ class ReasoningParserManager:
     @classmethod
     def register_module(
         cls,
-        name: Optional[Union[str, list[str]]] = None,
+        name: Union[str, list[str]] | None = None,
         force: bool = True,
         module: Union[type, None] = None,
     ) -> Union[type, Callable]:

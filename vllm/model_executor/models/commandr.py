@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 Cohere and the HuggingFace Inc. team. All rights reserved.
 #
@@ -22,11 +23,12 @@
 # This file is based on the LLama model definition file in transformers
 """PyTorch Cohere model."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
 from torch import nn
-from transformers import CohereConfig
+from transformers import Cohere2Config, CohereConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -44,13 +46,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name,
     row_parallel_weight_loader)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
-from .utils import (extract_layer_index, is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, extract_layer_index,
+                    is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -87,7 +89,7 @@ class CohereMLP(nn.Module):
 
     def __init__(
         self,
-        config: CohereConfig,
+        config: Union[CohereConfig, Cohere2Config],
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -122,7 +124,7 @@ class CohereAttention(nn.Module):
 
     def __init__(
         self,
-        config: CohereConfig,
+        config: Union[CohereConfig, Cohere2Config],
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -180,18 +182,13 @@ class CohereAttention(nn.Module):
         )
 
         # Model v2 has interleaved sliding windows, v1 does not
-        interleaved_sliding_window = getattr(config,
-                                             "interleaved_sliding_window",
-                                             None)
-        self.v1 = interleaved_sliding_window is None
+        self.v1 = isinstance(config, CohereConfig)
 
-        layer_idx = extract_layer_index(prefix)
-        layer_has_sliding_window = (
-            getattr(config, "sliding_window_pattern", False)
-            and (layer_idx + 1) % self.config.sliding_window_pattern != 0)
-
-        self.sliding_window = (interleaved_sliding_window
-                               if layer_has_sliding_window else None)
+        self.sliding_window = None
+        if not self.v1:
+            layer_idx = extract_layer_index(prefix)
+            if config.layer_types[layer_idx] == "sliding_attention":
+                self.sliding_window = config.sliding_window
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -237,7 +234,7 @@ class CohereAttention(nn.Module):
 class CohereDecoderLayer(nn.Module):
 
     def __init__(self,
-                 config: CohereConfig,
+                 config: Union[CohereConfig, Cohere2Config],
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
@@ -285,6 +282,7 @@ class CohereModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
+        self.quant_config = quant_config
 
         self.config = config
         lora_vocab = (lora_config.lora_extra_vocab_size *
@@ -324,7 +322,7 @@ class CohereModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -337,6 +335,62 @@ class CohereModel(nn.Module):
             })
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+
+            for param_name, shard_name, shard_id in stacked_params_mapping:
+                if shard_name not in name:
+                    continue
+                name = name.replace(shard_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
@@ -393,79 +447,19 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         is_not_lora = hasattr(self.model.embed_tokens, 'weight')
         if is_not_lora:
             logits = self.logits_processor(self.model.embed_tokens,
-                                           hidden_states, sampling_metadata)
+                                           hidden_states)
         else:
             logits = self.logits_processor(self.model.embed_tokens.base_layer,
-                                           hidden_states, sampling_metadata)
+                                           hidden_states)
 
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-
-            # Skip loading rotary embeddings since vLLM has its own
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
-            for param_name, shard_name, shard_id in stacked_params_mapping:
-                if shard_name not in name:
-                    continue
-                name = name.replace(shard_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # lm_head is not used in vllm as it is tied with embed_token.
-                # To prevent errors, skip loading lm_head.weight.
-                if "lm_head.weight" in name:
-                    continue
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(
+            self, skip_prefixes=["lm_head", "rotary_emb.inv_freq"])
+        return loader.load_weights(weights)

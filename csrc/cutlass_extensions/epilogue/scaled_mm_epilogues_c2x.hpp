@@ -153,7 +153,7 @@ struct ScaledEpilogueBias
       cutlass::epilogue::threadblock::Sm80EVT<Compute0, ScaleB, Accum>;
 
   using Compute1 = cutlass::epilogue::threadblock::VisitorCompute<
-      cutlass::multiply_add, ElementD, float,
+      cutlass::homogeneous_multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
  public:
@@ -210,7 +210,7 @@ struct ScaledEpilogueBiasAzp
                                               EVTComputeAzp>;
 
   using ComputeScaleBiasA = cutlass::epilogue::threadblock::VisitorCompute<
-      cutlass::multiply_add, ElementD, float,
+      cutlass::homogeneous_multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
  public:
@@ -288,7 +288,7 @@ struct ScaledEpilogueBiasAzpToken
                                               EVTComputeAcc>;
 
   using ComputeScaleBiasA = cutlass::epilogue::threadblock::VisitorCompute<
-      cutlass::multiply_add, ElementD, float,
+      cutlass::homogeneous_multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
  public:

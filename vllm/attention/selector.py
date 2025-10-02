@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import cache
-from typing import Generator, Optional, Type
+from typing import Generator, Optional, Union
 
 import torch
 
@@ -78,15 +80,72 @@ def get_global_forced_attn_backend() -> Optional[_Backend]:
     return forced_attn_backend
 
 
+@dataclass(frozen=True)
+class _IsSupported:
+    can_import: bool
+    head_size: bool
+    dtype: bool
+
+    def __bool__(self) -> bool:
+        return self.can_import and self.head_size and self.dtype
+
+
+def is_attn_backend_supported(
+    attn_backend: Union[str, type[AttentionBackend]],
+    head_size: int,
+    dtype: torch.dtype,
+    *,
+    allow_import_error: bool = True,
+) -> _IsSupported:
+    if isinstance(attn_backend, str):
+        try:
+            attn_backend = resolve_obj_by_qualname(attn_backend)
+        except ImportError:
+            if not allow_import_error:
+                raise
+
+            return _IsSupported(can_import=False, head_size=False, dtype=False)
+
+    assert isinstance(attn_backend, type)
+
+    # TODO: Update the interface once V0 is removed
+    if get_supported_head_sizes := getattr(attn_backend,
+                                           "get_supported_head_sizes", None):
+        is_head_size_supported = head_size in get_supported_head_sizes()
+    elif validate_head_size := getattr(attn_backend, "validate_head_size",
+                                       None):
+        try:
+            validate_head_size(head_size)
+            is_head_size_supported = True
+        except Exception:
+            is_head_size_supported = False
+    else:
+        raise NotImplementedError(f"{attn_backend.__name__} does not support "
+                                  "head size validation")
+
+    if get_supported_dtypes := getattr(attn_backend, "get_supported_dtypes",
+                                       None):
+        is_dtype_supported = dtype in get_supported_dtypes()
+    else:
+        raise NotImplementedError(f"{attn_backend.__name__} does not support "
+                                  "dtype validation")
+
+    return _IsSupported(
+        can_import=True,
+        head_size=is_head_size_supported,
+        dtype=is_dtype_supported,
+    )
+
+
 def get_attn_backend(
     head_size: int,
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
-    is_attention_free: bool,
-    is_blocksparse: bool = False,
     use_mla: bool = False,
-) -> Type[AttentionBackend]:
+    has_sink: bool = False,
+    use_sparse: bool = False,
+) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     # Accessing envs.* behind an @lru_cache decorator can cause the wrong
     # value to be returned from the cache if the value changes between calls.
@@ -97,10 +156,10 @@ def get_attn_backend(
         dtype=dtype,
         kv_cache_dtype=kv_cache_dtype,
         block_size=block_size,
-        is_attention_free=is_attention_free,
-        is_blocksparse=is_blocksparse,
         use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
+        has_sink=has_sink,
+        use_sparse=use_sparse,
     )
 
 
@@ -110,23 +169,11 @@ def _cached_get_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
-    is_attention_free: bool,
-    is_blocksparse: bool = False,
     use_v1: bool = False,
     use_mla: bool = False,
-) -> Type[AttentionBackend]:
-    if is_blocksparse:
-        logger.info("Using BlocksparseFlashAttention backend.")
-        from vllm.attention.backends.blocksparse_attn import (
-            BlocksparseFlashAttentionBackend)
-        return BlocksparseFlashAttentionBackend
-
-    # If there are no attention layers (e.g. we are running Mamba),
-    # use the placeholder NO_ATTENTION
-    if is_attention_free:
-        from vllm.attention.backends.placeholder_attn import (
-            PlaceholderAttentionBackend)
-        return PlaceholderAttentionBackend
+    has_sink: bool = False,
+    use_sparse: bool = False,
+) -> type[AttentionBackend]:
 
     # Check whether a particular choice of backend was
     # previously forced.
@@ -142,12 +189,24 @@ def _cached_get_attn_backend(
         # Check the environment variable and override if specified
         backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
         if backend_by_env_var is not None:
+            if backend_by_env_var.endswith("_VLLM_V1"):
+                logger.warning(
+                    "The suffix '_VLLM_V1' in the environment variable "
+                    "%s is no longer necessary as V0 backends have been "
+                    "deprecated. Please remove this suffix from your "
+                    "environment variable setting.", STR_BACKEND_ENV_VAR)
+                backend_by_env_var = backend_by_env_var.removesuffix(
+                    "_VLLM_V1")
             selected_backend = backend_name_to_enum(backend_by_env_var)
+            if selected_backend is None:
+                raise ValueError(
+                    f"Invalid attention backend: '{backend_by_env_var}'. "
+                    f"Valid backends are: {list(_Backend.__members__.keys())}")
 
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
         selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
-        use_mla)
+        use_mla, has_sink, use_sparse)
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}")

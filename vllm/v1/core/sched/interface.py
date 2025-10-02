@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional, Union
@@ -8,7 +9,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
-    from vllm.v1.outputs import ModelRunnerOutput
+    from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
 
 
@@ -45,7 +46,7 @@ class SchedulerInterface(ABC):
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
-    ) -> "EngineCoreOutputs":
+    ) -> dict[int, "EngineCoreOutputs"]:
         """Update the scheduler state based on the model runner output.
 
         This method is called after the model runner has processed the scheduled
@@ -55,8 +56,17 @@ class SchedulerInterface(ABC):
         for each request.
 
         Returns:
-            A EngineCoreOutputs object containing the outputs for each request.
+            A dict of client index to EngineCoreOutputs object containing the
+            outputs for each request originating from that client.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_draft_token_ids(
+        self,
+        draft_token_ids: "DraftTokenIds",
+    ) -> None:
+        """Update the draft token ids for the scheduled requests."""
         raise NotImplementedError
 
     @abstractmethod
@@ -124,6 +134,11 @@ class SchedulerInterface(ABC):
 
         This is particularly required when the model weights are live-updated.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_request_counts(self) -> tuple[int, int]:
+        """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError
 
     @abstractmethod

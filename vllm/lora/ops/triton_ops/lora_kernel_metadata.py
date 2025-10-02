@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 LoRA kernels metadata preparation utilities.
 """
@@ -82,8 +83,8 @@ class LoRAKernelMeta:
         Prepare kernel metadata tensors for the current forward pass.
 
         Args:
-            token_lora_tensor (torch.Tensor): Tensor containing lora indices
-            for each input token.
+            token_lora_mapping (torch.Tensor): Tensor containing lora indices
+                for each input token.
         """
 
         self._reset()
@@ -135,7 +136,7 @@ class LoRAKernelMeta:
 
         Args:
             token_nums (int): Number of input tokens in the current forward
-            pass. 
+                pass of the kernel.
         """
         return (
             self.token_lora_mapping[:token_nums],

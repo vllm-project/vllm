@@ -6,11 +6,6 @@
 
 [tool.ruff]
 line-length = 88
-exclude = [
-    # External file, leaving license intact
-    "examples/other/fp8/quantizer/quantize.py",
-    "vllm/vllm_flash_attn/flash_attn_interface.pyi"
-]
 
 [tool.ruff.lint.per-file-ignores]
 "vllm/third_party/**" = ["ALL"]

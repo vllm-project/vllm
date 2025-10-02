@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -24,6 +25,7 @@ def test_context_length_too_short(vllm_runner, image_assets, model):
             model,
             max_model_len=128,  # LLaVA has a feature size of 576
             enforce_eager=True,
+            load_format="dummy",
         )
 
         with vllm_model:

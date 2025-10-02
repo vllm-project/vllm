@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 from collections.abc import Sequence
@@ -7,7 +8,7 @@ from typing import Any, Optional
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.chat_utils import random_tool_call_id
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation,
@@ -68,12 +69,12 @@ class Phi4MiniJsonToolParser(ToolParser):
                              len(function_call_arr))
             except json.JSONDecodeError as e:
                 logger.error(
-                    "Failed to parse function calls from model output: %s. "
-                    "Error: %s", model_output, str(e))
+                    "Failed to parse function calls from model output. "
+                    "Error: %s", str(e))
 
             tool_calls: list[ToolCall] = [
                 ToolCall(
-                    id=random_tool_call_id(),
+                    id=make_tool_call_id(),
                     type="function",
                     function=FunctionCall(
                         name=raw_function_call["name"],

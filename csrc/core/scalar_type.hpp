@@ -321,6 +321,8 @@ static inline constexpr auto kFE3M2f =
     ScalarType::float_(3, 2, true, ScalarType::NAN_NONE);
 static inline constexpr auto kFE4M3fn =
     ScalarType::float_(4, 3, true, ScalarType::NAN_EXTD_RANGE_MAX_MIN);
+static inline constexpr auto kFE8M0fnu =
+    ScalarType(8, 0, false, 0, true, ScalarType::NAN_EXTD_RANGE_MAX_MIN);
 static inline constexpr auto kFE5M2 = ScalarType::float_IEEE754(5, 2);
 static inline constexpr auto kFE8M7 = ScalarType::float_IEEE754(8, 7);
 static inline constexpr auto kFE5M10 = ScalarType::float_IEEE754(5, 10);

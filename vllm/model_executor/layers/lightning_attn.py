@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
+
 import torch
 from einops import rearrange
 
@@ -452,7 +455,14 @@ class _attention(torch.autograd.Function):
 lightning_attention_ = _attention.apply
 
 
-def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
+def lightning_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    ed: torch.Tensor,
+    block_size: int = 256,
+    kv_history: Optional[torch.Tensor] = None
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply lightning attention algorithm 
     to compute attention efficiently.
@@ -531,7 +541,7 @@ def _linear_attn_decode_kernel(
     pid_d = tl.program_id(2)  # dimension block index
 
     # Load slot index for the current batch
-    slot_id = tl.load(slot_idx + pid_b)
+    slot_id = tl.load(slot_idx + pid_b).to(tl.int64)
 
     # Skip if slot_id is -1 (padding)
     if slot_id == -1:

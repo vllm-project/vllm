@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from collections.abc import Mapping
@@ -118,6 +119,11 @@ class SpanAttributes:
     # forward, block/sync across workers, cpu-gpu sync time and sampling time.
     GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE = (
         "gen_ai.latency.time_in_model_execute")
+    GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL = \
+        "gen_ai.latency.time_in_model_prefill"
+    GEN_AI_LATENCY_TIME_IN_MODEL_DECODE = "gen_ai.latency.time_in_model_decode"
+    GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE = \
+        "gen_ai.latency.time_in_model_inference"
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
@@ -24,8 +25,8 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
     def can_implement(
             cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
 
-        if (not current_platform.is_cuda() and not current_platform.is_cpu()):
-            return False, "CutlassScaledMM requires running on CUDA or CPU."
+        if not current_platform.is_cuda():
+            return False, "CutlassScaledMM requires running on CUDA."
 
         return True, None
 

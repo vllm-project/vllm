@@ -1,14 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import weakref
+from collections.abc import Sequence
 from copy import deepcopy
 from typing import Callable, Union
 
 from torch import fx
+from torch._ops import OpOverload
 
-from vllm.compilation.fx_utils import (find_specified_fn,
-                                       find_specified_fn_maybe)
+from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.inductor_pass import InductorPass
-from vllm.config import get_current_vllm_config
+from vllm.compilation.pass_manager import with_pattern_match_debug
+from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.config import VllmConfig, get_current_vllm_config
+
+
+class LazyInitPass(InductorPass):
+    """
+    If there's a pass that we want to initialize lazily in a test,
+    we can wrap it in LazyInitPass, which will initialize the pass when invoked
+    and then immediately invoke it.
+    """
+
+    def __init__(self, pass_cls: type[VllmInductorPass],
+                 vllm_config: VllmConfig):
+        self.pass_cls = pass_cls
+        self.vllm_config = weakref.proxy(vllm_config)  # avoid cycle
+
+    def __call__(self, graph: fx.Graph) -> None:
+        self.pass_ = self.pass_cls(self.vllm_config)
+        self.pass_(graph)
 
 
 class TestBackend:
@@ -38,27 +60,38 @@ class TestBackend:
                           example_inputs,
                           config_patches=self.inductor_config)
 
+    @with_pattern_match_debug
     def post_pass(self, graph: fx.Graph):
         self.graph_pre_pass = deepcopy(graph)
+
+        VllmInductorPass.dump_prefix = 0
         for pass_ in self.custom_passes:
             pass_(graph)
+            VllmInductorPass.dump_prefix += 1
+
+        VllmInductorPass.dump_prefix = None
 
         self.graph_post_pass = deepcopy(graph)
         # assign by reference, will reflect the final state of the graph
         self.final_graph = graph
 
-    def check_before_ops(self, ops,
-                         find_fn=find_specified_fn, \
-                         find_fn_maybe=find_specified_fn_maybe, \
-                        ops_fully_replaced=True):
+    def check_before_ops(self, ops: Sequence[OpOverload], fully_replaced=True):
         for op in ops:
-            find_fn(self.graph_pre_pass.nodes, op)
-            if ops_fully_replaced:
-                assert find_fn_maybe(self.graph_post_pass.nodes, op) is None
+            num_pre = len(list(find_op_nodes(op, self.graph_pre_pass)))
+            num_post = len(list(find_op_nodes(op, self.graph_post_pass)))
+            assert num_pre > 0, f"Op {op.name()} not found in pre-pass graph"
+            assert num_pre > num_post, f"All nodes remain for op {op.name()}"
+            if fully_replaced:
+                assert num_post == 0, \
+                    f"Unexpected op {op.name()} in post-pass graph"
 
-    def check_after_ops(self, ops,
-                        find_fn=find_specified_fn, \
-                        find_fn_maybe=find_specified_fn_maybe):
+    def check_after_ops(self, ops: Sequence[OpOverload]):
         for op in ops:
-            find_fn(self.graph_post_pass.nodes, op)
-            assert find_fn_maybe(self.graph_pre_pass.nodes, op) is None
+            num_pre = len(list(find_op_nodes(op, self.graph_pre_pass)))
+            num_post = len(list(find_op_nodes(op, self.graph_post_pass)))
+            assert num_pre == 0, f"Unexpected op {op.name()} in pre-pass graph"
+            assert num_post > 0, f"Op {op.name()} not found in post-pass graph"
+
+    def op_count(self, op: OpOverload, before=False) -> int:
+        graph = self.graph_pre_pass if before else self.graph_post_pass
+        return len(list(find_op_nodes(op, graph)))

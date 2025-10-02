@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kernel test utils"""
 
 import itertools
@@ -12,8 +13,11 @@ import pytest
 import torch
 from torch._prims_common import TensorLikeType
 
+from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input)
 from vllm.platforms.interface import _Backend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
                         STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
@@ -509,10 +513,6 @@ def make_backend(backend_name: str) -> AttentionBackend:
     Construct the backend instance determined by the backend_name string
     argument.
 
-    "XFORMERS" -> construct xformers backend
-
-    TODO: other backends
-
     Note: at time of writing the Attention wrapper automatically selects
     its own backend for Attention.forward(); so the backend instance which
     you generate with this function is not meant to be used for *running*
@@ -525,15 +525,65 @@ def make_backend(backend_name: str) -> AttentionBackend:
     * Backend instance
     '''
     if backend_name == STR_XFORMERS_ATTN_VAL:
-        # NOTE: xFormers backend cannot be imported for CPU and AMD GPUs.
-        from vllm.attention.backends.xformers import XFormersBackend
-        return XFormersBackend()
-    elif backend_name == STR_FLASH_ATTN_VAL:
-        from vllm.attention.backends.flash_attn import FlashAttentionBackend
+        from vllm.v1.attention.backends.xformers import (
+            XFormersAttentionBackend)
+        return XFormersAttentionBackend()
+    if backend_name == STR_FLASH_ATTN_VAL:
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
         return FlashAttentionBackend()
+    if backend_name == "TRITON_ATTN":
+        from vllm.v1.attention.backends.triton_attn import (
+            TritonAttentionBackend)
+        return TritonAttentionBackend()
+    if backend_name == "FLEX_ATTENTION":
+        from vllm.v1.attention.backends.flex_attention import (
+            FlexAttentionBackend)
+        return FlexAttentionBackend()
+    if backend_name == "TORCH_SDPA":
+        from vllm.v1.attention.backends.cpu_attn import TorchSDPABackend
+        return TorchSDPABackend()
+    if backend_name == "FLASHINFER":
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+        return FlashInferBackend()
 
     raise AssertionError(
         f"Unrecognized backend_name {backend_name} for unit test")
+
+
+def make_alibi_bias(
+    alibi_slopes: torch.Tensor,
+    num_kv_heads: int,
+    dtype: torch.dtype,
+    seq_lens: list[int],
+) -> list[Any]:
+    """Create ALiBi biases compatible with xFormers attention tests."""
+    from xformers.ops.fmha.attn_bias import LowerTriangularMaskWithTensorBias
+
+    if alibi_slopes is None:
+        return [None for _ in seq_lens]
+
+    attn_biases: list[Any] = []
+    num_heads = alibi_slopes.shape[0]
+    assert num_heads >= num_kv_heads, (
+        "ALiBi slopes expect at least as many heads as KV heads")
+
+    for seq_len in seq_lens:
+        bias = torch.arange(seq_len, dtype=dtype, device=alibi_slopes.device)
+        bias = bias[None, :] - bias[:, None]
+
+        padded_len = (seq_len + 7) // 8 * 8
+        bias_tensor = torch.empty(
+            1,
+            num_heads,
+            seq_len,
+            padded_len,
+            device=alibi_slopes.device,
+            dtype=dtype,
+        )[:, :, :, :seq_len].copy_(bias)
+        bias_tensor.mul_(alibi_slopes[:, None, None])
+        attn_biases.append(LowerTriangularMaskWithTensorBias(bias_tensor))
+
+    return attn_biases
 
 
 def _make_metadata_tensors(
@@ -909,7 +959,6 @@ def make_test_metadata(
         return attn_backend_obj.make_metadata(
             num_prefills=num_prefills,
             slot_mapping=(None if kv_mmap is None else kv_mmap.slot_mapping),
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -959,7 +1008,6 @@ def make_test_metadata(
         return attn_backend_obj.make_metadata(
             num_prefills=num_prefills,
             slot_mapping=kv_mmap.slot_mapping,
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -1053,23 +1101,131 @@ def compute_max_diff(output, output_ref):
         torch.abs(output_ref))
 
 
-def torch_moe(a, w1, w2, score, topk, expert_map):
-    B, D = a.shape
-    a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
-    out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_weight = topk_weight.view(-1)
+def torch_experts(
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    global_num_experts: int = -1,
+    b_bias1: Optional[torch.Tensor] = None,
+    b_bias2: Optional[torch.Tensor] = None,
+    expert_map: Optional[torch.Tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    quant_dtype: Optional[torch.dtype] = None,
+    per_act_token_quant=False,
+    block_shape: Optional[list[int]] = None,
+    apply_router_weights_on_input: bool = False,
+) -> torch.Tensor:
+    assert (global_num_experts == -1
+            or (global_num_experts == w1.shape[0] and expert_map is None)
+            or (expert_map is not None
+                and global_num_experts == expert_map.shape[0]))
+
+    M, K = a.shape
+    topk = topk_ids.shape[1]
+
+    if apply_router_weights_on_input:
+        assert topk == 1
+        a = a * topk_weight.to(a.dtype)
+
+    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
+
+    out = torch.zeros(M * topk, w2.shape[1], dtype=a.dtype, device=a.device)
+
+    if a1_scale:
+        assert not per_act_token_quant and block_shape is None
+    a, a_scale = moe_kernel_quantize_input(a, a1_scale, quant_dtype,
+                                           per_act_token_quant, block_shape)
+
+    num_experts = w1.shape[0]
+
     topk_ids = topk_ids.view(-1)
     if expert_map is not None:
         topk_ids = expert_map[topk_ids]
-    for i in range(w1.shape[0]):
+
+    f32 = torch.float32
+
+    for i in range(num_experts):
         mask = topk_ids == i
         if mask.sum():
-            out[mask] = SiluAndMul()(
-                a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
-    return (out.view(B, -1, w2.shape[1]) *
-            topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
+            if quant_dtype is None:
+                tmp1 = a[mask] @ w1[i].transpose(0, 1)
+                if b_bias1 is not None:
+                    tmp1 = tmp1 + b_bias1[i].view(1, -1).to(tmp1.dtype)
+                tmp2 = SiluAndMul()(tmp1)
+                out[mask] = tmp2 @ w2[i].transpose(0, 1)
+                if b_bias2 is not None:
+                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(
+                        tmp1.dtype)
+            elif block_shape is not None:
+                # block quantized
+                assert (a_scale is not None and w1_scale is not None
+                        and w2_scale is not None)
+                tmp1 = native_w8a8_block_matmul(a[mask], w1[i], a_scale[mask],
+                                                w1_scale[i], block_shape,
+                                                out.dtype)
+                if b_bias1 is not None:
+                    tmp1 = tmp1 + b_bias1[i].view(1, -1).to(tmp1.dtype)
+                tmp2 = SiluAndMul()(tmp1)
+                tmp2, b_scale = moe_kernel_quantize_input(
+                    tmp2, a2_scale, quant_dtype, per_act_token_quant,
+                    block_shape)
+
+                out[mask] = native_w8a8_block_matmul(tmp2, w2[i], b_scale,
+                                                     w2_scale[i], block_shape,
+                                                     out.dtype)
+                if b_bias2 is not None:
+                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(
+                        tmp1.dtype)
+            else:
+                assert (a_scale is not None and w1_scale is not None
+                        and w2_scale is not None)
+                scales = a_scale if a_scale.numel() == 1 else a_scale[mask]
+
+                tmp1 = a[mask].to(f32) * scales
+                w1_dq = (w1[i].to(f32) * w1_scale[i]).transpose(0, 1)
+                tmp1 = (tmp1 @ w1_dq).to(out.dtype)
+                if b_bias1 is not None:
+                    tmp1 = tmp1 + b_bias1[i].view(1, -1).to(out.dtype)
+
+                tmp2 = SiluAndMul()(tmp1).to(out.dtype)
+
+                tmp2, b_scale = moe_kernel_quantize_input(
+                    tmp2, a2_scale, quant_dtype, per_act_token_quant,
+                    block_shape)
+                assert b_scale is not None
+
+                tmp2 = tmp2.to(f32) * b_scale
+                w2_dq = (w2[i].to(f32) * w2_scale[i]).transpose(0, 1)
+                out[mask] = (tmp2 @ w2_dq).to(out.dtype)
+                if b_bias2 is not None:
+                    out[mask] = out[mask] + b_bias2[i].view(1, -1).to(
+                        out.dtype)
+
+    if apply_router_weights_on_input:
+        return out
+    else:
+        return (out.view(M, -1, w2.shape[1]).to(f32) *
+                topk_weight.view(M, -1, 1)).sum(dim=1).to(out.dtype)
+
+
+def torch_moe(a: torch.Tensor,
+              w1: torch.Tensor,
+              w2: torch.Tensor,
+              score: torch.Tensor,
+              topk: int,
+              b_bias1: Optional[torch.Tensor] = None,
+              b_bias2: Optional[torch.Tensor] = None,
+              global_num_experts: int = -1,
+              expert_map: Optional[torch.Tensor] = None) -> torch.Tensor:
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    return torch_experts(a, w1, w2, topk_weight, topk_ids, global_num_experts,
+                         b_bias1, b_bias2, expert_map)
 
 
 def torch_moe_single(a, w, score, topk):
@@ -1124,7 +1280,7 @@ def baseline_scaled_mm(a: torch.Tensor,
                        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
     # We treat N-dimensional group scaling as extended numpy-style broadcasting
-    # in numpy simply stretches dimensions with an extent of 1 to match the
+    # in numpy simply stretches dimensions with an extent of 1 to match
     # the target shape by repeating the data along that dimension (broadcasting)
     # , we extend these semantics to say if the extent of a dimension in the
     # source shape is not 1 and does not match the target shape we repeat each
@@ -1135,7 +1291,7 @@ def baseline_scaled_mm(a: torch.Tensor,
     # then we would expand a to:
     #       a = [[1, 1, 2, 2],
     #            [3, 3, 4, 4]]
-    # NOTE this function this function does not explicitly broadcast dimensions
+    # NOTE this function does not explicitly broadcast dimensions
     # with an extent of 1, since this can be done implicitly by pytorch
     def group_broadcast(t, shape):
         for i, s in enumerate(shape):

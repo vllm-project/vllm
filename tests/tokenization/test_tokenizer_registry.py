@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import TYPE_CHECKING, Any, Optional, Union
 
@@ -54,6 +55,10 @@ class TestTokenizer(TokenizerBase):
 
     @property
     def max_token_id(self) -> int:
+        raise NotImplementedError()
+
+    @property
+    def truncation_side(self) -> str:
         raise NotImplementedError()
 
     def __call__(

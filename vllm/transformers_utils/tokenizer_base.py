@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
 from abc import ABC, abstractmethod
@@ -58,6 +59,11 @@ class TokenizerBase(ABC):
     @property
     @abstractmethod
     def max_token_id(self) -> int:
+        raise NotImplementedError()
+
+    @property
+    @abstractmethod
+    def truncation_side(self) -> str:
         raise NotImplementedError()
 
     def __len__(self) -> int:

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import partial
 from typing import Optional, Union
@@ -11,10 +12,11 @@ from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
 from vllm.config import ModelConfig
-from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs
-from vllm.multimodal.processing import BaseMultiModalProcessor, ProcessingCache
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        InputProcessingContext)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                cached_tokenizer_from_config,
                                                encode_tokens)
@@ -23,27 +25,82 @@ from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import HF_EXAMPLE_MODELS
 
 
+def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """
+    Patch the multimodal data for GLM4.1V model.
+    """
+    # Ensure video metadata is included
+    if "video" in mm_data:
+        # GLM4.1V doesn't support multiple videos
+        video = mm_data["video"]
+        num_frames = len(video)
+        mm_data["video"] = (video, {
+            "total_num_frames": num_frames,
+            "fps": num_frames,
+            "duration": 1,
+            "frames_indices": [i for i in range(num_frames)],
+            "video_backend": "opencv",
+            "do_sample_frames": True,
+        })
+    return mm_data
+
+
+def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """
+    Patch the multimodal data for Qwen3-VL model.
+    """
+
+    def create_metadata(frames: np.ndarray):
+        num_frames = len(frames)
+        return {
+            "total_num_frames": num_frames,
+            "fps": 2.0,
+            "duration": num_frames / 2.0,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            "do_sample_frames": True,
+        }
+
+    # Ensure video metadata is included
+    if "video" in mm_data:
+        video = mm_data["video"]
+        if isinstance(video, list):
+            # multiple videos
+            mm_data["video"] = [(vid, create_metadata(vid)) for vid in video]
+        else:
+            # single video
+            mm_data["video"] = (video, create_metadata(video))
+    return mm_data
+
+
 def _test_processing_correctness(
-    model_id: str,
+    model_id_or_arch: str,
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
 ):
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
+        # Use model architecture to get the default model id
+        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_id_or_arch)
+        model_id = model_info.default
+    else:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id_or_arch)
+        model_id = model_id_or_arch
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
     model_config = ModelConfig(
         model_id,
-        task="auto",
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
-        seed=0,
-        dtype="float16",
-        revision=None,
         hf_overrides=model_info.hf_overrides,
-    )
+        # Ensure that the cache can fit all of the data
+        mm_processor_cache_gb=2048,
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
@@ -51,8 +108,7 @@ def _test_processing_correctness(
         model_config,
         tokenizer=cached_tokenizer_from_config(model_config),
     )
-    # Ensure that it can fit all of the data
-    cache = ProcessingCache(capacity_gb=2048)
+    cache = MultiModalProcessorOnlyCache(model_config)
 
     processing_info = factories.info(ctx)
     supported_mm_limits = processing_info.get_supported_mm_limits()
@@ -82,7 +138,7 @@ def _test_processing_correctness(
         partial(random_video,
                 rng,
                 min_frames=2,
-                max_frames=8,
+                max_frames=16,
                 min_wh=128,
                 max_wh=256),
         "audio":
@@ -140,8 +196,9 @@ def _test_processing_correctness(
 # incorrect token ids. So we need use `add_special_tokens=False` here
 # to leave bos_token to be added by the processor.
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
-    "mllama": False,
     "ovis": False,
+    "ovis2_5": False,
+    "paligemma": False,
     "ultravox": False,
     "whisper": False,
 }
@@ -151,6 +208,14 @@ _IGNORE_MM_KEYS = {
     # The slight difference should not be a problem though, since
     # attention_mask lets us ignore the difference.
     "ultravox": {"audio_features"},
+}
+
+MM_DATA_PATCHES = {
+    # GLM4.1V and Qwen3-VL requires video metadata to be included in the input
+    "glm4v": glm4_1v_patch_mm_data,
+    "glm4v_moe": glm4_1v_patch_mm_data,
+    "qwen3_vl": qwen3_vl_patch_mm_data,
+    "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
 
 
@@ -165,6 +230,8 @@ def _test_processing_correctness_one(
 ):
     model_type = model_config.hf_config.model_type
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
+    if model_type in MM_DATA_PATCHES:
+        mm_data = MM_DATA_PATCHES[model_type](mm_data)
 
     if isinstance(prompt, str):
         text_prompt = prompt
@@ -239,25 +306,35 @@ def _test_processing_correctness_one(
     "CohereForAI/aya-vision-8b",
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
+    "CohereLabs/command-a-vision-07-2025",
     "deepseek-ai/deepseek-vl2-tiny",
-    "microsoft/Florence-2-base",
+    "baidu/ERNIE-4.5-VL-28B-A3B-PT",
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
-    "THUDM/glm-4v-9b",
-    "ibm-granite/granite-speech-3.3-8b",
+    "google/gemma-3n-E2B-it",
+    "zai-org/glm-4v-9b",
+    "zai-org/GLM-4.1V-9B-Thinking",
+    "zai-org/GLM-4.5V",
+    "ibm-granite/granite-speech-3.3-2b",
     "h2oai/h2ovl-mississippi-800m",
+    "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
+    "HuggingFaceM4/Idefics3-8B-Llama3",
+    "internlm/Intern-S1",
     "OpenGVLab/InternVL2-1B",
     "OpenGVLab/InternVL3-1B",
-    "HuggingFaceM4/Idefics3-8B-Llama3",
-    "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+    "OpenGVLab/InternVL3_5-1B",
+    "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview",
+    "OpenGVLab/InternVL3_5-30B-A3B",
+    "Kwai-Keye/Keye-VL-8B-Preview",
+    "Kwai-Keye/Keye-VL-1_5-8B",
     "moonshotai/Kimi-VL-A3B-Instruct",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-    "meta-llama/Llama-3.2-11B-Vision-Instruct",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
+    "mispeech/midashenglm-7b",
     "openbmb/MiniCPM-Llama3-V-2_5",
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
@@ -265,9 +342,11 @@ def _test_processing_correctness_one(
     "allenai/Molmo-7B-D-0924",
     "allenai/Molmo-7B-O-0924",
     "nvidia/NVLM-D-72B",
+    "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
     "AIDC-AI/Ovis1.6-Gemma2-9B",
     "AIDC-AI/Ovis1.6-Llama3.2-3B",
     "AIDC-AI/Ovis2-1B",
+    "AIDC-AI/Ovis2.5-2B",
     "google/paligemma-3b-mix-224",
     "google/paligemma2-3b-ft-docci-448",
     "microsoft/Phi-3.5-vision-instruct",
@@ -279,9 +358,17 @@ def _test_processing_correctness_one(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "Qwen/Qwen2.5-Omni-3B",
+    "Qwen/Qwen3-VL-4B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "YannQi/R-4B",
     "Skywork/Skywork-R1V-38B",
+    "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+    "stepfun-ai/step3",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     "openai/whisper-large-v3",
+    "omni-research/Tarsier-7b",
+    "omni-research/Tarsier2-Recap-7b",
+    "mistralai/Voxtral-Mini-3B-2507",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
@@ -293,8 +380,32 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
+    if model_id == "google/gemma-3n-E2B-it":
+        pytest.skip("Skipping gemma-3n-E2B-it due to transformers #39911 bug.")
     _test_processing_correctness(
         model_id,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+    )
+
+
+# Phi4MultimodalForCausalLM share same model repo with original format
+# Phi4MMForCausalLM, so we add it as a separate test case
+# Remove this test after conversion PR merged:
+# https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70
+@pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+def test_processing_correctness_phi4_multimodal(
+    model_arch: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    _test_processing_correctness(
+        model_arch,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
@@ -311,10 +422,16 @@ def _assert_inputs_equal(
     if ignore_mm_keys is None:
         ignore_mm_keys = set()
 
-    assert "mm_kwargs" in a and "mm_kwargs" in b, msg
+    a_rest = {k: v for k, v in a.items() if k != "mm_kwargs"}
+    b_rest = {k: v for k, v in b.items() if k != "mm_kwargs"}
+
+    assert a_rest == b_rest, msg
+
+    a_data = a["mm_kwargs"].get_data()
+    b_data = b["mm_kwargs"].get_data()
 
     for key in ignore_mm_keys:
-        a["mm_kwargs"].pop(key, None)
-        b["mm_kwargs"].pop(key, None)
+        a_data.pop(key, None)
+        b_data.pop(key, None)
 
-    assert a == b, msg
+    assert a_data == b_data, msg

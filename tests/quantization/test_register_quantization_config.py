@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests register custom quantization config.
 
 See https://github.com/vllm-project/vllm/issues/11926 for more details.
@@ -52,6 +53,7 @@ class CustomQuantConfig(QuantizationConfig):
 
     def __init__(self, num_bits: int = 8) -> None:
         """Initialize the quantization config."""
+        super().__init__()
         self.num_bits = num_bits
 
     def get_name(self) -> QuantizationMethods:
@@ -103,18 +105,21 @@ def test_register_quantization_config():
                          ])
 def test_custom_quant(vllm_runner, model, monkeypatch):
     """Test infer with the custom quantization method."""
-    # vllm_runner.apply_model() relies on V0 internals.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
+    # `LLM.apply_model` requires pickling a function.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
     with vllm_runner(model_name=model,
                      quantization="custom_quant",
                      enforce_eager=True) as llm:
 
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
-        layer = model.model.layers[0]
-        qkv_proj = layer.self_attn.qkv_proj
+        def check_model(model):
+            layer = model.model.layers[0]
+            qkv_proj = layer.self_attn.qkv_proj
 
-        # Check the quantization method is FakeQuantLinearMethod
-        assert isinstance(qkv_proj.quant_method, FakeQuantLinearMethod)
+            # Check the quantization method is FakeQuantLinearMethod
+            assert isinstance(qkv_proj.quant_method, FakeQuantLinearMethod)
+
+        llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output

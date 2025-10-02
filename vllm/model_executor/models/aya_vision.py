@@ -1,7 +1,8 @@
-# SPDX-License-Identifier: Apache-2.0 Adapted from
-# https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, Union, cast
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 from torch import nn
@@ -15,10 +16,8 @@ from transformers.models.got_ocr2.image_processing_got_ocr2 import (
     get_optimal_tiled_canvas)
 
 from vllm.config import VllmConfig
-from vllm.jsontree import json_map_leaves
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -28,25 +27,36 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix)
 
 
-class AyaVisionImagePixelInputs(TypedDict):
+class AyaVisionImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - np: The total number of patches over each image over each prompt in
+              the batch
+        - c: Number of channels
+        - h: Height of each image patch
+        - w: Width of each image patch
+        - bn: Batch size * number of images
+    """
+
     type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
-    """
-    Shape: `(num_patches_total, num_channels, height, width)`
 
-    `num_patches_total` is the total number of patches over each image over each
-    prompt in the batch.
-    """
+    pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("np", 3, "h", "w"),
+    ]
 
-    num_patches: torch.Tensor
-    """Shape: `(batch_size * num_images)`"""
+    num_patches: Annotated[
+        torch.Tensor,
+        TensorShape("bn"),
+    ]
 
 
 class AyaVisionMultiModalProjector(nn.Module):
@@ -112,8 +122,8 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> AyaVisionProcessor:
         return self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
 
-    def get_image_processor(self) -> GotOcr2ImageProcessor:
-        return self.get_hf_processor().image_processor
+    def get_image_processor(self, **kwargs: object) -> GotOcr2ImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -177,19 +187,19 @@ class AyaVisionMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
             mm_kwargs,
+            tok_kwargs,
         )
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         image_processor = hf_processor.image_processor
 
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
-        if (images :=
-                mm_data.get("images")) is not None and '<image>' in prompt:
-            assert isinstance(images, list)
+        if (images := mm_data.get("images")) is not None:
             parsed_images = (self._get_data_parser().parse_mm_data({
                 "image":
                 images
@@ -229,7 +239,7 @@ class AyaVisionMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
@@ -237,8 +247,7 @@ class AyaVisionMultiModalProcessor(
         image_processor = hf_processor.image_processor
 
         def get_replacement(item_idx: int):
-            images: ImageProcessorItems = mm_items.get("image",
-                                                       ImageProcessorItems)
+            images = mm_items.get_items("image", ImageProcessorItems)
             image_size: ImageSize = images.get_image_size(item_idx)
             num_patches = self.info.get_num_patches(
                 image_width=image_size.width,
@@ -287,6 +296,22 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
 class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "lm_head.": "language_model.lm_head.",
+        })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: AyaVisionConfig = vllm_config.model_config.hf_config
@@ -318,34 +343,17 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
-    def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
-                                  pixel_values: torch.Tensor,
-                                  **kwargs) -> torch.Tensor:
-        target_dtype = vision_tower.get_input_embeddings().weight.dtype
-        image_features = vision_tower(pixel_values.to(dtype=target_dtype),
-                                      **kwargs)
-
-        def select_features(leaf: torch.Tensor):
-            return self._select_image_features(
-                leaf,
-                strategy=self.config.vision_feature_select_strategy,
-            )
-
-        return cast(
-            Union[torch.Tensor, tuple[torch.Tensor, ...]],
-            json_map_leaves(select_features, image_features),
+    def _image_pixels_to_features(
+        self,
+        vision_tower: SiglipVisionModel,
+        pixel_values: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+        return vision_tower(
+            pixel_values.to(dtype=vision_tower.dtype),
+            feature_select_strategy=self.config.vision_feature_select_strategy,
         )
-
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
-        if strategy == "default":
-            return image_features[:, 1:]
-        elif strategy == "full":
-            return image_features
-
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
 
     def _process_image_input(self, image_input: AyaVisionImagePixelInputs,
                              **kwargs) -> list[torch.Tensor]:
@@ -359,21 +367,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             e.flatten(0, 2) for e in image_embeds.split(num_patches.tolist())
         ]
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            if d.shape != expected_dims:
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_dims}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[AyaVisionImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -381,49 +374,28 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_embeds = kwargs.pop("image_embeds", None)
         assert image_embeds is None, "Aya Vision does not support image_embeds."
 
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
-        if num_patches is not None and not isinstance(num_patches,
-                                                      (torch.Tensor, list)):
-            raise ValueError("Incorrect type of num_patches. "
-                             f"Got type: {type(num_patches)}")
-
-        pixel_values = flatten_bn(pixel_values, concat=True)
-        num_patches = flatten_bn(num_patches, concat=True)
+        if pixel_values is None:
+            return None
 
         return AyaVisionImagePixelInputs(
             type="pixel_values",
-            pixel_values=self._validate_pixel_values(pixel_values),
-            num_patches=num_patches,
-        )
+            pixel_values=flatten_bn(pixel_values, concat=True),
+            num_patches=flatten_bn(num_patches, concat=True),
+            resolve_bindings={
+                "h": self.config.vision_config.image_size,
+                "w": self.config.vision_config.image_size,
+            })
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         return self._process_image_input(image_input, **kwargs)
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                multimodal_embeddings=multimodal_embeddings,
-                placeholder_token_id=self.config.image_token_index,
-            )
-
-        return inputs_embeds
 
     def forward(
         self,
@@ -436,14 +408,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
-
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,
@@ -455,7 +419,5 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)

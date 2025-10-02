@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
 # https://github.com/ROCm/vllm/blob/cea7419f151cc50293a05b7fac8547f8f887c9f6/vllm/model_executor/models/grok1.py
 # Copyright 2023 The vLLM team.
@@ -22,6 +23,7 @@
 # limitations under the License.
 """Inference-only Grok1 model."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -44,7 +46,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -346,8 +347,7 @@ class Grok1Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
@@ -359,6 +359,16 @@ class Grok1Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Map Grok1's unique expert parameter names to standard names
+        # Grok1 uses "num_experts" in its config
+        num_experts = getattr(self.config, "num_experts", 8)
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="linear",  # Grok1 specific
+            ckpt_down_proj_name="linear_1",  # Grok1 specific
+            ckpt_up_proj_name="linear_v",  # Grok1 specific
+            num_experts=num_experts)
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -368,18 +378,9 @@ class Grok1Model(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        # Map Grok1's unique expert parameter names to standard names
-        # Grok1 uses "num_experts" in its config
-        num_experts = getattr(self.config, "num_experts", 8)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="linear",  # Grok1 specific
-            ckpt_down_proj_name="linear_1",  # Grok1 specific
-            ckpt_up_proj_name="linear_v",  # Grok1 specific
-            num_experts=num_experts)
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-
+        expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
@@ -526,10 +527,8 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -543,3 +542,6 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             skip_prefixes=skip_prefixes,
         )
         return loader.load_weights(weights)
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()

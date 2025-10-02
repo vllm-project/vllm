@@ -1,23 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
-                    Union)
+from functools import cached_property
+from typing import Any, Awaitable, Callable, List, Optional, Set, Union
 
 import torch.nn as nn
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, deprecated
 
 import vllm.platforms
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest, PoolerOutput
+from vllm.sequence import ExecuteModelRequest
+from vllm.tasks import SupportedTask
 from vllm.utils import make_async
-from vllm.worker.worker_base import WorkerBase
+from vllm.v1.outputs import PoolerOutput, SamplerOutput
+from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -28,11 +30,12 @@ class ExecutorBase(ABC):
     """Base class for all executors.
 
     An executor is responsible for executing the model on one device,
-    or it can be a distributed executor 
+    or it can be a distributed executor
     that can execute the model on multiple devices.
     """
 
     uses_ray: bool  # whether the executor uses Ray for orchestration.
+    supports_pp: bool = False  # whether the executor supports PP
 
     def __init__(
         self,
@@ -47,11 +50,11 @@ class ExecutorBase(ABC):
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self._init_executor()
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
+        self.kv_output_aggregator = None
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -59,10 +62,10 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def collective_rpc(self,
-                       method: Union[str, Callable[..., _R]],
+                       method: Union[str, Callable[[WorkerBase], _R]],
                        timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict[str, Any]] = None) -> List[_R]:
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         """
         Execute an RPC call on all workers.
 
@@ -74,20 +77,20 @@ class ExecutorBase(ABC):
                 `self` argument, in addition to the arguments passed in `args`
                 and `kwargs`. The `self` argument will be the worker object.
             timeout: Maximum time in seconds to wait for execution. Raises a
-                {exc}`TimeoutError` on timeout. `None` means wait indefinitely.
+                [`TimeoutError`][] on timeout. `None` means wait indefinitely.
             args: Positional arguments to pass to the worker method.
             kwargs: Keyword arguments to pass to the worker method.
 
         Returns:
             A list containing the results from each worker.
-        
+
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
         """
         raise NotImplementedError
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
 
@@ -95,9 +98,10 @@ class ExecutorBase(ABC):
         ExecutorBase may require modification of the result, e.g. to ensure the
         selected cache sizes are compatible with all workers.
 
-        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
-        are blocks that are "active" on the device and can be appended to.
-        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
+        Returns a tuple `(num_gpu_blocks, num_cpu_blocks)`, where
+        `num_gpu_blocks` are blocks that are "active" on the device and can be
+        appended to.
+        `num_cpu_blocks` refers to "swapped" blocks in CPU memory and cannot be
         appended to.
         """
         results = self.collective_rpc("determine_num_available_blocks")
@@ -123,16 +127,20 @@ class ExecutorBase(ABC):
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
 
+    @deprecated("`llm_engine.model_executor.apply_model` will no longer work "
+                "in V1 Engine. Please replace with `llm_engine.apply_model` "
+                "and set `VLLM_ALLOW_INSECURE_SERIALIZATION=1`.")
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """
         Run a function directly on the model inside each worker,
         returning the result for each of them.
         """
+        return self.collective_rpc("apply_model", args=(func, ))
 
-        def rpc_func(worker: WorkerBase) -> _R:
-            return func(worker.get_model())
-
-        return self.collective_rpc(rpc_func)
+    @cached_property  # Avoid unnecessary RPC calls
+    def supported_tasks(self) -> tuple[SupportedTask, ...]:
+        output = self.collective_rpc("get_supported_tasks")
+        return output[0]
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
@@ -161,35 +169,6 @@ class ExecutorBase(ABC):
         sets = self.collective_rpc("list_loras")
         for s in sets:
             assert s == sets[0], "All workers should have the same LORAs."
-        return sets[0]
-
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        assert prompt_adapter_request.prompt_adapter_id > 0, \
-            "prompt_adapter_id must be greater than 0."
-        return all(
-            self.collective_rpc("add_prompt_adapter",
-                                args=(prompt_adapter_request, )))
-
-    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        assert prompt_adapter_id > 0, \
-            "prompt_adapter_id must be greater than 0."
-        return all(
-            self.collective_rpc("remove_prompt_adapter",
-                                args=(prompt_adapter_id, )))
-
-    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        assert prompt_adapter_id > 0, \
-            "prompt_adapter_id must be greater than 0."
-        return all(
-            self.collective_rpc("pin_prompt_adapter",
-                                args=(prompt_adapter_id, )))
-
-    def list_prompt_adapters(self) -> Set[int]:
-        sets = self.collective_rpc("list_prompt_adapters")
-        for s in sets:
-            assert (s == sets[0]
-                    ), "All workers should have the same prompt adapters."
         return sets[0]
 
     def start_profile(self) -> None:
@@ -253,10 +232,7 @@ class ExecutorBase(ABC):
 
     def shutdown(self) -> None:
         """Shutdown the executor."""
-        return
-
-    def __del__(self):
-        self.shutdown()
+        self.collective_rpc("shutdown")
 
     async def execute_model_async(
             self,
@@ -273,6 +249,11 @@ class ExecutorBase(ABC):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         self.check_health()
+
+    def init_kv_output_aggregator(self, finished_count: Optional[int]) -> None:
+        """Init KVOutputAggregator"""
+        self.kv_output_aggregator = KVOutputAggregator(
+            finished_count or self.parallel_config.world_size)
 
 
 class DistributedExecutorBase(ExecutorBase):
@@ -326,8 +307,8 @@ class DistributedExecutorBase(ExecutorBase):
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[Any]:
         return self._run_workers(method, *args, **(kwargs or {}))
 
     @abstractmethod
@@ -346,7 +327,7 @@ class DistributedExecutorBase(ExecutorBase):
                 run only in the remote TP workers, not the driver worker.
                 It will also be run asynchronously and return a list of futures
                 rather than blocking on the results.
-        
+
         # TODO: simplify and merge with collective_rpc
         """
         raise NotImplementedError

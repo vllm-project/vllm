@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 NOTE: This API server is used only for demonstrating usage of AsyncEngine
 and simple performance benchmarks. It is not intended for production use.
@@ -16,6 +17,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
@@ -28,7 +30,6 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
 
-TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
 engine = None
 
@@ -133,7 +134,7 @@ async def run_server(args: Namespace,
         host=args.host,
         port=args.port,
         log_level=args.log_level,
-        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+        timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
         ssl_keyfile=args.ssl_keyfile,
         ssl_certfile=args.ssl_certfile,
         ssl_ca_certs=args.ssl_ca_certs,

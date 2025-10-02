@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 
@@ -24,6 +25,28 @@ assert CHATML_JINJA_PATH.exists()
 def serve_parser():
     parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
     return make_arg_parser(parser)
+
+
+### Test config parsing
+def test_config_arg_parsing(serve_parser, cli_config_file):
+    args = serve_parser.parse_args([])
+    assert args.port == 8000
+    args = serve_parser.parse_args(['--config', cli_config_file])
+    assert args.port == 12312
+    args = serve_parser.parse_args([
+        '--config',
+        cli_config_file,
+        '--port',
+        '9000',
+    ])
+    assert args.port == 9000
+    args = serve_parser.parse_args([
+        '--port',
+        '9000',
+        '--config',
+        cli_config_file,
+    ])
+    assert args.port == 9000
 
 
 ### Tests for LoRA module parsing
@@ -152,3 +175,13 @@ def test_chat_template_validation_for_sad_paths(serve_parser):
     args = serve_parser.parse_args(args=["--chat-template", "does/not/exist"])
     with pytest.raises(ValueError):
         validate_parsed_serve_args(args)
+
+
+@pytest.mark.parametrize(
+    "cli_args, expected_middleware",
+    [(["--middleware", "middleware1", "--middleware", "middleware2"
+       ], ["middleware1", "middleware2"]), ([], [])])
+def test_middleware(serve_parser, cli_args, expected_middleware):
+    """Ensure multiple middleware args are parsed properly"""
+    args = serve_parser.parse_args(args=cli_args)
+    assert args.middleware == expected_middleware

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
@@ -200,7 +201,7 @@ def marlin_make_workspace(output_size_per_partition: int,
 def marlin_make_workspace_new(device: torch.device,
                               max_blocks_per_sm: int = 1) -> torch.Tensor:
     # In the new marlin kernel, we use the num of threadblocks as workspace
-    # size. The num of threadblocks is is sms_count * max_blocks_per_sm.
+    # size. The num of threadblocks is sms_count * max_blocks_per_sm.
     sms = torch.cuda.get_device_properties(device).multi_processor_count
     return torch.zeros(sms * max_blocks_per_sm,
                        dtype=torch.int,
@@ -258,6 +259,13 @@ def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
     s = s.reshape((-1, size_n)).contiguous()
 
     return s
+
+
+def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
+    origin_shape = s.shape
+    _, scale_perm_single = get_scale_perms()
+    s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+    return s.reshape(*origin_shape).contiguous()
 
 
 def marlin_moe_permute_scales(
@@ -409,6 +417,7 @@ def apply_gptq_marlin_linear(
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   None,
                                   weight,
+                                  bias,
                                   weight_scale,
                                   None,
                                   weight_zp,
@@ -423,9 +432,6 @@ def apply_gptq_marlin_linear(
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
-
-    if bias is not None:
-        output.add_(bias)  # In-place add
 
     return output.reshape(out_shape)
 
@@ -455,6 +461,7 @@ def apply_awq_marlin_linear(
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   None,
                                   weight,
+                                  bias,
                                   weight_scale,
                                   None,
                                   weight_zp,
@@ -468,8 +475,5 @@ def apply_awq_marlin_linear(
                                   use_atomic_add=use_atomic_add,
                                   use_fp32_reduce=use_fp32_reduce,
                                   is_zp_float=False)
-
-    if bias is not None:
-        output.add_(bias)  # In-place add
 
     return output.reshape(out_shape)

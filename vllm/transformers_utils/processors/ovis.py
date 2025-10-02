@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # yapf: disable
 # ruff: noqa: E501
@@ -54,7 +55,7 @@ class OvisProcessorKwargs(ProcessingKwargs, total=False):   # type: ignore[call-
 
 class OvisProcessor(ProcessorMixin):
     r"""
-    Constructs a Ovis processor which wraps a Ovis image processor and a Qwen2 tokenizer into a single processor.
+    Constructs an Ovis processor which wraps an Ovis image processor and a Qwen2 tokenizer into a single processor.
     [`OvisProcessor`] offers all the functionalities of [`Qwen2VLImageProcessor`] and [`Qwen2TokenizerFast`]. See the
     [`~OvisProcessor.__call__`] and [`~OvisProcessor.decode`] for more information.
     Args:
@@ -67,7 +68,7 @@ class OvisProcessor(ProcessorMixin):
     """
 
     attributes = ["image_processor", "tokenizer"]
-    valid_kwargs = ["chat_template", "image_pad_token", "image_segement_len"]
+    valid_kwargs = ["chat_template", "image_pad_token", "image_segment_len"]
 
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "AutoTokenizer"

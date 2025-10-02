@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom input builders for edge-cases in different models."""
-from io import BytesIO
 from typing import Callable
 
-import requests
-from PIL import Image
-
+from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import (rescale_video_size, resize_video,
                                    sample_frames_from_video)
@@ -117,9 +115,9 @@ def different_patch_input_cases_internvl():
 
 
 def windows_attention_image_qwen2_5_vl():
-    # image from regression issue: https://github.com/vllm-project/vllm/issues/15122
-    image_url = "https://aomediacodec.github.io/av1-avif/testFiles/Link-U/hato.jpg"
-    image = Image.open(BytesIO(requests.get(image_url).content))
+
+    # image from regression issue: https://github.com/vllm-project/vllm/issues/15122 # noqa: E501
+    image = ImageAsset("hato").pil_image
 
     question = "Describe the image."
     img_prompt = "<|vision_start|><|image_pad|><|vision_end|>"
@@ -128,3 +126,23 @@ def windows_attention_image_qwen2_5_vl():
 
     wrapped_sf = ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=[0.5])
     return build_single_image_inputs([image], [prompt], wrapped_sf)
+
+
+def video_with_metadata_glm4_1v():
+    video_array = VIDEO_ASSETS[0].np_ndarrays
+    metadata = VIDEO_ASSETS[0].metadata
+    question = "Describe the video."
+    video_prompt = "<|begin_of_video|><|video|><|end_of_video|>"
+    formatted_prompt = f"<|user|>\n{video_prompt}{question}<|assistant|>\n"
+
+    scales = [0.1, 0.2, 0.25]
+    video_input = [[(rescale_video_size(video_array, scale), metadata)]
+                   for scale in scales]
+    prompts = [formatted_prompt] * len(video_input)
+
+    return [
+        PromptWithMultiModalInput(
+            prompts=prompts,
+            video_data=video_input,
+        )
+    ]

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the Pallas MOE implementation.
 
 Run `pytest tests/kernels/moe/test_moe_pallas.py`.
 """
 import pytest
 import torch
+import torch_xla
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -76,7 +78,7 @@ def test_pallas_moe(
             expert_map=e_map,
             renormalize=False,
         )
-        xm.mark_step()
+        torch_xla.sync(wait=False)
 
     # Compare outputs
     torch.testing.assert_close(

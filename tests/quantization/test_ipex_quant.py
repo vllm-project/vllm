@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test model set-up and inference for quantized HF models supported
  on the CPU/GPU backend using IPEX (including AWQ/GPTQ).
  

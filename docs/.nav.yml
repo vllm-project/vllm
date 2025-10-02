@@ -1,25 +1,17 @@
 nav:
-  - Home: 
-    - vLLM: README.md
+  - Home: README.md
+  - User Guide:
+    - usage/README.md
     - Getting Started:
       - getting_started/quickstart.md
       - getting_started/installation
     - Examples:
-      - Offline Inference: getting_started/examples/offline_inference
-      - Online Serving: getting_started/examples/online_serving
-      - Others:
-        - LMCache: getting_started/examples/lmcache
-        - getting_started/examples/other/*
-    - Quick Links:
-      - User Guide: usage/README.md
-      - Developer Guide: contributing/README.md
-      - API Reference: api/README.md
-    - Timeline:
-      - Roadmap: https://roadmap.vllm.ai
-      - Releases: https://github.com/vllm-project/vllm/releases
-  - User Guide:
-    - usage/README.md
+      - examples/README.md
+      - Offline Inference: examples/offline_inference
+      - Online Serving: examples/online_serving
+      - Others: examples/others
     - General:
+      - usage/v1_guide.md
       - usage/*
     - Inference and Serving:
       - serving/offline_inference.md
@@ -32,30 +24,33 @@ nav:
       - deployment/integrations
     - Training: training
     - Configuration:
-      - Summary: configuration/README.md
+      - configuration/README.md
       - configuration/*
     - Models:
       - models/supported_models.md
       - models/generative_models.md
       - models/pooling_models.md
       - models/extensions
-    - Features:
-      - features/compatibility_matrix.md
-      - features/*
-      - features/quantization
+      - Hardware Supported Models: models/hardware_supported_models
+    - Features: features
   - Developer Guide:
     - contributing/README.md
     - General:
       - glob: contributing/*
         flatten_single_child_sections: true
-    - Model Implementation: contributing/model
-    - Design Documents:
-      - V0: design
-      - V1: design/v1
+    - Model Implementation:
+      - contributing/model/README.md
+      - contributing/model/basic.md
+      - contributing/model/registration.md
+      - contributing/model/tests.md
+      - contributing/model/multimodal.md
+      - contributing/model/transcription.md
+    - CI: contributing/ci
+    - Design Documents: design
   - API Reference:
     - api/README.md
-    - glob: api/vllm/*
-      preserve_directory_names: true
+    - api/vllm
+  - CLI Reference: cli
   - Community:
     - community/*
     - Blog: https://blog.vllm.ai

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions used for tests and benchmarks"""
 
 from typing import Optional
@@ -18,7 +19,7 @@ class MarlinWorkspace:
 
     def __init__(self, out_features, min_thread_n, max_parallel):
         assert (out_features % min_thread_n == 0), (
-            "out_features = {} is undivisible by min_thread_n = {}".format(
+            "out_features = {} is indivisible by min_thread_n = {}".format(
                 out_features, min_thread_n))
 
         max_workspace_size = ((out_features // min_thread_n) * max_parallel)

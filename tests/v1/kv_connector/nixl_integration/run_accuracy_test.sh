@@ -1,6 +1,31 @@
 #!/bin/bash
 set -xe
 
+# Parse command line arguments
+KV_BUFFER_DEVICE="cuda"  # Default to cuda
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --kv_buffer_device)
+      KV_BUFFER_DEVICE="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option $1"
+      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>]"
+      exit 1
+      ;;
+  esac
+done
+
+echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
+
+# Build the kv-transfer-config once
+if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
+  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+else
+  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}"
+fi
+
 # Models to run
 MODELS=(
     "Qwen/Qwen3-0.6B"
@@ -8,7 +33,9 @@ MODELS=(
 
 # Number of prefill and decode instances to create
 NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
-NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-2}   # Default to 2
+NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
+PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
+DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
@@ -74,20 +101,24 @@ run_tests_for_model() {
   for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs
     GPU_ID=$((i % $(get_num_gpus)))
+
     # Calculate port number (base port + instance number)
     PORT=$((8100 + i))
-    # Calculate side channel port
+    # Calculate side channel port. Avoid clash with with TP workers.
     SIDE_CHANNEL_PORT=$((5559 + i))
 
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+    UCX_NET_DEVICES=all \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
-    --disable-log-requests \
     --gpu-memory-utilization 0.2 \
-    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
+    --tensor-parallel-size $PREFILLER_TP_SIZE \
+    --kv-transfer-config '$KV_CONFIG'"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
@@ -109,17 +140,20 @@ run_tests_for_model() {
     # Calculate port number (base port + instance number)
     PORT=$((8200 + i))
     # Calculate side channel port
-    SIDE_CHANNEL_PORT=$((5659 + i))
+    SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE))
 
     echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
+    UCX_NET_DEVICES=all \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
-    --disable-log-requests \
     --gpu-memory-utilization 0.2 \
-    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
+    --tensor-parallel-size $DECODER_TP_SIZE \
+    --kv-transfer-config '$KV_CONFIG'"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
