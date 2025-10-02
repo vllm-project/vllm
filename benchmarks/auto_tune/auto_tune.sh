@@ -9,7 +9,6 @@ VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
 BASE=${BASE:-"$SCRIPT_DIR/../../.."}
 MODEL=${MODEL:-"meta-llama/Llama-3.1-8B-Instruct"}
 SYSTEM=${SYSTEM:-"TPU"}
-MODEL_IMPL_TYPE=${MODEL_IMPL_TYPE:-"vllm"}
 TP=${TP:-1}
 DOWNLOAD_DIR=${DOWNLOAD_DIR:-""}
 INPUT_LEN=${INPUT_LEN:-4000}
@@ -29,7 +28,6 @@ echo "SCRIPT_DIR=$SCRIPT_DIR"
 echo "BASE=$BASE"
 echo "MODEL=$MODEL"
 echo "SYSTEM=$SYSTEM"
-echo "MODEL_IMPL_TYPE=$MODEL_IMPL_TYPE"
 echo "TP=$TP"
 echo "DOWNLOAD_DIR=$DOWNLOAD_DIR"
 echo "INPUT_LEN=$INPUT_LEN"
@@ -99,13 +97,11 @@ start_server() {
     if [[ -n "$profile_dir" ]]; then
         # Start server with profiling enabled
         VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 VLLM_TORCH_PROFILER_DIR=$profile_dir \
-        MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
-            vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
+        vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     else
         # Start server without profiling
         VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 \
-        MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
-            vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
+        vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     fi
     local server_pid=$!
 
@@ -194,7 +190,7 @@ run_benchmark() {
             curl -X POST http://0.0.0.0:8004/reset_prefix_cache
             sleep 5
             bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_${request_rate}.txt"
-            MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" vllm bench serve \
+            vllm bench serve \
                 --backend vllm \
                 --model $MODEL  \
                 --dataset-name random \
@@ -294,7 +290,7 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
     echo "Running benchmark with profiling..."
     prefix_len=$(( INPUT_LEN * MIN_CACHE_HIT_PCT / 100 ))
     adjusted_input_len=$(( INPUT_LEN - prefix_len ))
-    MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" vllm bench serve \
+    vllm bench serve \
         --backend vllm \
         --model $MODEL \
         --dataset-name random \
