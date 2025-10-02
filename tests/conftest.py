@@ -732,7 +732,7 @@ class VllmRunner:
                     set_default_torch_num_threads(default_torch_num_threads))
 
         if not kwargs.get("compilation_config", None):
-            kwargs["compilation_config"] = {"cudagraph_capture_sizes": [8]}
+            kwargs["compilation_config"] = {"cudagraph_capture_sizes": [4]}
 
         with init_ctx:
             self.llm = LLM(
