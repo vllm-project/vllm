@@ -211,5 +211,46 @@ def test_reload_weights():
         # print("-" * 60)
 
 
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+# @pytest.mark.skip(
+#     reason="since torchao nightly is only compatible with torch nightly"
+#     "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
+#     "torchao tests that requires newer versions (0.14.0.dev+) for now")
+def test_opt_125m_int4wo_model_running_preshuffled_kernel(vllm_runner):
+    """We load a model with Int4Tensor (plain format) linear weights
+    and verify that the weight is updated to Int4PreshuffledTensor
+    after loading in vllm
+    """
+    from torchao.quantization import Int4PreshuffledTensor, Int4Tensor
+    from torchao.utils import _is_fbgemm_genai_gpu_available
+
+    torch._dynamo.reset()
+    model_name = ("torchao-testing/opt-125m-Int4WeightOnlyConfig-v2"
+                  "-0.14.0.dev")
+    with vllm_runner(model_name=model_name,
+                     quantization="torchao",
+                     dtype="bfloat16",
+                     pt_load_map_location="cuda:0") as llm:
+        model_runner = llm.llm_engine.model_executor.driver_worker.model_runner
+        orig_model = model_runner.model
+        print("orig model:", orig_model)
+        # making sure we are using Int4PreshuffledTensor in H100 GPU, when
+        # fbgemm_gpu_genai
+        # library is installed, otherwise it should be using Int4Tensor
+        if _is_fbgemm_genai_gpu_available():
+            assert isinstance(
+                orig_model.model.decoder.layers[0].self_attn.qkv_proj.weight,
+                Int4PreshuffledTensor)
+        else:
+            assert isinstance(
+                orig_model.model.decoder.layers[0].self_attn.qkv_proj.weight,
+                Int4Tensor)
+
+        output = llm.generate_greedy(["The capital of France is"],
+                                     max_tokens=32)
+
+        assert output
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
