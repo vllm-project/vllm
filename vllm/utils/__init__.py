@@ -1856,12 +1856,21 @@ class FlexibleArgumentParser(ArgumentParser):
         # Check for --model in command line arguments first
         if args and args[0] == "serve":
             try:
-                model_idx = args.index("--model")
+                model_idx = next(
+                    i for i, arg in enumerate(args)
+                    if arg == "--model" or arg.startswith("--model="))
                 logger.warning(
                     "With `vllm serve`, you should provide the model as a "
                     "positional argument or in a config file instead of via "
                     "the `--model` option. "
                     "The `--model` option will be removed in v0.13.")
+
+                if args[model_idx] == "--model":
+                    model_tag = args[model_idx + 1]
+                    rest_start_idx = model_idx + 2
+                else:
+                    model_tag = args[model_idx].removeprefix("--model=")
+                    rest_start_idx = model_idx + 1
 
                 # Move <model> to the front, e,g:
                 # [Before]
@@ -1870,11 +1879,12 @@ class FlexibleArgumentParser(ArgumentParser):
                 # vllm serve <model> -tp 2 --enforce-eager --port 8001
                 args = [
                     "serve",
-                    args[model_idx + 1],
+                    model_tag,
                     *args[1:model_idx],
-                    *args[model_idx + 2:],
+                    *args[rest_start_idx:],
                 ]
-            except ValueError:
+                print("args", args)
+            except StopIteration:
                 pass
 
         if '--config' in args:

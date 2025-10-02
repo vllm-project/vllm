@@ -812,6 +812,18 @@ def test_model_specification(parser_with_config, cli_config_file,
     assert args.trust_remote_code is True
     assert args.port == 8001
 
+    args = parser_with_config.parse_args([
+        'serve',
+        '--tensor-parallel-size=2',
+        '--model=my-model',
+        '--trust-remote-code',
+        '--port=8001',
+    ])
+    assert args.model is None
+    assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code is True
+    assert args.port == 8001
+
     # Test other config values are preserved
     args = parser_with_config.parse_args([
         'serve',
