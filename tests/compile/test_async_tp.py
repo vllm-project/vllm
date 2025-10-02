@@ -413,3 +413,95 @@ def test_async_tp_pass_correctness(
     compare_two_settings(
         model_id, async_tp_args, tp_args, async_tp_env, tp_env, method="generate"
     )
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("model_id", [
+    "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+])
+@pytest.mark.parametrize("tp_size", [2])
+@pytest.mark.parametrize("fp8_allgather_enabled", [True])
+@pytest.mark.parametrize("distributed_backend", ["mp"])
+@pytest.mark.parametrize("eager_mode", [False])
+def test_fp8_allgather_pass_correctness(
+    model_id: str,
+    tp_size: int,
+    fp8_allgather_enabled: bool,
+    distributed_backend: str,
+    eager_mode: bool,
+    num_gpus_available: int,
+):
+    """Test FP8 AllGather optimization correctness on FP8 models"""
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_available_online(on_fail="skip")
+
+    pp_size = 1
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
+
+    common_args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "8",
+    ]
+    if eager_mode:
+        common_args.append("--enforce-eager")
+
+    # Configuration WITH FP8 AllGather optimization
+    fp8_allgather_compilation_config = {
+        'level': 3,
+        'compile_sizes': [2, 4, 8],
+        'splitting_ops': [],
+        'pass_config': {
+            'enable_async_tp': True,
+            'enable_fp8_allgather_opt': fp8_allgather_enabled
+        },
+    }
+
+    # Configuration WITHOUT FP8 AllGather optimization (baseline)
+    baseline_compilation_config = {
+        'level': 3,
+        'compile_sizes': [2, 4, 8],
+        'splitting_ops': [],
+        'pass_config': {
+            'enable_async_tp': True,
+            'enable_fp8_allgather_opt': False
+        },
+    }
+
+    fp8_allgather_env = baseline_env = {
+        "VLLM_USE_V1": "1",
+    }
+
+    fp8_allgather_args = [
+        *common_args,
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--distributed-executor-backend",
+        distributed_backend,
+        "--compilation_config",
+        json.dumps(fp8_allgather_compilation_config),
+    ]
+
+    baseline_args = [
+        *common_args,
+        "--tensor-parallel-size",
+        str(tp_size),
+        "--distributed-executor-backend",
+        distributed_backend,
+        "--compilation_config",
+        json.dumps(baseline_compilation_config),
+    ]
+
+    compare_two_settings(
+        model_id,
+        fp8_allgather_args,
+        baseline_args,
+        fp8_allgather_env,
+        baseline_env,
+        method="generate",
+    )
