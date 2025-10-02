@@ -671,10 +671,22 @@ class FusedMoEModularKernel(torch.nn.Module):
                 f"{fused_experts.__class__.__name__}."
                 f"{fused_experts.activation_formats[0]}")
 
+    def _chunk_info(self, M: int) -> tuple[int, int]:
+        """
+        Compute number of chunks and chunk size for given M.
+        If chunking is not supported, set the CHUNK_SIZE to M so we
+        get num_chunks == 1. Take max(M, 1) to avoid divide by zero.
+        """
+        CHUNK_SIZE = (max(M, 1) if not self.fused_experts.supports_chunking()
+                      else envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+        num_chunks = cdiv(M, CHUNK_SIZE)
+        assert M > 0 or num_chunks == 0
+        return num_chunks, CHUNK_SIZE
+
     def _allocate_buffers(
         self,
         out_dtype: torch.dtype,
-        device: torch.device,
+        a1q: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -687,36 +699,44 @@ class FusedMoEModularKernel(torch.nn.Module):
         Allocate temporary and output buffers for the fused experts op.
         Inputs:
         - out_dtype: output type of workspace and output tensors.
-        - device: device of workspace and output tensors.
+        - a1q: quantized and dispatched activations.
         See `workspace_shapes` for a description of additional arguments.
         Returns a tuple of (workspace13, workspace2, output) tensors.
         """
-
-        # If chunking is not supported, set the CHUNK_SIZE to M so we
-        # get num_chunks == 1.
-        CHUNK_SIZE = (M if not self.fused_experts.supports_chunking() else
-                      envs.VLLM_FUSED_MOE_CHUNK_SIZE)
-        num_chunks = cdiv(M, CHUNK_SIZE)
-
-        workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
-
-        workspace13_shape, workspace2_shape, fused_out_shape = (
-            self.fused_experts.workspace_shapes(CHUNK_SIZE, M, N, K, top_k,
-                                                global_num_experts,
-                                                local_num_experts,
-                                                expert_tokens_meta))
-
         # select per-ubatch buffers to avoid cross-ubatch reuse under DBO
         ubatch_idx = dbo_current_ubatch_id()
         buffers = self.shared_buffers[ubatch_idx]
 
+        num_chunks, CHUNK_SIZE = self._chunk_info(M)
+
+        workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
+
+        # This happens when none of the tokens from the all2all reach this
+        # EP rank. Also, note that this is only relevant for CUDAGraph
+        # incompatible all2all kernels like the DeepEP high-throughput
+        # kernels. CUDAGraph compatible all2all kernels like the pplx
+        # kernels and the DeepEP low-latency kernels are always batched
+        # and can never run into the tensor.numel() == 0 case.
+        if M == 0:
+            assert num_chunks == 0
+            workspace13_shape: tuple[int, ...] = (0, )
+            workspace2_shape: tuple[int, ...] = (0, 0)
+            fused_out_shape: tuple[int, ...] = a1q.size()
+        else:
+            assert num_chunks > 0
+            workspace13_shape, workspace2_shape, fused_out_shape = (
+                self.fused_experts.workspace_shapes(CHUNK_SIZE, M, N, K, top_k,
+                                                    global_num_experts,
+                                                    local_num_experts,
+                                                    expert_tokens_meta))
+
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         workspace13 = buffers.workspace13.get(workspace13_shape,
-                                              device=device,
+                                              device=a1q.device,
                                               dtype=workspace_dtype)
         workspace2 = buffers.workspace2.get(workspace2_shape,
-                                            device=device,
+                                            device=a1q.device,
                                             dtype=workspace_dtype)
 
         # Construct the entire output that can then be processed in chunks.
@@ -727,7 +747,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             fused_out = _resize_cache(workspace13, fused_out_shape)
         else:
             fused_out = buffers.fused_out.get(fused_out_shape,
-                                              device=device,
+                                              device=a1q.device,
                                               dtype=out_dtype)
 
         return workspace13, workspace2, fused_out
@@ -985,13 +1005,12 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input,
             ))
 
+        #
+        # Invoke Experts
+        #
         _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
 
-        # If chunking is not supported, set the CHUNK_SIZE to M so we
-        # get num_chunks == 1.
-        CHUNK_SIZE = (M if not self.fused_experts.supports_chunking() else
-                      envs.VLLM_FUSED_MOE_CHUNK_SIZE)
-        num_chunks = cdiv(M, CHUNK_SIZE)
+        num_chunks, CHUNK_SIZE = self._chunk_info(M)
 
         def input_chunk_range(chunk_idx: int) -> tuple[int, int]:
             if num_chunks == 1:
@@ -1003,51 +1022,37 @@ class FusedMoEModularKernel(torch.nn.Module):
                 e = min(s + CHUNK_SIZE, M)
                 return s, e
 
-        #
-        # Invoke Experts
-        #
+        workspace13, workspace2, fused_out = self._allocate_buffers(
+            hidden_states.dtype, a1q, M, N, K, top_k, global_num_experts,
+            local_num_experts, expert_tokens_meta)
 
-        # TODO(bnell) is this necessary?  move into allocate_buffers
-        if a1q.numel() == 0:
-            # This happens when none of the tokens from the all2all reach this
-            # EP rank. Also, note that this is only relevant for CUDAGraph
-            # incompatible all2all kernels like the DeepEP high-throughput
-            # kernels. CUDAGraph compatible all2all kernels like the pplx
-            # kernels and the DeepEP low-latency kernels are always batched
-            # and can never run into the tensor.numel() == 0 case.
-            fused_out = torch.empty_like(a1q).to(dtype=hidden_states.dtype)
-        else:
-            workspace13, workspace2, fused_out = self._allocate_buffers(
-                hidden_states.dtype, a1q.device, M, N, K, top_k,
-                global_num_experts, local_num_experts, expert_tokens_meta)
+        for chunk_idx in range(num_chunks):
+            s, e = input_chunk_range(chunk_idx)
 
-            for chunk_idx in range(num_chunks):
-                s, e = input_chunk_range(chunk_idx)
+            c_expert_tokens_meta = self._slice_expert_tokens_metadata(
+                num_chunks, expert_tokens_meta, topk_ids[s:e],
+                local_num_experts, expert_map)
 
-                c_expert_tokens_meta = self._slice_expert_tokens_metadata(
-                    num_chunks, expert_tokens_meta, topk_ids[s:e],
-                    local_num_experts, expert_map)
+            c_fused_out = self._slice_output_tensor(fused_out, chunk_idx,
+                                                    num_chunks, CHUNK_SIZE, M)
 
-                c_fused_out = self._slice_output_tensor(
-                    fused_out, chunk_idx, num_chunks, CHUNK_SIZE, M)
-
-                self.fused_experts.apply(
-                    output=c_fused_out,
-                    hidden_states=a1q[s:e],
-                    w1=w1,
-                    w2=w2,
-                    topk_weights=topk_weights[s:e],
-                    topk_ids=topk_ids[s:e],
-                    activation=activation,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                    a1q_scale=_chunk_scales(a1q_scale, s, e),
-                    a2_scale=_chunk_scales(self.fused_experts.a2_scale, e, e),
-                    workspace13=workspace13,
-                    workspace2=workspace2,
-                    expert_tokens_meta=c_expert_tokens_meta,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                )
+            self.fused_experts.apply(
+                output=c_fused_out,
+                hidden_states=a1q[s:e],
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights[s:e],
+                topk_ids=topk_ids[s:e],
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                a1q_scale=_chunk_scales(a1q_scale, s, e),
+                a2_scale=_chunk_scales(self.fused_experts.a2_scale, e, e),
+                workspace13=workspace13,
+                workspace2=workspace2,
+                expert_tokens_meta=c_expert_tokens_meta,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
 
         #
         # Finalize
