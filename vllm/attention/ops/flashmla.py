@@ -29,19 +29,38 @@ else:
     _flashmla_extension_C_AVAILABLE = False
 
 
-def is_flashmla_supported() -> Tuple[bool, Optional[str]]:
-    """
-    Return: is_supported_flag, unsupported_reason (optional).
-    """
-    if not current_platform.is_cuda():
-        return False, "FlashMLA is only supported on CUDA devices."
-    if current_platform.get_device_capability()[0] != 9:
-        return False, "FlashMLA is only supported on Hopper devices."
+def _is_flashmla_available() -> Tuple[bool, Optional[str]]:
     if not _flashmla_C_AVAILABLE:
         return False, "vllm._flashmla_C is not available, likely was not "\
             "compiled due to insufficient nvcc version or a supported arch "\
-            "(only sm90a currently) was not in the list of target arches to "\
-            "compile for."
+            "was not in the list of target arches to compile for."
+    if not _flashmla_extension_C_AVAILABLE:
+        return False, "vllm._flashmla_extension_C is not available, likely "
+    return True, None
+
+
+def is_flashmla_dense_supported() -> Tuple[bool, Optional[str]]:
+    """
+    Return: is_supported_flag, unsupported_reason (optional).
+    """
+    is_availble, maybe_reason = _is_flashmla_available()
+    if not is_availble:
+        return False, maybe_reason
+    if current_platform.get_device_capability()[0] != 9:
+        return False, "FlashMLA Dense is only supported on Hopper devices."
+    return True, None
+
+
+def is_flashmla_sparse_supported() -> Tuple[bool, Optional[str]]:
+    """
+    Return: is_supported_flag, unsupported_reason (optional).
+    """
+    is_availble, maybe_reason = _is_flashmla_available()
+    if not is_availble:
+        return False, maybe_reason
+    if current_platform.get_device_capability()[0] not in (9, 10):
+        return False, \
+            "FlashMLA Sparse is only supported on Hopper and Blackwell devices."
     return True, None
 
 
