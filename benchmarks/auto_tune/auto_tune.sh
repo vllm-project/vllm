@@ -97,11 +97,11 @@ start_server() {
     if [[ -n "$profile_dir" ]]; then
         # Start server with profiling enabled
         VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 VLLM_TORCH_PROFILER_DIR=$profile_dir \
-        vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
+            vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     else
         # Start server without profiling
         VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 \
-        vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
+            vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     fi
     local server_pid=$!
 
