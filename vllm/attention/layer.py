@@ -86,11 +86,7 @@ def maybe_get_vit_flash_attn_backend(
         attn_backend == _Backend.FLASH_ATTN:
         use_upstream_fa = True
 
-    is_flash_attn_backend = attn_backend in {
-        _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
-    }
-
-    if is_flash_attn_backend:
+    if (attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}):
         if attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
         else:
@@ -98,8 +94,6 @@ def maybe_get_vit_flash_attn_backend(
                 from flash_attn import flash_attn_varlen_func
             else:
                 from vllm.vllm_flash_attn import flash_attn_varlen_func
-
-        flash_attn_varlen_func = flash_attn_varlen_func
     else:
         flash_attn_varlen_func = None
 
@@ -450,8 +444,7 @@ class MultiHeadAttention(nn.Module):
             backend = _Backend.FLASH_ATTN
             use_upstream_fa = True
 
-        # if current_platform.is_rocm() or current_platform.is_xpu():
-        if current_platform.is_xpu():
+        if current_platform.is_rocm() or current_platform.is_xpu():
             # currently, only torch_sdpa is supported on rocm/xpu
             self.attn_backend = _Backend.TORCH_SDPA
         else:
