@@ -103,7 +103,7 @@ start_server() {
             vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     else
         # Start server without profiling
-        VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1
+        VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 \
         MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
             vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     fi
