@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
 from fractions import Fraction
 from functools import partial
 from typing import Any, Callable, Optional, Union
@@ -8,7 +9,7 @@ from typing import Any, Callable, Optional, Union
 import torch
 import torch.nn.functional as F
 
-from vllm.logger import init_logger
+from vllm import envs
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4, quant_dequant_mxfp4)
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
@@ -21,9 +22,89 @@ from vllm.platforms import current_platform
 
 from .quark_scheme import QuarkScheme
 
-logger = init_logger(__name__)
+@cache
+def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
+    return current_platform.is_rocm() \
+        and envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM \
+        and envs.VLLM_ROCM_USE_AITER
 
-__all__ = ["QuarkOCP_MX"]
+
+try:
+    from aiter.ops.shuffle import shuffle_weight
+    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    from vllm.utils import direct_register_custom_op
+    if is_rocm_aiter_fp4_asm_gemm_enabled():
+        from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
+    def gemm_with_dynamic_quant(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        rocm_use_aiter_fp4_asm_gemm: bool = False,
+        out_dtype: Optional[torch.dtype] = torch.bfloat16,
+        x_scales: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        M = x.shape[0]
+        if rocm_use_aiter_fp4_asm_gemm:
+            if x_scales is None:
+                # use hip quant kernel for performance
+                x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+            else:
+                x_q = x
+                x_s = x_scales
+
+            # 32 alignment is enough for dim0 padding of output for
+            # gemm_a4w4 kernel
+            y = torch.empty((M + 31) // 32 * 32,
+                            weight.shape[0],
+                            device=x_q.device,
+                            dtype=out_dtype)
+
+            gemm_a4w4(x_q,
+                      weight,
+                      x_s,
+                      weight_scale.view(x_s.dtype),
+                      y,
+                      bpreshuffle=True)
+            return y[:M]
+        else:
+            if x_scales is None:
+                x_q, x_s = dynamic_mxfp4_quant(x)
+            else:
+                x_q = x
+                x_s = x_scales
+            y = torch.empty(x_q.shape[0],
+                            weight.shape[0],
+                            device=x_q.device,
+                            dtype=out_dtype)
+
+            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
+            return y
+
+    def gemm_with_dynamic_quant_fake(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        x_scales: torch.Tensor = None,
+        rocm_use_aiter_fp4_asm_gemm: bool = False,
+        out_dtype: Optional[torch.dtype] = torch.bfloat16,
+    ) -> torch.Tensor:
+        return torch.empty((*x.shape[:-1], weight.shape[0]),
+                           dtype=out_dtype,
+                           device=x.device)
+
+    direct_register_custom_op(
+        op_name="gemm_with_dynamic_quant",
+        op_func=gemm_with_dynamic_quant,
+        mutates_args=[],
+        fake_impl=gemm_with_dynamic_quant_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+except ImportError:
+    dynamic_mxfp4_quant = gemm_afp4wfp4 = None
 
 
 class QuarkOCP_MX(QuarkScheme):
@@ -62,21 +143,16 @@ class QuarkOCP_MX(QuarkScheme):
                 "QuarkOCP_MX with static input scales is currently not "
                 "implemented. Please open an issue.")
 
-        if not current_platform.supports_mx():
-            self.emulate = True
-            logger.warning_once(
-                "The current platform does not support native MXFP4/MXFP6 "
-                "computation. Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision.")
-        else:
-            self.emulate = True
-            logger.warning_once(
-                "The current platform supports native MXFP4/MXFP6 "
-                "computation, but kernels are not yet integrated in vLLM. "
-                "Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision.")
+        self.emulate = not current_platform.supports_mx()
+        self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
+
+        if not self.emulate and (dynamic_mxfp4_quant is None
+                                 or gemm_afp4wfp4 is None):
+            # Currently need these kernels if not emulating
+            raise NotImplementedError(
+                f"{self.__class__.__name__} requires AITER to be installed "
+                "for non-emulation mode! Please refer to "
+                "https://github.com/ROCm/aiter for installation details.")
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
         if quant_dtype == "fp4":
@@ -99,8 +175,33 @@ class QuarkOCP_MX(QuarkScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data,
                                           requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
-                                                requires_grad=False)
+
+        if self.emulate:
+        	layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
+                                                	requires_grad=False)
+        else:
+            if self.rocm_use_aiter_fp4_asm_gemm:
+                # shuffle weight scale
+                weight_scale_shuffle = layer.weight_scale.data
+                sm, sn = weight_scale_shuffle.shape
+                weight_scale_shuffle = weight_scale_shuffle.view(
+                    sm // 32, 2, 16, sn // 8, 2, 4, 1)
+                weight_scale_shuffle = weight_scale_shuffle.permute(
+                    0, 3, 5, 2, 4, 1, 6).contiguous()
+                weight_scale_shuffle = weight_scale_shuffle.view(sm, sn)
+                layer.weight_scale = torch.nn.Parameter(weight_scale_shuffle,
+                                                        requires_grad=False)
+
+                # shuffle weight
+                weight_shuffle = layer.weight.data
+                weight_shuffle = shuffle_weight(weight_shuffle,
+                                                layout=(16, 16))
+                layer.weight = torch.nn.Parameter(weight_shuffle,
+                                                  requires_grad=False)
+            else:
+                layer.weight_scale = torch.nn.Parameter(
+                    layer.weight_scale.data.T.contiguous(),
+                    requires_grad=False)
 
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: list[int],
@@ -148,4 +249,6 @@ class QuarkOCP_MX(QuarkScheme):
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
         else:
-            raise NotImplementedError()
+            return torch.ops.vllm.gemm_with_dynamic_quant(
+                x, layer.weight, layer.weight_scale,
+                self.rocm_use_aiter_fp4_asm_gemm, self.out_dtype)

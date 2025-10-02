@@ -1,21 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+"""Utility functions for vLLM config dataclasses."""
 import ast
 import inspect
 import textwrap
-from dataclasses import MISSING, Field, field, fields, is_dataclass
-from typing import TYPE_CHECKING, Any, TypeVar
+from collections.abc import Iterable
+from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import regex as re
+from typing_extensions import runtime_checkable
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
-
-    ConfigType = type[DataclassInstance]
 else:
-    ConfigType = type
+    DataclassInstance = Any
 
+ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
 
 
@@ -50,6 +51,18 @@ def get_field(cls: ConfigType, name: str) -> Field:
         return field(default=default)
     raise ValueError(
         f"{cls.__name__}.{name} must have a default value or default factory.")
+
+
+def getattr_iter(object: object, names: Iterable[str], default: Any) -> Any:
+    """
+    A helper function that retrieves an attribute from an object which may
+    have multiple possible names. This is useful when fetching attributes from
+    arbitrary `transformers.PretrainedConfig` instances.
+    """
+    for name in names:
+        if hasattr(object, name):
+            return getattr(object, name)
+    return default
 
 
 def contains_object_print(text: str) -> bool:
@@ -143,3 +156,33 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
 def is_init_field(cls: ConfigType, name: str) -> bool:
     return next(f for f in fields(cls) if f.name == name).init
+
+
+@runtime_checkable
+class SupportsHash(Protocol):
+
+    def compute_hash(self) -> str:
+        ...
+
+
+class SupportsMetricsInfo(Protocol):
+
+    def metrics_info(self) -> dict[str, str]:
+        ...
+
+
+def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
+    processed_overrides = {}
+    for field_name, value in overrides.items():
+        assert hasattr(
+            config, field_name), f"{type(config)} has no field `{field_name}`"
+        current_value = getattr(config, field_name)
+        if is_dataclass(current_value) and not is_dataclass(value):
+            assert isinstance(value, dict), (
+                f"Overrides to {type(config)}.{field_name} must be a dict"
+                f"  or {type(current_value)}, but got {type(value)}")
+            value = update_config(
+                current_value,  # type: ignore[type-var]
+                value)
+        processed_overrides[field_name] = value
+    return replace(config, **processed_overrides)

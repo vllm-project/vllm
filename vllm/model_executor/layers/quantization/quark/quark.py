@@ -394,6 +394,7 @@ class QuarkLinearMethod(LinearMethodBase):
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
+
         return scheme.apply_weights(layer, x, bias=bias)
 
 
