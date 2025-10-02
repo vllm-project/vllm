@@ -214,7 +214,7 @@ class Olmo3ReasoningParser(ReasoningParser):
           token is missing from generation.
     """
 
-    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
+    def __init__(self, tokenizer: "AnyTokenizer", *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         self.think_start = r"<think>"
