@@ -357,7 +357,7 @@ class EngineArgs:
     max_num_batched_tokens: Optional[
         int] = SchedulerConfig.max_num_batched_tokens
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
-    max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
+    max_long_prefills: int = SchedulerConfig.max_long_prefills
     long_prefill_token_threshold: int = \
         SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
@@ -879,9 +879,8 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--max-num-partial-prefills",
             **scheduler_kwargs["max_num_partial_prefills"])
-        scheduler_group.add_argument(
-            "--max-long-partial-prefills",
-            **scheduler_kwargs["max_long_partial_prefills"])
+        scheduler_group.add_argument("--max-long-prefills",
+                                     **scheduler_kwargs["max_long_prefills"])
         scheduler_group.add_argument('--cuda-graph-sizes',
                                      **scheduler_kwargs["cuda_graph_sizes"])
         scheduler_group.add_argument(
@@ -1362,7 +1361,7 @@ class EngineArgs:
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
             max_num_partial_prefills=self.max_num_partial_prefills,
-            max_long_partial_prefills=self.max_long_partial_prefills,
+            max_long_prefills=self.max_long_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
@@ -1457,9 +1456,8 @@ class EngineArgs:
 
         # No Concurrent Partial Prefills so far.
         if (self.max_num_partial_prefills
-                != SchedulerConfig.max_num_partial_prefills
-                or self.max_long_partial_prefills
-                != SchedulerConfig.max_long_partial_prefills):
+                != SchedulerConfig.max_num_partial_prefills or
+                self.max_long_prefills != SchedulerConfig.max_long_prefills):
             _raise_or_fallback(feature_name="Concurrent Partial Prefill",
                                recommend_to_remove=False)
             return False

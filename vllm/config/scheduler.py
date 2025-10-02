@@ -50,7 +50,7 @@ class SchedulerConfig:
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
 
-    max_long_partial_prefills: int = 1
+    max_long_prefills: int = 1
     """For chunked prefill, the maximum number of prompts longer than
     long_prefill_token_threshold that will be prefilled concurrently. Setting
     this less than max_num_partial_prefills will allow shorter prompts to jump
@@ -214,9 +214,9 @@ class SchedulerConfig:
 
             logger.info(
                 "Concurrent partial prefills enabled with "
-                "max_num_partial_prefills=%d, max_long_partial_prefills=%d, "
+                "max_num_partial_prefills=%d, max_long_prefills=%d, "
                 "long_prefill_token_threshold=%d",
-                self.max_num_partial_prefills, self.max_long_partial_prefills,
+                self.max_num_partial_prefills, self.max_long_prefills,
                 self.long_prefill_token_threshold)
 
         # NOTE: Default set cuda_graph_sizes to [min(max_num_seqs * 2, 512)].
@@ -276,11 +276,10 @@ class SchedulerConfig:
                     f"({self.long_prefill_token_threshold}) cannot be greater "
                     f"than the max_model_len ({self.max_model_len}).")
 
-        if (self.max_long_partial_prefills
-                < 1) or (self.max_long_partial_prefills
-                         > self.max_num_partial_prefills):
+        if (self.max_long_prefills < 1) or (self.max_long_prefills
+                                            > self.max_num_partial_prefills):
             raise ValueError(
-                f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
+                f"max_long_prefills ({self.max_long_prefills}) "
                 "must be greater than or equal to 1 and less than or equal to "
                 f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
 
