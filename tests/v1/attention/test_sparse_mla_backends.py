@@ -348,13 +348,14 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name,
                              dtype=dtype,
                              device=device)
 
-    backend_output = impl.forward(layer,
-                                  query_vllm,
-                                  kv_c_vllm,
-                                  k_pe_vllm,
-                                  kv_cache,
-                                  metadata,
-                                  output=out_buffer)
+    with torch.inference_mode():
+        backend_output = impl.forward(layer,
+                                      query_vllm,
+                                      kv_c_vllm,
+                                      k_pe_vllm,
+                                      kv_cache,
+                                      metadata,
+                                      output=out_buffer)
 
     assert backend_output.shape == sdpa_reference.shape
     assert backend_output.dtype == sdpa_reference.dtype
