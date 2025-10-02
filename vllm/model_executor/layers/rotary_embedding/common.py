@@ -73,7 +73,7 @@ def apply_rotary_emb_dispatch(x: torch.Tensor, cos: torch.Tensor,
 
 @cache
 def dispatch_rotary_emb_function(
-    apply_rotary_emb_torch_: Optional[Callable[..., torch.Tensor]] = None
+    func_override: Optional[Callable[..., torch.Tensor]] = None
 ) -> Callable[..., torch.Tensor]:
     if current_platform.is_cuda():
         return apply_rotary_emb
@@ -87,8 +87,8 @@ def dispatch_rotary_emb_function(
                 "flash_attn is not installed. Falling back to PyTorch "
                 "implementation for rotary embeddings.")
 
-    if apply_rotary_emb_torch_ is not None:
-        return apply_rotary_emb_torch_
+    if func_override is not None:
+        return func_override
     else:
         return apply_rotary_emb_torch
 
