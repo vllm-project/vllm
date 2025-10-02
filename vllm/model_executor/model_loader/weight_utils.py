@@ -1002,8 +1002,8 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
             )
             return None
         return remapped_name
-    
-    if any("mla_attn" in key for key in params_dict.keys()):
+
+    if any("mla_attn" in key for key in params_dict):
         attn_str = "mla_attn.mla_attn"
         logger.debug_once(f"Found mla_attn with k_scale and v_scale in "
                           f"the checkpoint, using {attn_str} as attn_str")
