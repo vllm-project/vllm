@@ -1262,7 +1262,7 @@ def initialize_model_parallel(
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
-    group_ranks = (all_ranks.transpose(1, 2).reshape(
+    group_ranks = (all_ranks.permute(0, 2, 3, 1, 4).reshape(
         -1, data_parallel_size * tensor_model_parallel_size).unbind(0))
     group_ranks = [x.tolist() for x in group_ranks]
     _EP = init_model_parallel_group(group_ranks,
