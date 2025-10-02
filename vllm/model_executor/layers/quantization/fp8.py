@@ -467,7 +467,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.info_once("DeepGemm disabled: FlashInfer MOE is"
                                  " enabled.")
             elif (is_deep_gemm_supported()):
-                logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
+                logger.debug_once(
+                    "DeepGemm kernels available for Fp8MoEMethod.")
                 self.allow_deep_gemm = True
             else:
                 logger.warning_once(
@@ -481,9 +482,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif (current_platform.is_cuda()
               and current_platform.is_device_capability(100)
               and not self.flashinfer_moe_backend):
-            logger.info_once(
-                "Using CutlassBlockScaledGroupedGemm kernels for Fp8 MOE "
-                "on SM100.")
+            logger.debug_once(
+                "CutlassBlockScaledGroupedGemm available for Fp8MoEMethod.")
             self.allow_cutlass_block_scaled_grouped_gemm = True
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
