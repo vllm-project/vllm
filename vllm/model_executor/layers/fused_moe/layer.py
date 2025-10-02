@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -679,8 +679,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
 
 def determine_expert_map(
-        ep_size: int, ep_rank: int,
-        global_num_experts: int) -> tuple[int, Optional[torch.Tensor]]:
+    ep_size: int, ep_rank: int, global_num_experts: int,
+    num_fused_shared_experts: int
+) -> tuple[int, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
         Calculates how many experts should be assigned to each rank for EP and
         creates a mapping from global to local expert index. Experts are
@@ -718,7 +719,23 @@ def determine_expert_map(
     start_idx = ep_rank * base_experts + min(ep_rank, remainder)
     expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
         0, local_num_experts, dtype=torch.int32)
-    return (local_num_experts, expert_map)
+    expert_mask = None
+
+    if is_rocm_aiter_moe_enabled():
+        expert_mask = torch.ones(
+            (global_num_experts + num_fused_shared_experts + 1, ),
+            dtype=torch.int32)
+        expert_mask[-1] = 0
+        expert_mask[:global_num_experts] = expert_map > -1
+        expert_map = torch.cat(
+            (expert_map,
+             torch.tensor([
+                 local_num_experts + i for i in range(num_fused_shared_experts)
+             ],
+                          dtype=torch.int32)),
+            dim=0)
+
+    return (local_num_experts, expert_map, expert_mask)
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
@@ -830,31 +847,7 @@ class FusedMoE(CustomOp):
         self.logical_to_physical_map: Optional[torch.Tensor] = None
         self.logical_replica_count: Optional[torch.Tensor] = None
 
-        # Determine expert maps
-        if self.use_ep:
-            if self.enable_eplb:
-                assert self.global_num_experts % self.ep_size == 0, \
-                    "EPLB currently only supports even distribution of " \
-                    "experts across ranks."
-            else:
-                assert num_redundant_experts == 0, \
-                    "Redundant experts are only supported with EPLB."
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
-            logger.info_once(
-                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
-                " number of experts: %s/%s. Experts local to global index map:"
-                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
-                self.global_num_experts,
-                get_compressed_expert_map(self.expert_map))
-        else:
-            self.local_num_experts, self.expert_map = (self.global_num_experts,
-                                                       None)
-
-        self.top_k = top_k
-
+        # ROCm aiter shared experts fusion
         self.num_fused_shared_experts = \
             n_shared_experts if n_shared_experts is not None \
                 and is_rocm_aiter_fusion_shared_expert_enabled(
@@ -864,37 +857,36 @@ class FusedMoE(CustomOp):
             raise ValueError(
                 "n_shared_experts is only supported on ROCm aiter when "
                 "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled")
-        self.expert_mask = None
-        if self.use_ep and is_rocm_aiter_moe_enabled():
-            expert_mask = torch.ones((self.global_num_experts +
-                                      self.num_fused_shared_experts + 1, ),
-                                     dtype=torch.int32)
-            expert_mask[-1] = 0
-            expert_mask[:self.global_num_experts] = self.expert_map > -1
-            self.expert_mask = expert_mask
-            self.expert_map = torch.cat(
-                (self.expert_map,
-                 torch.tensor([
-                     self.local_num_experts + i
-                     for i in range(self.num_fused_shared_experts)
-                 ],
-                              dtype=torch.int32)),
-                dim=0)
-        if is_rocm_aiter_fusion_shared_expert_enabled(
-        ) and self.num_fused_shared_experts > 0:
-            init_aiter_topK_meta_data(
-                n_routed_experts=self.global_num_experts,
-                n_shared_experts=self.num_fused_shared_experts,
-                top_k=self.top_k,
-                tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
-                tp_size=self.ep_size if self.use_ep else self.tp_size,
-                shared_experts_score=1.0,
-                max_num_tokens=vllm_config.scheduler_config.
-                max_num_batched_tokens * dp_size_,
-                is_EP=self.use_ep,
-            )
-        if is_rocm_aiter_fusion_shared_expert_enabled():
-            self.local_num_experts += self.num_fused_shared_experts
+
+        # Determine expert maps
+        if self.use_ep:
+            if self.enable_eplb:
+                assert self.global_num_experts % self.ep_size == 0, \
+                    "EPLB currently only supports even distribution of " \
+                    "experts across ranks."
+            else:
+                assert num_redundant_experts == 0, \
+                    "Redundant experts are only supported with EPLB."
+            self.local_num_experts, self.expert_map, self.expert_mask = \
+                determine_expert_map(
+                    ep_size=self.ep_size,
+                    ep_rank=self.ep_rank,
+                    global_num_experts=self.global_num_experts,
+                    num_fused_shared_experts=self.num_fused_shared_experts)
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                " number of experts: %s/%s. Experts local to global index map:"
+                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self.expert_map))
+        else:
+            self.local_num_experts, self.expert_map, self.expert_mask = (
+                self.global_num_experts, None, None)
+
+        self.top_k = top_k
+
+        self._init_aiter_shared_experts_topK_buffer(vllm_config=vllm_config,
+                                                    dp_size=dp_size_)
 
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
@@ -1047,10 +1039,15 @@ class FusedMoE(CustomOp):
         # ep_size and ep_rank should already be updated
         assert self.expert_map is not None
         with self.expert_map.device:
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
+            self.local_num_experts, self.expert_map, self.expert_mask = \
+                determine_expert_map(
+                    ep_size=self.ep_size,
+                    ep_rank=self.ep_rank,
+                    global_num_experts=self.global_num_experts,
+                    num_fused_shared_experts=self.num_fused_shared_experts)
+            self._init_aiter_shared_experts_topK_buffer(
+                vllm_config=get_current_vllm_config(),
+                dp_size=get_dp_group().world_size)
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
@@ -1190,6 +1187,23 @@ class FusedMoE(CustomOp):
         if self.expert_map is None:
             return expert_id
         return self.expert_map[expert_id].item()
+
+    def _init_aiter_shared_experts_topK_buffer(self, vllm_config: VllmConfig,
+                                               dp_size: int):
+        if is_rocm_aiter_fusion_shared_expert_enabled():
+            if self.num_fused_shared_experts > 0:
+                init_aiter_topK_meta_data(
+                    n_routed_experts=self.global_num_experts,
+                    n_shared_experts=self.num_fused_shared_experts,
+                    top_k=self.top_k,
+                    tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
+                    tp_size=self.ep_size if self.use_ep else self.tp_size,
+                    shared_experts_score=1.0,
+                    max_num_tokens=vllm_config.scheduler_config.
+                    max_num_batched_tokens * dp_size,
+                    is_EP=self.use_ep,
+                )
+            self.local_num_experts += self.num_fused_shared_experts
 
     @overload
     def weight_loader(self, param: torch.nn.Parameter,
