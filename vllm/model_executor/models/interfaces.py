@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping, MutableSequence
-from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
-                    Union, overload, runtime_checkable)
+from typing import (TYPE_CHECKING, Callable, ClassVar, Literal, Optional,
+                    Protocol, Union, overload, runtime_checkable)
 
 import numpy as np
 import torch
 from torch import Tensor
+from transformers import PretrainedConfig
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
@@ -15,14 +16,12 @@ from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils import supports_kw
 
-from .interfaces_base import is_pooling_model
+from .interfaces_base import VllmModel, is_pooling_model
 
 if TYPE_CHECKING:
-    from vllm.attention import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.sequence import IntermediateTensors
@@ -64,6 +63,12 @@ class SupportsMultiModal(Protocol):
     `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
+    merge_by_field_config: ClassVar[bool] = False
+    """
+    A flag that indicates which implementation of
+    `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         """
@@ -84,7 +89,7 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def get_language_model(self) -> torch.nn.Module:
+    def get_language_model(self) -> VllmModel:
         """
         Returns the underlying language model used for text generation.
 
@@ -96,38 +101,118 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    # Only for models that support v0 chunked prefill
-    # TODO(ywang96): Remove this overload once v0 is deprecated
+    @overload
+    def get_input_embeddings(self, input_ids: Tensor) -> Tensor:
+        ...
+
     @overload
     def get_input_embeddings(
         self,
         input_ids: Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-        attn_metadata: Optional["AttentionMetadata"] = None,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: torch.Tensor,
+        handle_oov_mm_token: bool = False,
     ) -> Tensor:
         ...
 
-    # TODO: Remove this overload once v0 is deprecated
-    @overload
+    def _get_text_embeddings(
+        self,
+        input_ids: Tensor,
+        get_input_embeddings: Callable[[Tensor], Tensor],
+        *,
+        is_multimodal: Optional[Tensor],
+        handle_oov_mm_token: bool,
+    ) -> Tensor:
+        if handle_oov_mm_token and is_multimodal is not None:
+            is_text = ~is_multimodal
+            text_embeds = get_input_embeddings(input_ids[is_text])
+
+            return torch.empty(
+                (input_ids.shape[0], text_embeds.shape[1]),
+                dtype=text_embeds.dtype,
+                device=text_embeds.device,
+            ).masked_scatter_(is_text.unsqueeze_(-1), text_embeds)
+
+        return get_input_embeddings(input_ids)
+
     def get_input_embeddings(
         self,
         input_ids: Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> Tensor:
-        ...
-
-    def get_input_embeddings(
-        self,
-        input_ids: Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-        # Only necessary so that the v0 overload is valid
-        # TODO: Remove attn_metadata once v0 is deprecated
-        attn_metadata: Optional["AttentionMetadata"] = None,
+        *,
+        is_multimodal: Optional[Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> Tensor:
         """
-        Returns the input embeddings merged from the text embeddings from 
-        input_ids and the multimodal embeddings generated from multimodal 
-        kwargs.
+        Apply token embeddings to `input_ids`.
+
+        If `multimodal_embeddings` is passed, scatter them into
+        `input_ids` according to the mask `is_multimodal`.
+
+        In case the multi-modal token IDs exceed the vocabulary size of
+        the language model, you can set `handle_oov_mm_token=False`
+        to avoid calling the language model's `get_input_embeddings` method
+        on those tokens. Note however that doing so increases memory usage
+        as an additional buffer is needed to hold the input embeddings.
+        """
+        from .utils import _merge_multimodal_embeddings
+
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.get_language_model().get_input_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229.")
+
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
+
+
+@runtime_checkable
+class SupportsMultiModalPruning(Protocol):
+    """The interface required for models that support returning both input
+    embeddings and positions. Model may require custom positions for dynamic
+    pruning of multimodal embeddings.
+    """
+    supports_multimodal_pruning: ClassVar[Literal[True]] = True
+
+    def recompute_mrope_positions(
+            self, input_ids: list[int],
+            multimodal_embeddings: MultiModalEmbeddings,
+            mrope_positions: torch.LongTensor, num_computed_tokens: int
+    ) -> tuple[MultiModalEmbeddings, Tensor, int]:
+        """
+        Update part of input mrope positions (starting with
+        num_computed_tokens index). Original mrope_positions are computed
+        for unpruned sequence and becomes incorrect once pruning occurs,
+        so once we prune media tokens we should reflect this in the
+        mrope_positions before we feed it to LLM.
+
+        Args:
+            input_ids: (N,) All input tokens of the prompt containing
+                entire sequence.
+            multimodal_embeddings: Tuple of multimodal embeddings that
+                fits into the prefill chunk that is being processed.
+            mrope_positions: Existing mrope positions (3, N) for entire
+                sequence
+            num_computed_tokens: A number of computed tokens so far.
+
+        Returns:
+            Tuple of (multimodal_embeddings, mrope_positions,
+                mrope_position_delta).
         """
         ...
 
@@ -157,6 +242,25 @@ def supports_multimodal_raw_input_only(
 def supports_multimodal_encoder_tp_data(
         model: Union[type[object], object]) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)
+
+
+@overload
+def supports_multimodal_pruning(
+        model: type[object]) -> TypeIs[type[SupportsMultiModalPruning]]:
+    ...
+
+
+@overload
+def supports_multimodal_pruning(
+        model: object) -> TypeIs[SupportsMultiModalPruning]:
+    ...
+
+
+def supports_multimodal_pruning(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsMultiModalPruning]],
+           TypeIs[SupportsMultiModalPruning]]:
+    return getattr(model, "supports_multimodal_pruning", False)
 
 
 @runtime_checkable
@@ -852,3 +956,70 @@ def supports_eagle3(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsEagle3]], TypeIs[SupportsEagle3]]:
     return isinstance(model, SupportsEagle3)
+
+
+@runtime_checkable
+class SupportsMRoPE(Protocol):
+    """The interface required for all models that support M-RoPE."""
+
+    supports_mrope: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports M-RoPE.
+    
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        hf_config: PretrainedConfig,
+        image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        video_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        second_per_grid_ts: Optional[list[float]] = None,
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+        audio_feature_lengths: Optional[torch.Tensor] = None,
+        use_audio_in_video: bool = False,
+    ) -> tuple[torch.Tensor, int]:
+        """
+        Get M-RoPE input positions and delta value for this specific model.
+        
+        This method should be implemented by each model that supports M-RoPE
+        to provide model-specific logic for computing input positions.
+        
+        Args:
+            input_tokens: List of input token IDs
+            hf_config: HuggingFace model configuration
+            image_grid_thw: Image grid dimensions (t, h, w)
+            video_grid_thw: Video grid dimensions (t, h, w)
+            second_per_grid_ts: Seconds per grid timestep for videos
+            context_len: Context length
+            seq_len: Sequence length
+            audio_feature_lengths: Audio feature lengths for multimodal models
+            use_audio_in_video: Whether to use audio in video for interleaving
+            
+        Returns:
+            Tuple of (llm_positions, mrope_position_delta)
+            - llm_positions: Tensor of shape [3, num_tokens]
+                with T/H/W positions
+            - mrope_position_delta: Delta for position calculations
+        """
+        ...
+
+
+@overload
+def supports_mrope(model: type[object]) -> TypeIs[type[SupportsMRoPE]]:
+    ...
+
+
+@overload
+def supports_mrope(model: object) -> TypeIs[SupportsMRoPE]:
+    ...
+
+
+def supports_mrope(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsMRoPE]], TypeIs[SupportsMRoPE]]:
+    return isinstance(model, SupportsMRoPE)

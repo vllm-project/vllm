@@ -8,7 +8,6 @@ if TYPE_CHECKING:
 
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -18,12 +17,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba2_metadata import update_metadata
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
-from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.short_conv_attn import (
     ShortConvAttentionMetadata)
@@ -71,15 +68,11 @@ class ShortConv(MambaBase, CustomOp):
             prefix=f"{prefix}.out_proj",
         )
 
-        assert envs.VLLM_USE_V1, ("ShortConv layers are only supported in V1")
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-        # The outer list is for v0 PP virtual engine. Though this code path
-        # only runs for v1, we have to do this to unify with the interface
-        # of Attention + v0 PP.
-        self.kv_cache = [(torch.tensor([]), )]
+        self.kv_cache = (torch.tensor([]), )
 
         self.model_config = model_config
         self.cache_config = cache_config
@@ -89,7 +82,6 @@ class ShortConv(MambaBase, CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        conv_metadata: ShortConvAttentionMetadata,
     ):
         return
 
@@ -97,7 +89,6 @@ class ShortConv(MambaBase, CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        conv_metadata: ShortConvAttentionMetadata,
     ):
         torch.ops.vllm.short_conv(
             hidden_states,
@@ -109,7 +100,6 @@ class ShortConv(MambaBase, CustomOp):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
-        conv_metadata: ShortConvAttentionMetadata,
     ):
         forward_context = get_forward_context()
         # ShortConvAttentionMetadata contains metadata necessary for the
@@ -121,7 +111,6 @@ class ShortConv(MambaBase, CustomOp):
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
-            conv_metadata = attn_metadata
             assert isinstance(attn_metadata, ShortConvAttentionMetadata)
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             conv_state = self_kv_cache[0].transpose(-1, -2)
@@ -181,9 +170,6 @@ class ShortConv(MambaBase, CustomOp):
 
         if has_prefill:
             Bx_p = (B_p * x_p).transpose(0, 1)
-            if conv_metadata.cu_seqlen is None:
-                conv_metadata = update_metadata(Bx_p, query_start_loc_p,
-                                                conv_metadata)
             Bx = causal_conv1d_fn(Bx_p,
                                   conv_weights,
                                   self.conv.bias,
@@ -191,7 +177,7 @@ class ShortConv(MambaBase, CustomOp):
                                   conv_states=conv_state,
                                   has_initial_state=has_initial_states_p,
                                   cache_indices=state_indices_tensor_p,
-                                  metadata=conv_metadata,
+                                  metadata=attn_metadata,
                                   query_start_loc=query_start_loc_p).transpose(
                                       0, 1)[:num_prefill_tokens]
 
@@ -248,9 +234,7 @@ def short_conv(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states,
-                      output=output,
-                      conv_metadata=None)
+    self.forward_cuda(hidden_states=hidden_states, output=output)
 
 
 def short_conv_fake(
@@ -266,5 +250,4 @@ direct_register_custom_op(
     op_func=short_conv,
     mutates_args=["output"],
     fake_impl=short_conv_fake,
-    dispatch_key=current_platform.dispatch_key,
 )

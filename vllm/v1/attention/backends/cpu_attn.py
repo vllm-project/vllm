@@ -11,7 +11,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
@@ -55,7 +54,7 @@ class TorchSDPABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TORCH_SDPA_VLLM_V1"
+        return "TORCH_SDPA"
 
     @staticmethod
     def get_impl_cls() -> type["TorchSDPABackendImpl"]:
@@ -64,10 +63,6 @@ class TorchSDPABackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return TorchSDPAMetadata
-
-    @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
-        return CommonAttentionState
 
     @staticmethod
     def get_builder_cls() -> type["TorchSDPAMetadataBuilderV1"]:
@@ -79,6 +74,7 @@ class TorchSDPABackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return _get_paged_attn_impl().get_kv_cache_shape(
             num_blocks, block_size, num_kv_heads, head_size)
@@ -90,6 +86,19 @@ class TorchSDPABackend(AttentionBackend):
 
 @dataclass
 class TorchSDPAMetadata(AttentionMetadata):
+    """Attention metadata for prefill and decode batched together."""
+    # Total number of prefill requests.
+    num_prefills: int
+    # Number of prefill tokens.
+    num_prefill_tokens: int
+    # Number of decode tokens. Note that it is equivalent to the number of
+    # decode requests.
+    num_decode_tokens: int
+    # (num_tokens,). The indices of the token slots that input tokens will be
+    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
+    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
+    # in block 0, and 1st slot in block 1, respectively.
+    slot_mapping: torch.Tensor
     """Metadata for PagedAttention."""
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
@@ -425,8 +434,6 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
                                                     num_prompt_req],  # prefill
             query_start_loc=query_start_loc_cpu[:num_reqs +
                                                 1],  # for logits index
-            multi_modal_placeholder_index_maps=None,
-            enable_kv_scales_calculation=False,
         )
 
         return attn_metadata
@@ -835,16 +842,6 @@ class _PagedAttention:
             blocksparse_block_size,
             blocksparse_head_sliding_step,
         )
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: list[torch.Tensor],
-        src_to_dists: torch.Tensor,
-        *args,
-    ) -> None:
-        key_caches = [kv_cache[0] for kv_cache in kv_caches]
-        value_caches = [kv_cache[1] for kv_cache in kv_caches]
-        ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
 class _IPEXPagedAttention(_PagedAttention):

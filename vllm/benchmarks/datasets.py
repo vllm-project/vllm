@@ -104,9 +104,9 @@ class BenchmarkDataset(ABC):
 
         Args:
             dataset_path (Optional[str]): Path to the dataset. If None, it
-            indicates that a default or random dataset might be used.
+                indicates that a default or random dataset might be used.
             random_seed (int): Seed value for reproducible shuffling or
-            sampling. Defaults to DEFAULT_SEED.
+                sampling. Defaults to DEFAULT_SEED.
         """
         self.dataset_path = dataset_path
         # Set the random seed, ensuring that a None value is replaced with the
@@ -171,7 +171,8 @@ class BenchmarkDataset(ABC):
                 If `None`, LoRA is not used.
 
         Returns:
-            A new [LoRARequest][] (or `None` if not applicable).
+            A new [`LoRARequest`][vllm.lora.request.LoRARequest]
+            (or `None` if not applicable).
         """
         if max_loras is None or lora_path is None:
             return None
@@ -200,8 +201,7 @@ class BenchmarkDataset(ABC):
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
                 for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
-            request_id_prefix (str) The prefix of request_id.
-
+            request_id_prefix (str): The prefix of request_id.
 
         Returns:
             list[SampleRequest]: A list of sample requests generated from the
@@ -224,7 +224,8 @@ class BenchmarkDataset(ABC):
             requests (List[SampleRequest]): The current list of sampled
                 requests.
             num_requests (int): The target number of requests.
-            request_id_prefix (str) The prefix of the request ids.
+            request_id_prefix (str): The prefix applied to generated request
+                identifiers.
 
         """
         if no_oversample:
@@ -365,10 +366,66 @@ def process_video(video: Any) -> Mapping[str, Any]:
         f"Invalid video input {video}. Must be a string of local path/remote url, or a dictionary with raw video bytes in the form of `{{'bytes': raw_video_bytes}}`."  # noqa: E501
     )
 
+
+def gen_prompt_decode_to_target_len(
+    tokenizer: PreTrainedTokenizerBase,
+    token_sequence: list[int],
+    target_token_len: int,
+    max_retry: int = 10,
+    add_special_tokens: bool = False,
+    rng: Optional[np.random.Generator] = None,
+) -> tuple[str, list[int]]:
+    """
+    Ensure decoded-then-encoded prompt length matches the target token length.
+
+    This function decodes an initial token sequence to text and re-encodes it
+    , iteratively adjusting the token sequence length to match a target. 
+    This is necessary because some tokenizers do not guarantee a 1:1 mapping 
+    between consecutive tokens and the decoded-then-encoded sequence length.
+    For example, for GPT2Tokenizer:
+    [6880, 6881] -> ['Ġcalls', 'here'] ->
+    [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+
+    Returns a tuple of the final prompt string and the adjusted token sequence.
+    """
+    remain_num_try = max_retry
+    token_mismatch = 0
+    while True:
+        prompt = tokenizer.decode(token_sequence)
+        token_sequence = tokenizer.encode(
+            prompt, add_special_tokens=add_special_tokens
+        )
+        if remain_num_try <= 0:
+            if len(token_sequence) != target_token_len:
+                token_mismatch = len(token_sequence) - target_token_len
+            break
+        
+        if len(token_sequence) == target_token_len:
+            break
+        elif len(token_sequence) < target_token_len:
+            if rng is not None:
+                extra_tokens = rng.integers(
+                    0,
+                    tokenizer.vocab_size,
+                    size=target_token_len - len(token_sequence),
+                ).tolist()
+            else:
+                extra_tokens = np.random.randint(
+                    0,
+                    tokenizer.vocab_size,
+                    size=target_token_len - len(token_sequence),
+                ).tolist()
+            token_sequence.extend(extra_tokens)
+        elif len(token_sequence) > target_token_len:
+            token_sequence = token_sequence[:target_token_len]
+
+        remain_num_try -= 1
+
+    return prompt, token_sequence, token_mismatch
+
 # -----------------------------------------------------------------------------
 # Random Dataset Implementation (Synthetic Data)
 # -----------------------------------------------------------------------------
-
 
 class RandomDataset(BenchmarkDataset):
     """
@@ -419,8 +476,9 @@ class RandomDataset(BenchmarkDataset):
         vocab_size = tokenizer.vocab_size
 
         requests = []
+        token_mismatch_total = 0
         for i in range(num_requests):
-            prompt, total_input_len = self.generate_token_sequence(
+            prompt, total_input_len, token_mismatch = self.generate_token_sequence( # noqa: E501
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
                 prefix_len=prefix_len,
@@ -429,6 +487,7 @@ class RandomDataset(BenchmarkDataset):
                 offset=int(offsets[i]),
                 index=i,
             )
+            token_mismatch_total += token_mismatch
             requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -452,6 +511,18 @@ class RandomDataset(BenchmarkDataset):
                     )
                 )
             requests = batch_requests
+        
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
+
         return requests
 
     def get_prefix(
@@ -529,7 +600,7 @@ class RandomDataset(BenchmarkDataset):
         input_len: int,
         offset: int,
         index: int,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, int]:
         """
         Returns (prompt, total_input_len).
 
@@ -548,15 +619,16 @@ class RandomDataset(BenchmarkDataset):
         token_sequence = prefix_token_ids + inner_seq
 
         # Decode, then re-encode and truncate to preserve token count invariants
-        prompt = tokenizer.decode(token_sequence)
         total_input_len = prefix_len + int(input_len)
-
-        re_encoded_sequence = tokenizer.encode(
-            prompt, add_special_tokens=False)[:total_input_len]
-        prompt = tokenizer.decode(re_encoded_sequence)
-        total_input_len = len(re_encoded_sequence)
-
-        return prompt, total_input_len
+        prompt, adjusted_token_sequence, token_mismatch = gen_prompt_decode_to_target_len( # noqa: E501
+            tokenizer=tokenizer,
+            token_sequence=token_sequence,
+            target_token_len=total_input_len,
+            add_special_tokens=False,
+            rng=self._rng,
+        )
+        total_input_len = len(adjusted_token_sequence)
+        return prompt, total_input_len, token_mismatch
 
 
 # -----------------------------------------------------------------------------
@@ -872,8 +944,9 @@ class RandomMultiModalDataset(RandomDataset):
         vocab_size = tokenizer.vocab_size
         # Add synthetic multimodal items to each request
         mm_requests = []
+        token_mismatch_total = 0
         for i in range(num_requests):
-            prompt, total_input_len = self.generate_token_sequence(
+            prompt, total_input_len, token_mismatch = self.generate_token_sequence( # noqa: E501
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
                 prefix_len=prefix_len,
@@ -882,6 +955,7 @@ class RandomMultiModalDataset(RandomDataset):
                 offset=int(offsets[i]),
                 index=i,
             )
+            token_mismatch_total += token_mismatch
             # Get multimodal item iterator for a given request
             mm_item_iterator = self.get_mm_item_iterator(
                 min_num_mm_items,
@@ -917,6 +991,18 @@ class RandomMultiModalDataset(RandomDataset):
                     request_id=request_id_prefix + str(i),
                 )
             mm_requests.append(sample_request)
+
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
+
         return mm_requests
 
 # -----------------------------------------------------------------------------
@@ -1357,7 +1443,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
     elif args.dataset_name == "sonnet":
         dataset = SonnetDataset(dataset_path=args.dataset_path)
         # For the "sonnet" dataset, formatting depends on the backend.
-        if args.endpoint_type == "openai-chat":
+        if args.backend == "openai-chat":
             input_requests = dataset.sample(
                 num_requests=args.num_prompts,
                 input_len=args.sonnet_input_len,
@@ -1449,6 +1535,13 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
         ):
             dataset_class = MLPerfDataset
             args.hf_split = "train"
+        elif (
+            args.dataset_path in MMStarDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MMStarDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = MMStarDataset
+            args.hf_split = "val"
+            args.hf_subset = None
         else:
             supported_datasets = set([
                 dataset_name for cls in HuggingFaceDataset.__subclasses__()
@@ -1461,7 +1554,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 "Please consider contributing if you would "
                 "like to add support for additional dataset formats.")
 
-        if dataset_class.IS_MULTIMODAL and args.endpoint_type not in [
+        if dataset_class.IS_MULTIMODAL and args.backend not in [
                 "openai-chat",
                 "openai-audio",
         ]:
@@ -1469,7 +1562,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             # endpoint-type.
             raise ValueError(
                 "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' endpoint-type.")
+                "'openai-audio' backends.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -1562,7 +1655,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
 
         try:
             # Enforce endpoint compatibility for multimodal datasets.
-            if args.dataset_name == "random-mm" and args.endpoint_type not in [
+            if args.dataset_name == "random-mm" and args.backend not in [
                     "openai-chat"]:
                 raise ValueError(
                     "Multi-modal content (images) is only supported on "
@@ -2686,27 +2779,23 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
             # Generate random tokens
             tokens = np.random.randint(
                 0, vocab_size, size=target_length).tolist()
-            text = tokenizer.decode(tokens)
-            re_encoded = tokenizer.encode(text, add_special_tokens=False)
 
-            if len(re_encoded) == target_length:
-                return re_encoded
-            elif len(re_encoded) < target_length:
-                # Recursively generate additional consistent tokens
-                needed = target_length - len(re_encoded)
-                extra_tokens = _generate_exact_length_tokens(needed)
-                return re_encoded + extra_tokens
-            else:
-                # Truncate to target length
-                return re_encoded[:target_length]
+            _, adjusted_tokens, token_mismatch = gen_prompt_decode_to_target_len( # noqa: E501
+                tokenizer=tokenizer,
+                token_sequence=tokens,
+                target_token_len=target_length,
+                add_special_tokens=False,
+            )
+            return adjusted_tokens, token_mismatch
 
         requests = []
+        token_mismatch_total = 0
         for _ in range(num_prefixes):
             prefix_tokens = _generate_exact_length_tokens(prefix_len)
 
             for _ in range(prompts_per_prefix):
-                suffix_tokens = _generate_exact_length_tokens(suffix_len)
-
+                suffix_tokens, token_mistmatch = _generate_exact_length_tokens(suffix_len) # noqa: E501
+                token_mismatch_total += token_mistmatch
                 combined_tokens = prefix_tokens + suffix_tokens
                 prompt = tokenizer.decode(combined_tokens)
                 prompt_len = len(combined_tokens)
@@ -2718,5 +2807,88 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
                     )
                 )
 
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
         random.shuffle(requests)
         return requests
+
+
+# -----------------------------------------------------------------------------
+# MMStar Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MMStarDataset(HuggingFaceDataset):
+    """
+    Lin-Chen/MMStar: https://huggingface.co/datasets/Lin-Chen/MMStar
+    refer to: https://github.com/sgl-project/SpecForge/pull/106
+    """
+    DEFAULT_OUTPUT_LEN = 128
+    SUPPORTED_DATASET_PATHS = {"Lin-Chen/MMStar"}
+    IS_MULTIMODAL = True
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # If --hf-output-len is not set, use the default output length.
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        sampled_requests: list[SampleRequest] = []
+
+        for ind, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            # Split the question text from options
+            # (keep only the part before "Options:").
+            full_q: str = item.get("question", "")
+            question_text = full_q.split("Options:", 1)[0].strip()
+
+            # Multimodal image content.
+            mm_content = process_image(item["image"])
+
+            # Compute prompt token length (note: this is plain text length
+            # if enable_multimodal_chat is False).
+            prompt_len = len(tokenizer(question_text).input_ids)
+
+            if enable_multimodal_chat:
+                # If multimodal content should be embedded in the chat message,
+                # convert to [{"role":"user","content":[...]}]
+                prompt = self.apply_multimodal_chat_transformation(
+                    question_text, mm_content
+                )
+                mm_for_request = None  # Already embedded in chat content.
+            else:
+                # Default: prompt is plain text,
+                # image is in mm_content for the bench to assemble.
+                prompt = question_text
+                mm_for_request = mm_content
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_for_request,
+                    request_id=request_id_prefix + str(ind),
+                )
+            )
+
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
