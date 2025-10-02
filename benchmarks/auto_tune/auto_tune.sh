@@ -9,6 +9,7 @@ VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
 BASE=${BASE:-"$SCRIPT_DIR/../../.."}
 MODEL=${MODEL:-"meta-llama/Llama-3.1-8B-Instruct"}
 SYSTEM=${SYSTEM:-"TPU"}
+MODEL_IMPL_TYPE=${MODEL_IMPL_TYPE:-"vllm"}
 TP=${TP:-1}
 DOWNLOAD_DIR=${DOWNLOAD_DIR:-""}
 INPUT_LEN=${INPUT_LEN:-4000}
@@ -28,6 +29,7 @@ echo "SCRIPT_DIR=$SCRIPT_DIR"
 echo "BASE=$BASE"
 echo "MODEL=$MODEL"
 echo "SYSTEM=$SYSTEM"
+echo "MODEL_IMPL_TYPE=$MODEL_IMPL_TYPE"
 echo "TP=$TP"
 echo "DOWNLOAD_DIR=$DOWNLOAD_DIR"
 echo "INPUT_LEN=$INPUT_LEN"
@@ -74,7 +76,7 @@ start_server() {
     local vllm_log=$4
     local profile_dir=$5
 
-    pkill -if vllm
+    pkill -if "vllm serve" || true
 
     # Define the common arguments as a bash array.
     # Each argument and its value are separate elements.
@@ -97,10 +99,12 @@ start_server() {
     if [[ -n "$profile_dir" ]]; then
         # Start server with profiling enabled
         VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 VLLM_TORCH_PROFILER_DIR=$profile_dir \
+        MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
             vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     else
         # Start server without profiling
-        VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 \
+        VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1
+        MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" \
             vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     fi
     local server_pid=$!
@@ -138,8 +142,8 @@ run_benchmark() {
     local vllm_log="$LOG_FOLDER/vllm_log_${max_num_seqs}_${max_num_batched_tokens}.txt"
     echo "vllm_log: $vllm_log"
     echo
-    rm -f $vllm_log
-    pkill -if vllm
+    rm -f "$vllm_log"
+    pkill -if "vllm serve" || true
 
     echo "starting server..."
     # Call start_server without a profile_dir to avoid profiling overhead
@@ -190,7 +194,7 @@ run_benchmark() {
             curl -X POST http://0.0.0.0:8004/reset_prefix_cache
             sleep 5
             bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_${request_rate}.txt"
-            vllm bench serve \
+            MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" vllm bench serve \
                 --backend vllm \
                 --model $MODEL  \
                 --dataset-name random \
@@ -232,7 +236,7 @@ run_benchmark() {
 
     echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput"
 
-    pkill -if vllm
+    pkill -if "vllm serve" || true
     sleep 10
     echo "===================="
     return 0
@@ -290,7 +294,7 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
     echo "Running benchmark with profiling..."
     prefix_len=$(( INPUT_LEN * MIN_CACHE_HIT_PCT / 100 ))
     adjusted_input_len=$(( INPUT_LEN - prefix_len ))
-    vllm bench serve \
+    MODEL_IMPL_TYPE="$MODEL_IMPL_TYPE" vllm bench serve \
         --backend vllm \
         --model $MODEL \
         --dataset-name random \
@@ -308,6 +312,6 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
 else
     echo "No configuration met the latency requirements. Skipping final profiling run."
 fi
-pkill -if vllm
+pkill -if "vllm serve" || true
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH" >> "$RESULT"
