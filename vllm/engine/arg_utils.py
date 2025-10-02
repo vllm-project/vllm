@@ -307,11 +307,12 @@ class EngineArgs:
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
     max_model_len: Optional[int] = ModelConfig.max_model_len
-    # Note: This field is decrepated from SchedulerConfig, and should be
+    # Note: This field is deprecated from SchedulerConfig, and should be
     # mapped to CompilationConfig correctly.
     cuda_graph_sizes: list[int] = get_field(CompilationConfig,
                                             "cudagraph_capture_sizes")
-
+    cuda_graph_max_size: Optional[int] = get_field(
+        CompilationConfig, "max_cudagraph_capture_size")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -919,15 +920,13 @@ class EngineArgs:
         # This is a workaround to keep --cuda-graph-sizes in CLI, but this
         # field is actually removed from ShedulerConfig, and should be mapped
         # to cudagraph_capture_sizes and max_cudagraph_capture_size in
-        # CompilationConfig. we hardcode this argument, as
-        # get_kwargs(CompilationConfig) doesn't work here.
+        # CompilationConfig. we hardcode this argument, as get_kwargs(
+        # CompilationConfig) doesn't work here.
         scheduler_group.add_argument('--cuda-graph-sizes',
                                      deprecated=True,
-                                     **{
-                                         "default": None,
-                                         "type": int,
-                                         "nargs": '+'
-                                     })
+                                     default=None,
+                                     type=int,
+                                     nargs='+')
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -956,6 +955,12 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
+
+        parser.add_argument('--cuda-graph-max-size',
+                            type=optional_type(int),
+                            default=None,
+                            help="Alias for compilation_config."
+                            "max_cudagraph_capture_size.")
 
         return parser
 
@@ -1448,7 +1453,11 @@ class EngineArgs:
         if self.cuda_graph_sizes:
             assert isinstance(
                 self.cuda_graph_sizes,
-                list), ("Only accept list format for cuda_graph_sizes")
+                list), ("Only accept list format for cuda_graph_sizes.")
+            logger.warning(
+                "--cuda-graph-sizes is deprecated. Please use"
+                "-O.max_cudagraph_capture_size, -O.cudagraph_capture_sizes, "
+                "or --cuda-graph-max-size instead.")
             if len(self.cuda_graph_sizes) == 1:
                 assert self.compilation_config.max_cudagraph_capture_size\
                     is None, "cuda_graph_sizes and compilation_config."\
@@ -1463,6 +1472,13 @@ class EngineArgs:
                     self.cuda_graph_sizes
             else:
                 raise TypeError(f"Invalid value for {self.cuda_graph_sizes=}.")
+
+        if self.cuda_graph_max_size:
+            assert self.compilation_config.max_cudagraph_capture_size\
+                is None, "cuda_graph_max_size and compilation_config."\
+                "max_cudagraph_capture_size are mutually exclusive"
+            self.compilation_config.max_cudagraph_capture_size = \
+                self.cuda_graph_max_size
 
         config = VllmConfig(
             model_config=model_config,
