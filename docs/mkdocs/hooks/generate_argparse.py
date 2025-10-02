@@ -32,8 +32,9 @@ def auto_mock(module, attr, max_mocks=50):
     for _ in range(max_mocks):
         try:
             # First treat attr as an attr, then as a submodule
-            return getattr(importlib.import_module(module), attr,
-                           importlib.import_module(f"{module}.{attr}"))
+            with patch("importlib.metadata.version", return_value="0.0.0"):
+                return getattr(importlib.import_module(module), attr,
+                               importlib.import_module(f"{module}.{attr}"))
         except importlib.metadata.PackageNotFoundError as e:
             raise e
         except ModuleNotFoundError as e:
@@ -165,6 +166,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
     # Generate documentation for each parser
     for stem, parser in parsers.items():
         doc_path = ARGPARSE_DOC_DIR / f"{stem}.md"
-        with open(doc_path, "w") as f:
-            f.write(parser.format_help())
+        # Specify encoding for building on Windows
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(super(type(parser), parser).format_help())
         logger.info("Argparse generated: %s", doc_path.relative_to(ROOT_DIR))

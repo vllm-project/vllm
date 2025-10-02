@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 MLA backends without GPUModelRunner dependency."""
+from typing import Optional, Union
 
 import pytest
 import torch
@@ -10,13 +11,14 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
+from vllm import _custom_ops as ops
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
-    _Backend.CUTLASS_MLA, _Backend.FLASHMLA_VLLM_V1, _Backend.FLASH_ATTN_MLA,
-    _Backend.TRITON_MLA_VLLM_V1
+    _Backend.CUTLASS_MLA, _Backend.FLASHMLA, _Backend.FLASH_ATTN_MLA,
+    _Backend.TRITON_MLA
 ]
 
 # Remove CUTLASS_MLA from the list if not using sm100
@@ -73,13 +75,14 @@ def create_and_prepopulate_kv_cache(
         kv_c_contexts: list[torch.Tensor],
         k_pe_contexts: list[torch.Tensor],
         block_size: int,
-        num_kv_heads: int,
         head_size: int,
         dtype: torch.dtype,
         device: torch.device,
         num_blocks: int,
         common_attn_metadata: CommonAttentionMetadata,
-        randomize_blocks: bool = True) -> torch.Tensor:
+        randomize_blocks: bool = True,
+        kv_cache_dtype: Optional[str] = None,
+        scale: Union[float, torch.Tensor] = 1.0) -> torch.Tensor:
     """Create and prepopulate an MLA KV cache with context data.
     
     Args:
@@ -87,7 +90,6 @@ def create_and_prepopulate_kv_cache(
         k_pe_contexts: List of key positional embedding context tensors
                        for each sequence
         block_size: Size of each block
-        num_kv_heads: Number of KV heads (should be 1 for MLA)
         head_size: Size of each head (latent dimension)
         dtype: Data type for the cache
         device: Device to create the cache on
@@ -95,6 +97,11 @@ def create_and_prepopulate_kv_cache(
         common_attn_metadata: Common attention metadata
         randomize_blocks: Whether to randomly permute blocks 
                           or use sequential order
+        kv_cache_dtype: Optional kv cache dtype string. When set to
+                        "fp8_ds_mla" the cache is populated using the
+                        fp8 DeepSeek MLA layout via concat_and_cache_mla.
+        scale: Scaling factor forwarded to concat_and_cache_mla when the
+               fp8 cache layout is requested.
         
     Returns:
         MLA KV cache tensor
@@ -107,23 +114,61 @@ def create_and_prepopulate_kv_cache(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
-    # Create MLA KV cache: (num_blocks, block_size, head_size)
-    kv_cache = torch.empty(num_blocks,
-                           block_size,
-                           head_size,
-                           dtype=dtype,
-                           device=device)
-    kv_cache_flat = kv_cache.view(-1, head_size)
+    use_fp8_ds_mla = kv_cache_dtype == "fp8_ds_mla"
+
+    if use_fp8_ds_mla:
+        if not kv_c_contexts:
+            raise ValueError("kv_c_contexts cannot be empty when using"
+                             " fp8_ds_mla cache dtype")
+        kv_lora_rank = kv_c_contexts[0].shape[-1]
+        rope_dim = k_pe_contexts[0].shape[-1]
+        entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
+        kv_cache = torch.zeros(num_blocks,
+                               block_size,
+                               entry_size,
+                               dtype=torch.uint8,
+                               device=device)
+        scale_tensor = (scale
+                        if isinstance(scale, torch.Tensor) else torch.tensor(
+                            scale, dtype=torch.float32, device=device))
+        scale_tensor = scale_tensor.to(device=device, dtype=torch.float32)
+    else:
+        # Create MLA KV cache: (num_blocks, block_size, head_size)
+        kv_cache = torch.empty(num_blocks,
+                               block_size,
+                               head_size,
+                               dtype=dtype,
+                               device=device)
+        kv_cache_flat = kv_cache.view(-1, head_size)
 
     # Populate the cache with the context tokens
     # Start from block_id=1 since block_id=0 is considered the null block
     start_block_idx = 1
     for i in range(batch_size):
         kv_c_context, k_pe_context = kv_c_contexts[i], k_pe_contexts[i]
-        kv_context = torch.cat([kv_c_context, k_pe_context.squeeze(1)], dim=-1)
+        context_len = kv_c_context.shape[0]
+        if context_len == 0:
+            start_block_idx += cdiv(int(seq_lens[i]), block_size)
+            continue
+
         start = start_block_idx * block_size
-        end = start + kv_context.shape[0]
-        kv_cache_flat[start:end, ...] = kv_context
+
+        if use_fp8_ds_mla:
+            slots = torch.arange(context_len, device=device,
+                                 dtype=torch.long) + start
+            ops.concat_and_cache_mla(
+                kv_c_context,
+                k_pe_context.squeeze(1),
+                kv_cache,
+                slots,
+                kv_cache_dtype="fp8_ds_mla",
+                scale=scale_tensor,
+            )
+        else:
+            kv_context = torch.cat(
+                [kv_c_context, k_pe_context.squeeze(1)], dim=-1)
+            end = start + kv_context.shape[0]
+            kv_cache_flat[start:end, ...] = kv_context
 
         # Stay block aligned and allocate enough blocks for the new tokens
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
@@ -284,8 +329,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     seq_lens = batch_spec.seq_lens
     query_lens = batch_spec.query_lens
     num_q_heads = vllm_config.model_config.get_num_attention_heads(
-        vllm_config.parallel_config)
-    num_kv_heads = vllm_config.model_config.get_num_kv_heads(
         vllm_config.parallel_config)
     head_size = vllm_config.model_config.get_head_size()
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
@@ -476,7 +519,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         kv_c_contexts=kv_c_contexts,
         k_pe_contexts=k_pe_contexts,
         block_size=block_size,
-        num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
         device=device,

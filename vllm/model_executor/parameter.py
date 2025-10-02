@@ -12,7 +12,6 @@ from torch.nn import Parameter
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
-from vllm.model_executor.utils import _make_synced_weight_loader
 
 __all__ = [
     "BasevLLMParameter", "PackedvLLMParameter", "PerTensorScaleParameter",
@@ -53,14 +52,32 @@ class BasevLLMParameter(Parameter):
         # This sometimes causes OOM errors during model loading. To avoid this,
         # we sync the param tensor after its weight loader is called.
         from vllm.platforms import current_platform
-        if current_platform.is_tpu():
-            weight_loader = _make_synced_weight_loader(weight_loader)
+        if current_platform.use_sync_weight_loader():
+            weight_loader = current_platform.make_synced_weight_loader(
+                weight_loader)
 
         self._weight_loader = weight_loader
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
 
     @property
-    def weight_loader(self):
+    def weight_loader(self) -> Callable:
+        # NOTE(@ksayers) some models such as mamba_mixer2 override the
+        # weight loader to support custom loading. In the future, model-specific
+        # weight loading should be implemented via Model.load_weights. In the
+        # meantime, support deleting and overriding `weight_loader`` attribute
+        if self._weight_loader is None:
+            raise AttributeError(f"{self.__class__.__name__} weight_loader "
+                                 "attribute has been deleted")
         return self._weight_loader
+
+    @weight_loader.setter
+    def weight_loader(self, value: Callable):
+        self._weight_loader = value
+
+    @weight_loader.deleter
+    def weight_loader(self):
+        self._weight_loader = None  # type: ignore[assignment]
 
     def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
         cond1 = self.data.ndim == 1 and self.data.numel() == 1
@@ -95,6 +112,12 @@ class BasevLLMParameter(Parameter):
         assert shard_id in qkv_idxs
         return qkv_idxs[shard_id]
 
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        return super().__torch_function__(func, types, args, kwargs)
+
 
 class _ColumnvLLMParameter(BasevLLMParameter):
     """
@@ -116,10 +139,10 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         return self._output_dim
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
         shard_size = self.data.shape[self.output_dim]
         loaded_weight = loaded_weight.narrow(self.output_dim,
-                                             tp_rank * shard_size, shard_size)
+                                             self.tp_rank * shard_size,
+                                             shard_size)
         assert self.data.shape == loaded_weight.shape
         self.data.copy_(loaded_weight)
 
@@ -127,6 +150,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         shard_offset = kwargs.get("shard_offset")
         shard_size = kwargs.get("shard_size")
+
         # TODO: move these to PackedColumnParameter and PackedvLLMParameter
         if isinstance(
                 self,
@@ -137,11 +161,11 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         param_data = self.data
 
-        tp_rank = get_tensor_model_parallel_rank()
         param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
         loaded_weight = loaded_weight.narrow(self.output_dim,
-                                             tp_rank * shard_size, shard_size)
+                                             self.tp_rank * shard_size,
+                                             shard_size)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
@@ -161,8 +185,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
                 shard_offset=shard_offset, shard_size=shard_size)
 
         param_data = self.data
-        tp_rank = get_tensor_model_parallel_rank()
-        shard_id = tp_rank if shard_id == "q" else tp_rank // num_heads
+        shard_id = (self.tp_rank if shard_id == "q" else self.tp_rank //
+                    num_heads)
         param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
         loaded_weight = loaded_weight.narrow(self.output_dim,
@@ -189,10 +213,10 @@ class RowvLLMParameter(BasevLLMParameter):
         return self._input_dim
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
         shard_size = self.data.shape[self.input_dim]
         loaded_weight = loaded_weight.narrow(self.input_dim,
-                                             tp_rank * shard_size, shard_size)
+                                             self.tp_rank * shard_size,
+                                             shard_size)
 
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
@@ -413,9 +437,6 @@ class SharedWeightParameter(BasevLLMParameter):
             "output_dim": output_dim,
             "weight_loader": self._fake_weight_loader
         }
-
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
 
         if self.tp_size > 1:
             raise NotImplementedError(f"{self.__class__.__name__} does not "
