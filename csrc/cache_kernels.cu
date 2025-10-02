@@ -457,8 +457,8 @@ __global__ void concat_and_cache_ds_mla_kernel(
   // Load the NoPE elements for this thread into registers
   const int64_t src_idx_start = token_idx * kv_c_stride + (threadIdx.x * 8);
   // Vectorized load of eight 16-bit values, performed as an int4 load
-  const scalar_t* vals =
-      reinterpret_cast<const scalar_t*>(&kv_c[src_idx_start]);
+  const int4 vals_i4 = *reinterpret_cast<const int4*>(&kv_c[src_idx_start]);
+  const scalar_t* vals = reinterpret_cast<const scalar_t*>(&vals_i4);
 
   // Max absolute value of this thread's elements
   float max_abs = fmaxf(fmaxf(fmaxf(fabsf(vals[0]), fabsf(vals[1])),
