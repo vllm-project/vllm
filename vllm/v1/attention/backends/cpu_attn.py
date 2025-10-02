@@ -15,9 +15,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.gpu_input_batch import InputBatch
 
 try:
     import intel_extension_for_pytorch.llm.modules as ipex_modules
@@ -323,6 +321,7 @@ class TorchSDPAMetadata(AttentionMetadata):
 
 
 class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
+    reorder_batch_threshold: int = 1
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device) -> None:
@@ -330,63 +329,12 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
         self.scheduler_config = vllm_config.scheduler_config
 
-        # For reorder
-        self.reorder_prompt_req_index_list = np.empty(
-            vllm_config.scheduler_config.max_num_seqs, dtype=np.int64)
-        self.reorder_decode_req_index_list = np.empty(
-            vllm_config.scheduler_config.max_num_seqs, dtype=np.int64)
-        self.num_prompt_req: int = 0
-
         self.seq_start_loc_cpu = torch.zeros(
             vllm_config.scheduler_config.max_num_seqs + 1,
             dtype=torch.int32,
             device="cpu",
         )
         self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
-
-    def reorder_batch(self, input_batch: InputBatch,
-                      scheduler_output: SchedulerOutput) -> bool:
-        prompt_list_idx = 0
-        decode_list_idx = 0
-        for req_index in range(input_batch.num_reqs):
-            if input_batch.num_computed_tokens_cpu[
-                    req_index] < input_batch.num_prompt_tokens[req_index]:
-                # prompt stage
-                self.reorder_prompt_req_index_list[prompt_list_idx] = req_index
-                prompt_list_idx += 1
-            else:
-                # decode stage
-                self.reorder_decode_req_index_list[decode_list_idx] = req_index
-                decode_list_idx += 1
-        assert decode_list_idx + prompt_list_idx == input_batch.num_reqs
-
-        # Update prompt requests number
-        self.num_prompt_req = prompt_list_idx
-
-        reorder_req_num = 0
-        for req_index in range(decode_list_idx):
-            if self.reorder_decode_req_index_list[req_index] < prompt_list_idx:
-                reorder_req_num += 1
-            else:
-                break
-
-        if reorder_req_num == 0:
-            return False
-
-        reorder_prompt_list = (
-            self.reorder_prompt_req_index_list[:prompt_list_idx]
-            [-reorder_req_num:])
-        reorder_decode_list = (
-            self.reorder_decode_req_index_list[:decode_list_idx]
-            [:reorder_req_num])
-        assert reorder_decode_list.size == reorder_prompt_list.size
-
-        for idx in range(reorder_req_num):
-            prompt_req_index = reorder_prompt_list[idx].item()
-            decode_req_index = reorder_decode_list[idx].item()
-            input_batch.swap_states(prompt_req_index, decode_req_index)
-
-        return True
 
     def build(self,
               common_prefix_len: int,
@@ -397,21 +345,33 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         seq_lens_np = seq_lens_cpu.numpy()
-        num_prompt_req = self.num_prompt_req
-        max_prefill_seq_len = seq_lens_np[:num_prompt_req].max().item(
+
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        query_start_loc_np = query_start_loc_cpu.numpy()
+        num_scheduled_tokens = query_start_loc_np[
+            1:num_reqs + 1] - query_start_loc_np[0:num_reqs]
+        num_decode_req = 0
+        for i in range(common_attn_metadata.num_reqs):
+            if num_scheduled_tokens[i] != 1:
+                break
+            num_decode_req += 1
+        num_prompt_req = num_reqs - num_decode_req
+
+        max_prefill_seq_len = seq_lens_np[num_decode_req:num_reqs].max().item(
         ) if num_prompt_req > 0 else 0
-        max_decode_seq_len = seq_lens_np[num_prompt_req:num_reqs].max().item(
+        max_decode_seq_len = seq_lens_np[:num_decode_req].max().item(
         ) if num_prompt_req < num_reqs else 0
         self.seq_start_loc_np[0] = 0
         np.cumsum(seq_lens_np, out=self.seq_start_loc_np[1:num_reqs + 1])
 
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        num_prefill_tokens = int(query_start_loc_cpu[num_prompt_req].item())
-        num_decode_tokens = int(query_start_loc_cpu[num_reqs].item() -
-                                num_prefill_tokens)
+        num_decode_tokens = int(query_start_loc_cpu[num_decode_req].item())
+        num_prefill_tokens = int(query_start_loc_cpu[num_reqs].item() -
+                                 num_decode_tokens)
 
         slot_mapping = common_attn_metadata.slot_mapping.long()
         block_table_tensor = common_attn_metadata.block_table_tensor
+        query_start_loc_np = query_start_loc_cpu.numpy()
+        query_start_loc_np[num_decode_req:num_reqs + 1] -= num_decode_tokens
 
         attn_metadata = TorchSDPAMetadata(
             num_prefills=num_prompt_req,
@@ -420,18 +380,18 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
             slot_mapping=slot_mapping,
             # to ensure inference when chunked_prefill is disabled
             seq_lens=seq_lens_cpu.tolist(),
-            seq_lens_tensor=seq_lens_cpu[num_prompt_req:num_reqs],  # decode
+            seq_lens_tensor=seq_lens_cpu[:num_decode_req],  # decode
             max_decode_seq_len=max_decode_seq_len,  # decode
-            block_tables=block_table_tensor[num_prompt_req:num_reqs],  # decode
+            block_tables=block_table_tensor[:num_decode_req],  # decode
             chunked_prefill=self.scheduler_config.chunked_prefill_enabled,
             max_query_len=max_query_len,
             max_kv_len=max_prefill_seq_len,
-            prefill_query_start_loc=query_start_loc_cpu[:num_prompt_req +
-                                                        1],  # prefill
-            kv_start_loc=self.seq_start_loc_cpu[:num_prompt_req +
+            prefill_query_start_loc=query_start_loc_cpu[
+                num_decode_req:num_reqs + 1],  # prefill
+            kv_start_loc=self.seq_start_loc_cpu[num_decode_req:num_reqs +
                                                 1],  # prefill
-            prefill_block_tables=block_table_tensor[:
-                                                    num_prompt_req],  # prefill
+            prefill_block_tables=block_table_tensor[
+                num_decode_req:num_reqs],  # prefill
             query_start_loc=query_start_loc_cpu[:num_reqs +
                                                 1],  # for logits index
         )
@@ -596,8 +556,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 import intel_extension_for_pytorch.llm.modules as ipex_modules
                 output = torch.empty_like(query)
                 ipex_modules.PagedAttention.flash_attn_varlen_func(
-                    output[:prefill_meta.num_prefill_tokens, :, :],
-                    query[:prefill_meta.num_prefill_tokens, :, :],
+                    output[prefill_meta.num_decode_tokens:, :, :],
+                    query[prefill_meta.num_decode_tokens:, :, :],
                     key_cache,
                     value_cache,
                     prefill_meta.prefill_query_start_loc,
@@ -621,8 +581,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             ) = decode_meta.get_seq_len_block_table_args(attn_type)
 
             self.paged_attn_impl.forward_decode(
-                output[attn_metadata.num_prefill_tokens:, :, :],
-                query[attn_metadata.num_prefill_tokens:, :, :],
+                output[:attn_metadata.num_decode_tokens, :, :],
+                query[:attn_metadata.num_decode_tokens, :, :],
                 key_cache,
                 value_cache,
                 block_tables_arg,
