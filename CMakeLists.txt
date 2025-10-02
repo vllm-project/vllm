@@ -83,6 +83,16 @@ endif()
 #
 find_package(Torch REQUIRED)
 
+# Warn on +PTX in TORCH_CUDA_ARCH_LIST (ignored by our per-file arch setup)
+if(DEFINED ENV{TORCH_CUDA_ARCH_LIST})
+  string(FIND "$ENV{TORCH_CUDA_ARCH_LIST}" "+PTX" _has_ptx)
+  if(NOT _has_ptx EQUAL -1)
+    message(WARNING
+      "Detected '+PTX' in TORCH_CUDA_ARCH_LIST; PTX builds are not supported "
+      "via global arch list in vLLM and will be ignored. Remove '+PTX' to silence.")
+  endif()
+endif()
+
 # Supported NVIDIA architectures.
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND

@@ -1,0 +1,101 @@
+name: Local editable install
+
+on:
+  pull_request:
+    paths:
+      - '**/*.py'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'requirements/**'
+      - 'setup.py'
+      - '.github/workflows/local-editable.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - '**/*.py'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'requirements/**'
+      - 'setup.py'
+      - '.github/workflows/local-editable.yml'
+
+jobs:
+  editable-install:
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cpu, cuda]
+        include:
+          - backend: cpu
+            python: '3.10'
+            runner: 'ubuntu-latest'
+          - backend: cuda
+            python: '3.10'
+            cuda: '12.8'
+            torch: '2.8.0'
+            runner: 'ubuntu-22.04'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Upgrade build tooling
+        run: |
+          python -m pip install -U pip wheel setuptools cmake ninja packaging
+
+      - name: Install CUDA toolkit
+        if: matrix.backend == 'cuda'
+        run: |
+          bash .github/workflows/scripts/cuda-install.sh "${{ matrix.cuda }}" "${{ matrix.runner }}"
+
+      - name: Install PyTorch
+        run: |
+          if [ "${{ matrix.backend }}" = "cuda" ]; then
+            CU=$(echo "${{ matrix.cuda }}" | tr -d '.')
+            python -m pip install torch=="${{ matrix.torch }}+cu${CU}" --extra-index-url "https://download.pytorch.org/whl/cu${CU}"
+          else
+            python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          fi
+
+      - name: Editable install (full source build)
+        env:
+          VLLM_TARGET_DEVICE: ${{ matrix.backend }}
+          MAX_JOBS: '1'
+          CMAKE_BUILD_TYPE: Release
+          VERBOSE: '0'
+          TORCH_CUDA_ARCH_LIST: ${{ matrix.backend == 'cuda' && '8.0 8.9' || '' }}
+        run: |
+          if [ "${{ matrix.backend }}" = "cuda" ]; then
+            export CUDA_HOME=/usr/local/cuda-${{ matrix.cuda }}
+            export PATH=${CUDA_HOME}/bin:$PATH
+            export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:$LD_LIBRARY_PATH
+          fi
+          python -m pip install -e .
+
+      - name: Sanity check import
+        run: |
+          python - <<'PY'
+          import vllm, importlib, torch
+          print("vllm:", vllm.__version__)
+          print("torch:", torch.__version__, "cuda:", torch.version.cuda)
+          mod = importlib.import_module("vllm._C")
+          print("_C loaded:", hasattr(mod, "__doc__"))
+          PY
+
+      - name: Sanity check flash-attn (CUDA)
+        if: matrix.backend == 'cuda'
+        run: |
+          python - <<'PY'
+          import importlib
+          import sys
+          try:
+              importlib.import_module("vllm.vllm_flash_attn._vllm_fa2_C")
+              print("_vllm_fa2_C loaded: True")
+          except Exception as e:
+              print("_vllm_fa2_C import failed:", e)
+              sys.exit(1)
+          PY
