@@ -173,7 +173,7 @@ def replace_linear_class(
     )
 
 
-def replace_rms_norm_class(rms_norm: nn.Module) -> RMSNorm:
+def replace_rms_norm_class(rms_norm: nn.Module, hidden_size: int) -> RMSNorm:
     """Replace a Transformers RMSNorm with vLLM's RMSNorm.
 
     This method assumes:
@@ -184,17 +184,16 @@ def replace_rms_norm_class(rms_norm: nn.Module) -> RMSNorm:
     and Transformers doesn't appear to have the same concept.
     """
     kwargs = {
+        "hidden_size": hidden_size,
         "eps": getattr_iter(rms_norm, ("eps", "variance_epsilon"), 1e-6),
         "has_weight": getattr(rms_norm, "with_scale", True)
     }
     if (weight := getattr(rms_norm, "weight", None)) is not None:
         # If weight is a Parameter, get its data tensor
         weight = getattr(weight, "data", weight)
-        kwargs["hidden_size"] = weight.numel()
         kwargs["dtype"] = weight.dtype
     else:
         # No weight, fall back to weightless RMSNorm
-        kwargs["hidden_size"] = 1
         kwargs["has_weight"] = False
     return RMSNorm(**kwargs)
 
@@ -636,7 +635,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                                                       self.quant_config,
                                                       prefix=qual_name)
                 elif child_module.__class__.__name__.endswith("RMSNorm"):
-                    new_module = replace_rms_norm_class(child_module)
+                    new_module = replace_rms_norm_class(
+                        child_module, self.config.hidden_size)
                 else:
                     _recursive_replace(child_module, prefix=qual_name)
 
