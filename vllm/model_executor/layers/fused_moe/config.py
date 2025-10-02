@@ -439,6 +439,7 @@ def fp8_w8a8_moe_quant_config(
                                     per_out_ch_quant=per_out_ch_quant,
                                     block_shape=block_shape)
 
+
 def int8_w8a8_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
