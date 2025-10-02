@@ -213,27 +213,9 @@ class DeepseekV2MoE(nn.Module):
                                     self.n_local_physical_experts)
 
         if config.n_shared_experts is None:
-            self.experts = FusedMoE(
-                num_experts=config.n_routed_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                reduce_results=True,
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                use_grouped_topk=True,
-                num_expert_group=config.n_group,
-                topk_group=config.topk_group,
-                prefix=f"{prefix}.experts",
-                scoring_func=config.scoring_func,
-                # we do scaling outside, set factor to 1.0 to avoid double mul
-                routed_scaling_factor=1.0,
-                e_score_correction_bias=self.gate.e_score_correction_bias,
-                enable_eplb=self.enable_eplb,
-                num_redundant_experts=self.n_redundant_experts,
-                is_sequence_parallel=self.is_sequence_parallel,
-            )
             self.shared_experts = None
+            fused_output_scaling_factor = 1.0
+            shared_output_scaling_factor = 1.0
         else:
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
@@ -244,7 +226,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 is_sequence_parallel=self.is_sequence_parallel,
-                reduce_results=False,
+                reduce_results=False,  # XXXXX
                 prefix=f"{prefix}.shared_experts",
             )
 
@@ -258,30 +240,28 @@ class DeepseekV2MoE(nn.Module):
                 shared_output_scaling_factor = (1. /
                                                 self.routed_scaling_factor)
 
-            self.experts = SharedFusedMoE(
-                use_overlapped=True,  # Debugging
-                shared_experts=self.shared_experts,
-                fused_output_scaling_factor=fused_output_scaling_factor,
-                shared_output_scaling_factor=shared_output_scaling_factor,
-                num_experts=config.n_routed_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                reduce_results=True,  # remove?
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                use_grouped_topk=True,
-                num_expert_group=config.n_group,
-                topk_group=config.topk_group,
-                prefix=f"{prefix}.experts",
-                scoring_func=config.scoring_func,
-                # we do scaling outside, set factor to 1.0 to avoid double mul
-                routed_scaling_factor=1.0,
-                e_score_correction_bias=self.gate.e_score_correction_bias,
-                enable_eplb=self.enable_eplb,
-                num_redundant_experts=self.n_redundant_experts,
-                is_sequence_parallel=self.is_sequence_parallel,
-            )
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_experts,
+            fused_output_scaling_factor=fused_output_scaling_factor,
+            shared_output_scaling_factor=shared_output_scaling_factor,
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=config.n_group,
+            topk_group=config.topk_group,
+            prefix=f"{prefix}.experts",
+            scoring_func=config.scoring_func,
+            # we do scaling outside, set factor to 1.0 to avoid double mul
+            routed_scaling_factor=1.0,
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -301,7 +281,6 @@ class DeepseekV2MoE(nn.Module):
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
 
-        # TODO: move to layer
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0)

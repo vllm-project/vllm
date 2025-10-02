@@ -36,8 +36,7 @@ from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -48,6 +47,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -267,22 +267,6 @@ class BailingMoE(nn.Module):
             # default value for scoring_func
             self.score_function = "softmax"
 
-        self.experts = FusedMoE(
-            num_experts=self.num_experts,
-            top_k=self.top_k,
-            hidden_size=self.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=self.norm_expert_prob,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            scoring_func=self.score_function,
-            e_score_correction_bias=self.gate.expert_bias,
-            num_expert_group=self.n_group,
-            topk_group=self.topk_group,
-            use_grouped_topk=self.use_grouped_topk,
-        )
-
         if self.num_shared_experts > 0:
             if hasattr(config, "moe_shared_expert_intermediate_size"):
                 intermediate_size = config.moe_shared_expert_intermediate_size
@@ -295,14 +279,45 @@ class BailingMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts")
+
+            self.experts = SharedFusedMoE(
+                shared_experts=self.shared_experts,
+                fused_output_scaling_factor=self.routed_scaling_factor,
+                shared_output_scaling_factor=1.0,
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+                hidden_size=self.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                renormalize=self.norm_expert_prob,
+                quant_config=quant_config,
+                prefix=f"{prefix}.experts",
+                scoring_func=self.score_function,
+                e_score_correction_bias=self.gate.expert_bias,
+                num_expert_group=self.n_group,
+                topk_group=self.topk_group,
+                use_grouped_topk=self.use_grouped_topk,
+            )
         else:
+            self.experts = FusedMoE(
+                num_experts=self.num_experts,
+                top_k=self.top_k,
+                hidden_size=self.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                renormalize=self.norm_expert_prob,
+                quant_config=quant_config,
+                prefix=f"{prefix}.experts",
+                scoring_func=self.score_function,
+                e_score_correction_bias=self.gate.expert_bias,
+                num_expert_group=self.n_group,
+                topk_group=self.topk_group,
+                use_grouped_topk=self.use_grouped_topk,
+            )
             self.shared_experts = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        if self.shared_experts:
-            shared_output = self.shared_experts(hidden_states)
+
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states.to(self.router_dtype))
         router_logits = router_logits.to(hidden_states.dtype)
@@ -310,14 +325,6 @@ class BailingMoE(nn.Module):
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
 
-        final_hidden_states *= self.routed_scaling_factor
-
-        if self.shared_experts:
-            final_hidden_states = final_hidden_states + shared_output
-
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_size)
 
 

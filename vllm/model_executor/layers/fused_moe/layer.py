@@ -983,10 +983,7 @@ class FusedMoE(CustomOp):
                     if dp_size is not None else get_dp_group().world_size)
 
         self.is_sequence_parallel = is_sequence_parallel
-        if self.is_sequence_parallel:
-            self.sp_size = tp_size_
-
-        #print(f"TP_SIZE, DP_SIZE = {tp_size_, dp_size_, self.is_sequence_parallel}")
+        self.sp_size = tp_size_ if is_sequence_parallel else 1
 
         self.moe_parallel_config: FusedMoEParallelConfig = (
             FusedMoEParallelConfig.make(
@@ -1147,6 +1144,9 @@ class FusedMoE(CustomOp):
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
         if self.use_dp_chunking:
+            states_shape: tuple[int, ...]
+            logits_shape: tuple[int, ...]
+
             if vllm_config.parallel_config.enable_dbo:
                 states_shape = (2, moe.max_num_tokens, self.hidden_size)
                 logits_shape = (2, moe.max_num_tokens, num_experts)
@@ -1207,8 +1207,7 @@ class FusedMoE(CustomOp):
         # only when data parallelism (DP) is enabled.
         return (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
-                or (self.dp_size > 1
-                    and self.moe_config.use_flashinfer_cutlass_kernels))
+                or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels))
 
     @property
     def use_pplx_kernels(self):
@@ -1974,10 +1973,12 @@ class FusedMoE(CustomOp):
             assert full_shared_final_hidden_states is not None
 
             # Probably wrong
-            if False and self.tp_size > 1 and self.must_reduce_shared_expert_outputs(
-            ):
-                full_shared_final_hidden_states = tensor_model_parallel_all_reduce(
-                    full_shared_final_hidden_states)
+            # if (False and
+            #     self.tp_size > 1 and
+            #     self.must_reduce_shared_expert_outputs()):
+            #     full_shared_final_hidden_states = (
+            #         tensor_model_parallel_all_reduce(
+            #             full_shared_final_hidden_states))
 
             assert self.shared_fused_combine is not None
             full_fused_final_hidden_states = self.shared_fused_combine(
@@ -2000,7 +2001,8 @@ class FusedMoE(CustomOp):
 
         self.ensure_moe_quant_config()
 
-        #print(f"GOT HERE 0 {self.use_chunking} TP={self.tp_size} DP={self.dp_size} EP={self.ep_size} ")
+        # print(f"GOT HERE 0 {self.use_chunking} TP={self.tp_size}"
+        #       f"DP={self.dp_size} EP={self.ep_size} ")
 
         if self.use_dp_chunking:
             return self.forward_impl_chunked(hidden_states, router_logits)
@@ -2078,7 +2080,8 @@ class FusedMoE(CustomOp):
         if self.shared_experts is not None:
             assert self.shared_fused_combine is not None
 
-            #print(f"GOT HERE 2 {self.reduce_results} {self.tp_size > 1 or self.ep_size > 1}")
+            # print(f"GOT HERE 2 {self.reduce_results} "
+            #       f"{self.tp_size > 1 or self.ep_size > 1}")
 
             must_reduce = self.must_reduce_shared_expert_outputs()
             final_hidden_states = (combine_and_reduce_output(
@@ -2091,15 +2094,17 @@ class FusedMoE(CustomOp):
                 final_hidden_states[0], final_hidden_states[1])
         elif self.zero_expert_num is not None and self.zero_expert_num > 0:
             assert isinstance(final_hidden_states, torch.Tensor)
-            return combine_and_reduce_output(final_hidden_states) + zero_expert_result
+            return combine_and_reduce_output(
+                final_hidden_states) + zero_expert_result
 
-            if False and (self.ep_size > 1 or self.tp_size > 1):
-                #print(f"GOT HERE 3 {self.must_reduce_shared_expert_outputs()}")
-                return self.maybe_all_reduce_tensor_model_parallel(
-                    final_hidden_states)
-            else:
-                #print("GOT HERE 4")
-                return final_hidden_states
+            # TODO: delete??
+            # if False and (self.ep_size > 1 or self.tp_size > 1):
+            #     print(f"GOT HERE 3")
+            #     return self.maybe_all_reduce_tensor_model_parallel(
+            #         final_hidden_states)
+            # else:
+            #     #print("GOT HERE 4")
+            #     return final_hidden_states
         else:
             #print("GOT HERE A")
             assert not isinstance(final_hidden_states, tuple)

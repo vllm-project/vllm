@@ -32,7 +32,7 @@ class SharedFusedMoE(FusedMoE):
 
     def __init__(
         self,
-        shared_experts: torch.nn.Module,
+        shared_experts: Optional[torch.nn.Module],
         use_overlapped: bool = True,
         fused_output_scaling_factor: float = 1.0,
         shared_output_scaling_factor: float = 1.0,
@@ -42,7 +42,8 @@ class SharedFusedMoE(FusedMoE):
         self._shared_experts = shared_experts
         self._shared_fused_combine = lambda a, b: self.post_process(a, b)
         self.use_overlapped = use_overlapped and not (
-            self.use_ep or self.use_flashinfer_cutlass_kernels)
+            self.use_ep or self.use_flashinfer_cutlass_kernels
+        ) and self.shared_experts is not None
         self.fused_output_scaling_factor = fused_output_scaling_factor
         self.shared_output_scaling_factor = shared_output_scaling_factor
 
@@ -60,7 +61,10 @@ class SharedFusedMoE(FusedMoE):
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
         if not self.use_overlapped:
-            shared_out = self._shared_experts(hidden_states)
+            if self._shared_experts is not None:
+                shared_out = self._shared_experts(hidden_states)
+            else:
+                shared_out = None
 
             # Reduce outputs if necessary, since the MLP should
             # have been created with reduce_results=False.
@@ -74,7 +78,12 @@ class SharedFusedMoE(FusedMoE):
                 router_logits=router_logits,
             )
 
-            output = self._shared_fused_combine(shared_out, fused_out)
+            if self.shared_experts is not None:
+                assert shared_out is not None
+                output = self._shared_fused_combine(shared_out, fused_out)
+            else:
+                assert self.shared_output_scaling_factor == 1.0
+                output = fused_out * self.fused_output_scaling_factor
 
             if self.tp_size > 1 or self.ep_size > 1:
                 output = self.maybe_all_reduce_tensor_model_parallel(output)
