@@ -176,19 +176,23 @@ def replace_rms_norm_class(rms_norm: nn.Module) -> RMSNorm:
     - Weight is stored as `weight`.
     - Epsilon is stored as `eps` or `variance_epsilon`.
     - `with_scale` indicates whether the layer has a weight (Gemma3n only).
-    - `var_hidden_size` is only ever used for Intern vision encoder.
+    - `var_hidden_size` is only ever used for Intern vision encoder in vLLM
+    and Transformers doesn't appear to have the same concept.
     """
-    weight = getattr(rms_norm, "weight", None)
-    weight: Optional[torch.Tensor] = getattr(weight, "data", weight)
-    # Return early if weight not found
-    if weight is None:
-        return rms_norm
-    # Construct the new RMSNorm
-    return RMSNorm(hidden_size=weight.numel(),
-                   eps=getattr_iter(rms_norm, ("eps", "variance_epsilon"),
-                                    1e-6),
-                   has_weight=getattr(rms_norm, "with_scale", True),
-                   dtype=weight.dtype)
+    kwargs = {
+        "eps": getattr_iter(rms_norm, ("eps", "variance_epsilon"), 1e-6),
+        "has_weight": getattr(rms_norm, "with_scale", True)
+    }
+    if (weight := getattr(rms_norm, "weight", None)) is not None:
+        # If weight is a Parameter, get its data tensor
+        weight = getattr(weight, "data", weight)
+        kwargs["hidden_size"] = weight.numel()
+        kwargs["dtype"] = weight.dtype
+    else:
+        # No weight, fall back to weightless RMSNorm
+        kwargs["hidden_size"] = 1
+        kwargs["has_weight"] = False
+    return RMSNorm(**kwargs)
 
 
 # Copied from `accelerate`
@@ -607,8 +611,13 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             raise ValueError(
                 f"{type(self.model)} does not support tensor parallel. {tip}")
 
+        # Prefix the patterns because we always start from `self.model`
+        tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
+
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
+                if child_name == "language_model":
+                    print("here")
                 new_module = child_module
                 qual_name = maybe_prefix(prefix, child_name)
                 if isinstance(child_module, nn.Linear):
