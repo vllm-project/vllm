@@ -1220,7 +1220,12 @@ class ModelConfig:
             "n_routed_experts",  # DeepSeek
             "num_local_experts",  # Mixtral
         ]
-        return getattr_iter(self.hf_text_config, num_expert_names, 0)
+        num_experts = getattr_iter(self.hf_text_config, num_expert_names, 0)
+        if isinstance(num_experts, list):
+            # Ernie VL's remote code uses list[int]...
+            # The values are always the same so we just take the first one.
+            return num_experts[0]
+        return num_experts
 
     def get_layers_start_end_indices(
             self, parallel_config: ParallelConfig) -> tuple[int, int]:
