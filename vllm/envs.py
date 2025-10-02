@@ -151,8 +151,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
-    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput",
-                                         "latency",
+    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency",
                                          "cutedsl"] = "throughput"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256

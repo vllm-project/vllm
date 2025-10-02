@@ -7,14 +7,12 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.utils.flashinfer import (flashinfer_cutedsl_grouped_gemm_nt_masked,
-                                   silu_and_mul_nvfp4_batched_quantize,
+                                   has_flashinfer_cutedsl_fused_moe,
                                    nvfp4_batched_quantize,
-                                   has_flashinfer_cutedsl_grouped_gemm_nt_masked)
+                                   silu_and_mul_nvfp4_batched_quantize)
 
 logger = init_logger(__name__)
 
@@ -50,7 +48,8 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(quant_config)
-        assert quant_config.quant_dtype == "nvfp4", ("Only nvfp4 quantization are currently supported.")
+        assert quant_config.quant_dtype == "nvfp4", (
+            "Only nvfp4 quantization are currently supported.")
         self.out_dtype = out_dtype
 
     @property
@@ -66,7 +65,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         # This refers to TP chunking; DP chunking is handled separately.
         # TODO(shuw@nvidia.com): Set to False to be consistent with batched_deep_gemm_moe
-        return True#False
+        return True  #False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
@@ -147,11 +146,11 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # K = K_BY_2 * 2
         # top_k_num = topk_ids.size(1)
         max_num_tokens = hidden_states.size(1)
-        
-        # workspace for gateup_output (E, M, N_TIMES_2), 
+
+        # workspace for gateup_output (E, M, N_TIMES_2),
         # high precision as hidden_states
         # gateup_output = _resize_cache(workspace13, (E, max_num_tokens, N_TIMES_2))
-        
+
         flashinfer_cutedsl_moe_masked(
             hidden_states=hidden_states,
             input_global_scale=self.a1_gscale,
@@ -167,6 +166,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
             out=output,
         )
 
+
 def get_cute_dtype(input: torch.Tensor) -> str:
     if input.dtype == torch.bfloat16:
         return "bfloat16"
@@ -176,6 +176,7 @@ def get_cute_dtype(input: torch.Tensor) -> str:
         return "float32"
     else:
         raise ValueError(f"Unsupported cute dtype {input.dtype}")
+
 
 def scaled_fp4_grouped_quant(
     input_tensor: torch.Tensor,
@@ -237,11 +238,11 @@ def scaled_fp4_grouped_quant(
     # --- re-layout blockscales ---
     # physical (l, rm, rk, 32, 4, 4) -> logical (32, 4, rm, 4, rk, l)
     output_scales = aq_sf.view(torch.float8_e4m3fn).view(
-        l, padded_m // 128, padded_k // 4, 32, 4, 4
-    )
+        l, padded_m // 128, padded_k // 4, 32, 4, 4)
     output_scales = output_scales.permute(3, 4, 1, 5, 2, 0)
 
     return output, output_scales
+
 
 def flashinfer_cutedsl_moe_masked(
     hidden_states: torch.Tensor,
@@ -286,19 +287,16 @@ def flashinfer_cutedsl_moe_masked(
     assert (
         w1_blockscale.dtype == torch.float8_e4m3fn
     ), f"w1_blockscale must be float8_e4m3fn, got {w1_blockscale.dtype}"
-    assert (
-        w1_alpha.dtype == torch.float32
-    ), f"w1_alpha must be float32, got {w1_alpha.dtype}"
+    assert (w1_alpha.dtype == torch.float32
+            ), f"w1_alpha must be float32, got {w1_alpha.dtype}"
     assert w2.dtype == torch.uint8, f"w2 must be uint8 (fp4 packed), got {w2.dtype}"
-    assert (
-        a2_global_scale.dtype == torch.float32
-    ), f"a2_global_scale must be float32, got {a2_global_scale.dtype}"
+    assert (a2_global_scale.dtype == torch.float32
+            ), f"a2_global_scale must be float32, got {a2_global_scale.dtype}"
     assert (
         w2_blockscale.dtype == torch.float8_e4m3fn
     ), f"w2_blockscale must be float8_e4m3fn, got {w2_blockscale.dtype}"
-    assert (
-        w2_alpha.dtype == torch.float32
-    ), f"w2_alpha must be float32, got {w2_alpha.dtype}"
+    assert (w2_alpha.dtype == torch.float32
+            ), f"w2_alpha must be float32, got {w2_alpha.dtype}"
 
     # === Assertions on shapes ===
     n = w2.shape[-1] * 2  # intermediate dimension
@@ -306,8 +304,8 @@ def flashinfer_cutedsl_moe_masked(
 
     assert w1.shape[-2] == 2 * n, f"w1 last-2 dim must be 2*n, got {w1.shape}"
     assert (
-        w1.shape[-1] * 2 == k
-    ), f"w1 last dim * 2 must equal k, got {w1.shape[-1]} vs k={k}"
+        w1.shape[-1] *
+        2 == k), f"w1 last dim * 2 must equal k, got {w1.shape[-1]} vs k={k}"
     assert w2.shape[-2:] == (
         k,
         n // 2,
@@ -317,14 +315,12 @@ def flashinfer_cutedsl_moe_masked(
         num_experts,
     ), f"input_global_scale must be (l,), got {input_global_scale.shape}"
     assert w1_alpha.shape == (
-        num_experts,
-    ), f"w1_alpha must be (l,), got {w1_alpha.shape}"
+        num_experts, ), f"w1_alpha must be (l,), got {w1_alpha.shape}"
     assert a2_global_scale.shape == (
         num_experts,
     ), f"a2_global_scale must be (l,), got {a2_global_scale.shape}"
     assert w2_alpha.shape == (
-        num_experts,
-    ), f"w2_alpha must be (l,), got {w2_alpha.shape}"
+        num_experts, ), f"w2_alpha must be (l,), got {w2_alpha.shape}"
 
     aq, aq_sf = scaled_fp4_grouped_quant(
         hidden_states,

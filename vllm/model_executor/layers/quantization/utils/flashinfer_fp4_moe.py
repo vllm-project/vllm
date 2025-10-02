@@ -9,17 +9,16 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
                                                          FusedMoEQuantConfig)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
     FlashInferCuteDSLExperts)
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    FlashInferExperts)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
-    has_flashinfer_cutlass_fused_moe,
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked
-)
+    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
+    has_flashinfer_cutlass_fused_moe)
 
 __all__ = [
     "is_flashinfer_fp4_cutlass_moe_available",
@@ -35,6 +34,7 @@ def is_flashinfer_fp4_cutlass_moe_available() -> bool:
             and has_flashinfer_cutlass_fused_moe()
             and current_platform.is_cuda()
             and current_platform.is_device_capability(100))
+
 
 def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
     """Return ``True`` when FlashInfer CUTEDSL NV-FP4 kernels can be used."""

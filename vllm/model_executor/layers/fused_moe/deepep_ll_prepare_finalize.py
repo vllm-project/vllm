@@ -5,9 +5,9 @@ from typing import Callable, Optional, Union
 import deep_ep
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
@@ -21,6 +21,7 @@ DEEPEP_QUANT_BLOCK_SIZE = 128
 DEEPEP_QUANT_BLOCK_SHAPE = [DEEPEP_QUANT_BLOCK_SIZE, DEEPEP_QUANT_BLOCK_SIZE]
 
 logger = init_logger(__name__)
+
 
 def dequant_fp8(expert_x_fp8: torch.Tensor,
                 expert_x_scales: torch.Tensor) -> torch.Tensor:
@@ -108,12 +109,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
             if quant_config.quant_dtype is not None:
                 assert x_scales is not None
-                x_scales = normalize_batched_scales_shape(x_scales, num_experts)
+                x_scales = normalize_batched_scales_shape(
+                    x_scales, num_experts)
         else:
             # BF16 dispatch path - no quantization
             # TODO(shuw@nvidia.com): enable nvfp4 dispatch once DEEPEP is ready.
             logger.info_once(
-                f"Using BF16 dispatch path for DeepEPLLPrepareAndFinalize")
+                "Using BF16 dispatch path for DeepEPLLPrepareAndFinalize")
             assert x.dtype == torch.bfloat16, (
                 "BF16 dispatch requires input to be in BF16")
             x_scales = None

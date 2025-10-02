@@ -934,7 +934,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
             )
-            import traceback
             # traceback.print_stack()
             #print(f"after prepare_async, prepare_ret:{prepare_ret}")
             # TODO(lucas): refactor this in the alternative schedules followup
