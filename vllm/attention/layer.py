@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import torch
 import torch.nn as nn
@@ -67,7 +67,51 @@ def check_upstream_fa_availability(dtype: torch.dtype):
     ) and current_platform.has_device_capability(80):
         from transformers.utils import is_flash_attn_2_available
         return is_flash_attn_2_available()
+    if current_platform.is_rocm():
+        try:
+            from importlib.util import find_spec
+            logger.info("Check Upstream flash attention is available.")
+            find_spec("flash_attn")
+            logger.info("Upstream flash attention is available.")
+            return True
+        except ImportError as e:
+            logger.info(
+                "Fail to import Upstream flash attention is available. %s", e)
+            return False
     return False
+
+
+def maybe_get_vit_flash_attn_backend(
+        attn_backend: _Backend,
+        use_upstream_fa: bool) -> tuple[_Backend, Callable]:
+    if attn_backend != _Backend.FLASH_ATTN and \
+        attn_backend != _Backend.ROCM_AITER_FA and \
+                check_upstream_fa_availability(torch.get_default_dtype()):
+        attn_backend = _Backend.FLASH_ATTN
+        use_upstream_fa = True
+
+    if current_platform.is_rocm() and \
+        attn_backend == _Backend.FLASH_ATTN:
+        use_upstream_fa = True
+
+    is_flash_attn_backend = attn_backend in {
+        _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
+    }
+
+    if is_flash_attn_backend:
+        if attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+        else:
+            if use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+        flash_attn_varlen_func = flash_attn_varlen_func
+    else:
+        flash_attn_varlen_func = None
+
+    return attn_backend, flash_attn_varlen_func
 
 
 class Attention(nn.Module, AttentionLayerBase):
@@ -414,7 +458,8 @@ class MultiHeadAttention(nn.Module):
             backend = _Backend.FLASH_ATTN
             use_upstream_fa = True
 
-        if current_platform.is_rocm() or current_platform.is_xpu():
+        # if current_platform.is_rocm() or current_platform.is_xpu():
+        if current_platform.is_xpu():
             # currently, only torch_sdpa is supported on rocm/xpu
             self.attn_backend = _Backend.TORCH_SDPA
         else:
