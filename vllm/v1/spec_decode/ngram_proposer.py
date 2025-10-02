@@ -36,7 +36,6 @@ class NgramProposer:
         # Threshold of total number of tokens in the batch to enable
         # multi-threading in numba batch propose.
         self.num_tokens_threshold = 8192
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
         cpu_count = os.cpu_count()
         # Max number of threads for numba parallel processing.
         if cpu_count:
@@ -46,9 +45,6 @@ class NgramProposer:
             # since other components like frontend (incl tokenization)
             # and Structured Outputs also use multiple threads.
             self.num_numba_thread_available = min(8, (cpu_count // 2))
-            # Divide by tp_size to ensure each tensor parallel rank
-            # has some threads since all ranks will run this.
-            self.num_numba_thread_available //= tp_size
         else:
             self.num_numba_thread_available = 1
 
