@@ -38,9 +38,10 @@ def format_chatml_messages(prompt: str):
 @pytest.mark.parametrize(
     "max_lora_rank,lora_extra_vocab_size",
     [
-        (8, 256),  # Standard case with extra vocab
-        (16, 512),  # Standard case with larger extra vocab
-        (8, 0),  # Test case: no vocab padding
+        (
+            8, 0
+        ),  # Qwen3 uses tied weights, only lora_extra_vocab_size=0 is supported
+        (16, 0),  # Test with different rank
     ])
 def test_qwen3_unembed_lora(max_lora_rank: int, lora_extra_vocab_size: int):
     """
@@ -192,6 +193,97 @@ def test_qwen3_unembed_lora_zero_vocab_padding():
 
     print(f"Output: {outputs[0].outputs[0].text}")
     print("Test passed with extra_vocab_size=0")
+
+
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("lora_extra_vocab_size", [256, 512])
+def test_qwen3_unembed_lora_untied_weights(lora_extra_vocab_size: int):
+    """
+    Test Qwen3 with unembed LoRA and extra vocab when tie_word_embeddings=False.
+
+    This test verifies that when tie_word_embeddings is disabled,
+    we can use lora_extra_vocab_size > 0.
+    """
+    import os
+    import tempfile
+
+    from transformers import AutoConfig
+
+    # Load the base config
+    config = AutoConfig.from_pretrained(MODEL_PATH)
+
+    # Modify to disable tied weights
+    config.tie_word_embeddings = False
+
+    # Save to a temporary directory
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config.save_pretrained(tmpdir)
+
+        # Copy the model weights to the temp directory
+        # (we only need config.json to be modified)
+        import shutil
+
+        from huggingface_hub import snapshot_download
+
+        # Download the original model
+        cache_dir = snapshot_download(MODEL_PATH)
+
+        # Copy all files except config.json
+        for filename in os.listdir(cache_dir):
+            if filename != "config.json":
+                src = os.path.join(cache_dir, filename)
+                dst = os.path.join(tmpdir, filename)
+                if os.path.isfile(src):
+                    shutil.copy2(src, dst)
+
+        # Initialize LLM with modified config
+        llm = LLM(
+            model=tmpdir,
+            enable_lora=True,
+            max_loras=2,
+            max_lora_rank=8,
+            lora_extra_vocab_size=lora_extra_vocab_size,
+            max_model_len=256,
+            gpu_memory_utilization=0.5,
+            enforce_eager=True,
+        )
+
+        # Test prompts
+        prompts = ["What is GitHub?", "Hello, my name is"]
+
+        # Sampling parameters
+        sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=32,
+        )
+
+        # Test with base model (no LoRA)
+        print("Testing base model without LoRA...")
+        base_outputs = llm.generate(prompts, sampling_params)
+        assert len(base_outputs) == len(prompts)
+        for output in base_outputs:
+            assert output.outputs[0].text
+
+        # Test with LoRA adapter
+        print(f"Testing with LoRA adapter - "
+              f"extra_vocab_size={lora_extra_vocab_size}...")
+        lora_request = LoRARequest("alice", 1, LORA_QWEN3_ALICE)
+
+        formatted_prompts = [format_chatml_messages(p) for p in prompts]
+
+        lora_outputs = llm.chat(
+            formatted_prompts,
+            sampling_params,
+            chat_template_kwargs={"enable_thinking": False},
+            lora_request=lora_request,
+            use_tqdm=False,
+        )
+        assert len(lora_outputs) == len(prompts)
+        for output in lora_outputs:
+            assert output.outputs[0].text
+
+        print(f"Test passed with extra_vocab_size={lora_extra_vocab_size} "
+              f"and tie_word_embeddings=False")
 
 
 @create_new_process_for_each_test()

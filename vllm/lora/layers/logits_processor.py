@@ -160,7 +160,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states)
+        # When LoRA is enabled, lm_head is wrapped, so we need to unwrap it
+        if hasattr(lm_head, 'base_layer'):
+            actual_lm_head = lm_head.base_layer
+        else:
+            actual_lm_head = lm_head
+        logits = actual_lm_head.quant_method.apply(actual_lm_head,
+                                                   hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
 
@@ -218,9 +224,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                                                           posinf=pos_inf,
                                                           neginf=neg_inf))
 
-            logits[:, self.base_layer.
-                   org_vocab_size:self.base_layer.org_vocab_size +
-                   lora_logits.shape[1]] = lora_logits
+            # Only assign if lora_logits has data (not empty after index_select)
+            if lora_logits.shape[1] > 0:
+                logits[:, self.base_layer.
+                       org_vocab_size:self.base_layer.org_vocab_size +
+                       lora_logits.shape[1]] = lora_logits
 
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_logits(
