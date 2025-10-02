@@ -440,6 +440,48 @@ class CudaPlatformBase(Platform):
         return cuda_device_count_stateless()
 
     @classmethod
+    def graph_pool_handle(cls):
+        """
+        Override to use CuMemAllocator's custom graph pool when sleep mode is enabled.
+        This allows CUDA graphs to be offloaded to CPU during sleep and restored during wake up.
+        """
+        try:
+            from vllm.config import get_current_vllm_config
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            vllm_config = get_current_vllm_config()
+
+            # Check for complete config initialization (fixes race condition)
+            if (vllm_config and
+                vllm_config.model_config and
+                hasattr(vllm_config.model_config, 'enable_sleep_mode') and
+                vllm_config.model_config.enable_sleep_mode):
+
+                logger.info("CUDA Platform: Using CuMemAllocator custom graph pool "
+                           "(sleep mode enabled)")
+                allocator = CuMemAllocator.get_instance()
+                return allocator.get_graph_pool_handle()
+            else:
+                # Enhanced logging for debugging
+                config_status = "None" if not vllm_config else "available"
+                model_config_status = "None" if not (vllm_config and vllm_config.model_config) else "available"
+                sleep_mode_status = "unknown"
+
+                if vllm_config and vllm_config.model_config and hasattr(vllm_config.model_config, 'enable_sleep_mode'):
+                    sleep_mode_status = str(vllm_config.model_config.enable_sleep_mode)
+
+                logger.debug("CUDA Platform: Using native PyTorch graph pool "
+                           f"(config={config_status}, model_config={model_config_status}, "
+                           f"sleep_mode={sleep_mode_status})")
+        except Exception as e:
+            # Fall back to native PyTorch graph pool if anything fails
+            logger.warning("CUDA Platform: Exception in graph_pool_handle, "
+                          f"falling back to native pool: {e}")
+
+        # Default to native PyTorch graph pool handle
+        return torch.cuda.graph_pool_handle()
+
+    @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
                                     model_config: "ModelConfig") -> bool:
         fp8_attention = kv_cache_dtype.startswith("fp8")

@@ -119,3 +119,26 @@ class CudagraphDispatcher:
 
         # finally, just return no cudagraphs
         return CUDAGraphMode.NONE, None
+
+    def get_sleep_state(self) -> dict:
+        """Get the current state for sleep mode preservation."""
+        return {
+            "dispatcher_keys": {
+                mode: list(keys) for mode, keys in self.cudagraph_keys.items()
+            },
+            "keys_initialized": self.keys_initialized
+        }
+
+    def verify_wake_state(self, sleep_state: dict) -> bool:
+        """Verify that dispatcher state matches saved sleep state."""
+        if not sleep_state or "dispatcher_keys" not in sleep_state:
+            return False
+
+        saved_keys = sleep_state["dispatcher_keys"]
+        for mode, keys in saved_keys.items():
+            if mode not in self.cudagraph_keys:
+                return False
+            if set(keys) != self.cudagraph_keys[mode]:
+                return False
+
+        return self.keys_initialized == sleep_state.get("keys_initialized", False)

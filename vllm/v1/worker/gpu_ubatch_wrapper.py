@@ -397,3 +397,58 @@ class UBatchWrapper:
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
             with self.sm_control:
                 return self._run_ubatches(ubatch_metadata, self.model)
+
+    def enter_sleep_mode(self) -> tuple[dict, int]:
+        """Put UBatch CUDA graphs to sleep and return state for restoration and count."""
+        sleep_state = {}
+        cuda_graph_count = 0
+
+        # Handle cudagraph wrapper sleep
+        if hasattr(self, "cudagraph_wrapper") and self.cudagraph_wrapper:
+            wrapper_state, wrapper_count = self.cudagraph_wrapper.enter_sleep_mode()
+            sleep_state["cudagraph_wrapper"] = wrapper_state
+            cuda_graph_count += wrapper_count
+
+        # Handle UBatch specific cudagraphs
+        if hasattr(self, "cudagraphs") and self.cudagraphs:
+            sleep_state["ubatch_graphs"] = {}
+            for batch_size, metadata in self.cudagraphs.items():
+                sleep_state["ubatch_graphs"][batch_size] = {
+                    "sleeping": True,
+                    "batch_size": batch_size,
+                    "metadata": metadata,
+                }
+                cuda_graph_count += 1
+
+        # Preserve graph pool reference
+        if hasattr(self, "graph_pool") and self.graph_pool:
+            sleep_state["graph_pool"] = self.graph_pool
+
+        logger.info(
+            "UBatchWrapper: Put %d UBatch CUDA graphs into sleep mode.",
+            len(sleep_state.get("ubatch_graphs", {}))
+        )
+        return sleep_state, cuda_graph_count
+
+    def exit_sleep_mode(self, sleep_state: dict) -> int:
+        """Wake up UBatch CUDA graphs from sleep state."""
+        cuda_graph_count = 0
+
+        if not sleep_state:
+            return cuda_graph_count
+
+        # Handle cudagraph wrapper wake
+        if "cudagraph_wrapper" in sleep_state and self.cudagraph_wrapper:
+            cuda_graph_count += self.cudagraph_wrapper.exit_sleep_mode(
+                sleep_state["cudagraph_wrapper"]
+            )
+
+        # UBatch graphs are preserved and don't need explicit restoration
+        if "ubatch_graphs" in sleep_state:
+            cuda_graph_count += len(sleep_state["ubatch_graphs"])
+
+        logger.info(
+            "UBatchWrapper: Restored %d UBatch CUDA graphs from sleep mode.",
+            cuda_graph_count
+        )
+        return cuda_graph_count

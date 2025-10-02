@@ -197,3 +197,45 @@ class CUDAGraphWrapper:
 
         entry.cudagraph.replay()
         return entry.output
+
+    def enter_sleep_mode(self) -> tuple[dict, int]:
+        """Put CUDA graphs to sleep and return state for restoration and count."""
+        sleep_state = {"entries": {}}
+        cuda_graph_count = 0
+
+        for key, entry in self.concrete_cudagraph_entries.items():
+            if entry.cudagraph is not None:
+                sleep_state["entries"][key] = {
+                    "batch_descriptor": entry.batch_descriptor,
+                    "output": entry.output,
+                    "graph_ref": entry.cudagraph,
+                    "sleeping": True,
+                }
+                cuda_graph_count += 1
+
+        logger.info(
+            "CUDAGraphWrapper: Put %d CUDA graphs into sleep mode.",
+            cuda_graph_count
+        )
+        return sleep_state, cuda_graph_count
+
+    def exit_sleep_mode(self, sleep_state: dict) -> int:
+        """Wake up CUDA graphs from sleep state."""
+        cuda_graph_count = 0
+
+        if not sleep_state or "entries" not in sleep_state:
+            return cuda_graph_count
+
+        for key, metadata in sleep_state["entries"].items():
+            if key in self.concrete_cudagraph_entries:
+                if "graph_ref" in metadata:
+                    self.concrete_cudagraph_entries[key].cudagraph = metadata[
+                        "graph_ref"
+                    ]
+                    cuda_graph_count += 1
+
+        logger.info(
+            "CUDAGraphWrapper: Restored %d CUDA graphs from sleep mode.",
+            cuda_graph_count
+        )
+        return cuda_graph_count
