@@ -69,12 +69,6 @@ endif()
 #
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
-# On CPU builds, ensure Torch/Caffe2 CMake does not try to validate CUDA
-if (VLLM_TARGET_DEVICE STREQUAL "cpu")
-  set(USE_CUDA OFF CACHE BOOL "Disable CUDA in Torch/Caffe2")
-  set(CAFFE2_USE_CUDA OFF CACHE BOOL "Disable CUDA in Torch/Caffe2")
-endif()
-
 # Ensure the 'nvcc' command is in the PATH
 find_program(NVCC_EXECUTABLE nvcc)
 if (CUDA_FOUND AND NOT NVCC_EXECUTABLE)
