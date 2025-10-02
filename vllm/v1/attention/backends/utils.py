@@ -4,7 +4,7 @@ import abc
 import enum
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass, fields, make_dataclass
+from dataclasses import dataclass, fields, make_dataclass, replace
 from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional,
                     Protocol, TypeVar, Union, get_args)
 
@@ -86,6 +86,12 @@ class CommonAttentionMetadata:
     def batch_size(self) -> int:
         return self.seq_lens_cpu.shape[0]
 
+    def replace(self, **kwargs) -> "CommonAttentionMetadata":
+        return replace(self, **kwargs)
+
+    def query_lens(self) -> torch.Tensor:
+        return self.query_start_loc[1:] - self.query_start_loc[:-1]
+
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
@@ -104,23 +110,20 @@ def slice_query_start_locs(
 
 def extend_all_queries_by_1(
         common_attn_metadata: CommonAttentionMetadata, arange: torch.Tensor,
-        last_token_indices: torch.Tensor) -> CommonAttentionMetadata:
+        new_slot_mapping: torch.Tensor) -> CommonAttentionMetadata:
     """
     Creates a new CommonAttentionMetadata with all query lengths increased by 1.
     Also all seq lens are increased by 1.
     This is useful e.g. in speculative decoding with draft models, where we
     extend each sequence by 1 token.
+    The slot mapping is computed externally, as it requires more information.
     """
     cad = common_attn_metadata
     # query start loc must be increased by [+0, +1, +2, ..., +batch_size]
     new_query_start_loc = cad.query_start_loc \
         + arange[:len(cad.query_start_loc)]
     new_seq_lens = cad.seq_lens + 1
-    # slot mappings are extended (interleaved) by the next serial id
-    last_slot_mapping_ids = cad.slot_mapping[last_token_indices]
-    new_slot_mapping = extend_flat_seqs(seqs=cad.slot_mapping,
-                                        end_locs=last_token_indices,
-                                        new_vals=last_slot_mapping_ids + 1)
+
     new_cad = CommonAttentionMetadata(
         query_start_loc=new_query_start_loc,
         query_start_loc_cpu=new_query_start_loc.to("cpu"),

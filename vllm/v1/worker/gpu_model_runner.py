@@ -184,7 +184,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.do_log = True
+        self.do_log = False
         if self.do_log:
             from transformers import AutoTokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -2472,6 +2472,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampler_output = self._sample(logits, spec_decode_metadata)
         for idx, tokens in enumerate(sampler_output.sampled_token_ids):
             self.log_tokens(f"Sampler output {idx}", tokens[tokens != -1])
+        if self.do_log:
+            logger.info("n_sampled_tokens: %s",
+                        sampler_output.n_sampled_tokens())
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -2487,6 +2490,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_common_attn_metadata,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
+                    sampler_output=sampler_output,
                 )
 
         use_padded_batch = self.speculative_config and \
@@ -2578,6 +2582,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         common_attn_metadata: CommonAttentionMetadata,
         cudagraph_runtime_mode: CUDAGraphMode,
         batch_descriptor: BatchDescriptor,
+        sampler_output: SamplerOutput,
     ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
@@ -2658,8 +2663,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
                 if self.speculative_config.disable_padded_drafter_batch:
-                    raise NotImplementedError(
-                        "This path cannot be reached using `vllm serve ...`")
                     token_indices_to_sample = None
                     common_attn_metadata, token_indices =\
                         self.drafter.prepare_inputs(
@@ -2709,7 +2712,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             if isinstance(self.drafter, DraftModelProposer):
                 propose_kwargs = self.drafter.update_propose_kwargs(
-                    propose_kwargs)
+                    propose_kwargs, sampler_output, spec_decode_metadata)
             draft_token_ids = self.drafter.propose(**propose_kwargs)
         return draft_token_ids
 

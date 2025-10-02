@@ -386,27 +386,14 @@ class SpecDecodeBaseProposer:
                 common_attn_metadata.seq_lens_cpu - 1
 
             # Compute the slot mapping.
-            if self.uses_mrope:
-                # all dimensions of positions are the same
-                block_numbers = clamped_positions[0] // self.block_size
-            else:
-                block_numbers = clamped_positions // self.block_size
-            block_ids = common_attn_metadata.block_table_tensor.gather(
-                dim=1, index=block_numbers.view(-1, 1))
-            block_ids = block_ids.view(-1)
-            if self.uses_mrope:
-                common_attn_metadata.slot_mapping = (
-                    block_ids * self.block_size +
-                    clamped_positions[0] % self.block_size)
-            else:
-                common_attn_metadata.slot_mapping = (
-                    block_ids * self.block_size +
-                    clamped_positions % self.block_size)
+            slot_mapping = self.compute_slot_mapping(
+                positions=clamped_positions,
+                block_table_tensor=common_attn_metadata.block_table_tensor)
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
-            common_attn_metadata.slot_mapping.masked_fill_(
-                exceeds_max_model_len, PADDING_SLOT_ID)
+            slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
+            common_attn_metadata.slot_mapping = slot_mapping
 
             # Rebuild attention metadata
             attn_metadata = builder.build_for_drafting(  # type: ignore
@@ -463,7 +450,11 @@ class SpecDecodeBaseProposer:
                             model_kwargs["positions"].shape[0])
                 logger.info("draft batch_descriptor: %s",
                             forward_ctx_kwargs["batch_descriptor"])
-                # logger.info(f"draft attn_metadata={attn_metadata}")
+                logger.info("draft attn_metadata.slot_mapping: %s",
+                            attn_metadata.slot_mapping)
+                for _idx, _block in enumerate(attn_metadata.block_table):
+                    logger.info("draft attn_metadata.block_table [%d]: %s",
+                                _idx, _block.tolist())
 
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
@@ -475,6 +466,24 @@ class SpecDecodeBaseProposer:
         for idx, tokens in enumerate(draft_token_ids):
             self.runner.log_tokens(f"draft token ids {idx}", tokens)
         return draft_token_ids
+
+    def compute_slot_mapping(self, positions: torch.Tensor,
+                             block_table_tensor: torch.Tensor) -> torch.Tensor:
+        if self.uses_mrope:
+            # all dimensions of positions are the same
+            block_numbers = positions[0] // self.block_size
+        else:
+            block_numbers = positions // self.block_size
+        block_ids = block_table_tensor.gather(dim=1,
+                                              index=block_numbers.view(-1, 1))
+        block_ids = block_ids.view(-1)
+        if self.uses_mrope:
+            slot_mapping = (block_ids * self.block_size +
+                            positions[0] % self.block_size)
+        else:
+            slot_mapping = (block_ids * self.block_size +
+                            positions % self.block_size)
+        return slot_mapping
 
     def set_input_ids_first_pass(self, target_token_ids: torch.Tensor,
                                  next_token_ids: torch.Tensor, num_tokens: int,
@@ -611,17 +620,12 @@ class SpecDecodeBaseProposer:
         used as padding and filtered out later by `token_indices_to_sample`.
         No blocking CPU operations should be introduced in this function.
         """
-        num_draft_tokens_gpu = torch.cat([
-            spec_decode_metadata.cu_num_draft_tokens[0:1],
-            spec_decode_metadata.cu_num_draft_tokens[1:] -
-            spec_decode_metadata.cu_num_draft_tokens[:-1]
-        ])
-
-        num_rejected_tokens_gpu = torch.where(
-            num_draft_tokens_gpu > 0,
-            num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
-            torch.zeros_like(num_draft_tokens_gpu))
-
+        num_rejected_tokens_gpu = num_rejected_tokens(
+            spec_decode_metadata, valid_sampled_tokens_count)
+        if self.runner.do_log:
+            logger.info("valid_sampled_tokens_count: %s",
+                        valid_sampled_tokens_count)
+            logger.info("num_rejected_tokens_gpu: %s", num_rejected_tokens_gpu)
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
         new_query_len_per_req = (query_start_loc_cpu[1:] -
@@ -1147,3 +1151,22 @@ def compute_probs_and_sample_next_token(
             next_token_ids,
         )
     return next_token_ids, probs
+
+
+def num_rejected_tokens(
+        spec_decode_metadata: Optional[SpecDecodeMetadata],
+        valid_sampled_tokens_count: torch.Tensor) -> torch.Tensor:
+    if spec_decode_metadata is None:
+        return torch.zeros_like(valid_sampled_tokens_count)
+
+    num_draft_tokens_gpu = torch.cat([
+        spec_decode_metadata.cu_num_draft_tokens[0:1],
+        spec_decode_metadata.cu_num_draft_tokens[1:] -
+        spec_decode_metadata.cu_num_draft_tokens[:-1]
+    ])
+
+    num_rejected_tokens_gpu = torch.where(
+        num_draft_tokens_gpu > 0,
+        num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
+        torch.zeros_like(num_draft_tokens_gpu))
+    return num_rejected_tokens_gpu

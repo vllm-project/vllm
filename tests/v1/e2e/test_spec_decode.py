@@ -352,11 +352,9 @@ def test_mtp_correctness(
 
 @pytest.mark.parametrize("args", cases)
 @pytest.mark.parametrize("enforce_eager", [True, False])
-@pytest.mark.parametrize("disable_padded_drafter_batch", [True, False])
 def test_draft_model_correctness(
     args: ArgsTest,
     enforce_eager: bool,
-    disable_padded_drafter_batch: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Compare the outputs using and not using speculative decoding.
@@ -373,7 +371,6 @@ def test_draft_model_correctness(
             "max_model_len": args.max_model_len,
             "enforce_eager": enforce_eager,
             "tensor_parallel_size": args.draft_tensor_parallel_size,
-            "disable_padded_drafter_batch": disable_padded_drafter_batch,
         },
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
