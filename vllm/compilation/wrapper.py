@@ -22,6 +22,11 @@ class TorchCompileGuardsStripWrapper:
     (Since we drop all guards)
     """
 
+    def check_invariantes_and_forward(self, *args, **kwargs):
+        self._check_shape_invariants(*args, **kwargs)
+
+        return self.forward(*args, **kwargs)
+
     def __init__(self):
         self.compiled = False
 
@@ -42,7 +47,7 @@ class TorchCompileGuardsStripWrapper:
             options["guard_filter_fn"] = lambda x: [False for _ in x]
 
         self._compiled_callable = torch.compile(
-            self.forward,
+            self.check_invariantes_and_forward,
             fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
             backend=backend,
             options=options,
@@ -54,9 +59,13 @@ class TorchCompileGuardsStripWrapper:
          method, for directly dispatching to the compiled code.
         """
         if not self.compiled:
+            # We check eagirly on the first compile as well.
+            self.check_invariantes_and_forward(*args, **kwargs)
+
             # Make sure a compilation is triggered by clearing dynamo cache.
             torch._dynamo.eval_frame.remove_from_cache(
                 self.original_code_object())
+
             self.compiled = True
 
             # Disable the C++ compilation of symbolic shape guards. C++-fication

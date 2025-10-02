@@ -12,6 +12,7 @@ from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileGuardsStripWrapper
 from vllm.config import CompilationLevel, VllmConfig
+from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import supports_dynamo
@@ -78,6 +79,7 @@ def support_torch_compile(
     *,
     dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]] = None,
     enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    shape_invariants: Callable[..., None] = lambda *args, **kwargs: None
 ) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -164,7 +166,7 @@ def support_torch_compile(
                 raise ValueError(
                     f"Argument {k} not found in the forward method of {cls}")
         return _support_torch_compile(cls, inferred_dynamic_arg_dims,
-                                      enable_if)
+                                      enable_if, shape_invariants)
 
     if cls is not None:
         # use `support_torch_compile` as a decorator without arguments
@@ -178,7 +180,8 @@ def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, Union[int, list[int]]],
     enable_if: Optional[Callable[[VllmConfig], bool]] = None,
-) -> _T:
+    shape_invariants: Callable[...,
+                               None] = lambda *args, **kwargs: None) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
     """
@@ -209,23 +212,33 @@ def _support_torch_compile(
         if self.do_not_compile:
             return
 
+        self._check_shape_invariants = shape_invariants
+
         compilation_counter.num_models_seen += 1
         TorchCompileGuardsStripWrapper.__init__(self)
 
     cls.__init__ = __init__
 
-    def _mark_dynamic_inputs(mod, *args, **kwargs):
+    def _mark_dynamic_inputs(mod, dynamic_shapes_type, *args, **kwargs):
+
+        def mark_dynamic(arg, dims):
+            if dynamic_shapes_type == DynamicShapesType.UNBACKED:
+                torch._dynamo.decorators.mark_unbacked(arg, dims)
+            else:
+                torch._dynamo.mark_dynamic(arg, dims)
+
         sig = inspect.signature(mod.__class__.forward)
         bound_args = sig.bind(mod, *args, **kwargs)
         bound_args.apply_defaults()
         for k, dims in dynamic_arg_dims.items():
             arg = bound_args.arguments.get(k)
+
             if arg is not None:
                 dims = [dims] if isinstance(dims, int) else dims
                 if isinstance(arg, torch.Tensor):
                     # In case dims is specified with negative indexing
                     dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
-                    torch._dynamo.mark_dynamic(arg, dims)
+                    mark_dynamic(arg, dims)
                 elif isinstance(arg, IntermediateTensors):
                     for tensor in arg.tensors.values():
                         # In case dims is specified with negative indexing
@@ -233,7 +246,7 @@ def _support_torch_compile(
                             tensor.ndim + dim if dim < 0 else dim
                             for dim in dims
                         ]
-                        torch._dynamo.mark_dynamic(tensor, dims)
+                        mark_dynamic(tensor, dims)
                 else:
                     raise ValueError(
                         "Unsupported dynamic dimensions"
@@ -251,8 +264,11 @@ def _support_torch_compile(
             return TorchCompileGuardsStripWrapper.__call__(
                 self, *args, **kwargs)
 
+        _mark_dynamic_inputs(
+            self, self.vllm_config.compilation_config.dynamic_shapes_config.
+            dynamic_shapes_type, *args, **kwargs)
+
         # This is the path for the first compilation.
-        _mark_dynamic_inputs(self, *args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked
         start_monitoring_torch_compile(self.vllm_config)
