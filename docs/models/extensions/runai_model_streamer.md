@@ -24,6 +24,13 @@ vllm serve s3://core-llm/Llama-3-8b \
     --load-format runai_streamer
 ```
 
+To run model from Google Cloud Storage run:
+
+```bash
+vllm serve gs://core-llm/Llama-3-8b \
+    --load-format runai_streamer
+```
+
 To run model from a S3 compatible object store run:
 
 ```bash
