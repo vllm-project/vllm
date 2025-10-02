@@ -661,8 +661,7 @@ Benchmark the performance of multi-modal requests in vLLM.
 Start vLLM:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-VL-7B-Instruct \
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
   --dtype bfloat16 \
   --limit-mm-per-prompt '{"image": 1}' \
   --allowed-local-media-path /path/to/sharegpt4v/images
@@ -688,8 +687,7 @@ vllm bench serve \
 Start vLLM:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-VL-7B-Instruct \
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
   --dtype bfloat16 \
   --limit-mm-per-prompt '{"video": 1}' \
   --allowed-local-media-path /path/to/sharegpt4video/videos

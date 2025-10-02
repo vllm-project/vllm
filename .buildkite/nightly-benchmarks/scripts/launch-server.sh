@@ -181,18 +181,14 @@ launch_vllm_server() {
   if echo "$common_params" | jq -e 'has("fp8")' >/dev/null; then
     echo "Key 'fp8' exists in common params. Use neuralmagic fp8 model for convenience."
     model=$(echo "$common_params" | jq -r '.neuralmagic_quantized_model')
-    server_command="python3 \
-        -m vllm.entrypoints.openai.api_server \
+    server_command="vllm serve $model \
         -tp $tp \
-        --model $model \
         --port $port \
         $server_args"
   else
     echo "Key 'fp8' does not exist in common params."
-    server_command="python3 \
-        -m vllm.entrypoints.openai.api_server \
+    server_command="vllm serve $model \
         -tp $tp \
-        --model $model \
         --port $port \
         $server_args"
   fi
