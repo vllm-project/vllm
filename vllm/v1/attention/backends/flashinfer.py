@@ -435,9 +435,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
-        # TODO: Cascade attention doesn't work, disable it for now
-        # use_cascade = common_prefix_len > 0
-        use_cascade = False
+        use_cascade = common_prefix_len > 0
         if use_cascade:
             # Grab the blocks of the shared prefix from the first request.
             assert common_prefix_len % page_size == 0
