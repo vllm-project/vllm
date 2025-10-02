@@ -54,7 +54,7 @@ class HTTPConnection:
         stream: bool = False,
         timeout: Optional[float] = None,
         extra_headers: Optional[Mapping[str, str]] = None,
-        allow_redirects=True,
+        allow_redirects: bool = True,
     ):
         self._validate_http_url(url)
 
@@ -73,7 +73,7 @@ class HTTPConnection:
         *,
         timeout: Optional[float] = None,
         extra_headers: Optional[Mapping[str, str]] = None,
-        allow_redirects=True,
+        allow_redirects: bool = True,
     ):
         self._validate_http_url(url)
 
@@ -89,7 +89,7 @@ class HTTPConnection:
                   url: str,
                   *,
                   timeout: Optional[float] = None,
-                  allow_redirects=True) -> bytes:
+                  allow_redirects: bool = True) -> bytes:
         with self.get_response(url,
                                timeout=timeout,
                                allow_redirects=allow_redirects) as r:
@@ -102,7 +102,7 @@ class HTTPConnection:
         url: str,
         *,
         timeout: Optional[float] = None,
-        allow_redirects=True,
+        allow_redirects: bool = True,
     ) -> bytes:
         async with await self.get_async_response(
                 url, timeout=timeout, allow_redirects=allow_redirects) as r:
