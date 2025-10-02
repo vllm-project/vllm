@@ -39,7 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python (CPU)
+        if: matrix.backend == 'cpu'
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
           cache: 'pip'
@@ -47,6 +49,12 @@ jobs:
             requirements/**/*.txt
             setup.py
             pyproject.toml
+
+      - name: Setup Python (CUDA)
+        if: matrix.backend == 'cuda'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
 
       - name: Upgrade build tooling
         run: |
@@ -61,10 +69,16 @@ jobs:
         run: |
           if [ "${{ matrix.backend }}" = "cuda" ]; then
             CU=$(echo "${{ matrix.cuda }}" | tr -d '.')
-            python -m pip install torch=="${{ matrix.torch }}+cu${CU}" --extra-index-url "https://download.pytorch.org/whl/cu${CU}"
+            python -m pip install --no-cache-dir torch=="${{ matrix.torch }}+cu${CU}" --extra-index-url "https://download.pytorch.org/whl/cu${CU}"
           else
-            python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+            python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
           fi
+
+      - name: Free pip cache (CUDA)
+        if: matrix.backend == 'cuda'
+        run: |
+          python -m pip cache purge || true
+          rm -rf ~/.cache/pip || true
 
       - name: Editable install (full source build)
         env:

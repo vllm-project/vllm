@@ -69,6 +69,12 @@ endif()
 #
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
+# On CPU builds, ensure Torch/Caffe2 CMake does not try to validate CUDA
+if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+  set(USE_CUDA OFF CACHE BOOL "Disable CUDA in Torch/Caffe2")
+  set(CAFFE2_USE_CUDA OFF CACHE BOOL "Disable CUDA in Torch/Caffe2")
+endif()
+
 # Ensure the 'nvcc' command is in the PATH
 find_program(NVCC_EXECUTABLE nvcc)
 if (CUDA_FOUND AND NOT NVCC_EXECUTABLE)
@@ -83,14 +89,19 @@ endif()
 #
 find_package(Torch REQUIRED)
 
-# Warn on +PTX in TORCH_CUDA_ARCH_LIST (ignored by our per-file arch setup)
+# Warn on '+PTX' only when it appears as an arch suffix (e.g., 8.9+PTX)
 if(DEFINED ENV{TORCH_CUDA_ARCH_LIST})
-  string(FIND "$ENV{TORCH_CUDA_ARCH_LIST}" "+PTX" _has_ptx)
-  if(NOT _has_ptx EQUAL -1)
-    message(WARNING
-      "Detected '+PTX' in TORCH_CUDA_ARCH_LIST; PTX builds are not supported "
-      "via global arch list in vLLM and will be ignored. Remove '+PTX' to silence.")
-  endif()
+  string(REPLACE "," ";" _vllm_archs "$ENV{TORCH_CUDA_ARCH_LIST}")
+  string(REPLACE " " ";" _vllm_archs "${_vllm_archs}")
+  foreach(_tok ${_vllm_archs})
+    string(TOUPPER _tok_up "${_tok}")
+    if(_tok_up MATCHES "\\+PTX$")
+      message(WARNING
+        "Detected '+PTX' in TORCH_CUDA_ARCH_LIST; PTX builds are not supported "
+        "via global arch list in vLLM and will be ignored. Remove '+PTX' to silence.")
+      break()
+    endif()
+  endforeach()
 endif()
 
 # Supported NVIDIA architectures.
