@@ -314,6 +314,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
     def load_file(
         self,
         filepath: Path,
+        *,
         request_overrides: Optional[dict[str, Any]] = None
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         with filepath.open("rb") as f:

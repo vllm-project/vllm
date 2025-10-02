@@ -1414,11 +1414,23 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         Call the HF processor on the prompt text and
         associated multi-modal data.
+        Supports splitting static (cache-affecting) vs
+        dynamic (per-request) kwargs.
         """
+        static_mm_processor_kwargs, dynamic_mm_processor_kwargs = \
+            self._split_static_dynamic_mm_kwargs(mm_kwargs)
+        # use static kwargs to get (and possibly cache) the processor
+        hf_processor = self.info.get_hf_processor(**static_mm_processor_kwargs)
+        # merge static and dynamic kwargs(such as fps) for actual call
+        merge_mm_kwargs = {**static_mm_processor_kwargs,
+                           **tok_kwargs}
+        if dynamic_mm_processor_kwargs:
+            merge_mm_kwargs.update(dynamic_mm_processor_kwargs)
+
         return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+            hf_processor,
             dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            dict(**merge_mm_kwargs),
         )
 
     def _hf_processor_applies_updates(
@@ -1742,7 +1754,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         mm_uuids: Optional[MultiModalUUIDDict] = None,
-        hashed_mm_processor_kwargs: Optional[Mapping[str, object]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         (
             prompt_ids,
@@ -1755,8 +1766,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             tokenization_kwargs=tokenization_kwargs,
             enable_hf_prompt_update=True,
         )
-        if hashed_mm_processor_kwargs is None:
-            hashed_mm_processor_kwargs = hf_processor_mm_kwargs
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
@@ -1766,7 +1775,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # Use overrides if provided; fallback to data-dependent hashing.
         mm_hashes = self._hash_mm_items(mm_data_items,
-                                        hashed_mm_processor_kwargs,
+                                        hf_processor_mm_kwargs,
                                         tokenization_kwargs,
                                         mm_uuids=mm_uuids)
 
@@ -1792,16 +1801,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         mm_uuids: Optional[MultiModalUUIDDict] = None,
-        hashed_mm_processor_kwargs: Optional[Mapping[str, object]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
         """
         cache = self.cache
-        # hashed_mm_processor_mm_kwargs used for complete hashing
-        if hashed_mm_processor_kwargs is None:
-            hashed_mm_processor_kwargs = hf_processor_mm_kwargs
 
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
         if cache is None or passthrough_data:
@@ -1811,11 +1816,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
-                hashed_mm_processor_kwargs=hashed_mm_processor_kwargs,
             )
 
         mm_hashes = self._hash_mm_items(mm_data_items,
-                                        hashed_mm_processor_kwargs,
+                                        hf_processor_mm_kwargs,
                                         tokenization_kwargs,
                                         mm_uuids=mm_uuids)
 
@@ -2035,14 +2039,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         # split static and dynamic kwargs
         full_mm_processor_kwargs = dict(hf_processor_mm_kwargs)
-        static_mm_processor_kwargs, dynamic_mm_processor_kwargs = {}, {}
-        for k, v in hf_processor_mm_kwargs.items():
-            if k in DYNAMIC_KEYS:
-                dynamic_mm_processor_kwargs[k] = v
-            else:
-                static_mm_processor_kwargs[k] = v
 
-        # parse mm_data to mm_items with io_overrides
+        static_mm_processor_kwargs, dynamic_mm_processor_kwargs = self._split_static_dynamic_mm_kwargs(hf_processor_mm_kwargs)
+
         mm_items = self._to_mm_items(mm_data)
 
         if tokenization_kwargs is None:
@@ -2058,7 +2057,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             hf_processor_mm_kwargs=static_mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
-            hashed_mm_processor_kwargs=full_mm_processor_kwargs,
         )
 
         # NOTE: tokenization_kwargs are not required to init processor
@@ -2084,26 +2082,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_placeholders=mm_placeholder_ranges,
         )
 
-    def _get_io_overrides(
-        self,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> dict[str, dict[str, object]]:
-        """
-        Get IO overrides for parsing `mm_data` in `self.apply`.
-        By default, no overrides are applied.
-        Example:
-            return {"video": {"fps": 2.0}}
-        """
-        try:
-            proc = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        except Exception:
-            return {}
-        dynamic_overrides = getattr(proc, "_vllm_dynamic_mm_kwargs", {}) or {}
-        dynamic_overrides = {
-            k: v
-            for k, v in dynamic_overrides.items() if k in DYNAMIC_KEYS
-        }
-        return {"video": dynamic_overrides} if dynamic_overrides else {}
+    @staticmethod
+    def _split_static_dynamic_mm_kwargs(
+        mm_kwargs: Mapping[str, object],
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        static, dynamic = {}, {}
+        for k, v in mm_kwargs.items():
+            if k in DYNAMIC_KEYS:
+                dynamic[k] = v
+            else:
+                static[k] = v
+        return static, dynamic
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):

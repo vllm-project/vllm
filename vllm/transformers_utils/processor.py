@@ -202,27 +202,16 @@ def cached_processor_from_config(
     **kwargs: Any,
 ) -> _P:
 
-    static_kwargs, dynamic_kwargs = _prepare_static_kwargs_for_cache(
+    static_kwargs, _ = _prepare_static_kwargs_for_cache(
         model_config, processor_cls, **kwargs)
 
-    base = cached_static_processor(
+    return cached_static_processor(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
         **static_kwargs,
     )
-
-    # if there are dynamic kwargs, we need to create a new processor
-    # instance with the dynamic kwargs
-    if dynamic_kwargs:
-        # TODO: deepcopy may be too heavy, consider using copy.copy
-        base_copy = copy.copy(base)
-        base_copy._vllm_dynamic_mm_kwargs = dynamic_kwargs
-        return base_copy
-    else:
-        return base
-
 
 def get_feature_extractor(
     processor_name: str,
