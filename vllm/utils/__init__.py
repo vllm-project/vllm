@@ -73,6 +73,7 @@ from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
+from vllm.platforms import current_platform
 from vllm.ray.lazy_utils import is_in_ray_actor
 
 if TYPE_CHECKING:
