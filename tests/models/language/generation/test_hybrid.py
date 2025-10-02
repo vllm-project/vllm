@@ -337,7 +337,10 @@ def test_fp32_cache_state(
 
 
 # Helper functions for the APC tests
-def _get_vllm_runner_params(model, enforce_eager, max_model_len, tensor_parallel_size=1):
+def _get_vllm_runner_params(model,
+                            enforce_eager,
+                            max_model_len,
+                            tensor_parallel_size=1):
     return {
         'model_name': model,
         'enable_prefix_caching': False,
@@ -413,9 +416,11 @@ def test_apc_single_prompt(
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model, enforce_eager,
-                                                 max_model_len,
-                                                 tensor_parallel_size=tensor_parallel_size)
+    vllm_runner_kwargs = _get_vllm_runner_params(
+        model,
+        enforce_eager,
+        max_model_len,
+        tensor_parallel_size=tensor_parallel_size)
     vllm_runner_kwargs[cache_dtype_param] = "float32"
     vllm_outputs_no_cache, _ = _get_vLLM_output(vllm_runner,
                                                 vllm_runner_kwargs,
@@ -482,9 +487,11 @@ def test_apc_single_prompt_block_align_alignment(
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model, enforce_eager,
-                                                 max_model_len,
-                                                 tensor_parallel_size=tensor_parallel_size)
+    vllm_runner_kwargs = _get_vllm_runner_params(
+        model,
+        enforce_eager,
+        max_model_len,
+        tensor_parallel_size=tensor_parallel_size)
     vllm_runner_kwargs[cache_dtype_param] = "float32"
 
     vllm_outputs_no_cache, _ = _get_vLLM_output(vllm_runner,
@@ -567,9 +574,11 @@ def test_apc_multiple_prompts_all_cached_outputs(
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model, enforce_eager,
-                                                 max_model_len,
-                                                 tensor_parallel_size=tensor_parallel_size)
+    vllm_runner_kwargs = _get_vllm_runner_params(
+        model,
+        enforce_eager,
+        max_model_len,
+        tensor_parallel_size=tensor_parallel_size)
     vllm_runner_kwargs[cache_dtype_param] = "float32"
 
     vllm_outputs_no_cache, _ = _get_vLLM_output(vllm_runner,
@@ -593,7 +602,8 @@ def test_apc_multiple_prompts_all_cached_outputs(
             name_0="vllm_no_cache",
             name_1=f"vllm_cache_it_{r_idx + 1}",
         )
-            
+
+
 @pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
@@ -628,22 +638,27 @@ def test_apc_multiple_prompts_block_align_alignment(
 
     compare_operator: Callable = check_logprobs_close \
         if num_logprobs > 0 else check_outputs_equal # type: ignore
-        
+
     MULTIPLE = 300
 
     # Sample prompts. This custom prompt is used, as it causes the most issues
     prompt_text = "The president of the United States is "
     prompt_offsets = [0, 3, 7, 13, 17, 22, 25, 31]
-    generated_prompts = [prompt_text[offset:] * MULTIPLE for offset in prompt_offsets]
+    generated_prompts = [
+        prompt_text[offset:] * MULTIPLE for offset in prompt_offsets
+    ]
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model, enforce_eager, max_model_len,
+    vllm_runner_kwargs = _get_vllm_runner_params(model, enforce_eager,
+                                                 max_model_len,
                                                  tensor_parallel_size)
     vllm_runner_kwargs[cache_dtype_param] = "float32"
-    
-    vllm_outputs_no_cache, _ = _get_vLLM_output(
-        vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens, num_logprobs)
+
+    vllm_outputs_no_cache, _ = _get_vLLM_output(vllm_runner,
+                                                vllm_runner_kwargs,
+                                                generated_prompts, max_tokens,
+                                                num_logprobs)
 
     vllm_runner_kwargs['enable_prefix_caching'] = True
     with vllm_runner(**vllm_runner_kwargs) as vllm_model:
@@ -657,14 +672,16 @@ def test_apc_multiple_prompts_block_align_alignment(
     ]:
 
         vllm_runner_kwargs[
-            'max_num_batched_tokens'] = mamba_block_size_multiplier * mamba_block_size - \
-                                        offsets
-        vllm_outputs_cache_rep, _ = _get_vLLM_output(
-            vllm_runner, vllm_runner_kwargs, generated_prompts, max_tokens, num_logprobs, n_repetitions)
+            'max_num_batched_tokens'] = mamba_block_size_multiplier * \
+                                        mamba_block_size - offsets
+        vllm_outputs_cache_rep, _ = _get_vLLM_output(vllm_runner,
+                                                     vllm_runner_kwargs,
+                                                     generated_prompts,
+                                                     max_tokens, num_logprobs,
+                                                     n_repetitions)
 
         # Check alignment of the output logits when using APC
-        for r_idx, vllm_outputs_cache_itn in enumerate(
-                vllm_outputs_cache_rep):
+        for r_idx, vllm_outputs_cache_itn in enumerate(vllm_outputs_cache_rep):
             # In the first repetition, the caches are filled
             # In the second repetition, these caches are reused
 
@@ -674,7 +691,6 @@ def test_apc_multiple_prompts_block_align_alignment(
                 name_0="vllm_no_cache",
                 name_1=f"vllm_cache_it_{r_idx + 1}",
             )
-            
 
 
 @pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
@@ -719,9 +735,11 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model, enforce_eager,
-                                                 max_model_len,
-                                                 tensor_parallel_size=tensor_parallel_size)
+    vllm_runner_kwargs = _get_vllm_runner_params(
+        model,
+        enforce_eager,
+        max_model_len,
+        tensor_parallel_size=tensor_parallel_size)
     vllm_runner_kwargs[cache_dtype_param] = "float32"
 
     vllm_outputs_no_cache, _ = _get_vLLM_output(vllm_runner,

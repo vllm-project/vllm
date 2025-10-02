@@ -320,15 +320,15 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         # The additional states are cached starting from the last stride_block_m.
         # For example:
         # If n_block_to_fill = 0, then only the state at the sequence end is cached and the process below is not involved.
-        # If n_block_to_fill > 0, then the states at the sequence end and at the n_block_to_fill-last 
+        # If n_block_to_fill > 0, then the states at the sequence end and at the n_block_to_fill-last
         # stride_block_m are cached.
         # For example chunk_offset = n_block_to_fill stores the state at last_full_block
         if (chunk_offset - 1) < n_block_to_fill:
             # Store the states at the chunk boundaries from the start of the sequence
-            idx_tokens_last = (
-                last_full_block_token_index -
-                (n_block_to_fill - chunk_offset) * B_size -
-                state_len) + tl.arange(0, NP2_STATELEN)  # [BLOCK_M]
+            idx_tokens_last = (last_full_block_token_index -
+                               (n_block_to_fill - chunk_offset) * B_size -
+                               state_len) + tl.arange(
+                                   0, NP2_STATELEN)  # [BLOCK_M]
             x_ptrs = x_ptr + (idx_tokens_last * stride_x_token)[:, None] + (
                 idx_feats * stride_x_dim)[None, :]  # [BLOCK_M,BLOCK_N,]
 
