@@ -720,7 +720,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         if M == 0:
             assert num_chunks == 0
             workspace13_shape: tuple[int, ...] = (0, )
-            workspace2_shape: tuple[int, ...] = (0, 0)
+            workspace2_shape: tuple[int, ...] = (0, )
             fused_out_shape: tuple[int, ...] = a1q.size()
         else:
             assert num_chunks > 0
