@@ -323,7 +323,7 @@ class InputPreprocessor:
                 mm_uuids=mm_uuids,
             )
         else:
-            inputs = token_inputs(prompt_token_ids=prompt_token_ids)
+            inputs = token_inputs(prompt_token_ids)
 
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
@@ -353,7 +353,7 @@ class InputPreprocessor:
                 prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
             )
-            inputs = token_inputs(prompt_token_ids=prompt_token_ids)
+            inputs = token_inputs(prompt_token_ids)
 
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
