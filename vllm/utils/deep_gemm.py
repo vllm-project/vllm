@@ -68,8 +68,8 @@ def is_deep_gemm_e8m0_used() -> bool:
 def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable DeepGEMM backend."""
     raise RuntimeError(
-        "DeepGEMM backend is not available. Please install the `deep_gemm` "
-        "package to enable FP8 kernels.")
+        "DeepGEMM backend is not available or outdated. Please install or "
+        "update the `deep_gemm` to a newer version to enable FP8 kernels.")
 
 
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
