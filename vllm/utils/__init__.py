@@ -73,7 +73,6 @@ from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
-from vllm.platforms import current_platform
 from vllm.ray.lazy_utils import is_in_ray_actor
 
 if TYPE_CHECKING:
@@ -2747,13 +2746,9 @@ class MemorySnapshot:
         if self.auto_measure:
             self.measure()
 
-    def _get_device_sm(self):
-        if torch.cuda.is_available():
-            major, minor = torch.cuda.get_device_capability()
-            return major * 10 + minor
-        return 0
-
     def measure(self):
+        from vllm.platforms import current_platform
+
         # we measure the torch peak memory usage via allocated_bytes,
         # rather than `torch.cuda.memory_reserved()` .
         # After `torch.cuda.reset_peak_memory_stats()`,
@@ -2766,7 +2761,7 @@ class MemorySnapshot:
         shared_sysmem_device_mem_sms = ((8,7), (11,0), (12,1))  # Orin, Thor, Spark
         if current_platform.is_cuda() and \
         current_platform.get_device_capability() in shared_sysmem_device_mem_sms:
-            # On UMA (Orin, Thor and Spark) platforms,
+            # On UMA (Orin, Thor and Spark) platform,
             # where both CPU and GPU rely on system memory,
             # the cudaMemGetInfo function shows the amount of free system memory
             # rather than what’s actually available.
