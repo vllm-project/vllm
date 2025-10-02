@@ -1124,6 +1124,7 @@ class FusedMoE(CustomOp):
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
+            "global_num_experts": self.global_num_experts,
             "hidden_size": hidden_size,
             "intermediate_size_per_partition":
             self.intermediate_size_per_partition,
@@ -1404,13 +1405,17 @@ class FusedMoE(CustomOp):
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
-        expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
-        if expert_id == -1:
+        quant_method_name = self.quant_method.__class__.__name__
+        global_expert_id = expert_id
+        expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
+        is_modeloptnvfp4 = "ModelOpt" in quant_method_name
+        is_input_scale = "input_scale" in weight_name:
+        if expert_id == -1 and not (is_modeloptnvfp4 and is_input_scale):
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
 
-        quant_method_name = self.quant_method.__class__.__name__
+        
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
@@ -1479,7 +1484,7 @@ class FusedMoE(CustomOp):
         expert_data = param.data if full_load else param.data[expert_id]
 
         # Case input scale: input_scale loading is only supported for fp8
-        if "input_scale" in weight_name:
+        if is_input_scale:
             # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
 
@@ -1493,7 +1498,7 @@ class FusedMoE(CustomOp):
 
             self._load_single_value(param=param,
                                     loaded_weight=loaded_weight,
-                                    expert_id=expert_id)
+                                    expert_id=global_expert_id if is_modeloptnvfp4 else expert_id)
             return True if return_success else None
 
         # Case g_idx
