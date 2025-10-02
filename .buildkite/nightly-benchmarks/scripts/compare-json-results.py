@@ -7,6 +7,7 @@ from importlib import util
 
 import pandas as pd
 
+pd.options.display.float_format = "{:.2f}".format
 plotly_found = util.find_spec("plotly.express") is not None
 
 
@@ -272,7 +273,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--ttft-max-ms", type=float, default=3000.0,
                     help="Reference limit for TTFT plots (ms)")
-    parser.add_argument("--tpot-max-ms", type=float, default=150.0,
+    parser.add_argument("--tpot-max-ms", type=float, default=100.0,
                     help="Reference limit for TPOT plots (ms)")
 
 
@@ -348,15 +349,20 @@ if __name__ == "__main__":
                 group_name = ",".join(map(str, name)).replace(",", "_").replace("/","-")
                 group_html_name = "perf_comparison_" + group_name + ".html"
 
-
                 metric_name = str(data_cols_to_compare[i]).lower()
                 if "tok/s" in metric_name:
                     html = group.to_html()
                 elif "ttft" in metric_name:
-                    styler = _highlight_threshold(group, args.ttft_max_ms)
+                    styler = (
+                      _highlight_threshold(group, args.ttft_max_ms)
+                      .format({c: "{:.2f}" for c in group.select_dtypes("number").columns}, na_rep="—")
+                    )
                     html = styler.to_html(table_attributes='border="1" class="dataframe"')
                 elif "tpot" in metric_name or "median" in metric_name or "p99" in metric_name:
-                    styler = _highlight_threshold(group, args.tpot_max_ms)
+                    styler = (
+                      _highlight_threshold(group, args.tpot_max_ms)
+                      .format({c: "{:.2f}" for c in group.select_dtypes("number").columns}, na_rep="—")
+                    )
                     html = styler.to_html(table_attributes='border="1" class="dataframe"')
                 
                 text_file.write(html_msgs_for_data_cols[i])
