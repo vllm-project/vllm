@@ -302,10 +302,10 @@ class SpeculativeConfig:
             if self.num_speculative_tokens is None:
                 self.num_speculative_tokens = 32
             # Validate values
-            if self.suffix_decoding_max_tree_depth < 4:
+            if self.suffix_decoding_max_tree_depth < 1:
                 raise ValueError(
                     f"suffix_decoding_max_tree_depth="
-                    f"{self.suffix_decoding_max_tree_depth} must be >= 4")
+                    f"{self.suffix_decoding_max_tree_depth} must be >= 1")
             if self.suffix_decoding_max_cached_requests < 0:
                 raise ValueError(
                     f"suffix_decoding_max_cached_requests="
