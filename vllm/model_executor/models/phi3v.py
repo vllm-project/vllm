@@ -45,7 +45,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import decode_tokens
 from vllm.utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -503,9 +502,8 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         )
 
         # Keep the behavior in line with HF processor
-        text = decode_tokens(tokenizer, token_ids)
-        if text.startswith("<s> <|image|>"):
-            text = text.replace("<s> <|image|>", "<s><|image|>", 1)
+        if token_ids[:2] == tokenizer.encode("<s> <|image|>",
+                                             add_special_tokens=False):
             token_ids = [token_ids[0], *token_ids[2:]]
             placeholders = {
                 modality: [
