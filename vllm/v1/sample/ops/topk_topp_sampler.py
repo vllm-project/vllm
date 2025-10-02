@@ -17,7 +17,6 @@ logger = init_logger(__name__)
 
 try:
     import flashinfer.sampling
-
     is_flashinfer_available = True
 except ImportError:
     is_flashinfer_available = False
