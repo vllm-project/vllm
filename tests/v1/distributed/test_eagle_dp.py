@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import os
-from contextlib import ExitStack
+from contextlib import AsyncExitStack
 
 import pytest
 
@@ -43,7 +43,7 @@ async def test_run_eagle_dp(use_vllm_v1):
         pytest.skip(reason="Requires V1-supporting platform.",
                     allow_module_level=True)
 
-    with ExitStack() as after:
+    async with AsyncExitStack() as after:
         engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
@@ -55,11 +55,14 @@ async def test_run_eagle_dp(use_vllm_v1):
             ignore_eos=True,
             output_kind=RequestOutputKind.FINAL_ONLY,
             temperature=0)
-        async with asyncio.timeout(30):
+
+        async def generate_with_timeout():
             async for out in engine.generate(request_id="eagle-dp",
                                              prompt=prompt,
                                              sampling_params=sampling_params):
                 num_tokens = len(out.outputs[0].token_ids)
                 assert num_tokens == num_expected_tokens
+
+        await asyncio.wait_for(generate_with_timeout(), timeout=30)
 
         assert not engine.output_processor.has_unfinished_requests()
