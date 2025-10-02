@@ -221,7 +221,7 @@ class CpuPlatform(Platform):
                 "epilogue_fusion":
                 True,
             })
-            if compilation_config.use_inductor:
+            if compilation_config.backend == "inductor":
                 compilation_config.custom_ops = ["none"]
 
         if vllm_config.lora_config is not None:

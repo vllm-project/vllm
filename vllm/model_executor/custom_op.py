@@ -133,7 +133,7 @@ class CustomOp(nn.Module):
         from vllm.config import CompilationLevel
         compilation_config = get_cached_compilation_config()
         default_on = (compilation_config.level < CompilationLevel.PIECEWISE
-                      or not compilation_config.use_inductor)
+                      or compilation_config.backend != "inductor")
         count_none = compilation_config.custom_ops.count("none")
         count_all = compilation_config.custom_ops.count("all")
         return default_on and not count_none > 0 or count_all > 0
