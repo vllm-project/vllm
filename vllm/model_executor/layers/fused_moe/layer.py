@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
-from vllm.config import PretrainedConfig, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -790,7 +790,7 @@ class FusedMoE(CustomOp):
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
-        config: Optional[PretrainedConfig] = None,
+        n_shared_experts: Optional[int] = None,
     ):
         super().__init__()
         if params_dtype is None:
@@ -856,9 +856,14 @@ class FusedMoE(CustomOp):
         self.top_k = top_k
 
         self.num_fused_shared_experts = \
-            config.n_shared_experts if config is not None \
+            n_shared_experts if n_shared_experts is not None \
                 and is_rocm_aiter_fusion_shared_expert_enabled(
         ) else 0
+        if not is_rocm_aiter_fusion_shared_expert_enabled() and \
+            self.num_fused_shared_experts != 0:
+            raise ValueError(
+                "n_shared_experts is only supported on ROCm aiter when "
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled")
         self.expert_mask = None
         if self.use_ep and is_rocm_aiter_moe_enabled():
             expert_mask = torch.ones((self.global_num_experts +

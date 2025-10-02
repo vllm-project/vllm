@@ -173,7 +173,7 @@ class DeepseekV2MoE(nn.Module):
                 e_score_correction_bias=self.gate.e_score_correction_bias,
                 enable_eplb=self.enable_eplb,
                 num_redundant_experts=self.n_redundant_experts,
-                config=config)
+                n_shared_experts=config.n_shared_experts)
             self.shared_experts = None
         else:
             intermediate_size = (config.moe_intermediate_size *
