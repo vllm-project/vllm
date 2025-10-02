@@ -29,7 +29,6 @@ from vllm.utils.flashinfer import (can_use_trtllm_attention,
                                    flashinfer_disable_q_quantization,
                                    supports_trtllm_attention,
                                    use_trtllm_attention)
-from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
@@ -436,7 +435,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
-        use_cascade = common_prefix_len > 0
+        # TODO: Cascade attention doesn't work, disable it for now
+        # use_cascade = common_prefix_len > 0
+        use_cascade = False
         if use_cascade:
             # Grab the blocks of the shared prefix from the first request.
             assert common_prefix_len % page_size == 0
@@ -677,7 +678,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # TODO: The cascade wrapper currently does not support setting
             # kv cache dtype to something different from query dtype.
             return False
-        return use_cascade_attention(*args, **kwargs)
+        # TODO: Cascade attention doesn't work, disable it for now
+        # return use_cascade_attention(*args, **kwargs)
+        return False
 
 
 class FlashInferImpl(AttentionImpl):
