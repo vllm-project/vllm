@@ -562,6 +562,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       {stride_tag});
   ops.impl("gptq_gemm", torch::kCUDA, &gptq_gemm);
 
+  // Quantized GEMM for GPTQv2 format checkpoint
+  ops.def(
+      "gptq_gemm_v2(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, "
+      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, int bit) "
+      "-> Tensor",
+      {stride_tag});
+  ops.impl("gptq_gemm_v2", torch::kCUDA, &gptq_gemm_v2);
+
   // Post processing for GPTQ.
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
