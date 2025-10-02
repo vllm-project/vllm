@@ -1,4 +1,3 @@
-#include <curand_mtgp32_kernel.h>
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -17,8 +16,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <map>
-#include <vector>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
