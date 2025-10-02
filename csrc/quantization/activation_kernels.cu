@@ -278,9 +278,9 @@ __device__ __forceinline__ void token_bounds(int32_t n_tokens,
   }
 }
 
-static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;
-template <int SMEM_SIZE_BYTES_Y, typename fp8_type, int THREADS, typename Idx_t,
-          bool USE_UE8M0, int GROUP_SIZE = 128, int NUM_STAGES = 3>
+template <int BLOCK_COUNT, int SMEM_SIZE_BYTES_Y, typename fp8_type,
+          int THREADS, typename Idx_t, bool USE_UE8M0, int GROUP_SIZE = 128,
+          int NUM_STAGES = 3>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const __nv_bfloat16* __restrict__ _input, fp8_type* __restrict__ _y_q,
     float* __restrict__ _y_s, const int32_t* __restrict__ tokens_per_expert,
@@ -368,8 +368,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   int tokens_lower, tokens_upper;
 
-  token_bounds<SILU_V2_BLOCK_COUNT>(total_tokens, blockIdx.x, tokens_lower,
-                                    tokens_upper);
+  token_bounds<BLOCK_COUNT>(total_tokens, blockIdx.x, tokens_lower,
+                            tokens_upper);
 
   Idx_t expert_id{}, expert_offset{}, next_expert_offset{};
   int token_id = tokens_lower;
@@ -937,9 +937,9 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  #define KERNEL(USE_UE8M0, THREAD_COUNT, STAGES)                              \
+  #define KERNEL(BLOCK_COUNT, USE_UE8M0, THREAD_COUNT, STAGES)                 \
     static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;                 \
-    int sms = vllm::SILU_V2_BLOCK_COUNT;                                       \
+    int sms = SILU_V2_BLOCK_COUNT;                                             \
     static constexpr int max_shared_mem_bytes =                                \
         GROUP_SIZE * 2 * STAGES * NUM_WARPS * 2;                               \
     dim3 grid(sms), block(THREAD_COUNT);                                       \
@@ -947,8 +947,8 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
     VLLM_DISPATCH_FP8_TYPES(                                                   \
         y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {        \
           vllm::silu_mul_fp8_quant_deep_gemm_kernel<                           \
-              max_shared_mem_bytes, fp8_t, THREAD_COUNT, Idx_t, USE_UE8M0,     \
-              GROUP_SIZE, STAGES>                                              \
+              BLOCK_COUNT, max_shared_mem_bytes, fp8_t, THREAD_COUNT, Idx_t,   \
+              USE_UE8M0, GROUP_SIZE, STAGES>                                   \
               <<<grid, block, max_shared_mem_bytes + (E + 1) * 16, stream>>>(  \
                   reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),          \
                   (fp8_t*)y_q.data_ptr(), y_s.data_ptr<float>(),               \
@@ -958,23 +958,25 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
                   stride_ys_g, stride_counts_e);                               \
         });
 
+  static constexpr int SILU_V2_BLOCK_COUNT = 132 * 32;
+
   if (!use_ue8m0) {
     if (H >= 4096) {
       static constexpr int NUM_STAGES = 4;
       static constexpr int THREAD_COUNT = 256;
-      KERNEL(false, THREAD_COUNT, NUM_STAGES);
+      KERNEL(SILU_V2_BLOCK_COUNT, false, THREAD_COUNT, NUM_STAGES);
     } else {
       static constexpr int THREAD_COUNT = 32;
-      KERNEL(false, THREAD_COUNT, 2);
+      KERNEL(SILU_V2_BLOCK_COUNT, false, THREAD_COUNT, 2);
     }
   } else {
     if (H >= 4096) {
       static constexpr int NUM_STAGES = 4;
       static constexpr int THREAD_COUNT = 256;
-      KERNEL(true, THREAD_COUNT, NUM_STAGES);
+      KERNEL(SILU_V2_BLOCK_COUNT, true, THREAD_COUNT, NUM_STAGES);
     } else {
       static constexpr int THREAD_COUNT = 32;
-      KERNEL(true, THREAD_COUNT, 2);
+      KERNEL(SILU_V2_BLOCK_COUNT, true, THREAD_COUNT, 2);
     }
   }
 
