@@ -1138,6 +1138,8 @@ class EngineArgs:
              revision=self.revision,
              trust_remote_code=self.trust_remote_code,
              vllm_speculative_config=self.speculative_config,
+             load_format=self.load_format,
+             download_dir=self.download_dir,
          )
         model_config = self.create_model_config()
 

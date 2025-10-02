@@ -46,7 +46,12 @@ class LoadConfig:
     - "gguf" will load weights from GGUF format files (details specified in
     https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n
     - "mistral" will load weights from consolidated safetensors files used by
-    Mistral models.
+    Mistral models.\n
+    - "oci" will load weights from OCI (Open Container Initiative) registries.
+    Models are stored as OCI artifacts with Safetensors layers and optional
+    config tar files. Supports public registries without authentication.
+    Model reference format: [registry/]repository[:tag|@digest].
+    If registry is omitted, docker.io is used by default.
     - Other custom values can be supported via plugins."""
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
