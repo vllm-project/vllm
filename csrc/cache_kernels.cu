@@ -495,8 +495,8 @@ __global__ void concat_and_cache_ds_mla_kernel(
   }
 
   // Store as aligned 64-bit writes
-  *reinterpret_cast<uint4*>(&kv_cache[dst_idx_base]) =
-      *reinterpret_cast<const uint4*>(result);
+  *reinterpret_cast<uint64_t*>(&kv_cache[dst_idx_base]) =
+      *reinterpret_cast<const uint64_t*>(result);
 }
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
