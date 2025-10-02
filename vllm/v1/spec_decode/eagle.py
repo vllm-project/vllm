@@ -65,9 +65,7 @@ class SpecDecodeBaseProposer:
         self.num_speculative_tokens = (
             self.speculative_config.num_speculative_tokens)
         self.max_num_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens +
-            vllm_config.scheduler_config.max_num_seqs *
-            self.num_speculative_tokens)
+            vllm_config.scheduler_config.max_num_batched_tokens)
         self.token_arange_np = np.arange(self.max_num_tokens)
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -266,12 +264,7 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
         )
         if self.pass_cudagraph_args_to_forward_ctx:
-            # Update num_tokens in batch descriptor, eg after cudagraph padding
-            old_bd: BatchDescriptor = cudagraph_args["batch_descriptor"]
-            if old_bd is not None:
-                new_bd = BatchDescriptor(num_tokens=num_input_tokens,
-                                         uniform_decode=old_bd.uniform_decode)
-                cudagraph_args["batch_descriptor"] = new_bd
+            update_batch_descriptor(cudagraph_args, num_input_tokens)
             forward_ctx_kwargs.update(cudagraph_args)
 
         with set_forward_context(**forward_ctx_kwargs):
@@ -1137,3 +1130,14 @@ def num_rejected_tokens(
         num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
         torch.zeros_like(num_draft_tokens_gpu))
     return num_rejected_tokens_gpu
+
+
+def update_batch_descriptor(cudagraph_args: CudaGraphArgs,
+                            new_num_tokens: int) -> None:
+    """The cudagraph padding can change the num_tokens, so the batch descriptor
+    should be updated. The cudagraph_args is modified in place."""
+    old: Optional[BatchDescriptor] = cudagraph_args["batch_descriptor"]
+    if old is not None:
+        new = BatchDescriptor(num_tokens=new_num_tokens,
+                              uniform_decode=old.uniform_decode)
+        cudagraph_args["batch_descriptor"] = new
