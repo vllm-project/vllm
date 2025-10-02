@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import json
 import sys
 import time
@@ -272,6 +273,26 @@ class OpenAIServing:
             async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
             self._async_tokenizer_pool[tokenizer] = async_tokenizer
         return async_tokenizer
+
+    async def _async_apply_mistral_chat_template(
+        self,
+        tokenizer: MistralTokenizer,
+        messages: list[ChatCompletionMessageParam],
+        chat_template: Optional[str],
+        tools: Optional[list[dict[str, Any]]],
+        **kwargs: Any,
+    ) -> list[int]:
+        """
+        Async wrapper for apply_mistral_chat_template that offloads blocking
+        tokenization to a background thread so we don't block the event loop.
+        """
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._tokenizer_executor,
+            lambda: apply_mistral_chat_template(
+                tokenizer, messages, chat_template, tools, **kwargs),
+        )
 
     async def _preprocess(
         self,
@@ -782,7 +803,7 @@ class OpenAIServing:
         if tokenizer is None:
             request_prompt = "placeholder"
         elif isinstance(tokenizer, MistralTokenizer):
-            request_prompt = apply_mistral_chat_template(
+            request_prompt = await self._async_apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
                 **_chat_template_kwargs,
