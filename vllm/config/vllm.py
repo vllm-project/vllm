@@ -587,7 +587,15 @@ class VllmConfig:
                 "Maximum cudagraph size should be greater than or equal to 1.")
             batch_size_capture_list = [
                 i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
-            ] + list(range(8, max_cudagraph_capture_size + 1, 8))
+            ]
+            if max_cudagraph_capture_size >= 8:
+                # Step size 8 for small batch sizes, up to 256(not included)
+                batch_size_capture_list += list(
+                    range(8, min(max_cudagraph_capture_size, 256), 8))
+            if max_cudagraph_capture_size >= 256:
+                # Step size 16 for larger batch sizes
+                batch_size_capture_list += list(
+                    range(256, max_cudagraph_capture_size + 1, 16))
 
             if self.parallel_config.tensor_parallel_size > 1 and \
                 self.compilation_config.pass_config.enable_sequence_parallelism:
