@@ -373,14 +373,27 @@ class SpecDecodeBaseProposer:
                 common_attn_metadata.seq_lens_cpu - 1
 
             # Compute the slot mapping.
-            slot_mapping = self.compute_slot_mapping(
-                positions=clamped_positions,
-                block_table_tensor=common_attn_metadata.block_table_tensor)
+            if self.uses_mrope:
+                # all dimensions of positions are the same
+                block_numbers = clamped_positions[0] // self.block_size
+            else:
+                block_numbers = clamped_positions // self.block_size
+            block_ids = common_attn_metadata.block_table_tensor.gather(
+                dim=1, index=block_numbers.view(-1, 1))
+            block_ids = block_ids.view(-1)
+            if self.uses_mrope:
+                common_attn_metadata.slot_mapping = (
+                    block_ids * self.block_size +
+                    clamped_positions[0] % self.block_size)
+            else:
+                common_attn_metadata.slot_mapping = (
+                    block_ids * self.block_size +
+                    clamped_positions % self.block_size)
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
-            slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
-            common_attn_metadata.slot_mapping = slot_mapping
+            common_attn_metadata.slot_mapping.masked_fill_(
+                exceeds_max_model_len, PADDING_SLOT_ID)
 
             # Rebuild attention metadata
             attn_metadata = builder.build_for_drafting(  # type: ignore
@@ -439,24 +452,6 @@ class SpecDecodeBaseProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
-
-    def compute_slot_mapping(self, positions: torch.Tensor,
-                             block_table_tensor: torch.Tensor) -> torch.Tensor:
-        if self.uses_mrope:
-            # all dimensions of positions are the same
-            block_numbers = positions[0] // self.block_size
-        else:
-            block_numbers = positions // self.block_size
-        block_ids = block_table_tensor.gather(dim=1,
-                                              index=block_numbers.view(-1, 1))
-        block_ids = block_ids.view(-1)
-        if self.uses_mrope:
-            slot_mapping = (block_ids * self.block_size +
-                            positions[0] % self.block_size)
-        else:
-            slot_mapping = (block_ids * self.block_size +
-                            positions % self.block_size)
-        return slot_mapping
 
     def set_input_ids_first_pass(self, target_token_ids: torch.Tensor,
                                  next_token_ids: torch.Tensor, num_tokens: int,
