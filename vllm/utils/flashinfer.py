@@ -98,6 +98,34 @@ autotune = _lazy_import_wrapper(
 
 
 @functools.cache
+def has_flashinfer_comm() -> bool:
+    """Return ``True`` if FlashInfer comm module is available."""
+    return has_flashinfer() and importlib.util.find_spec(
+        "flashinfer.comm") is not None
+
+
+@functools.cache
+def has_flashinfer_all2all() -> bool:
+    """Return ``True`` if FlashInfer mnnvl all2all is available."""
+    if not has_flashinfer_comm():
+        return False
+
+    # Check if all required functions are available
+    required_functions = [
+        ("flashinfer.comm", "Mapping"),
+        ("flashinfer.comm.mnnvl", "MnnvlMemory"),
+        ("flashinfer.comm.trtllm_alltoall", "MnnvlMoe"),
+        ("flashinfer.comm.trtllm_alltoall", "MoEAlltoallInfo"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
+
+@functools.cache
 def has_flashinfer_moe() -> bool:
     """Return ``True`` if FlashInfer MoE module is available."""
     return has_flashinfer() and importlib.util.find_spec(
@@ -181,6 +209,12 @@ def force_use_trtllm_attention() -> Optional[bool]:
     return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
 
 
+def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
+    """Check if the current configuration supports TRTLLM attention."""
+    has_trtllm = supports_trtllm_attention()
+    return has_trtllm and (num_qo_heads % num_kv_heads == 0)
+
+
 def use_trtllm_attention(
     num_qo_heads: int,
     num_kv_heads: int,
@@ -188,7 +222,9 @@ def use_trtllm_attention(
     max_seq_len: int,
     kv_cache_dtype: str,
     q_dtype: torch.dtype,
+    is_prefill: bool,
     has_sinks: bool = False,
+    has_spec: bool = False,
 ) -> bool:
     """Return ``True`` if TRTLLM attention is used."""
     force_use_trtllm = force_use_trtllm_attention()
@@ -213,6 +249,12 @@ def use_trtllm_attention(
                 "query and key heads, but VLLM_USE_TRTLLM_ATTENTION is set to 1"
             )
         return False
+
+    if has_spec and not is_prefill:
+        # Speculative decoding requires TRTLLM attention for decodes
+        logger.info_once(
+            "Using TRTLLM attention (enabled for speculative decoding).")
+        return True
 
     # Must use TRTLLM attention if query is FP8 quantized
     if q_dtype == current_platform.fp8_dtype():
@@ -388,9 +430,12 @@ __all__ = [
     "trtllm_fp4_block_scale_moe",
     "autotune",
     "has_flashinfer_moe",
+    "has_flashinfer_comm",
+    "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
+    "can_use_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_disable_q_quantization",
     "flashinfer_scaled_fp4_mm",
