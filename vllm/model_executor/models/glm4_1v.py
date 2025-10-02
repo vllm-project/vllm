@@ -29,7 +29,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Callable, Literal, Optional, Union
+from typing import Annotated, Any, Callable, Literal, Optional, Union, override
 
 import numpy as np
 import torch
@@ -48,7 +48,7 @@ from transformers.video_utils import VideoMetadata
 
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               parallel_state)
 from vllm.distributed import utils as dist_utils
@@ -1144,7 +1144,31 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         height: int,
         num_frames: int,
         num_videos: int,
+        overrides: Optional[VideoDummyOptions] = None,
     ) -> list[VideoItem]:
+        if overrides:
+            if overrides.num_frames:
+                if overrides.num_frames > num_frames:
+                    logger.warning(
+                        "video.num_frames override (%d) exceeds model's "
+                        "maximum number of frames (%d), will be ignored",
+                        overrides.num_frames, num_frames)
+                num_frames = min(num_frames, overrides.num_frames)
+            if overrides.width:
+                if overrides.width > width:
+                    logger.warning(
+                        "video.width override (%d) exceeds model's "
+                        "maximum width (%d), will be ignored", overrides.width,
+                        width)
+                width = min(width, overrides.width)
+            if overrides.height:
+                if overrides.height > height:
+                    logger.warning(
+                        "video.height override (%d) exceeds model's "
+                        "maximum height (%d), will be ignored",
+                        overrides.height, height)
+                height = min(height, override.height)
+
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         video_items = []
         for i in range(num_videos):
