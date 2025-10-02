@@ -50,6 +50,9 @@ FP32_STATE_MODELS = [
 # Avoid OOM
 MAX_NUM_SEQS = 4
 
+# CI is failing using default ([8])
+COMPILATION_CONFIG = {'cudagraph_capture_sizes': [8, 4, 2, 1]}
+
 
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
@@ -75,7 +78,9 @@ def test_models(
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(model,
+                     max_num_seqs=MAX_NUM_SEQS,
+                     compilation_config=COMPILATION_CONFIG) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
@@ -105,7 +110,9 @@ def test_batching(
         pass
 
     for_loop_outputs = []
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(model,
+                     max_num_seqs=MAX_NUM_SEQS,
+                     compilation_config=COMPILATION_CONFIG) as vllm_model:
         for prompt in example_prompts:
             single_output, = vllm_model.generate_greedy_logprobs([prompt],
                                                                  max_tokens,
@@ -151,6 +158,7 @@ def test_chunked_prefill_with_parallel_sampling(
             # forces prefill chunks with decoding
             max_num_batched_tokens=MAX_NUM_SEQS * 3,
             max_num_seqs=MAX_NUM_SEQS,
+            compilation_config=COMPILATION_CONFIG,
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
@@ -175,7 +183,8 @@ def test_mamba_cache_cg_padding(
         example_prompts.append(example_prompts[0])
 
     try:
-        with vllm_runner(model) as vllm_model:
+        with vllm_runner(model,
+                         compilation_config=COMPILATION_CONFIG) as vllm_model:
             vllm_model.generate_greedy(example_prompts, max_tokens)
     except RuntimeError:
         pytest.fail(
@@ -200,7 +209,9 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     a single step.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(model,
+                         max_num_seqs=MAX_NUM_SEQS,
+                         compilation_config=COMPILATION_CONFIG) as vllm_model:
             vllm_model.generate_greedy([example_prompts[0]] * 100, 10)
     except ValueError:
         pytest.fail("Hybrid inner state wasn't cleaned up properly between"
@@ -220,7 +231,9 @@ def test_state_cleanup(
     If it's not cleaned, an error would be expected.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(model,
+                         max_num_seqs=MAX_NUM_SEQS,
+                         compilation_config=COMPILATION_CONFIG) as vllm_model:
             for _ in range(10):
                 vllm_model.generate_greedy([example_prompts[0]] * 100, 1)
     except ValueError:
@@ -239,13 +252,17 @@ def test_distributed_correctness(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    with vllm_runner(model, tensor_parallel_size=1,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(model,
+                     tensor_parallel_size=1,
+                     max_num_seqs=2,
+                     compilation_config=COMPILATION_CONFIG) as vllm_model:
         vllm_outputs_tp_1 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    with vllm_runner(model, tensor_parallel_size=2,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(model,
+                     tensor_parallel_size=2,
+                     max_num_seqs=2,
+                     compilation_config=COMPILATION_CONFIG) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
@@ -281,7 +298,9 @@ def test_full_cuda_graph(
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(model,
+                     max_num_seqs=MAX_NUM_SEQS,
+                     compilation_config=COMPILATION_CONFIG) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
@@ -322,6 +341,7 @@ def test_fp32_cache_state(
 
     with vllm_runner(model,
                      max_num_seqs=MAX_NUM_SEQS,
+                     compilation_config=COMPILATION_CONFIG,
                      **{cache_dtype_param: "float32"}) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
