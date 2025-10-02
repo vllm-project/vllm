@@ -43,7 +43,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
-from .utils import (flatten_bn, is_pp_missing_parameter,
+from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -940,6 +940,8 @@ class ChameleonModel(nn.Module):
     dummy_inputs=ChameleonDummyInputsBuilder)
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP, SupportsQuant):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
@@ -986,8 +988,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         expected_h = expected_w = vq_config.resolution
 
         return ChameleonImagePixelInputs(type="pixel_values",
-                                         data=flatten_bn(pixel_values,
-                                                         concat=True),
+                                         data=pixel_values,
                                          resolve_bindings={
                                              "h": expected_h,
                                              "w": expected_w
