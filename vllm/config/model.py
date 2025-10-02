@@ -19,6 +19,7 @@ import vllm.envs as envs
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.pooler import PoolerConfig
+from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -40,7 +41,6 @@ if TYPE_CHECKING:
     import vllm.model_executor.models as me_models
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
-    from vllm.config.scheduler import RunnerType
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.v1.sample.logits_processor import LogitsProcessor
 else:
@@ -52,13 +52,12 @@ else:
                            "vllm.model_executor.models")
     LoadConfig = Any
     ParallelConfig = Any
-    RunnerType = Any
     QuantizationMethods = Any
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
 
-RunnerOption = Literal["auto", "generate", "pooling", "draft"]
+RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify", "reward"]
 ConvertOption = Literal["auto", ConvertType]
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
@@ -137,6 +136,9 @@ class ModelConfig:
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
+    allowed_media_domains: Optional[list[str]] = None
+    """If set, only media URLs that belong to this domain can be used for 
+    multi-modal inputs. """
     revision: Optional[str] = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
@@ -283,6 +285,7 @@ class ModelConfig:
     mm_encoder_tp_mode: InitVar[Optional[MMEncoderTPMode]] = None
     interleave_mm_strings: InitVar[Optional[bool]] = None
     skip_mm_profiling: InitVar[Optional[bool]] = None
+    video_pruning_rate: InitVar[Optional[float]] = None
 
     def compute_hash(self) -> str:
         """
@@ -311,6 +314,7 @@ class ModelConfig:
         factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
+        factors.append(self.video_pruning_rate)
 
         # hf_config can control how the model looks!
         try:
@@ -338,17 +342,19 @@ class ModelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(
-            self,
-            # Multimodal config init vars
-            limit_mm_per_prompt: Optional[dict[str, int]],
-            media_io_kwargs: Optional[dict[str, dict[str, Any]]],
-            mm_processor_kwargs: Optional[dict[str, Any]],
-            mm_processor_cache_gb: Optional[float],
-            mm_processor_cache_type: Optional[MMCacheType],
-            mm_shm_cache_max_object_size_mb: Optional[int],
-            mm_encoder_tp_mode: Optional[MMEncoderTPMode],
-            interleave_mm_strings: Optional[bool],
-            skip_mm_profiling: Optional[bool]) -> None:
+        self,
+        # Multimodal config init vars
+        limit_mm_per_prompt: Optional[dict[str, int]],
+        media_io_kwargs: Optional[dict[str, dict[str, Any]]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+        mm_processor_cache_gb: Optional[float],
+        mm_processor_cache_type: Optional[MMCacheType],
+        mm_shm_cache_max_object_size_mb: Optional[int],
+        mm_encoder_tp_mode: Optional[MMEncoderTPMode],
+        interleave_mm_strings: Optional[bool],
+        skip_mm_profiling: Optional[bool],
+        video_pruning_rate: Optional[float],
+    ) -> None:
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
@@ -502,9 +508,14 @@ class ModelConfig:
                 else:  # task == "auto"
                     pass
             else:
+                debug_info = {
+                    "architectures": architectures,
+                    "is_generative_model": is_generative_model,
+                    "is_pooling_model": is_pooling_model,
+                }
                 raise AssertionError("The model should be a generative or "
                                      "pooling model when task is set to "
-                                     f"{self.task!r}.")
+                                     f"{self.task!r}. Found: {debug_info}")
 
             self.runner = runner
             self.convert = convert
@@ -612,6 +623,7 @@ class ModelConfig:
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
+                video_pruning_rate=video_pruning_rate,
             )
 
             mm_config_kwargs = {
@@ -655,8 +667,28 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
-        if getattr(self, "runner_type", self.runner) == "pooling":
-            return "TransformersModel"
+        # Check if the architecture we're wrapping has defaults
+        runner = None
+        convert = None
+        if defaults := try_match_architecture_defaults(self.architectures[0]):
+            _, (runner, convert) = defaults
+        # Overwrite with user-specified values
+        if self.runner != "auto":
+            runner = self.runner
+        if self.convert not in {"auto", "none"}:
+            convert = self.convert
+        # Fall back to default values if still not set
+        if runner is None:
+            runner = "generate"
+        if convert in {None, "none"}:
+            convert = "embed"
+        # Resolve Transformers backend pooling classes
+        if runner == "pooling":
+            if convert == "embed":
+                return "TransformersEmbeddingModel"
+            if convert == "classify":
+                return "TransformersForSequenceClassification"
+        # Resolve Transformers backend generate classes
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
@@ -665,7 +697,9 @@ class ModelConfig:
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers backend class."""
-        return self.architecture == self._get_transformers_backend_cls()
+        used_cls = self._model_info.architecture
+        transformers_backend_cls = self._get_transformers_backend_cls()
+        return used_cls == transformers_backend_cls
 
     @property
     def registry(self):
@@ -1069,14 +1103,14 @@ class ModelConfig:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp',
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_v32', 'deepseek_mtp',
               'kimi_k2', 'longcat_flash'):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
             # underlying architecture
             return self.hf_text_config.model.model_type in \
-                    ('deepseek_v2', 'deepseek_v3') \
+                    ('deepseek_v2', 'deepseek_v3', 'deepseek_v32') \
                 and self.hf_text_config.kv_lora_rank is not None
         return False
 
@@ -1321,11 +1355,13 @@ class ModelConfig:
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
+                config_format=self.config_format,
             )
         else:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
+                config_format=self.config_format,
             )
 
         if config is None:

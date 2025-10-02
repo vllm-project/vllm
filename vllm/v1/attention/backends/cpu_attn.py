@@ -54,7 +54,7 @@ class TorchSDPABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TORCH_SDPA_VLLM_V1"
+        return "TORCH_SDPA"
 
     @staticmethod
     def get_impl_cls() -> type["TorchSDPABackendImpl"]:
@@ -74,6 +74,7 @@ class TorchSDPABackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return _get_paged_attn_impl().get_kv_cache_shape(
             num_blocks, block_size, num_kv_heads, head_size)

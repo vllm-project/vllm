@@ -75,14 +75,20 @@ class XpuCommunicator(DeviceCommunicatorBase):
         dist.broadcast(input_, src=src, group=self.device_group)
 
     def dispatch(
-            self, hidden_states: torch.Tensor,
-            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.all2all_manager is not None
         hidden_states, router_logits = self.all2all_manager.dispatch(
-            hidden_states, router_logits)
+            hidden_states, router_logits, is_sequence_parallel)
         return hidden_states, router_logits
 
-    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def combine(self,
+                hidden_states: torch.Tensor,
+                is_sequence_parallel: bool = False) -> torch.Tensor:
         assert self.all2all_manager is not None
-        hidden_states = self.all2all_manager.combine(hidden_states)
+        hidden_states = self.all2all_manager.combine(hidden_states,
+                                                     is_sequence_parallel)
         return hidden_states

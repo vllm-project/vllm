@@ -9,13 +9,14 @@ from transformers import AriaConfig, AriaTextConfig, BatchFeature
 from transformers.models.aria.modeling_aria import AriaCrossAttention
 from transformers.models.aria.processing_aria import AriaProcessor
 
-from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
@@ -38,8 +39,7 @@ from .idefics2_vision_model import (
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    is_pp_missing_parameter, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    is_pp_missing_parameter, maybe_prefix)
 
 
 class AriaImagePixelInputs(TensorSchema):
@@ -298,14 +298,12 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
     Experts (MoE) Layer.
     """
 
-    def __init__(
-        self,
-        config: AriaTextConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config, cache_config, quant_config, prefix)
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config, prefix)
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+
         self.mlp = AriaTextMoELayer(config,
                                     quant_config=quant_config,
                                     prefix=f"{prefix}.mlp")
@@ -605,19 +603,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         multimodal_embeddings = self._process_image_input(image_input)
         return multimodal_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.image_token_index)
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -628,10 +613,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if inputs_embeds is None:
             multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            # always pass the input via `inputs_embeds`
-            # to make sure the computation graph is consistent
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings)
+            inputs_embeds = self.get_input_embeddings(
+                input_ids,
+                multimodal_embeddings,
+                is_multimodal=input_ids == self.config.image_token_index,
+            )
             input_ids = None
 
         hidden_states = self.language_model(

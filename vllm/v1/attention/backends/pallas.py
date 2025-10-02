@@ -86,7 +86,7 @@ class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "PALLAS_VLLM_V1"
+        return "PALLAS"
 
     @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
@@ -102,6 +102,7 @@ class PallasAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         padded_head_size = cdiv(
             head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
