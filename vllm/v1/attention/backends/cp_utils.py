@@ -30,19 +30,19 @@ def _cp_shard_positions_for_prefill(
     padding_position: int = -1,
 ) -> list[int]:
     """
-    Compute the positions and sequence lengths for context parallel (CP) shards during prefill.
+    Compute token positions and seq lengths for context parallel (CP) shards.
 
     Args:
-        cp_size (int): Context parallel world size.
-        cp_rank (int): Current context parallel rank.
-        positions_np (np.ndarray): Array to store the computed positions.
-        arange_np (np.ndarray): Array containing sequential indices for token positioning.
-        num_prefill_tokens (int): Number of tokens to prefill.
-        seq_offset (int): Offset to add to each position.
-        padding_position (int): Value to use for padding positions (default: -1).
+        cp_size (int): CP world size.
+        cp_rank (int): This CP rank.
+        positions_np (np.ndarray): Output positions.
+        arange_np (np.ndarray): Sequential indices.
+        num_prefill_tokens (int): Tokens to prefill.
+        seq_offset (int): Position offset.
+        padding_position (int): Padding value (default: -1).
 
     Returns:
-        list[int]: List of sequence lengths for each shard.
+        list[int]: Sequence lengths per shard.
     """
     cp_shard_size, num_pad_tokens_all = cp_get_shard_size(num_prefill_tokens)
     # Compute the token index ranges for the two shards handled by this rank
@@ -105,14 +105,12 @@ def _cp_get_computed_positions(cp_size, cp_rank,
                                num_computed_tokens: list[int],
                                padding_position: int) -> int:
     """
-    Get the computed token positions for a given context parallel (CP) rank.
+    Get computed token positions for a CP rank.
 
     Example:
-        Suppose CP world size is 2, and for a request, num_computed_tokens = [0, 4, 8, 9, 10, 11].
-        - CP rank 0 will be assigned tokens: [0, 3, 4, 7, 8, 10]
-        - CP rank 1 will be assigned tokens: [1, 2, 5, 6, 9]
-
-    This function determines which token positions each CP rank should process.
+      If CP world size=2, num_computed_tokens=[0,4,8,9,10,11]:
+        - CP rank 0: [0,3,4,7,8,10]
+        - CP rank 1: [1,2,5,6,9]
     """
     computed_chunk_sizes = np.diff(num_computed_tokens)
     if computed_chunk_sizes.size == 0:
@@ -156,28 +154,39 @@ def prepare_inputs_for_cp(
 ) -> tuple[list[int], list[int], list[list[int]]]:
     """
     Prepare inputs for context parallelism (CP).
-    
-    This method handles the distribution of tokens across context parallel ranks,
-    computing local token counts and positions for both scheduled and computed tokens.
-    It processes each request to determine how many tokens each CP rank should handle
-    and calculates the appropriate sequence lengths for attention computation.
+
+    This method handles the distribution of tokens across context
+    parallel ranks, computing local token counts and positions for
+    both scheduled and computed tokens. It processes each request to
+    determine how many tokens each CP rank should handle and calculates
+    the appropriate sequence lengths for attention computation.
 
     Args:
-        num_scheduled_tokens: Dictionary mapping request IDs to number of scheduled tokens per request
-        requests: Dictionary mapping request IDs to their cached request states
+        num_scheduled_tokens: Dictionary mapping request IDs to number
+            of scheduled tokens per request
+        requests: Dictionary mapping request IDs to their cached
+            request states
         req_ids: List of request IDs to process
-        block_table: Multi-group block table for managing KV cache slot mappings
-        positions_np: NumPy array to store position indices for scheduled tokens
-        computed_positions_np: NumPy array to store position indices for computed tokens
-        arange_np: NumPy array containing sequential indices used for token positioning
-        padding_loc: Integer value used for padding positions when sharding tokens
-            
+        block_table: Multi-group block table for managing KV cache
+            slot mappings
+        positions_np: NumPy array to store position indices for
+            scheduled tokens
+        computed_positions_np: NumPy array to store position indices
+            for computed tokens
+        arange_np: NumPy array containing sequential indices used for
+            token positioning
+        padding_loc: Integer value used for padding positions when
+            sharding tokens
+
     Returns:
         tuple containing:
-        - num_local_scheduled_tokens: Number of scheduled tokens per request on this CP rank
-        - num_local_computed_tokens: Number of computed tokens per request on this CP rank  
-        - q_seqlens_sharded: Query sequence lengths for each request (list of [1st_shard_size, 2nd_shard_size] 
-                    for prefill requests, or [1] for decode requests)
+        - num_local_scheduled_tokens: Number of scheduled tokens per
+            request on this CP rank
+        - num_local_computed_tokens: Number of computed tokens per
+            request on this CP rank
+        - q_seqlens_sharded: Query sequence lengths for each request
+            (list of [1st_shard_size, 2nd_shard_size] for prefill
+            requests, or [1] for decode requests)
     """
     cp_size = get_context_parallel_world_size()
     cp_rank = get_context_parallel_rank()
@@ -190,7 +199,8 @@ def prepare_inputs_for_cp(
     for idx, req_id in enumerate(req_ids):
         req_state = requests[req_id]
 
-        # Calculate how many computed tokens this CP rank should handle for this request
+        # Calculate how many computed tokens this CP rank should handle
+        # for this request
         num_computed_tokens_local[idx] = _cp_get_computed_positions(
             cp_size,
             cp_rank,
@@ -200,11 +210,13 @@ def prepare_inputs_for_cp(
             padding_loc,
         )
 
-        # Set up slot mapping for computed tokens if any exist. For context parallel,
-        # we do not need to track the absolute position of each token
-        # in the block table; preserving the correct relative ordering is sufficient for
-        # correct mapping. It also saves KV cache space by avoiding unnecessary allocation
-        # for absolute positions.
+        # Set up slot mapping for computed tokens if any exist. For
+        # context parallel, we do not need to track the absolute
+        # position of each token in the block table; preserving the
+        # correct relative ordering is sufficient for correct mapping.
+        # It also saves KV cache space by avoiding unnecessary
+        # allocation for absolute positions.
+
         if num_computed_tokens_local[idx] != 0:
             start_offset = sum(num_computed_tokens_local[:idx])
             computed_req_indices = np.full(num_computed_tokens_local[idx],
@@ -233,12 +245,12 @@ def prepare_inputs_for_cp(
             num_scheduled_tokens_local[idx] = sum(seqlens)
         else:
             # Decode case: each rank processes 1 token
-            positions_np[
-                total_num_local_scheduled_tokens] = req_state.num_computed_tokens[
-                    -1]
+            positions_np[total_num_local_scheduled_tokens] = (
+                req_state.num_computed_tokens[-1])
             num_scheduled_tokens_local[idx] = 1
             q_seqlens_sharded.append([1])
 
         total_num_local_scheduled_tokens += num_scheduled_tokens_local[idx]
 
-    return num_scheduled_tokens_local, num_computed_tokens_local, q_seqlens_sharded
+    return (num_scheduled_tokens_local, num_computed_tokens_local,
+            q_seqlens_sharded)
