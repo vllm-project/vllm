@@ -127,16 +127,8 @@ class TransformersMoEBase(TransformersBase):
                 ))
         return expert_mapping
 
-    def init_hook(self):
-        """Initialize the MoE layers.
-        
-        It is important that this happens:
-        
-        - After pipeline parallelism so only the `FusedMoE` layers for this
-        pipeline stage are created.
-        - Before tensor parallelism so vLLM `Linear` layers are not created for
-        the unfused `Linear` layers inside the Transformers MoE layers.
-        """
+    def recursive_replace(self):
+        """Initialize the MoE layers."""
         text_config = self.text_config
 
         # Positional arguments
@@ -200,7 +192,7 @@ class TransformersMoEBase(TransformersBase):
         num_redundant_experts = eplb_config.num_redundant_experts
 
         # Recursively fuse MoE layers
-        def _fused_moe(module: nn.Module, prefix: str):
+        def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
                 if (child_name == "experts"
@@ -250,9 +242,11 @@ class TransformersMoEBase(TransformersBase):
                                                or fused_experts.ep_size > 1):
                         add_all_reduce(mlp)
                 else:
-                    _fused_moe(child_module, prefix=qual_name)
+                    _recursive_replace(child_module, prefix=qual_name)
 
-        _fused_moe(self.model, prefix="model")
+        _recursive_replace(self.model, prefix="model")
+        # Continue with the replacement of layers in TransformersBase
+        super().recursive_replace()
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
