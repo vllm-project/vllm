@@ -197,7 +197,7 @@ class CompilationConfig:
     used for the compilation directly (it sees the whole graph). When the
     compilation level is 3, the backend is used for the piecewise compilation
     (it sees a part of the graph)."""
-    custom_ops: list[str] = ['all']
+    custom_ops: list[str] = field(default_factory=lambda: ['all'])
     """Fine-grained control over which custom ops to enable/disable. Use 'all'
     to enable all, 'none' to disable all. Also specify a list of custom op
     names to enable (prefixed with a '+'), or disable (prefixed with a '-').
@@ -467,6 +467,9 @@ class CompilationConfig:
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
+
+        if len(self.custom_ops) == 0:
+            self.custom_ops = ['all']
 
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
