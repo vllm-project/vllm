@@ -158,11 +158,14 @@ class LiteProfiler:
         log_path = os.path.abspath(log_path)
         if log_path == self._log_path:
             return
-        handler = logging.FileHandler(log_path)
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        self._logger.addHandler(handler)
-        self._logger.propagate = False
-        self._log_path = log_path
+        with self._lock:
+            if log_path == self._log_path:
+                return
+            handler = logging.FileHandler(log_path)
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            self._logger.addHandler(handler)
+            self._logger.propagate = False
+            self._log_path = log_path
 
     def _emit(self, transaction: _LiteTransaction) -> None:
         metrics = {
