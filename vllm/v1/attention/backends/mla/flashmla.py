@@ -27,7 +27,7 @@ class FlashMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHMLA_VLLM_V1"
+        return "FLASHMLA"
 
     @staticmethod
     def get_metadata_cls() -> type["FlashMLAMetadata"]:
@@ -155,8 +155,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                          logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **mla_args)
 
-        assert is_flashmla_supported(), \
-            "FlashMLA is not supported on this device"
+        is_supported, reason = is_flashmla_supported()
+        assert is_supported, reason
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -177,6 +177,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         attn_metadata: FlashMLAMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # TODO: (zyongye) decode function for mla here
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 

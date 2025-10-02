@@ -28,6 +28,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
@@ -90,7 +91,7 @@ class OpenAIServingPooling(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        model_name = self._get_model_name(request.model)
+        model_name = self.models.model_name()
 
         request_id = f"pool-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
@@ -102,8 +103,7 @@ class OpenAIServingPooling(OpenAIServing):
             if self.model_config.skip_tokenizer_init:
                 tokenizer = None
             else:
-                tokenizer = await self.engine_client.get_tokenizer(lora_request
-                                                                   )
+                tokenizer = await self.engine_client.get_tokenizer()
             renderer = self._get_renderer(tokenizer)
 
             if getattr(request, "dimensions", None) is not None:
@@ -149,10 +149,7 @@ class OpenAIServingPooling(OpenAIServing):
             elif isinstance(request, PoolingCompletionRequest):
                 engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=request.input,
-                    max_length=self.max_model_len,
-                    truncate_prompt_tokens=truncate_prompt_tokens,
-                    add_special_tokens=request.add_special_tokens,
-                    cache_salt=getattr(request, 'cache_salt', None),
+                    config=self._build_render_config(request),
                 )
             else:
                 raise ValueError(
@@ -270,3 +267,10 @@ class OpenAIServingPooling(OpenAIServing):
             data=items,
             usage=usage,
         )
+
+    def _build_render_config(
+            self, request: PoolingCompletionRequest) -> RenderConfig:
+        return RenderConfig(
+            max_length=self.max_model_len,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
+            add_special_tokens=request.add_special_tokens)

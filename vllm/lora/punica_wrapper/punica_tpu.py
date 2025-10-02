@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.nn.functional as F
-import torch_xla.core.xla_model as xm
+import torch_xla
 
 from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
 from vllm.lora.punica_wrapper.utils import convert_mapping
@@ -119,7 +119,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                    y: torch.Tensor,
                    x: Union[tuple[torch.Tensor, ...], torch.Tensor],
                    lora_b_stacked: tuple[torch.Tensor, ...],
-                   lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
                    output_slices: tuple[int, ...],
                    offset_start: int = 0,
                    add_inputs=True,
@@ -130,16 +129,13 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         Semantics:
             for i in range(len(lora_b_stacked)):
                 slice = output_slices[i]
-                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i] +
-                    lora_bias_stacked[i]
+                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i]
                 offset += slice
 
         Args:
             y (torch.Tensor): Output tensor.
             x (Union[tuple[torch.Tensor, ...], torch.Tensor]): Input tensors
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
-            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]):
-                bias's weight
             output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool):  Defaults to True.
         """
@@ -147,9 +143,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         offset_left = 0
 
-        if lora_bias_stacked is not None:
-            y = self._apply_bias(self._get_token_lora_indices(y), y,
-                                 output_slices, lora_bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
             y = self.expand_slice(y,
                                   x[slice_idx],
@@ -187,7 +180,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                         x: torch.Tensor,
                         lora_a_stacked: tuple[torch.Tensor, ...],
                         lora_b_stacked: tuple[torch.Tensor, ...],
-                        lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
                         scale: float,
                         output_slices: tuple[int, ...],
                         *,
@@ -203,24 +195,19 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                     @ lora_a_stacked[indices[i], layer_idx, :, :]
                     @ lora_b_stacked[indices[i], layer_idx, :, :]
                     * scale
-                    ).squeeze(0)+lora_bias_stacked[i]
+                    ).squeeze(0)
 
         Args:
             y (torch.Tensor): Output tensor. Will not be changed in-place.
             x (torch.Tensor): Input tensor (T, E)
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weight.
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight.
-            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]): lora's bias.
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[tuple[torch.Tensor, ...]]): Defaults to None.
         """
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
-        if lora_bias_stacked is not None:
-            assert len(lora_bias_stacked) == len(output_slices)
-            y = self._apply_bias(self._get_token_lora_indices(y), y,
-                                 output_slices, lora_bias_stacked)
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
@@ -281,12 +268,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         indices: torch.Tensor,
         output: torch.Tensor,
         output_slices: tuple[int, ...],
-        lora_bias_stacked: tuple[Optional[torch.Tensor], ...],
     ):
         """Applies bias to output
 
         Input shapes:
-            lora_bias_stacked:      3 element tuple of (num_loras, output_dim)
             indices:           (batch_size)
             output:            (batch_size, q_slice_size + 2*kv_slice_size)
             output_slices:     n-1 element tuple of (slice_size...),
@@ -298,16 +283,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         offset_left = 0
         for slice_idx, slice in enumerate(output_slices):
-            bias = lora_bias_stacked[slice_idx]
-            if bias is not None:
-                bias = bias.view(-1, bias.shape[-1])
-                bias = bias[indices]
-                bias = torch.where(indices[:, None] == -1, 0, bias)
-
-                bias = F.pad(bias, (offset_left, output.shape[1] -
-                                    (offset_left + slice), 0, 0))
-
-                output += bias
             offset_left += slice
 
         return output.view_as(org_output)
@@ -323,7 +298,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         extra_vocab_size: int,
     ):
         # Make sure we don't accidentally collect outside operations
-        xm.mark_step()
+        torch_xla.sync()
 
         # Pad the prompt mapping to avoid running into recompiles on the TPU
         # TODO: Should this happen inside mapping internally? If so how can we

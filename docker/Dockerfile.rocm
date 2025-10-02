@@ -29,7 +29,10 @@ ARG VLLM_BRANCH="main"
 ONBUILD RUN git clone ${VLLM_REPO} \
 	    && cd vllm \
 	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
-	    && git checkout FETCH_HEAD
+	    && git checkout FETCH_HEAD \
+        && if [ ${VLLM_REPO} != "https://github.com/vllm-project/vllm.git" ] ; then \
+               git remote add upstream "https://github.com/vllm-project/vllm.git" \
+               && git fetch upstream ; fi
 FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
 # -----------------------
@@ -104,6 +107,7 @@ COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 COPY --from=export_vllm /docker ${COMMON_WORKDIR}/vllm/docker
 
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+ENV RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false
 
 # ENV that can improve safe tensor loading, and end-to-end time

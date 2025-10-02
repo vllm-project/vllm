@@ -11,7 +11,6 @@ from typing import Optional, Union, final
 
 import torch
 
-import vllm.envs as envs
 from vllm.lora.layers import LoRAMapping
 from vllm.triton_utils import HAS_TRITON
 
@@ -41,14 +40,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                                                       max_num_batched_tokens,
                                                       device=device)
 
-        # When cudagraph capture size is greater than max_num_seqs (max_batches,
-        # here), V0 captures the graph as if max_num_seqs is set to
-        # the capture size.
-        # V1 doesn't have this problem and always respects max_num_seqs.
-        max_num_prompts = (max_batches
-                           if envs.VLLM_USE_V1 else max_num_batched_tokens)
         self.prompt_mapping_meta = LoRAKernelMeta.make(self.max_loras,
-                                                       max_num_prompts,
+                                                       max_batches,
                                                        device=device)
 
     def update_metadata(self, mapping: LoRAMapping,
@@ -93,7 +86,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                    y: torch.Tensor,
                    x: torch.Tensor,
                    lora_b_stacked: tuple[torch.Tensor, ...],
-                   lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
                    output_slices: tuple[int, ...],
                    offset_start: int = 0,
                    add_inputs=True,
@@ -104,26 +96,18 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Semantics:
             for i in range(len(lora_b_stacked)):
                 slice = output_slices[i]
-                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i] + 
-                    lora_bias_stacked[i] 
+                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i]
                 offset += slice
             
         Args:
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensors
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
-            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]): 
-                bias's weight
             output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool): Defaults to True.
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        if lora_bias_stacked is not None:
-            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0,
-                                              y.size(0))
-            self._apply_bias(token_lora_indices, y, output_slices,
-                             lora_bias_stacked)
 
         assert x.ndim == 3
         assert x.size(0) == len(output_slices)
@@ -173,7 +157,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                         x: torch.Tensor,
                         lora_a_stacked: tuple[torch.Tensor, ...],
                         lora_b_stacked: tuple[torch.Tensor, ...],
-                        lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
                         scale: float,
                         output_slices: tuple[int, ...],
                         *,
@@ -189,26 +172,18 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                     @ lora_a_stacked[indices[i], layer_idx, :, :]
                     @ lora_b_stacked[indices[i], layer_idx, :, :]
                     * scale
-                    ).squeeze(0)+lora_bias_stacked[i]
-
+                    ).squeeze(0)
         Args:
             y (torch.Tensor): Output tensor. Will be changed in-place.
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weight.
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight.
-            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]): lora's bias.
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[torch.Tensor]): Defaults to None.
         """
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
-        if lora_bias_stacked is not None:
-            assert len(lora_bias_stacked) == len(output_slices)
-            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0,
-                                              y.size(0))
-            y = self._apply_bias(token_lora_indices, y, output_slices,
-                                 lora_bias_stacked)
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
