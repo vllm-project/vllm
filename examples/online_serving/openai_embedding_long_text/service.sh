@@ -103,7 +103,7 @@ POOLER_CONFIG="{\"pooling_type\": \"$POOLING_TYPE\", \"normalize\": true, \"enab
 vllm serve "$MODEL_NAME" \
   --tensor-parallel-size "$GPU_COUNT" \
   --enforce-eager \
-  --override-pooler-config "$POOLER_CONFIG" \
+  --pooler-config "$POOLER_CONFIG" \
   --served-model-name ${MODEL_CODE} \
   --api-key "$API_KEY" \
   --trust-remote-code \

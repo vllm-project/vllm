@@ -8,8 +8,7 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
-from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -21,7 +20,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
-from vllm.v1.sample.metadata import SamplingMetadata
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -30,17 +28,14 @@ logger = init_logger(__name__)
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
 
-    def __init__(
-        self,
-        config: LlamaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config,
-                         cache_config=cache_config,
-                         quant_config=quant_config,
-                         prefix=prefix)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 config: Optional[LlamaConfig] = None) -> None:
+        super().__init__(vllm_config, prefix=prefix, config=config)
+
+        config = config or vllm_config.model_config.hf_config
+        quant_config = self.get_quant_config(vllm_config)
 
         # override qkv
         self.self_attn.qkv_proj = QKVParallelLinear(
@@ -59,6 +54,16 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             self._residual_norm = self._norm_before_residual
         else:
             self._residual_norm = self._norm_after_residual
+
+    def get_quant_config(
+            self, vllm_config: VllmConfig) -> Optional[QuantizationConfig]:
+        """Use drafter's quantization config instead of verifier's."""
+        draft_model_config = vllm_config.speculative_config.draft_model_config
+        draft_load_config = vllm_config.load_config
+
+        return VllmConfig.get_quantization_config(
+            draft_model_config,
+            draft_load_config) if draft_model_config else None
 
     def _norm_before_residual(
             self,
@@ -103,7 +108,6 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         return hidden_states, residual
 
 
-@support_torch_compile
 class LlamaModel(nn.Module):
 
     def __init__(
@@ -128,9 +132,9 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
-                config=self.config,
-                cache_config=current_vllm_config.cache_config,
+                current_vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
+                config=self.config,
             )
         ])
         if hasattr(self.config, "target_hidden_size"):
@@ -146,13 +150,18 @@ class LlamaModel(nn.Module):
             eps=self.config.rms_norm_eps,
         )
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        input_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_embeds = self.embed_tokens(input_ids)
+        if input_embeds is None:
+            input_embeds = self.get_input_embeddings(input_ids)
         assert hidden_states.shape[-1] == input_embeds.shape[-1]
 
         residual = None
@@ -204,6 +213,11 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         nn.Module.__init__(self)
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
+        # Ensure draft_vocab_size is set
+        # default to the base vocab size when absent
+        if getattr(self.config, "draft_vocab_size", None) is None:
+            base_vocab_size = getattr(self.config, "vocab_size", None)
+            self.config.draft_vocab_size = base_vocab_size
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
 
@@ -228,6 +242,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             requires_grad=False,
         )
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -235,19 +252,13 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if inputs_embeds is not None:
-            raise NotImplementedError(
-                f"{type(self).__name__} does not support multimodal inputs yet."
-            )
-        return self.model(input_ids, positions, hidden_states)
+        return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             assert logits.shape[1] == self.config.vocab_size, \
                 "Expected logits to have shape " \
