@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import glob
+import hashlib
 import os
 import tempfile
 
@@ -9,7 +10,8 @@ import huggingface_hub.constants
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf)
-from vllm.transformers_utils.runai_utils import (is_runai_obj_uri,
+from vllm.transformers_utils.runai_utils import (ObjectStorageModel,
+                                                 is_runai_obj_uri,
                                                  list_safetensors)
 
 
@@ -34,6 +36,23 @@ def test_runai_list_safetensors_local():
         assert len(safetensors) == len(files)
 
 
-if __name__ == "__main__":
-    test_is_runai_obj_uri()
-    test_runai_list_safetensors_local()
+def test_runai_pull_files_gcs(monkeypatch):
+    monkeypatch.setenv("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS", "true")
+    # Bypass default project lookup by setting GOOGLE_CLOUD_PROJECT
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "fake-project")
+    filename = "LT08_L1GT_074061_20130309_20170505_01_T2_MTL.txt"
+    gcs_bucket = "gs://gcp-public-data-landsat/LT08/01/074/061/LT08_L1GT_074061_20130309_20170505_01_T2/"
+    gcs_url = f"{gcs_bucket}/{filename}"
+    model = ObjectStorageModel(gcs_url)
+    model.pull_files(gcs_bucket, allow_pattern=[f"*{filename}"])
+    # To re-generate / change URLs:
+    #   gsutil ls -L gs://<gcs-url> | grep "Hash (md5)" | tr -d ' ' \
+    #     | cut -d":" -f2 | base64 -d | xxd -p
+    expected_checksum = "f60dea775da1392434275b311b31a431"
+    hasher = hashlib.new("md5")
+    with open(os.path.join(model.dir, filename), 'rb') as f:
+        # Read the file in chunks to handle large files efficiently
+        for chunk in iter(lambda: f.read(4096), b''):
+            hasher.update(chunk)
+    actual_checksum = hasher.hexdigest()
+    assert actual_checksum == expected_checksum
