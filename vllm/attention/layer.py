@@ -68,16 +68,8 @@ def check_upstream_fa_availability(dtype: torch.dtype):
         from transformers.utils import is_flash_attn_2_available
         return is_flash_attn_2_available()
     if current_platform.is_rocm():
-        try:
-            from importlib.util import find_spec
-            logger.info("Check Upstream flash attention is available.")
-            find_spec("flash_attn")
-            logger.info("Upstream flash attention is available.")
-            return True
-        except ImportError as e:
-            logger.info(
-                "Fail to import Upstream flash attention is available. %s", e)
-            return False
+        from importlib.util import find_spec
+        return find_spec("flash_attn") is not None
     return False
 
 
