@@ -98,6 +98,8 @@ class PassConfig:
     """Whether to enable flashinfer allreduce fusion."""
     fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
+    enable_fp8_allgather_opt: bool = False
+    """Whether to enable FP8 AllGather optimization (2x bandwidth reduction)."""
 
     # TODO(luka) better pass enabling system.
 

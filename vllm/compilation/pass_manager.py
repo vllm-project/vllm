@@ -20,6 +20,7 @@ if current_platform.is_cuda_alike():
 
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
+    from .fp8_allgather_pass import FP8AllGatherOptPass
 
 from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
@@ -93,6 +94,9 @@ class PostGradPassManager(CustomGraphPass):
             self.passes += [SequenceParallelismPass(config)]
             if self.pass_config.enable_async_tp:
                 self.passes += [AsyncTPPass(config)]
+
+        if self.pass_config.enable_fp8_allgather_opt:
+            self.passes += [FP8AllGatherOptPass(config)]
 
         if self.pass_config.enable_fi_allreduce_fusion:
             self.passes += [AllReduceFusionPass(config)]
