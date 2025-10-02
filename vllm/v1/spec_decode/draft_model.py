@@ -109,8 +109,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 "disabled padded drafter batch yet")
 
     def _model_kwargs(self, num_tokens: int) -> dict[str, Any]:
-        self._raise_if_multimodal()
-        self._raise_if_mrope()
         return {
             "input_ids": self.input_ids[:num_tokens],
             "positions": self.positions[:num_tokens],
@@ -118,7 +116,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
 
     def dummy_run(self, num_tokens: int, forward_ctx_kwargs: dict):
         model_kwargs = self._model_kwargs(num_tokens)
-        assert isinstance(self.model, torch.nn.Module)
         with set_forward_context(
                 vllm_config=self.vllm_config,
                 num_tokens=num_tokens,
