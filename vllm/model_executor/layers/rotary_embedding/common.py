@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from functools import cache
+from importlib.util import find_spec
 from typing import Callable
 
 import torch
@@ -12,9 +14,6 @@ from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
-
-import importlib
-from functools import cache
 
 logger = init_logger(__name__)
 
@@ -78,7 +77,7 @@ def dispatch_rotary_emb_function() -> Callable[..., torch.Tensor]:
         return apply_rotary_emb
 
     if current_platform.is_rocm():
-        if importlib.util.find_spec("flash_attn") is not None:
+        if find_spec("flash_attn") is not None:
             from flash_attn.ops.triton.rotary import apply_rotary
             return apply_rotary
         else:
