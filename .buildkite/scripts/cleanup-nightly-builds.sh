@@ -21,10 +21,12 @@ fi
 
 # Get DockerHub bearer token
 echo "Getting DockerHub bearer token..."
+set +x
 BEARER_TOKEN=$(curl -s -X POST \
     -H "Content-Type: application/json" \
     -d "{\"username\": \"$DOCKERHUB_USERNAME\", \"password\": \"$DOCKERHUB_TOKEN\"}" \
     "https://hub.docker.com/v2/users/login" | jq -r '.token')
+set -x
 
 if [ -z "$BEARER_TOKEN" ] || [ "$BEARER_TOKEN" = "null" ]; then
     echo "Error: Failed to get DockerHub bearer token"
@@ -37,8 +39,10 @@ get_all_tags() {
     local all_tags=""
     
     while true; do
+        set +x
         local response=$(curl -s -H "Authorization: Bearer $BEARER_TOKEN" \
             "$REPO_API_URL?page=$page&page_size=100")
+        set -x
         
         # Get both last_updated timestamp and tag name, separated by |
         local tags=$(echo "$response" | jq -r '.results[] | select(.name | startswith("nightly-")) | "\(.last_updated)|\(.name)"')
@@ -60,7 +64,9 @@ delete_tag() {
     echo "Deleting tag: $tag_name"
     
     local delete_url="https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/$tag_name"
+    set +x
     local response=$(curl -s -X DELETE -H "Authorization: Bearer $BEARER_TOKEN" "$delete_url")
+    set -x
     
     if echo "$response" | jq -e '.detail' > /dev/null 2>&1; then
         echo "Warning: Failed to delete tag $tag_name: $(echo "$response" | jq -r '.detail')"
