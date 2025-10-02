@@ -42,6 +42,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements/**/*.txt
+            setup.py
+            pyproject.toml
 
       - name: Upgrade build tooling
         run: |
@@ -64,7 +69,7 @@ jobs:
       - name: Editable install (full source build)
         env:
           VLLM_TARGET_DEVICE: ${{ matrix.backend }}
-          MAX_JOBS: '1'
+          MAX_JOBS: '2'
           CMAKE_BUILD_TYPE: Release
           VERBOSE: '0'
           TORCH_CUDA_ARCH_LIST: ${{ matrix.backend == 'cuda' && '8.0 8.9' || '' }}
