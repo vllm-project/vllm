@@ -400,7 +400,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 "exactly equal.", mamba_padding_pct)
 
 
-class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
+class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -409,20 +409,20 @@ class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
         """
         hf_config = vllm_config.model_config.hf_config
 
+        # Mirror the check in vllm/model_executor/models/deepseek_v2.py
         is_v32 = hasattr(hf_config, "index_topk")
+        assert is_v32
 
-        if is_v32:
-            # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
-            #   "auto")
-            cache_config = vllm_config.cache_config
-            if cache_config.cache_dtype == "auto" or \
-                cache_config.cache_dtype.startswith("fp8"):
-                cache_config.cache_dtype = "fp8_ds_mla"
-                logger.info(
-                    "Using custom fp8 kv-cache format for DeepSeekV3.2")
-            if cache_config.cache_dtype == "bfloat16":
-                cache_config.cache_dtype = "auto"
-                logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
+        # For DeepSeekV3.2, we use a custom fp8 format as default (i.e.
+        #   "auto")
+        cache_config = vllm_config.cache_config
+        if cache_config.cache_dtype == "auto" or \
+            cache_config.cache_dtype.startswith("fp8"):
+            cache_config.cache_dtype = "fp8_ds_mla"
+            logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
+        if cache_config.cache_dtype == "bfloat16":
+            cache_config.cache_dtype = "auto"
+            logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
@@ -441,5 +441,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "MambaForCausalLM": MambaModelConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
-    "DeepseekV3ForCausalLM": DeepseekV3ForCausalLM,
+    "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
 }

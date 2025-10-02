@@ -147,6 +147,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             assert out is not None
             return out
         pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            out = input_.clone()
+            torch.distributed.all_reduce(out, group=self.device_group)
+            return out
         assert pynccl_comm is not None
         out = pynccl_comm.all_reduce(input_)
         if out is None:
