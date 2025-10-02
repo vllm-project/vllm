@@ -1,9 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import NamedTuple
+
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+
+from ....utils import RemoteOpenAIServer
+
+# # any model with a chat template should work here
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+
+
+@pytest.fixture(scope="module")
+def server():
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "float16",
+        "--enforce-eager",
+        "--max-model-len",
+        "4080",
+        "--max-logprobs",  # test prompt_logprobs equal to -1
+        "151936"
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
 
 
 @pytest_asyncio.fixture
@@ -12,14 +36,25 @@ async def client(server):
         yield async_client
 
 
+class TestCase(NamedTuple):
+    model_name: str
+    echo: bool
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("echo", [True, False])
+@pytest.mark.parametrize(
+    "test_case",
+    [
+        TestCase(model_name=MODEL_NAME, echo=True),
+        TestCase(model_name=MODEL_NAME, echo=False)
+    ],
+)
 async def test_chat_session_with_echo_and_continue_final_message(
-        client: openai.AsyncOpenAI, echo: bool, model_name):
+        client: openai.AsyncOpenAI, test_case: TestCase):
     saying: str = "Here is a common saying about apple. An apple a day, keeps"
     # test echo with continue_final_message parameter
     chat_completion = await client.chat.completions.create(
-        model=model_name,
+        model=test_case.model_name,
         messages=[{
             "role": "user",
             "content": "tell me a common saying"
@@ -28,7 +63,7 @@ async def test_chat_session_with_echo_and_continue_final_message(
             "content": saying
         }],
         extra_body={
-            "echo": echo,
+            "echo": test_case.echo,
             "continue_final_message": True,
             "add_generation_prompt": False
         })
@@ -36,10 +71,10 @@ async def test_chat_session_with_echo_and_continue_final_message(
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
-    assert choice.finish_reason in ["stop", "length"]
+    assert choice.finish_reason == "stop"
 
     message = choice.message
-    if echo:
+    if test_case.echo:
         assert message.content is not None and saying in message.content
     else:
         assert message.content is not None and saying not in message.content
@@ -47,7 +82,7 @@ async def test_chat_session_with_echo_and_continue_final_message(
 
 
 @pytest.mark.asyncio
-async def test_prompt_logprobs(client: openai.AsyncOpenAI, model_name):
+async def test_prompt_logprobs(client: openai.AsyncOpenAI):
     messages = [{
         "role": "system",
         "content": "You are a helpful assistant."
@@ -57,9 +92,9 @@ async def test_prompt_logprobs(client: openai.AsyncOpenAI, model_name):
     }]
 
     completion = await client.chat.completions.create(
-        model=model_name,
+        model=MODEL_NAME,
         messages=messages,
-        extra_body={"prompt_logprobs": 5},
+        extra_body={"prompt_logprobs": -1},
     )
 
     assert completion.prompt_logprobs is not None
@@ -67,7 +102,7 @@ async def test_prompt_logprobs(client: openai.AsyncOpenAI, model_name):
 
 
 @pytest.mark.asyncio
-async def test_top_logprobs(client: openai.AsyncOpenAI, model_name):
+async def test_top_logprobs(client: openai.AsyncOpenAI):
     messages = [{
         "role": "system",
         "content": "You are a helpful assistant."
@@ -77,10 +112,10 @@ async def test_top_logprobs(client: openai.AsyncOpenAI, model_name):
     }]
 
     completion = await client.chat.completions.create(
-        model=model_name,
+        model=MODEL_NAME,
         messages=messages,
         extra_body={
-            "top_logprobs": 5,
+            "top_logprobs": -1,
             "logprobs": "true",
         },
     )
