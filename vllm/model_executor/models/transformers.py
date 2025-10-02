@@ -310,41 +310,22 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_fields["num_image_patches"] = MultiModalFieldConfig.batched("image")
         return mm_fields
 
-    def _apply_hf_processor_text_mm(
+    def _get_hf_mm_data(
         self,
-        prompt_text: str,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature, bool]:
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         """
-        Apply the HF processor on the prompt text and multi-modal data
-        together.
-
-        In contrast to the base class, this method always returns
-        `mm_token_type_ids` from HF processor. Additionally, return whether
-        prompt replacements have been applied.
+        In contrast to the base class, this method always adds
+        `return_mm_token_type_ids` to the processor data
         """
-        processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
-        processor_data["return_mm_token_type_ids"] = True
+        processor_data: dict[str, object] = {"return_mm_token_type_ids": True}
+        passthrough_data = dict[str, object]()
 
-        processed_data = self._call_hf_processor(
-            prompt=prompt_text,
-            mm_data=processor_data,
-            mm_kwargs=hf_processor_mm_kwargs,
-            tok_kwargs=tokenization_kwargs,
-        )
-        processed_data.update(passthrough_data)
-        prompt_ids, = processed_data.pop("input_ids").tolist()
+        for items in mm_items.values():
+            processor_data.update(items.get_processor_data())
+            passthrough_data.update(items.get_passthrough_data())
 
-        is_update_applied = self._hf_processor_applies_updates(
-            prompt_text=prompt_text,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
-
-        return prompt_ids, processed_data, is_update_applied
+        return processor_data, passthrough_data
 
     def apply(
         self,
