@@ -619,8 +619,6 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
-                if child_name == "language_model":
-                    print("here")
                 new_module = child_module
                 qual_name = maybe_prefix(prefix, child_name)
                 if isinstance(child_module, nn.Linear):
