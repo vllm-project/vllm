@@ -176,7 +176,7 @@ def replace_rms_norm_class(rms_norm: nn.Module) -> RMSNorm:
     - Weight is stored as `weight`.
     - Epsilon is stored as `eps` or `variance_epsilon`.
     - `with_scale` indicates whether the layer has a weight (Gemma3n only).
-    - `var_hidden_size` is used only ever used for Intern vision encoder.
+    - `var_hidden_size` is only ever used for Intern vision encoder.
     """
     weight = getattr(rms_norm, "weight", None)
     weight: Optional[torch.Tensor] = getattr(weight, "data", weight)
