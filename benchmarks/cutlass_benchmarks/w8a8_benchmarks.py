@@ -17,7 +17,7 @@ from weight_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    w8a8_block_fp8_matmul,
+    w8a8_triton_block_scaled_mm,
 )
 from vllm.utils import FlexibleArgumentParser, cdiv
 
@@ -158,7 +158,7 @@ def bench_fp8(
         "cutlass_fp8_fp8_fp16_scaled_mm_bias": lambda: ops.cutlass_scaled_mm(
             a, b, scale_a, scale_b, torch.float16, bias.to(dtype=torch.float16)
         ),
-        "triton_fp8_fp8_fp16_scaled_mm_blockwise": lambda: w8a8_block_fp8_matmul(
+        "triton_fp8_fp8_fp16_scaled_mm_blockwise": lambda: w8a8_triton_block_scaled_mm(
             a_cont, b.t(), block_scale_a, block_scale_b.t(), (128, 128)
         ),
         "cutlass_fp8_fp8_fp16_scaled_mm_blockwise": lambda: ops.cutlass_scaled_mm(

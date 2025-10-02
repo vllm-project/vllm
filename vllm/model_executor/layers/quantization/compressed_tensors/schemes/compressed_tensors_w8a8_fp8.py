@@ -11,7 +11,7 @@ from torch.nn import Parameter
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_fp8_block_linear, check_aiter_fp8_linear_support,
+    W8A8BlockFp8LinearOp, check_aiter_fp8_linear_support,
     create_fp8_input_scale, create_fp8_scale_parameter,
     create_fp8_weight_parameter, maybe_post_process_fp8_weight_block,
     process_fp8_weight_block_strategy, process_fp8_weight_channel_strategy,
@@ -41,15 +41,29 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.strategy = weight_quant.strategy
         self.out_dtype = torch.get_default_dtype()
         self.is_static_input_scheme = is_static_input_scheme
-        self.act_q_group_shape = GroupShape.PER_TENSOR \
-            if is_static_input_scheme else GroupShape.PER_TOKEN
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.is_static_input_scheme,
-            act_quant_group_shape=self.act_q_group_shape)
 
         self.weight_block_size = self.weight_quant.block_structure
+        if self.weight_block_size is not None:
+            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
+        else:
+            self.act_q_group_shape = GroupShape.PER_TENSOR \
+                if is_static_input_scheme else GroupShape.PER_TOKEN
+
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
         self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
+
+        if self.weight_block_size is not None:
+            assert not self.is_static_input_scheme
+            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+                weight_group_shape=GroupShape(*self.weight_block_size),
+                act_quant_group_shape=self.act_q_group_shape,
+                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+            )
+        else:
+            self.fp8_linear = Fp8LinearOp(
+                act_quant_static=self.is_static_input_scheme,
+                act_quant_group_shape=self.act_q_group_shape)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -142,13 +156,14 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        if layer.weight_block_size is not None:
-            return apply_fp8_block_linear(
-                layer,
+        if self.weight_block_size is not None:
+            return self.w8a8_block_fp8_linear.apply(
                 input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                input_scale=layer.input_scale,
                 bias=bias,
-                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-                use_aiter_and_is_supported=self.use_aiter_and_is_supported)
+            )
 
         return self.fp8_linear.apply(input=x,
                                      weight=layer.weight,
