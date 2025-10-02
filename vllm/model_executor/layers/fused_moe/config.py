@@ -438,8 +438,6 @@ def fp8_w8a8_moe_quant_config(
                                     per_act_token_quant=per_act_token_quant,
                                     per_out_ch_quant=per_out_ch_quant,
                                     block_shape=block_shape)
-#    from vllm.platforms import current_platform
-#    return FusedMoEQuantConfig.make(current_platform.fp8_dtype(),
 
 def int8_w8a8_moe_quant_config(
     w1_scale: torch.Tensor,

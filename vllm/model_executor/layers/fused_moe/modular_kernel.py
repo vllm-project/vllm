@@ -696,8 +696,8 @@ class FusedMoEModularKernel(torch.nn.Module):
             workspace2 = None
         else:
             workspace2 = buffers.workspace2.get(workspace2_shape,
-                                                    device=a1.device,
-                                                    dtype=workspace_dtype)
+                                                device=a1.device,
+                                                dtype=workspace_dtype)
 
         assert fused_out is None or fused_out.shape == fused_out_shape, (
             f"fused_out {fused_out.shape} but expected {fused_out_shape}")

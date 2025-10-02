@@ -4,6 +4,7 @@
 from contextlib import contextmanager
 from typing import Any, Optional
 
+from vllm.model_executor.layers.fused_moe.aiter_experts import AiterExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
@@ -11,7 +12,6 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
-from vllm.model_executor.layers.fused_moe.aiter_experts import AiterExperts
 from vllm.triton_utils import HAS_TRITON
 
 _config: Optional[dict[str, Any]] = None
