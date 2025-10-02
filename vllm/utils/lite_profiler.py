@@ -87,6 +87,11 @@ class _NullTransaction:
         return None
 
 
+# Create singleton sentinel objects to avoid repeated allocations
+_NULL_TRANSACTION = _NullTransaction()
+_NULL_CONTEXT = nullcontext()
+
+
 class LiteProfiler:
 
     def __init__(self) -> None:
@@ -94,17 +99,23 @@ class LiteProfiler:
         self._lock = threading.Lock()
         self._logger = init_logger("vllm.lite_profiler")
         self._log_path: Optional[str] = None
+        self._enabled = self._check_enabled()
 
-    def is_enabled(self) -> bool:
+    def _check_enabled(self) -> bool:
+        """Check if profiling is enabled via environment variable."""
         try:
             return bool(envs.VLLM_LITE_PROFILER)
         except AttributeError:  # pragma: no cover - env not wired in tests
             return False
 
+    def is_enabled(self) -> bool:
+        """Return cached enabled state - no environment variable lookup."""
+        return self._enabled
+
     # Transaction handling
     def transaction(self, tag: str):
-        if not self.is_enabled():
-            return _NullTransaction()
+        if not self._enabled:
+            return _NULL_TRANSACTION
         return _LiteTransaction(self, tag)
 
     def _push(self, transaction: _LiteTransaction) -> None:
@@ -120,18 +131,22 @@ class LiteProfiler:
             stack.pop()
 
     def _current(self) -> Optional[_LiteTransaction]:
+        if not self._enabled:
+            return None
         stack = getattr(self._local, "stack", None)
         if stack:
             return stack[-1]
         return None
 
     def has_active_transaction(self) -> bool:
+        if not self._enabled:
+            return False
         stack = getattr(self._local, "stack", None)
         return bool(stack)
 
     # Scope helpers
     def scope(self, name: str):
-        if not self.is_enabled():
+        if not self._enabled:
             return None
         transaction = self._current()
         if transaction is None:
@@ -139,12 +154,16 @@ class LiteProfiler:
         return transaction.scope(name)
 
     def scoped(self, name: str):
-        scope = self.scope(name)
-        if scope is None:
-            return nullcontext()
-        return scope
+        if not self._enabled:
+            return _NULL_CONTEXT
+        transaction = self._current()
+        if transaction is None:
+            return _NULL_CONTEXT
+        return transaction.scope(name)
 
     def record(self, name: str, elapsed_ns: int, *, count: int = 1) -> None:
+        if not self._enabled:
+            return
         transaction = self._current()
         if transaction is None:
             return
