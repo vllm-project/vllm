@@ -4232,8 +4232,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 block_size=block_size,
                 num_kv_heads=1,
                 head_size=mla_module.head_size,
-                dtype=self.kv_cache_dtype,
-                use_mla=True)
+                dtype=self.kv_cache_dtype)
 
         mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
         if len(mamba_layers) > 0:

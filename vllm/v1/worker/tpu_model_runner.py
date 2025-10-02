@@ -567,7 +567,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_kv_heads=1,
                 head_size=mla_module.head_size,
                 dtype=self.kv_cache_dtype,
-                use_mla=True,
             )
 
         return kv_cache_spec
