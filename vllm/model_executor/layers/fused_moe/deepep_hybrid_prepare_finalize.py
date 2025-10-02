@@ -4,6 +4,7 @@ from typing import Callable, Optional, Union
 
 import deep_ep
 import torch
+import torch.nn.functional as F
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -47,7 +48,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
-        self.rank_expert_offset = rank_expert_offset
+        self.rank_expert_offset = rank_expert_offset #?
         self.handle = None
         self.expert_probs = None
 
@@ -112,13 +113,13 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1_post_scale = None
         else:
             a1q = a1
-            a1q_scale = None
+            a1q_scale = torch.ones(1, device=a1.device, dtype=torch.float32) # hack
             a1_post_scale = quant_config.a1_scale
 
         (
             expert_x, expert_probs, expert_x_scale, handle
         ) = self.buffer.dispatch(
-            tensor=a1,
+            tensor=a1q,
             scaling_factor=a1q_scale,
             topk_idx=topk_ids,
             topk_weights=topk_weights,
@@ -127,6 +128,39 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_of_tokens_for_experts=-1, #??
         )
         self.handle = handle
+        self.expert_probs = expert_probs
+
+        (sparse_to_dense_map,
+         rdma_to_attn_map,
+         attn_to_rdma_map,
+         num_of_tokens_for_experts,
+         local_expert_routing_map,
+         num_tokens) = self.handle
+
+        num_of_tokens_for_experts = num_of_tokens_for_experts.cpu()
+
+        print(f"STUFF\n"
+              f"rank_exp_offset = {self.rank_expert_offset}\n"
+              f"a={a1q.shape}/{a1q.dtype} -> {expert_x.shape}/{expert_x.dtype}\n"
+              f"topk_ids={topk_ids.shape}\n"
+              f"tok_for_exp={num_of_tokens_for_experts}\n"
+              f"probs={expert_probs.shape}\n"
+              f"lem shape={local_expert_routing_map.shape}, {local_expert_routing_map[:num_of_tokens_for_experts].shape}\n"
+              f"lem numel={local_expert_routing_map.nonzero().numel()}\n"
+              #f"lem={local_expert_routing_map}\n"
+              f"lem sum={local_expert_routing_map.sum(dim=1).shape}\n"
+              f"sparse_to_dense_map={sparse_to_dense_map.shape} {sparse_to_dense_map.dtype} {sparse_to_dense_map}\n"
+              f"rdma_to_attn_map={rdma_to_attn_map.shape} {rdma_to_attn_map.dtype} {rdma_to_attn_map}\n"
+              f"attn_to_rdma_map={attn_to_rdma_map.shape} {attn_to_rdma_map.dtype}\n"
+              f"num_tokens={num_tokens}\n"
+              )
+
+        local_expert_routing_map = local_expert_routing_map[:num_of_tokens_for_experts.item()]
+
+        # TBD
+        new_topk_ids = None
+
+        # N/A
         expert_tokens_meta = None
 
         # Dispatch and Quant
@@ -144,9 +178,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape)
 
-        self.expert_probs = expert_probs
-
-        return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
+        return (expert_x, expert_x_scale, expert_tokens_meta, new_topk_ids, expert_probs)
 
     def finalize(
         self,
@@ -170,11 +202,15 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
+        print(f"\nCOMBINE START({self.rank_expert_offset})\n")
+
         combined_x, _ = self.buffer.combine(
             tensor=fused_expert_output,
             probs=self.expert_probs,  # None?
             handle=self.handle,
         )
+
+        print(f"\nCOMBINE END({self.rank_expert_offset}) {combined_x.shape}/{combined_x.dtype}\n")
 
         # TODO(lucas): support this case with the refactored modular kernel
         # Respect inplace outputs.
