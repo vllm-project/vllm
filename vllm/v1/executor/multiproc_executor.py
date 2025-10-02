@@ -36,6 +36,7 @@ from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.utils import (_maybe_force_spawn, decorate_logs,
                         get_distributed_init_method, get_loopback_ip,
                         get_mp_context, get_open_port, set_process_title)
+from vllm.utils.lite_profiler import context_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.utils import get_and_update_mm_cache
@@ -663,7 +664,11 @@ class WorkerProc:
                 if self.mm_receiver_cache is not None \
                     and func.__name__ == "execute_model":
                     get_and_update_mm_cache(self.mm_receiver_cache, args)
-                output = func(*args, **kwargs)
+                if func.__name__ == "execute_model":
+                    with context_logger("worker.execute_model"):
+                        output = func(*args, **kwargs)
+                else:
+                    output = func(*args, **kwargs)
             except Exception as e:
                 # Notes have been introduced in python 3.11
                 if hasattr(e, "add_note"):
