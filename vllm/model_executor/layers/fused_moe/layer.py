@@ -1147,17 +1147,6 @@ class FusedMoE(CustomOp):
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
 
-        # TODO(bnell): make these into methods on PrepareAndFinalize or all2all?
-        self.must_reduce_shared_experts = (self.use_pplx_kernels
-                                           or self.use_deepep_ht_kernels
-                                           or self.use_deepep_ll_kernels)
-
-        self.use_dp_chunking = (
-            self.moe_parallel_config.use_pplx_kernels
-            or self.moe_parallel_config.use_deepep_ll_kernels
-            or (self.dp_size > 1
-                and self.moe_config.use_flashinfer_cutlass_kernels))
-
         if self.use_dp_chunking:
             states_shape: tuple[int, ...]
             logits_shape: tuple[int, ...]
@@ -1229,6 +1218,14 @@ class FusedMoE(CustomOp):
         return (self.moe_quant_config is not None
                 and self.moe_quant_config.quant_dtype == "nvfp4"
                 and self.moe_config.use_flashinfer_cutlass_kernels)
+
+    @property
+    def use_dp_chunking(self) -> bool:
+        # Route to the chunked forward path using the FlashInfer Cutlass kernel
+        # only when data parallelism (DP) is enabled.
+        return (self.moe_parallel_config.use_pplx_kernels
+                or self.moe_parallel_config.use_deepep_ll_kernels
+                or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels))
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
@@ -1827,14 +1824,16 @@ class FusedMoE(CustomOp):
         Therefore it is required that we reduce the shared_experts output
         early.
         """
-        return self.must_reduce_shared_experts
+        assert self.quant_method is not None
+        return (self.quant_method.fused_experts is not None
+                and self.quant_method.fused_experts.output_is_reduced())
 
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """
         Some combine kernels reduce across GPU ranks by default.
         """
-        if self.must_reduce_shared_experts:
+        if self.must_reduce_shared_expert_outputs():
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)

@@ -364,6 +364,14 @@ class FusedMoEPrepareAndFinalize(ABC):
     def num_dispatchers(self) -> int:
         raise NotImplementedError
 
+    @abstractmethod
+    def output_is_reduced(self) -> bool:
+        """
+        Indicates whether or not the output of finalize is reduced across all
+        ranks.
+        """
+        raise NotImplementedError
+
 
 # TODO: add supported activations method (return string)
 class FusedMoEPermuteExpertsUnpermute(ABC):
@@ -670,6 +678,13 @@ class FusedMoEModularKernel(torch.nn.Module):
                 f"{prepare_finalize.activation_format} == "
                 f"{fused_experts.__class__.__name__}."
                 f"{fused_experts.activation_formats[0]}")
+
+    def output_is_reduced(self) -> bool:
+        """
+        Indicates whether or not the output of fused MoE kernel
+        is reduced across all ranks.
+        """
+        return self.prepare_finalize.output_is_reduced()
 
     def _chunk_info(self, M: int) -> tuple[int, int]:
         """
