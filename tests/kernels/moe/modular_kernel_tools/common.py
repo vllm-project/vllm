@@ -555,12 +555,11 @@ def make_modular_kernel(
     vllm_config: VllmConfig,
     quant_config: FusedMoEQuantConfig,
 ) -> mk.FusedMoEModularKernel:
-    def next_power_of_2(x):
+    def next_power_of_2(x) -> int:
         import math
-
         if x == 0:
             return 1
-        return 2 ** math.ceil(math.log2(x))
+        return int(2**math.ceil(math.log2(x)))
 
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
@@ -577,7 +576,7 @@ def make_modular_kernel(
         num_local_experts=config.num_local_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
-        max_num_tokens=next_power_of_2(config.M),
+        max_num_tokens=max(128, next_power_of_2(config.M)),
     )
 
     # make modular kernel
