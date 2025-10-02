@@ -265,6 +265,7 @@ def run_model(
             level=CompilationLevel.PIECEWISE,
             use_cudagraph=True,
             backend=backend,
+            use_inductor_graph_partition=False,  # TODO try both?
             cudagraph_capture_sizes=[1, 2],
         )
         if split_attn:
