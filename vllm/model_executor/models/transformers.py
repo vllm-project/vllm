@@ -632,9 +632,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                                                       style,
                                                       self.quant_config,
                                                       prefix=qual_name)
-                elif child_module.__class__.__name__.endswith("RMSNorm"):
-                    new_module = replace_rms_norm_class(
-                        child_module, self.config.hidden_size)
+                # TODO(hmellor): Enable RMSNorm replacement once we have a way
+                # to choose RMSNorm vs GemmaRMSNorm
+                # elif child_module.__class__.__name__.endswith("RMSNorm"):
+                #     new_module = replace_rms_norm_class(
+                #         child_module, self.config.hidden_size)
                 else:
                     _recursive_replace(child_module, prefix=qual_name)
 
