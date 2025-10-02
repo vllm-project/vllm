@@ -597,15 +597,15 @@ class CompilationConfig:
         self.bs_to_padded_graph_size = [
             0 for i in range(self.max_cudagraph_capture_size + 1)
         ]
-        for end, start in zip(self.cudagraph_capture_sizes,
-                              [0] + self.cudagraph_capture_sizes[:-1]):
+        for end, start in zip(
+                self.cudagraph_capture_sizes +
+            [self.max_cudagraph_capture_size + 1],
+            [0] + self.cudagraph_capture_sizes):
             for bs in range(start, end):
                 if bs == start:
                     self.bs_to_padded_graph_size[bs] = start
                 else:
                     self.bs_to_padded_graph_size[bs] = end
-        self.bs_to_padded_graph_size[
-            self.max_cudagraph_capture_size] = self.max_cudagraph_capture_size
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when level is
