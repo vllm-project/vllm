@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.tokenizer import decode_tokens
 from vllm.utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -461,7 +462,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         self,
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         # align to hf behavior when there are images
         if len(mm_prompt_updates):
             tokenizer = self.info.get_tokenizer()
@@ -496,12 +497,13 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                 for ele in sublist for e in ele
             ]
 
-        token_ids, text, placeholders = super()._apply_prompt_updates(
+        token_ids, placeholders = super()._apply_prompt_updates(
             token_ids=token_ids,
             mm_prompt_updates=mm_prompt_updates,
         )
 
         # Keep the behavior in line with HF processor
+        text = decode_tokens(tokenizer, token_ids)
         if text.startswith("<s> <|image|>"):
             text = text.replace("<s> <|image|>", "<s><|image|>", 1)
             token_ids = [token_ids[0], *token_ids[2:]]
@@ -518,7 +520,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                 for modality, ps in placeholders.items()
             }
 
-        return token_ids, text, placeholders
+        return token_ids, placeholders
 
 
 @MULTIMODAL_REGISTRY.register_processor(Phi3VMultiModalProcessor,
