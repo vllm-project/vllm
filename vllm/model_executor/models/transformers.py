@@ -124,9 +124,13 @@ def can_enable_torch_compile(vllm_config: VllmConfig) -> bool:
     return enable
 
 
+Style = Literal["colwise", "colwise_rep", "rowwise", "rowwise_rep",
+                "replicate"]
+
+
 def replace_linear_class(
     linear: nn.Linear,
-    style: Literal["colwise", "rowwise"] = "replicate",
+    style: Style = "replicate",
     quant_config: Optional[QuantizationConfig] = None,
     *,
     prefix: str = "",
