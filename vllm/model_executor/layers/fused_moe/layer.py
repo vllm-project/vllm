@@ -255,7 +255,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-        num_fused_shared_experts: int = 0,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         raise NotImplementedError
 
@@ -413,7 +412,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-        num_fused_shared_experts: int = 0,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             assert expert_load_view is not None
@@ -442,7 +440,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
-            num_fused_shared_experts=num_fused_shared_experts,
         )
 
     def forward_cuda(
@@ -467,7 +464,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-        num_fused_shared_experts: int = 0,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
 
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -488,7 +484,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
-            num_fused_shared_experts=num_fused_shared_experts,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
         )
 
         if self.rocm_aiter_moe_enabled:
@@ -556,7 +552,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-        num_fused_shared_experts: int = 0,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb is not False or expert_load_view is not None or \
                 logical_to_physical_map is not None or \
@@ -604,7 +599,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-        num_fused_shared_experts: int = 0,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb is not False or expert_load_view is not None or \
                 logical_to_physical_map is not None or \
@@ -644,7 +638,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-        num_fused_shared_experts: int = 0,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert not use_grouped_topk
         assert num_expert_group is None
@@ -1736,7 +1729,6 @@ class FusedMoE(CustomOp):
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
-                num_fused_shared_experts=self.num_fused_shared_experts,
             )
 
             assert self.shared_experts is None or isinstance(
@@ -1836,7 +1828,6 @@ class FusedMoE(CustomOp):
             expert_load_view=self.expert_load_view,
             logical_to_physical_map=self.logical_to_physical_map,
             logical_replica_count=self.logical_replica_count,
-            num_fused_shared_experts=self.num_fused_shared_experts,
         )
 
         if shared_output is not None:
