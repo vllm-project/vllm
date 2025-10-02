@@ -846,7 +846,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe import (
-            AiterExperts, BatchedTritonOrDeepGemmExperts, TritonOrDeepGemmExperts)
+            AiterExperts, BatchedTritonOrDeepGemmExperts,
+            TritonOrDeepGemmExperts)
         assert not self.use_marlin, (
             "Marlin is not supported with all2all yet.")
 
@@ -858,7 +859,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_config=self.moe_quant_config,
             )
         elif (prepare_finalize.activation_format ==
-                FusedMoEActivationFormat.BatchedExperts):
+              FusedMoEActivationFormat.BatchedExperts):
             max_num_tokens_per_rank = (
                 prepare_finalize.max_num_tokens_per_rank())
             assert max_num_tokens_per_rank is not None
@@ -1009,7 +1010,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # can override fused_experts or cutlass but not rocm or marlin.
         #
         topk_weights, topk_ids, zero_expert_result = select_result
-        if self.moe.use_mori_kernels:
+        if self.moe.use_mori_kernels and self.fused_experts:
             common_kwargs = dict(
                 hidden_states=x,
                 w1=layer.w13_weight,

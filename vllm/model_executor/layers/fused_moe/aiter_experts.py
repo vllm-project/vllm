@@ -1,16 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Aiter-based expert processing for Mori integration.
 """
 
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    rocm_aiter_fused_experts,
-)
+    rocm_aiter_fused_experts)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP)
 
 
 class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -24,11 +27,9 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
         max_num_tokens: int,
-        quant_config: FusedMoEQuantConfig = None,
+        quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(
-            quant_config=quant_config,
-        )
+        super().__init__(quant_config=quant_config, )
         self.max_num_tokens = max_num_tokens
 
     @property
@@ -51,10 +52,6 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         """Aiter handles weight and reduce internally."""
-        from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-            TopKWeightAndReduceNoOP,
-        )
-
         return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
@@ -101,6 +98,11 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         Process expert computation using Aiter kernels.
         Works with pre-dispatched tokens from Mori all2all.
         """
+        if expert_tokens_meta is not None:
+            expert_num_tokens = expert_tokens_meta.expert_num_tokens
+        else:
+            expert_num_tokens = None
+
         # Call Aiter fused MoE expert processing
         result = rocm_aiter_fused_experts(
             hidden_states=hidden_states,
@@ -111,7 +113,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
-            expert_num_tokens=expert_tokens_meta.expert_num_tokens if expert_tokens_meta is not None else None,
+            expert_num_tokens=expert_num_tokens,
             output_dtype=output.dtype,
             quant_config=self.quant_config,
             a1q_scale=a1q_scale,

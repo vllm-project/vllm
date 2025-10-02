@@ -40,8 +40,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import (cdiv, direct_register_custom_op, has_deep_ep, has_pplx,
-                        has_mori, round_up)
+from vllm.utils import (cdiv, direct_register_custom_op, has_deep_ep, has_mori,
+                        has_pplx, round_up)
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -75,9 +75,12 @@ else:
 
 if is_rocm_aiter_moe_enabled():
     from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
-        rocm_aiter_grouped_topk as grouped_topk)
+        rocm_aiter_grouped_topk)
+    grouped_topk_impl = rocm_aiter_grouped_topk
 else:
     from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
+    grouped_topk_impl = grouped_topk
+
 if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
 else:
@@ -210,21 +213,20 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 use_fp8_dispatch=use_fp8_dispatch,
             )
         elif moe.use_mori_kernels:
-            use_fp8_dispatch = (
-                quant_config is not None
-                and quant_config.quant_dtype == current_platform.fp8_dtype()
-            )
+            use_fp8_dispatch = (quant_config is not None
+                                and quant_config.quant_dtype
+                                == current_platform.fp8_dtype())
             scale_dim = 0
             scale_type_size = 0
             quant_dtype = None
             if use_fp8_dispatch:
+                assert quant_config is not None
                 scale_dim = quant_config.scale_shape(
                     moe.max_num_tokens,
                     moe.hidden_dim,
                 )[-1]
-                scale_type_size = (
-                    torch.float32.itemsize
-                )  # aiter quantization uses float32 scale
+                scale_type_size = (torch.float32.itemsize
+                                   )  # aiter quantization uses float32 scale
                 quant_dtype = quant_config.quant_dtype
 
             all_to_all_args = dict(
@@ -394,7 +396,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 quant_config=self.moe_quant_config,
             )
         elif (prepare_finalize.activation_format ==
-                FusedMoEActivationFormat.BatchedExperts):
+              FusedMoEActivationFormat.BatchedExperts):
             logger.debug("BatchedTritonExperts %s", self.moe)
             return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
@@ -1760,7 +1762,7 @@ class FusedMoE(CustomOp):
         if use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
-            topk_weights, topk_ids = grouped_topk(
+            topk_weights, topk_ids = grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
                 topk=top_k,

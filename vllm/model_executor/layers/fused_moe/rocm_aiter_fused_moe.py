@@ -195,16 +195,26 @@ def rocm_aiter_fused_moe_impl(
     from aiter.fused_moe import fused_moe
 
     # Check if input is already pre-quantized (from mori dispatch)
-    input_is_pre_quantized = (a1_scale is not None and
-                              hidden_states.dtype == torch.float8_e4m3fnuz)
+    input_is_pre_quantized = (a1_scale is not None
+                              and hidden_states.dtype == torch.float8_e4m3fnuz)
     dtype = output_dtype if input_is_pre_quantized else None
 
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
 
-    return fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, expert_mask,
-                     activation, quant_type, doweight_stage1, w1_scale,
-                     w2_scale, a1_scale, a2_scale,
+    return fused_moe(hidden_states,
+                     w1,
+                     w2,
+                     topk_weight,
+                     topk_ids,
+                     expert_mask,
+                     activation,
+                     quant_type,
+                     doweight_stage1,
+                     w1_scale,
+                     w2_scale,
+                     a1_scale,
+                     a2_scale,
                      num_local_tokens=expert_num_tokens,
                      dtype=dtype)
 

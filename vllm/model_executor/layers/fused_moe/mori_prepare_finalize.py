@@ -10,8 +10,8 @@ from typing import Any, Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 
 logger = init_logger(__name__)
 
@@ -20,9 +20,9 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
     Prepare/Finalize using mori kernels for AMD GPU expert parallelism.
 
-    This class handles the dispatch and combine operations for expert parallelism
-    using the mori library, which provides optimized All2All communication
-    primitives for AMD GPUs.
+    This class handles the dispatch and combine operations for
+    expert parallelism using the mori library, which provides optimized
+    All2All communication primitives for AMD GPUs.
     """
 
     def __init__(
@@ -76,11 +76,11 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> tuple[
-        torch.Tensor,
-        Optional[torch.Tensor],
-        Optional[mk.ExpertTokensMetadata],
-        Optional[torch.Tensor],
-        Optional[torch.Tensor],
+            torch.Tensor,
+            Optional[torch.Tensor],
+            Optional[mk.ExpertTokensMetadata],
+            Optional[torch.Tensor],
+            Optional[torch.Tensor],
     ]:
         """
         Prepare inputs for mori dispatch operation.
@@ -94,7 +94,8 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             quant_config: Quantization config
 
         Returns:
-            Tuple of (dispatched_x, batched_scales, expert_tokens_meta, dispatch_indices, dispatch_weights)
+            Tuple of (dispatched_x, batched_scales, expert_tokens_meta,
+                      dispatch_indices, dispatch_weights)
             where dispatched_x is in Standard format (2D tensor)
         """
         try:
@@ -103,15 +104,13 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             scales = None
 
             if self.use_fp8_dispatch:
-                from aiter import get_hip_quant
-                from aiter import QuantType
+                from aiter import QuantType, get_hip_quant
 
                 block_shape = quant_config.block_shape
                 if block_shape is not None:
                     assert not apply_router_weight_on_input, (
                         "apply_router_weight_on_input is"
-                        " not supported for block scaled moe"
-                    )
+                        " not supported for block scaled moe")
                     quant_type = QuantType.per_1x128
                 else:
                     quant_type = QuantType.per_Token
@@ -150,8 +149,8 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
 
         except Exception as e:
-            logger.error(f"mori dispatch failed: {e}")
-            raise RuntimeError(f"mori dispatch failed: {e}") from e
+            logger.error("mori dispatch failed: %s", e)
+            raise RuntimeError("mori dispatch failed: %s", e) from e
 
     def finalize(
         self,
@@ -167,8 +166,10 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         Finalize expert outputs using mori combine operation.
 
         Args:
-            output: Output tensor to write results [num_original_tokens, hidden_dim]
-            fused_expert_output: Expert output activations in Standard format (2D tensor)
+            output: Output tensor to write results [num_original_tokens,
+                                                    hidden_dim]
+            fused_expert_output: Expert output activations in Standard format
+                                 (2D tensor)
             topk_weights: Original top-k weights
             topk_ids: Original top-k indices
         """
@@ -183,18 +184,14 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 indices=topk_ids,
             )
 
-            output.copy_(
-                combined_output[:num_original_tokens], non_blocking=True
-            )
+            output.copy_(combined_output[:num_original_tokens],
+                         non_blocking=True)
 
         except Exception as e:
-            logger.error(f"mori combine failed: {e}")
-            raise RuntimeError(f"mori combine failed: {e}") from e
+            logger.error("mori combine failed: %s", e)
+            raise RuntimeError("mori combine failed: %s", e) from e
 
     def __repr__(self) -> str:
-        return (
-            f"MoriPrepareAndFinalize("
-            f"max_tokens={self.max_num_tokens}, "
-            f"num_local_experts={self.num_local_experts}, "
-            f"num_dispatchers={self.num_dispatchers_})"
-        )
+        return (f"MoriPrepareAndFinalize(max_tokens={self.max_num_tokens}, "
+                f"num_local_experts={self.num_local_experts}, "
+                f"num_dispatchers={self.num_dispatchers_})")
