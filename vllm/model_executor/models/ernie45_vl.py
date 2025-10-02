@@ -25,7 +25,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any, Callable, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -56,6 +56,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -579,38 +580,38 @@ class Ernie4_5_VisionTransformer(nn.Module):
 # === Vision Inputs === #
 
 
-class Ernie4_5_VLImagePixelInputs(TypedDict):
+class Ernie4_5_VLImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - np: The total number of patches over each image over each prompt in
+              the batch
+        - ni: Number of images
+        - cps: Number of channels * patch_size * patch_size
+    """
     type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
-    """Shape:
-    `(num_patches, num_channels * patch_size * patch_size)`
-    """
 
-    grid_thw: torch.Tensor
-    """Shape: `(num_images, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
-    """
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "cps")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 Ernie4_5_VLImageInputs = Ernie4_5_VLImagePixelInputs
 
 
-class Ernie4_5_VLVideoPixelInputs(TypedDict):
+class Ernie4_5_VLVideoPixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - np: The total number of patches over each image over each prompt in
+              the batch
+        - ni: Number of images
+        - cps: Number of channels * temporal_patch_size * patch_size *
+              patch_size
+    """
     type: Literal["pixel_values_videos"]
-    pixel_values_videos: torch.Tensor
-    """Shape:
-    `(num_patches,
-      num_channels * temporal_patch_size * patch_size * patch_size)`
-    """
-
-    video_grid_thw: torch.Tensor
-    """Shape: `(num_videos, 3)`
-
-    This should be in `(grid_t, grid_h, grid_w)` format.
-    """
+    pixel_values_videos: Annotated[torch.Tensor, TensorShape("np", "cps")]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
-Ernie4_5_VLVideoInputs = Ernie4_5_VLImagePixelInputs
+Ernie4_5_VLVideoInputs = Ernie4_5_VLVideoPixelInputs
 
 # === Vision Processor === #
 
@@ -1213,6 +1214,7 @@ class Ernie4_5_VLDummyInputsBuilder(
     dummy_inputs=Ernie4_5_VLDummyInputsBuilder)
 class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsLoRA, SupportsPP):
+    merge_by_field_config = True
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -1325,22 +1327,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. "
-                             f"Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            if mm_input.ndim == 2:
-                return mm_input
-            if mm_input.ndim != 3:
-                raise ValueError(f"{name} should be 2D or batched 3D tensor. "
-                                 f"Got ndim: {mm_input.ndim} "
-                                 f"(shape={mm_input.shape})")
-            return mm_input.reshape(-1, mm_input.shape[-1])
-        else:
-            return torch.concat(mm_input)
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Ernie4_5_VLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -1350,15 +1336,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, "image pixel values")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
             return Ernie4_5_VLImagePixelInputs(type="pixel_values",
                                                pixel_values=pixel_values,
                                                image_grid_thw=image_grid_thw)
@@ -1372,11 +1349,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         if pixel_values_videos is not None:
-            pixel_values_videos = self._validate_and_reshape_mm_tensor(
-                pixel_values_videos, "video pixel values")
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw")
-
             return Ernie4_5_VLVideoPixelInputs(
                 type="pixel_values_videos",
                 pixel_values_videos=pixel_values_videos,
