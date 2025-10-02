@@ -47,9 +47,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponse, ErrorInfo,
                                               ErrorResponse,
                                               IOProcessorRequest,
-                                              PoolingResponse, RerankRequest,
-                                              ResponsesRequest, ScoreRequest,
-                                              ScoreResponse,
+                                              PoolingResponse,
+                                              PromptTokenUsageInfo,
+                                              RerankRequest, ResponsesRequest,
+                                              ScoreRequest, ScoreResponse,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
                                               TokenizeResponse,
@@ -462,6 +463,28 @@ class OpenAIServing:
                                        err_type=err_type,
                                        status_code=status_code).model_dump())
         return json_str
+
+    def _create_prompt_token_usage_info(
+        self,
+        enable_prompt_tokens_details: bool,
+        num_cached_tokens: Optional[int],
+    ) -> Optional[PromptTokenUsageInfo]:
+        """Create PromptTokenUsageInfo if enabled and cached tokens exist.
+        
+        This helper method centralizes the logic for creating prompt token
+        usage information to avoid code duplication across serving modules.
+        
+        Args:
+            enable_prompt_tokens_details: Whether prompt token details 
+                are enabled
+            num_cached_tokens: Number of cached tokens, if any
+            
+        Returns:
+            PromptTokenUsageInfo if conditions are met, None otherwise
+        """
+        if enable_prompt_tokens_details and num_cached_tokens is not None:
+            return PromptTokenUsageInfo(cached_tokens=num_cached_tokens)
+        return None
 
     async def _check_model(
         self,

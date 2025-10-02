@@ -23,17 +23,19 @@ from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          make_tool_call_id)
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
-    get_streamable_parser_for_assistant, get_system_message, parse_chat_input,
-    parse_chat_output, render_for_completion)
+    get_streamable_parser_for_assistant, get_system_message,
+    is_reasoning_token, parse_chat_input, parse_chat_output,
+    render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
     ChatCompletionLogProbsContent, ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
-    PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
+    ChatCompletionStreamResponse, ChatMessage, CompletionTokenUsageInfo,
+    DeltaFunctionCall, DeltaMessage, DeltaToolCall, ErrorResponse,
+    FunctionCall, FunctionDefinition, RequestResponseMetadata, ToolCall,
+    UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -496,6 +498,9 @@ class OpenAIServingChat(OpenAIServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
+        num_reasoning_tokens = [
+            0
+        ] * num_choices  # Track reasoning tokens per choice
         if self.use_harmony:
             harmony_parsers = [
                 get_streamable_parser_for_assistant()
@@ -615,6 +620,11 @@ class OpenAIServingChat(OpenAIServing):
                                 prompt_tokens=num_prompt_tokens,
                                 completion_tokens=0,
                                 total_tokens=num_prompt_tokens)
+                            # Add token details if available
+                            chunk.usage.prompt_tokens_details = (
+                                self._create_prompt_token_usage_info(
+                                    self.enable_prompt_tokens_details,
+                                    num_cached_tokens))
 
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
@@ -647,6 +657,11 @@ class OpenAIServingChat(OpenAIServing):
                                         prompt_tokens=num_prompt_tokens,
                                         completion_tokens=0,
                                         total_tokens=num_prompt_tokens)
+                                    # Add token details if available
+                                    chunk.usage.prompt_tokens_details = (
+                                        self._create_prompt_token_usage_info(
+                                            self.enable_prompt_tokens_details,
+                                            num_cached_tokens))
 
                                 data = chunk.model_dump_json(
                                     exclude_unset=True)
@@ -679,6 +694,11 @@ class OpenAIServingChat(OpenAIServing):
                         prev_recipient = harmony_parser.current_recipient
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
+                            # Track reasoning tokens based on current
+                            # channel/recipient. Similar to PR #23460
+                            # implementation in context.py
+                            if is_reasoning_token(harmony_parser):
+                                num_reasoning_tokens[i] += 1
                         cur_channel = harmony_parser.current_channel
                         cur_recipient = harmony_parser.current_recipient
                         delta_text = harmony_parser.last_content_delta or ""
@@ -1086,6 +1106,17 @@ class OpenAIServingChat(OpenAIServing):
                             completion_tokens=completion_tokens,
                             total_tokens=num_prompt_tokens + completion_tokens,
                         )
+                        # Add token details if available
+                        chunk.usage.prompt_tokens_details = (
+                            self._create_prompt_token_usage_info(
+                                self.enable_prompt_tokens_details,
+                                num_cached_tokens))
+                        # Add completion token details for reasoning tokens
+                        # (gpt_oss/harmony only)
+                        if self.use_harmony and num_reasoning_tokens[i] > 0:
+                            chunk.usage.completion_tokens_details = (
+                                CompletionTokenUsageInfo(
+                                    reasoning_tokens=num_reasoning_tokens[i]))
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
@@ -1098,9 +1129,17 @@ class OpenAIServingChat(OpenAIServing):
                                         completion_tokens=completion_tokens,
                                         total_tokens=num_prompt_tokens +
                                         completion_tokens)
-                if self.enable_prompt_tokens_details and num_cached_tokens:
-                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens)
+                final_usage.prompt_tokens_details = (
+                    self._create_prompt_token_usage_info(
+                        self.enable_prompt_tokens_details, num_cached_tokens))
+                # Add completion token details for reasoning tokens
+                # (gpt_oss/harmony only)
+                if self.use_harmony:
+                    total_reasoning_tokens = sum(num_reasoning_tokens)
+                    if total_reasoning_tokens > 0:
+                        final_usage.completion_tokens_details = (
+                            CompletionTokenUsageInfo(
+                                reasoning_tokens=total_reasoning_tokens))
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -1402,13 +1441,32 @@ class OpenAIServingChat(OpenAIServing):
             num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
+
+        # Calculate reasoning tokens for non-streaming responses (harmony only)
+        total_reasoning_tokens = 0
+        if self.use_harmony:
+            harmony_parsers = [
+                get_streamable_parser_for_assistant()
+                for _ in range(len(final_res.outputs))
+            ]
+            for i, output in enumerate(final_res.outputs):
+                harmony_parser = harmony_parsers[i]
+                for token_id in output.token_ids:
+                    harmony_parser.process(token_id)
+                    if is_reasoning_token(harmony_parser):
+                        total_reasoning_tokens += 1
+
         usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                           completion_tokens=num_generated_tokens,
                           total_tokens=num_prompt_tokens +
                           num_generated_tokens)
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens)
+        usage.prompt_tokens_details = self._create_prompt_token_usage_info(
+            self.enable_prompt_tokens_details, final_res.num_cached_tokens)
+        # Add completion token details for reasoning tokens
+        # (gpt_oss/harmony only)
+        if self.use_harmony and total_reasoning_tokens > 0:
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=total_reasoning_tokens)
 
         request_metadata.final_usage_info = usage
 
