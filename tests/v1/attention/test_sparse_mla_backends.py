@@ -141,12 +141,14 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name,
         max_model_len=max_seqlen,
         num_gpu_blocks=max(2048,
                            cdiv(total_cache_tokens, block_size) + 1),
-        block_size=block_size)
+        block_size=block_size,
+        hf_config_override={
+            "index_topk": topk_tokens,
+            "attn_module_list_cfg": [{
+                "topk_tokens": topk_tokens
+            }]
+        })
     model_config = vllm_config.model_config
-    model_config.hf_config = SimpleNamespace(
-        attn_module_list_cfg=[{
-            "topk_tokens": topk_tokens
-        }])
     model_config.hf_text_config = SimpleNamespace(
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
