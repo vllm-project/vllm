@@ -1300,20 +1300,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         intermediate_size,
         num_experts,
     ):
-        from flashinfer import (
-            RoutingMethodType,
-            e2m1_and_ufp8sf_scale_to_float,
-            fp4_quantize,
-            next_positive_power_of_2,
-            nvfp4_block_scale_interleave,
-            reorder_rows_for_gated_act_gemm,
-            shuffle_matrix_a,
-            shuffle_matrix_sf_a,
-        )
+        from flashinfer import (RoutingMethodType,
+                                e2m1_and_ufp8sf_scale_to_float, fp4_quantize,
+                                next_positive_power_of_2,
+                                nvfp4_block_scale_interleave,
+                                reorder_rows_for_gated_act_gemm,
+                                shuffle_matrix_a, shuffle_matrix_sf_a)
         from flashinfer.fused_moe.core import (
             _maybe_get_cached_w2_permute_indices,
-            _maybe_get_cached_w3_w1_permute_indices,
-        )
+            _maybe_get_cached_w3_w1_permute_indices)
 
         """Prepare quantized weights for kernel (done offline with weights)."""
         epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
