@@ -249,46 +249,54 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            while True:
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    num_new_tokens,
-                    num_lookahead_tokens=self.num_lookahead_tokens)
-                if new_blocks is None:
-                    # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
-                        self.running.remove(preempted_req)
-                        if preempted_req in scheduled_running_reqs:
-                            scheduled_running_reqs.remove(preempted_req)
+            # Training requests don't need KV cache - they process full sequence at once
+            if request.is_training:
+                new_blocks = None  # No KV cache needed
+                can_schedule = True
+            else:
+                while True:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens,
+                        num_lookahead_tokens=self.num_lookahead_tokens)
+                    if new_blocks is None:
+                        # The request cannot be scheduled.
+                        # Preempt the lowest-priority request.
+                        if self.policy == SchedulingPolicy.PRIORITY:
+                            preempted_req = max(
+                                self.running,
+                                key=lambda r: (r.priority, r.arrival_time),
+                            )
+                            self.running.remove(preempted_req)
+                            if preempted_req in scheduled_running_reqs:
+                                scheduled_running_reqs.remove(preempted_req)
+                        else:
+                            preempted_req = self.running.pop()
+
+                        self.kv_cache_manager.free(preempted_req)
+                        self.encoder_cache_manager.free(preempted_req)
+                        preempted_req.status = RequestStatus.PREEMPTED
+                        preempted_req.num_computed_tokens = 0
+                        if self.log_stats:
+                            preempted_req.record_event(
+                                EngineCoreEventType.PREEMPTED, scheduled_timestamp)
+
+                        self.waiting.prepend_request(preempted_req)
+                        preempted_reqs.append(preempted_req)
+                        if preempted_req == request:
+                            # No more request to preempt.
+                            can_schedule = False
+                            break
                     else:
-                        preempted_req = self.running.pop()
-
-                    self.kv_cache_manager.free(preempted_req)
-                    self.encoder_cache_manager.free(preempted_req)
-                    preempted_req.status = RequestStatus.PREEMPTED
-                    preempted_req.num_computed_tokens = 0
-                    if self.log_stats:
-                        preempted_req.record_event(
-                            EngineCoreEventType.PREEMPTED, scheduled_timestamp)
-
-                    self.waiting.prepend_request(preempted_req)
-                    preempted_reqs.append(preempted_req)
-                    if preempted_req == request:
-                        # No more request to preempt.
-                        can_schedule = False
+                        # The request can be scheduled.
+                        can_schedule = True
                         break
-                else:
-                    # The request can be scheduled.
-                    can_schedule = True
+                if not can_schedule:
                     break
-            if not can_schedule:
-                break
-            assert new_blocks is not None
+            
+            # Store blocks for inference requests only
+            if new_blocks is not None:
+                assert not request.is_training
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -374,8 +382,8 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
 
-                # Get already-cached tokens.
-                if request.num_computed_tokens == 0:
+                # Get already-cached tokens (skip for training requests).
+                if request.num_computed_tokens == 0 and not request.is_training:
                     # Get locally-cached tokens.
                     new_computed_blocks, num_new_local_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
@@ -470,25 +478,30 @@ class Scheduler(SchedulerInterface):
                 else:
                     num_encoder_tokens = 0
 
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    num_new_tokens + num_external_computed_tokens,
-                    num_new_local_computed_tokens,
-                    new_computed_blocks,
-                    num_lookahead_tokens=effective_lookahead_tokens,
-                    delay_cache_blocks=load_kv_async,
-                    num_encoder_tokens=num_encoder_tokens,
-                )
+                # Training requests don't need KV cache
+                if request.is_training:
+                    new_blocks = None  # No KV cache for training
+                else:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens + num_external_computed_tokens,
+                        num_new_local_computed_tokens,
+                        new_computed_blocks,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                        delay_cache_blocks=load_kv_async,
+                        num_encoder_tokens=num_encoder_tokens,
+                    )
 
-                if new_blocks is None:
-                    # The request cannot be scheduled.
-                    break
+                    if new_blocks is None:
+                        # The request cannot be scheduled.
+                        break
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
                 # This information is used to determine if a load is
                 # needed for this request.
-                if self.connector is not None:
+                # Skip for training requests
+                if self.connector is not None and not request.is_training:
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
@@ -520,8 +533,12 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_blocks[request.request_id] = (
-                    self.kv_cache_manager.get_blocks(request.request_id))
+                # Training requests don't have KV cache blocks
+                if request.is_training:
+                    req_to_new_blocks[request.request_id] = None
+                else:
+                    req_to_new_blocks[request.request_id] = (
+                        self.kv_cache_manager.get_blocks(request.request_id))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -566,7 +583,11 @@ class Scheduler(SchedulerInterface):
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(
-                req, req_to_new_blocks[req.request_id].get_block_ids())
+                req,
+                req_to_new_blocks[req.request_id].get_block_ids()
+                if req_to_new_blocks[req.request_id] is not None
+                else ([], )  # Empty block IDs for training requests
+            )
             for req in scheduled_new_reqs
         ]
         cached_reqs_data = self._make_cached_request_data(
@@ -914,8 +935,12 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
 
+            # Training requests finish after their forward pass (no generation)
+            if request.is_training:
+                stopped = True
+                request.status = RequestStatus.FINISHED_STOPPED
             # Check for stop and update request status.
-            if new_token_ids:
+            elif new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids)
 
@@ -954,7 +979,7 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids or pooler_output is not None \
-                or kv_transfer_params:
+                or kv_transfer_params or request.is_training:
 
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(

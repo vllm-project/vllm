@@ -6,7 +6,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
@@ -580,6 +580,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                is_training=new_req_data.is_training,
+                training_config=new_req_data.training_config,
             )
             self.requests[req_id] = req_state
 
@@ -2087,12 +2089,40 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             invalid_req_indices,
         )
 
-    @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
+        # Check if this batch contains training requests
+        # For now, assume homogeneous batches (all inference OR all training)
+        has_training_requests = any(
+            req.is_training 
+            for req in scheduler_output.scheduled_new_reqs
+        )
+        
+        print(f"[DEBUG model_runner] execute_model: has_training_requests={has_training_requests}")
+        print(f"[DEBUG model_runner] scheduled_new_reqs count: {len(scheduler_output.scheduled_new_reqs)}")
+        
+        # Use no_grad (not inference_mode) for inference batches
+        # inference_mode() cannot be overridden by enable_grad(), but no_grad() can be
+        inference_context = (
+            torch.no_grad() if not has_training_requests
+            else torch.enable_grad()
+        )
+        
+        with inference_context:
+            return self._execute_model_impl(
+                scheduler_output, intermediate_tensors, has_training_requests
+            )
+    
+    def _execute_model_impl(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors],
+        has_training_requests: bool = False,
+    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
+        """Internal implementation of execute_model (extracted for context manager)."""
         with record_function_or_nullcontext("Preprocess"):
             self._update_states(scheduler_output)
             if not scheduler_output.total_num_scheduled_tokens:
@@ -2147,24 +2177,50 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        with (set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                batch_descriptor=batch_descriptor,
-                ubatch_slices=ubatch_slices,
-        ), record_function_or_nullcontext("Forward"),
-              self.maybe_get_kv_connector_output(scheduler_output) as
-              kv_connector_output):
-            model_output = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
+        # For training, we need to ensure gradients are enabled
+        grad_mode = torch.enable_grad() if has_training_requests else nullcontext()
+        
+        with grad_mode:
+            with (set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_input_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
+                    ubatch_slices=ubatch_slices,
+            ), record_function_or_nullcontext("Forward"),
+                  self.maybe_get_kv_connector_output(scheduler_output) as
+                  kv_connector_output):
+                model_output = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
+        
+        # Process training outputs if this is a training batch
+        if has_training_requests:
+            print(f"[DEBUG model_runner] Processing training outputs...")
+            # Save hidden states for LoRA training (detach-reattach pattern)
+            # These will be used to apply LoRA adapters with gradients
+            if not hasattr(self, '_training_hidden_states'):
+                self._training_hidden_states = {}
+            self._training_hidden_states = self._extract_hidden_states_for_training(
+                model_output, scheduler_output
             )
+            print(f"[DEBUG model_runner] Extracted hidden states for {len(self._training_hidden_states)} training requests")
+            
+            training_loss = self._process_training_outputs(
+                model_output, scheduler_output, input_ids
+            )
+            # Store loss for monitoring in TrainingManager
+            if training_loss is not None:
+                if not hasattr(self, '_training_losses'):
+                    self._training_losses = {}
+                for req_id, loss in training_loss.items():
+                    self._training_losses[req_id] = loss
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2226,6 +2282,39 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if scheduler_output.grammar_bitmask is not None:
                 self.apply_grammar_bitmask(scheduler_output, logits)
 
+        # Skip sampling for training-only batches
+        if has_training_requests:
+            # Training requests don't generate tokens, so no sampling needed
+            print(f"[DEBUG model_runner] Skipping sampling for training batch")
+            sampler_output = None
+            
+            # IMPORTANT: Do LoRA training HERE, while still in enable_grad() context!
+            # If we do it later in worker.py, we'll be in inference_mode() which can't be overridden
+            if hasattr(self, '_training_hidden_states') and self._training_hidden_states:
+                print(f"[DEBUG model_runner] Calling LoRA training from within execute_model")
+                if hasattr(self, 'lora_training_manager'):
+                    lora_stats = self.lora_training_manager.apply_lora_and_train(
+                        self._training_hidden_states, scheduler_output
+                    )
+                    if lora_stats:
+                        print(f"[DEBUG model_runner] LoRA training completed: {lora_stats['num_requests']} requests, avg_loss={lora_stats['avg_loss']:.4f}")
+                else:
+                    print(f"[DEBUG model_runner] WARNING: lora_training_manager not set on model_runner!")
+            
+            # Return early for training requests - no need for bookkeeping/sampling
+            print(f"[DEBUG model_runner] Returning early for training batch")
+            # Build req_ids list from training requests
+            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            req_id_to_index = {req_id: i for i, req_id in enumerate(req_ids)}
+            return ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index=req_id_to_index,
+                sampled_token_ids=[[] for _ in req_ids],  # Empty token lists for each request
+                logprobs=[[] for _ in req_ids],
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            )
+        
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
@@ -2280,6 +2369,129 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             async_output_copy_stream=self.async_output_copy_stream,
         )
 
+    def _extract_hidden_states_for_training(
+        self,
+        hidden_states: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+    ) -> dict[str, torch.Tensor]:
+        """
+        Extract and detach hidden states for training requests.
+        
+        This implements the "detach-reattach" pattern:
+        1. Extract hidden states from vLLM forward pass (no gradients)
+        2. Detach from vLLM's computational graph
+        3. Enable gradients for LoRA training
+        
+        Args:
+            hidden_states: Output from vLLM model (no gradients)
+            scheduler_output: Contains request info
+            
+        Returns:
+            Dictionary mapping request_id to detached hidden states
+        """
+        training_hidden_states = {}
+        token_offset = 0
+        
+        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+            req_state = self.requests.get(req_id)
+            
+            if req_state and req_state.is_training:
+                # Extract this request's hidden states
+                req_hidden = hidden_states[token_offset:token_offset + num_tokens]
+                
+                # Detach from vLLM graph and enable gradients for LoRA
+                # This breaks the connection to vLLM's non-differentiable kernels
+                # but allows gradients to flow through LoRA adapters
+                req_hidden_trainable = req_hidden.detach().clone().requires_grad_(True)
+                
+                training_hidden_states[req_id] = req_hidden_trainable
+            
+            token_offset += num_tokens
+        
+        return training_hidden_states
+    
+    def _process_training_outputs(
+        self,
+        hidden_states: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+        input_ids: torch.Tensor,
+    ) -> Optional[dict[str, torch.Tensor]]:
+        """
+        Compute training loss for training requests.
+        
+        Args:
+            hidden_states: Model hidden states output
+            scheduler_output: Scheduler output with request info
+            input_ids: Input token IDs
+            
+        Returns:
+            Dictionary mapping request_id to loss tensor
+        """
+        import torch.nn.functional as F
+        
+        # Compute logits from hidden states
+        logits = self.model.compute_logits(hidden_states, None)
+        
+        training_losses = {}
+        token_offset = 0
+        
+        # Iterate over all scheduled requests using num_scheduled_tokens
+        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+            req_state = self.requests.get(req_id)
+            
+            if not req_state or not req_state.is_training:
+                # Skip inference requests
+                token_offset += num_tokens
+                continue
+            
+            # Extract logits and labels for this training request
+            req_logits = logits[token_offset:token_offset + num_tokens]
+            
+            # Get labels from training config
+            if req_state.training_config and req_state.training_config.labels is not None:
+                labels = req_state.training_config.labels.to(req_logits.device)
+                
+                # For causal LM: given tokens 0..n-1, predict tokens 1..n
+                # logits: [num_tokens, vocab_size] from input tokens
+                # labels: full sequence (may be longer than num_tokens)
+                
+                if len(labels) >= num_tokens:
+                    # Standard case: labels contain full sequence
+                    # Use logits[:-1] to predict labels[1:num_tokens]
+                    if num_tokens > 1:
+                        shift_logits = req_logits[:-1, :]  # Remove last position
+                        shift_labels = labels[1:num_tokens]  # Next tokens to predict
+                        loss = F.cross_entropy(
+                            shift_logits.view(-1, shift_logits.size(-1)),
+                            shift_labels.view(-1),
+                            ignore_index=-100,
+                        )
+                    else:
+                        # Single token, can't compute loss
+                        print(f"Warning: Cannot compute loss for single-token request {req_id}")
+                        token_offset += num_tokens
+                        continue
+                elif len(labels) == num_tokens - 1:
+                    # Labels already aligned (rare case)
+                    shift_logits = req_logits[:-1, :]
+                    loss = F.cross_entropy(
+                        shift_logits.view(-1, shift_logits.size(-1)),
+                        labels.view(-1),
+                        ignore_index=-100,
+                    )
+                else:
+                    # Labels shorter than we expect
+                    print(f"Warning: Label dimension mismatch for {req_id}: "
+                          f"logits={num_tokens}, labels={len(labels)}")
+                    token_offset += num_tokens
+                    continue
+                
+                training_losses[req_id] = loss
+            
+            token_offset += num_tokens
+        
+        return training_losses if training_losses else None
+    
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
             return None

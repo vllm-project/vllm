@@ -390,6 +390,125 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
+    def train(
+        self,
+        training_data: Union[dict[str, Any], Sequence[dict[str, Any]]],
+        *,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+    ) -> list[dict[str, Any]]:
+        """Train the model on the given training data.
+        
+        This method automatically batches the given training examples and processes
+        them through the same pipeline as inference requests.
+        
+        Args:
+            training_data: Training examples. Each example should be a dictionary
+                with 'prompt' and 'labels' keys. The format is:
+                {
+                    'prompt': str or dict (same format as generate()),
+                    'labels': list[int],  # Token IDs for the labels
+                }
+                Or you can provide token IDs directly:
+                {
+                    'prompt_token_ids': list[int],
+                    'labels': list[int],
+                }
+            use_tqdm: If `True`, shows a tqdm progress bar.
+            lora_request: LoRA request to use for training, if any.
+        
+        Returns:
+            A list of training results, each containing:
+            {
+                'request_id': str,
+                'loss': float,
+                'num_tokens': int,
+            }
+        
+        Example:
+            >>> llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct")
+            >>> training_data = [
+            ...     {
+            ...         'prompt': "The quick brown fox",
+            ...         'labels': tokenizer.encode("The quick brown fox jumps"),
+            ...     },
+            >>> ]
+            >>> results = llm.train(training_data)
+            >>> print(f"Loss: {results[0]['loss']:.4f}")
+        """
+        if not envs.VLLM_USE_V1:
+            raise NotImplementedError(
+                "Training API is only supported in V1 engine. "
+                "Set VLLM_USE_V1=1 to enable it."
+            )
+        
+        # Convert single example to list
+        if isinstance(training_data, dict):
+            training_data = [training_data]
+        
+        # Validate training data
+        for i, example in enumerate(training_data):
+            if 'labels' not in example:
+                raise ValueError(
+                    f"Training example {i} missing 'labels' field"
+                )
+            if 'prompt' not in example and 'prompt_token_ids' not in example:
+                raise ValueError(
+                    f"Training example {i} must have 'prompt' or 'prompt_token_ids'"
+                )
+        
+        self._validate_and_add_training_requests(
+            training_data=training_data,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+        )
+        
+        print(f"[DEBUG llm.train] Added {len(training_data)} training requests")
+        print(f"[DEBUG llm.train] Engine has {self.llm_engine.get_num_unfinished_requests()} unfinished requests")
+        
+        # Run the engine - training requests will be processed
+        # The LoRA training manager will handle actual training
+        print(f"[DEBUG llm.train] Calling _run_engine()...")
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        print(f"[DEBUG llm.train] _run_engine() returned {len(outputs) if outputs else 0} outputs")
+        
+        # Get results from LoRA training manager
+        # The LoRA manager stores losses after each training batch
+        worker = self.llm_engine.model_executor.driver_worker
+        lora_manager = worker.lora_training_manager
+        
+        # Retrieve training results
+        # The LoRA manager processes training during engine execution
+        # We can access the loss history
+        results = []
+        
+        # Get loss history from LoRA training manager
+        if hasattr(lora_manager, '_last_training_stats'):
+            stats_list = lora_manager._last_training_stats
+            for stats in stats_list:
+                for req_id, loss in stats.get('individual_losses', {}).items():
+                    results.append({
+                        'request_id': req_id,
+                        'loss': loss,
+                        'num_tokens': 0,  # TODO: track this
+                    })
+        
+        # Fallback: check monitoring manager
+        if not results:
+            training_manager = worker.training_manager
+            loss_history = training_manager.get_loss_history()
+            if loss_history:
+                # Use monitoring losses as fallback
+                for batch_stats in loss_history:
+                    for req_id, loss in batch_stats.get('individual_losses', {}).items():
+                        results.append({
+                            'request_id': req_id,
+                            'loss': loss,
+                            'num_tokens': 0,
+                        })
+        
+        return results
+
     def _get_modality_specific_lora_reqs(
             self, prompts: Union[PromptType, Sequence[PromptType]],
             lora_request: Optional[Union[list[LoRARequest], LoRARequest]]):
@@ -1556,6 +1675,132 @@ class LLM:
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
+    
+    def _validate_and_add_training_requests(
+        self,
+        training_data: Sequence[dict[str, Any]],
+        *,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
+    ) -> None:
+        """Validate and add training requests to the engine."""
+        import torch
+        from vllm.v1.request import TrainingConfig
+        
+        num_requests = len(training_data)
+        if isinstance(lora_request, Sequence) and len(lora_request) != num_requests:
+            raise ValueError("The lengths of training_data and lora_request "
+                             "must be the same.")
+        
+        # Add requests to the engine
+        it = training_data
+        if use_tqdm:
+            tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
+            it = tqdm_func(it, desc="Adding training requests")
+        
+        for i, example in enumerate(it):
+            # Get labels
+            labels = example['labels']
+            if isinstance(labels, list):
+                labels = torch.tensor(labels, dtype=torch.long)
+            
+            # Create training config
+            training_config = TrainingConfig(
+                labels=labels,
+                compute_loss=True,
+                loss_fn="cross_entropy",
+            )
+            
+            # Get prompt (either as text or token IDs)
+            if 'prompt' in example:
+                prompt = example['prompt']
+            elif 'prompt_token_ids' in example:
+                prompt = {'prompt_token_ids': example['prompt_token_ids']}
+            else:
+                raise ValueError(f"Training example {i} missing prompt")
+            
+            # Add training request
+            self._add_training_request(
+                prompt=prompt,
+                training_config=training_config,
+                lora_request=lora_request[i] if isinstance(
+                    lora_request, Sequence) else lora_request,
+            )
+    
+    def _add_training_request(
+        self,
+        prompt: PromptType,
+        training_config: "TrainingConfig",
+        lora_request: Optional[LoRARequest] = None,
+    ) -> None:
+        """Add a single training request to the engine."""
+        from vllm.v1.request import Request, TrainingConfig as TC
+        
+        request_id = str(next(self.request_counter))
+        print(f"[DEBUG _add_training_request] Called for request_id={request_id}")
+        
+        # For V1 engine, we need to create a Request object directly
+        # and add it to the scheduler
+        if envs.VLLM_USE_V1:
+            # Tokenize the prompt if needed
+            if isinstance(prompt, str):
+                tokenizer = self.get_tokenizer()
+                prompt_token_ids = tokenizer.encode(prompt)
+            elif isinstance(prompt, dict):
+                if 'prompt_token_ids' in prompt:
+                    prompt_token_ids = prompt['prompt_token_ids']
+                elif 'prompt' in prompt:
+                    tokenizer = self.get_tokenizer()
+                    prompt_token_ids = tokenizer.encode(prompt['prompt'])
+                else:
+                    raise ValueError("Prompt dict must have 'prompt' or 'prompt_token_ids'")
+            else:
+                raise ValueError(f"Unsupported prompt type: {type(prompt)}")
+            
+            # Get EOS token ID
+            tokenizer = self.get_tokenizer()
+            eos_token_id = tokenizer.eos_token_id
+            
+            # Create the training request
+            training_request = Request(
+                request_id=request_id,
+                prompt_token_ids=prompt_token_ids,
+                sampling_params=None,
+                pooling_params=None,
+                eos_token_id=eos_token_id,
+                is_training=True,
+                training_config=training_config,
+            )
+            
+            # Add to output processor first (needed for get_num_unfinished_requests)
+            prompt_str = prompt if isinstance(prompt, str) else str(prompt_token_ids)
+            self.llm_engine.output_processor.add_request(training_request, prompt_str, None, 0)
+            print(f"[DEBUG _add_training_request] Added to output processor")
+            
+            # Then add to scheduler for execution
+            # For V1, the engine has engine_core which contains the actual EngineCore
+            engine_core_client = self.llm_engine.engine_core
+            
+            # Access the actual EngineCore (unwrap from InprocClient)
+            if hasattr(engine_core_client, 'engine_core'):
+                # InprocClient case
+                actual_engine_core = engine_core_client.engine_core
+                print(f"[DEBUG _add_training_request] Adding to scheduler (InprocClient)")
+                actual_engine_core.scheduler.add_request(training_request)
+                print(f"[DEBUG _add_training_request] Request added. max_tokens={training_request.max_tokens}")
+            elif hasattr(engine_core_client, 'scheduler'):
+                # Direct EngineCore access
+                print(f"[DEBUG _add_training_request] Adding to scheduler (direct)")
+                engine_core_client.scheduler.add_request(training_request)
+                print(f"[DEBUG _add_training_request] Request added. max_tokens={training_request.max_tokens}")
+            else:
+                # For async/multiprocess case
+                raise NotImplementedError(
+                    "Training with async/multiprocess engine not yet supported. "
+                    "Please use the synchronous LLM class with V1 engine."
+                )
+        else:
+            raise NotImplementedError("Training only supported in V1 engine")
 
     def _run_engine(
         self,

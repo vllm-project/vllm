@@ -153,8 +153,13 @@ class RequestState:
             top_p = None
             n = None
             temperature = None
-            assert request.pooling_params is not None
-            output_kind = request.pooling_params.output_kind
+            
+            # Training requests don't have pooling_params or sampling_params
+            if hasattr(request, 'is_training') and request.is_training:
+                output_kind = RequestOutputKind.FINAL_ONLY
+            else:
+                assert request.pooling_params is not None
+                output_kind = request.pooling_params.output_kind
 
         return cls(
             request_id=request.request_id,
@@ -198,6 +203,10 @@ class RequestState:
                 request_id, [self._new_pooling_output(pooling_output)],
                 finished)
 
+        # Training requests don't have detokenizer - skip output creation
+        if self.detokenizer is None:
+            return None
+        
         output = self._new_completion_output(new_token_ids, finish_reason,
                                              stop_reason)
 
@@ -411,19 +420,20 @@ class OutputProcessor:
             req_state.is_prefilling = False
 
             if pooling_output is None:
-                assert req_state.detokenizer is not None
-                assert req_state.logprobs_processor is not None
-                # 2) Detokenize the token ids into text and perform stop checks.
-                stop_string = req_state.detokenizer.update(
-                    new_token_ids, finish_reason == FinishReason.STOP)
-                if stop_string:
-                    finish_reason = FinishReason.STOP
-                    stop_reason = stop_string
+                # Training requests don't have detokenizer or logprobs
+                if req_state.detokenizer is not None:
+                    assert req_state.logprobs_processor is not None
+                    # 2) Detokenize the token ids into text and perform stop checks.
+                    stop_string = req_state.detokenizer.update(
+                        new_token_ids, finish_reason == FinishReason.STOP)
+                    if stop_string:
+                        finish_reason = FinishReason.STOP
+                        stop_reason = stop_string
 
-                # 3) Compute sample and prompt logprobs for request,
-                # if required.
-                req_state.logprobs_processor.update_from_output(
-                    engine_core_output)
+                    # 3) Compute sample and prompt logprobs for request,
+                    # if required.
+                    req_state.logprobs_processor.update_from_output(
+                        engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(

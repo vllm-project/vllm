@@ -4,8 +4,11 @@
 import enum
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+
+import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -18,6 +21,26 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
+
+
+@dataclass
+class TrainingConfig:
+    """Configuration for training requests.
+    
+    This allows a request to be used for training instead of inference.
+    Training requests compute loss and cache outputs for backward pass.
+    """
+    # Labels for computing training loss
+    labels: torch.Tensor
+    
+    # Whether to compute loss for this request
+    compute_loss: bool = True
+    
+    # Loss function to use (currently only cross_entropy supported)
+    loss_fn: str = "cross_entropy"
+    
+    # Whether to cache activations for backward pass
+    cache_for_backward: bool = True
 
 
 class Request:
@@ -39,6 +62,9 @@ class Request:
         trace_headers: Optional[Mapping[str, str]] = None,
         block_hasher: Optional[Callable[["Request"],
                                         list["BlockHash"]]] = None,
+        # NEW: Training support
+        is_training: bool = False,
+        training_config: Optional[TrainingConfig] = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -51,6 +77,10 @@ class Request:
         self.structured_output_request = structured_output_request
         self.arrival_time = arrival_time if arrival_time is not None else \
             time.time()
+
+        # NEW: Training support
+        self.is_training = is_training
+        self.training_config = training_config
 
         self.status = RequestStatus.WAITING
         self.use_structured_output = False
@@ -74,6 +104,11 @@ class Request:
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = \
                     sampling_params.extra_args.get("kv_transfer_params")
+        elif is_training:
+            # Training requests don't need sampling or pooling params
+            # They process the entire sequence at once for training
+            # Set max_tokens=1 so scheduler knows to run forward pass
+            self.max_tokens = 1
         else:
             raise ValueError(
                 "sampling_params and pooling_params can't both be unset")

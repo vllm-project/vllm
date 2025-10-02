@@ -43,6 +43,8 @@ class CachedRequestState:
     mrope_position_delta: Optional[int] = None
 
     lora_request: Optional[LoRARequest] = None
+    is_training: bool = False
+    training_config: Optional["TrainingConfig"] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -399,6 +401,10 @@ class InputBatch:
             self.pooling_params[req_id] = pooling_params
             self.logits_processing_needs_token_ids[req_index] = (
                 pooling_params.requires_token_ids)
+        elif request.is_training:
+            # Training request: no sampling or pooling params needed
+            # Training requests only compute loss, no token generation
+            pass
         else:
             raise NotImplementedError("Unrecognized request type")
 
