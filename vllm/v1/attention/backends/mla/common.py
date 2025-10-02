@@ -1010,7 +1010,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+        kv_b_proj_weight = get_and_maybe_dequant_weights(
+            self.kv_b_proj).T.detach().contiguous()
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), (

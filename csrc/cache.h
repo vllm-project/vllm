@@ -64,3 +64,7 @@ void indexer_k_quant_and_cache(
     torch::Tensor& slot_mapping,  // [num_tokens]
     int64_t quant_block_size,     // quantization block size
     const std::string& scale_fmt);
+
+void upconvert_ds_mla_tokens(torch::Tensor const& src_cache,
+                             torch::Tensor& dst_workspace,
+                             torch::Tensor const& indices);

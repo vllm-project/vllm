@@ -1631,6 +1631,13 @@ def concat_and_cache_mla(
                                                 scale)
 
 
+def upconvert_ds_mla_tokens(src_cache: torch.Tensor,
+                            dst_workspace: torch.Tensor,
+                            indices: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.upconvert_ds_mla_tokens(src_cache, dst_workspace,
+                                                   indices)
+
+
 def copy_blocks(key_caches: list[torch.Tensor],
                 value_caches: list[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:

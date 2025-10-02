@@ -504,6 +504,99 @@ __global__ void concat_and_cache_ds_mla_kernel(
           src_val, scale_val);
 }
 
+__global__ void upconvert_ds_mla_tokens_kernel(
+    const uint8_t* __restrict__ src_cache,      // [num_blocks, block_size, 656]
+    __nv_bfloat16* __restrict__ dst_workspace,  // [num_slots, head_dim]
+    const int32_t* __restrict__ indices,        // [num_indices]
+    const int64_t num_indices, const int64_t block_stride,
+    const int64_t entry_stride, const int32_t block_size,
+    const int32_t head_dim, const int64_t num_slots) {
+  const int64_t list_idx = blockIdx.x;
+  if (list_idx >= num_indices) {
+    return;
+  }
+
+  const int64_t token_index = static_cast<int64_t>(indices[list_idx]);
+  if (token_index < 0 || token_index >= num_slots) {
+    return;
+  }
+
+  const int64_t block_idx = token_index / block_size;
+  const int64_t block_offset = token_index % block_size;
+  const uint8_t* token_ptr =
+      src_cache + block_idx * block_stride + block_offset * entry_stride;
+  __nv_bfloat16* dst_ptr =
+      dst_workspace + token_index * static_cast<int64_t>(head_dim);
+
+  const uint8_t* no_pe_ptr = token_ptr;
+  const float* scales_ptr =
+      reinterpret_cast<const float*>(token_ptr + 512);  // 4 tiles of 128
+  const __nv_bfloat16* rope_ptr =
+      reinterpret_cast<const __nv_bfloat16*>(token_ptr + 512 + 16);
+
+  for (int i = threadIdx.x; i < 512; i += blockDim.x) {
+    const int tile = i >> 7;  // each tile is 128 elements
+    const float scale = scales_ptr[tile];
+    const uint8_t val = no_pe_ptr[i];
+    dst_ptr[i] =
+        fp8::scaled_convert<__nv_bfloat16, uint8_t,
+                            vllm::Fp8KVCacheDataType::kFp8E4M3>(val, scale);
+  }
+
+  for (int j = threadIdx.x; j < 64; j += blockDim.x) {
+    dst_ptr[512 + j] = rope_ptr[j];
+  }
+}
+
+}  // namespace vllm
+
+void upconvert_ds_mla_tokens(torch::Tensor const& src_cache,
+                             torch::Tensor& dst_workspace,
+                             torch::Tensor const& indices) {
+  if (indices.numel() == 0) {
+    return;
+  }
+  TORCH_CHECK(src_cache.scalar_type() == at::kByte,
+              "src_cache must be uint8 for fp8_ds_mla layout")
+  TORCH_CHECK(dst_workspace.scalar_type() == at::kBFloat16,
+              "dst_workspace must be bfloat16")
+  TORCH_CHECK(indices.scalar_type() == at::kInt, "indices must be int32")
+  TORCH_CHECK(src_cache.is_cuda(), "src_cache must be on CUDA device")
+  TORCH_CHECK(dst_workspace.is_cuda(), "dst_workspace must be on CUDA device")
+  TORCH_CHECK(indices.is_cuda(), "indices must be on CUDA device")
+  TORCH_CHECK(src_cache.device() == dst_workspace.device(),
+              "src_cache and dst_workspace must be on the same device")
+  TORCH_CHECK(src_cache.device() == indices.device(),
+              "indices must be on the same device as src_cache")
+
+  at::cuda::OptionalCUDAGuard device_guard(src_cache.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  const int64_t block_stride = src_cache.stride(0);
+  const int64_t entry_stride = src_cache.stride(1);
+  const int32_t block_size = static_cast<int32_t>(src_cache.size(1));
+  const int32_t head_dim = static_cast<int32_t>(dst_workspace.size(1));
+  const int64_t num_slots = dst_workspace.size(0);
+
+  TORCH_CHECK(src_cache.size(2) == 656,
+              "fp8 Ds-MLA cache entries must be 656 bytes");
+  TORCH_CHECK(head_dim == 576,
+              "Ds-MLA sparse workspace expects head_dim 576, got ", head_dim);
+  TORCH_CHECK(num_slots == src_cache.size(0) * static_cast<int64_t>(block_size),
+              "Workspace rows must match kv-cache slots");
+
+  const dim3 grid(indices.size(0));
+  const dim3 block(256);
+
+  vllm::upconvert_ds_mla_tokens_kernel<<<grid, block, 0, stream>>>(
+      reinterpret_cast<const uint8_t*>(src_cache.data_ptr()),
+      reinterpret_cast<__nv_bfloat16*>(dst_workspace.data_ptr()),
+      indices.data_ptr<int32_t>(), indices.size(0), block_stride, entry_stride,
+      block_size, head_dim, num_slots);
+}
+
+namespace vllm {
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void indexer_k_quant_and_cache_kernel(
     const scalar_t* __restrict__ k,  // [num_tokens, head_dim]

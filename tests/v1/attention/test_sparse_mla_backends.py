@@ -165,6 +165,12 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name,
                                                model_config)
     model_config.get_head_size = MethodType(lambda self: head_size,
                                             model_config)
+
+    # Provide a mock attention layer for the placeholder name to satisfy
+    # get_layers_from_vllm_config.
+    mock_attention_layer = MockAttentionLayer(device)
+    vllm_config.compilation_config.static_forward_context["placeholder"] = \
+        mock_attention_layer
     model_config.get_sliding_window = MethodType(lambda self: None,
                                                  model_config)
 
