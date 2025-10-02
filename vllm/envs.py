@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import hashlib
 import json
 import os
@@ -1407,6 +1408,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 # --8<-- [end:env-vars-definition]
 
 
+@functools.cache
 def __getattr__(name: str):
     # lazy evaluation of environment variables
     if name in environment_variables:
