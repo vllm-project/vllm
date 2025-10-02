@@ -54,6 +54,7 @@ class HTTPConnection:
         stream: bool = False,
         timeout: Optional[float] = None,
         extra_headers: Optional[Mapping[str, str]] = None,
+        allow_redirects: bool = True,
     ):
         self._validate_http_url(url)
 
@@ -63,7 +64,8 @@ class HTTPConnection:
         return client.get(url,
                           headers=self._headers(**extra_headers),
                           stream=stream,
-                          timeout=timeout)
+                          timeout=timeout,
+                          allow_redirects=allow_redirects)
 
     async def get_async_response(
         self,
@@ -71,6 +73,7 @@ class HTTPConnection:
         *,
         timeout: Optional[float] = None,
         extra_headers: Optional[Mapping[str, str]] = None,
+        allow_redirects: bool = True,
     ):
         self._validate_http_url(url)
 
@@ -79,10 +82,17 @@ class HTTPConnection:
 
         return client.get(url,
                           headers=self._headers(**extra_headers),
-                          timeout=timeout)
+                          timeout=timeout,
+                          allow_redirects=allow_redirects)
 
-    def get_bytes(self, url: str, *, timeout: Optional[float] = None) -> bytes:
-        with self.get_response(url, timeout=timeout) as r:
+    def get_bytes(self,
+                  url: str,
+                  *,
+                  timeout: Optional[float] = None,
+                  allow_redirects: bool = True) -> bytes:
+        with self.get_response(url,
+                               timeout=timeout,
+                               allow_redirects=allow_redirects) as r:
             r.raise_for_status()
 
             return r.content
@@ -92,8 +102,10 @@ class HTTPConnection:
         url: str,
         *,
         timeout: Optional[float] = None,
+        allow_redirects: bool = True,
     ) -> bytes:
-        async with await self.get_async_response(url, timeout=timeout) as r:
+        async with await self.get_async_response(
+                url, timeout=timeout, allow_redirects=allow_redirects) as r:
             r.raise_for_status()
 
             return await r.read()
