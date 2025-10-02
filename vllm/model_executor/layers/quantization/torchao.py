@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
 import json
+import types
 from importlib.util import find_spec
 from typing import Any, Optional
 
@@ -25,6 +26,14 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
+
+
+def _bond_method_to_cls(func, obj):
+    if hasattr(func, "__self__") or not callable(func):
+        # If the function is already bound to an instance, return it as is
+        return func
+    else:
+        return types.MethodType(func, obj)
 
 
 def torchao_version_at_least(torchao_version: str) -> bool:
@@ -307,6 +316,41 @@ class TorchAOLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.quant_config.is_checkpoint_torchao_serialized:
+            if not hasattr(layer, "weight"):
+                return
+
+            # record attributes attached to the weight, so we can
+            # recover later
+            recorded_weight_attr = {}
+            param = layer.weight
+            for key in param.__dict__:
+                if hasattr(param, key):
+                    attr = getattr(param, key)
+                    if not callable(attr):
+                        recorded_weight_attr[key] = attr
+                    elif hasattr(attr, "__self__") and param is attr.__self__:
+                        # if attr is a bonded method for an instance, and
+                        # attr.__self__ points to the instance (param)
+                        # we'll record the underlying function object
+                        recorded_weight_attr[key] = attr.__func__
+                    else:
+                        recorded_weight_attr[key] = attr
+
+            from torchao.prototype.tensor_conversion.api import (
+                convert_to_packed_tensor_based_on_current_hardware,
+            )
+
+            layer.weight = Parameter(
+                convert_to_packed_tensor_based_on_current_hardware(layer.weight),
+                requires_grad=layer.weight.requires_grad,
+            )
+
+            for attr_name, attr in recorded_weight_attr.items():
+                if not hasattr(layer.weight, attr_name):
+                    setattr(
+                        layer.weight, attr_name, _bond_method_to_cls(attr, layer.weight)
+                    )
+
             return
 
         # quantize the weight on the fly if the checkpoint is not already
@@ -314,5 +358,6 @@ class TorchAOLinearMethod(LinearMethodBase):
         weight = torchao_quantize_param_data(
             layer.weight, self.quant_config.torchao_config
         )
+        weight = convert_to_packed_tensor_based_on_current_hardware(weight)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
