@@ -892,7 +892,7 @@ class FusedMoE(CustomOp):
                 tp_size=self.ep_size if self.use_ep else self.tp_size,
                 shared_experts_score=1.0,
                 max_num_tokens=vllm_config.scheduler_config.
-                max_num_batched_tokens,
+                max_num_batched_tokens * dp_size_,
                 is_EP=self.use_ep,
             )
         if is_rocm_aiter_fusion_shared_expert_enabled():
