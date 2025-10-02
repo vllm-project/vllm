@@ -131,16 +131,11 @@ class CustomOp(nn.Module):
         On by default if PyTorch Inductor is not used.
         Specifying 'all' or 'none' in custom_op takes precedence.
         """
-        from vllm.config import CompilationLevel
-
         compilation_config = get_cached_compilation_config()
-        default_on = (
-            compilation_config.level < CompilationLevel.PIECEWISE
-            or not compilation_config.backend == "inductor"
-        )
         count_none = compilation_config.custom_ops.count("none")
         count_all = compilation_config.custom_ops.count("all")
-        return default_on and not count_none > 0 or count_all > 0
+
+        return not count_none > 0 or count_all > 0
 
     # Dictionary of all custom ops (classes, indexed by registered name).
     # To check if an op with a name is enabled, call .enabled() on the class.

@@ -192,7 +192,7 @@ class CompilationConfig:
     used for the compilation directly (it sees the whole graph). When the
     compilation level is 3, the backend is used for the piecewise compilation
     (it sees a part of the graph)."""
-    custom_ops: list[str] = field(default_factory=list)
+    custom_ops: list[str] = ['all']
     """Fine-grained control over which custom ops to enable/disable. Use 'all'
     to enable all, 'none' to disable all. Also specify a list of custom op
     names to enable (prefixed with a '+'), or disable (prefixed with a '-').
