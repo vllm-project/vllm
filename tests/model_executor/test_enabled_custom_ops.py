@@ -62,7 +62,8 @@ class Relu3(ReLUSquaredActivation):
         # All but ReLU3 (even if ReLU2 is on)
         ("-relu3,+relu2", 3, "eager", [1, 1, 1, 0], True),
         # RMSNorm and SiluAndMul
-        ("none,-relu3,+rms_norm,+silu_and_mul", 4, "eager", [1, 1, 0, 0], False),
+        ("none,-relu3,+rms_norm,+silu_and_mul", 4, "eager", [1, 1, 0, 0], False
+         ),
         # All but RMSNorm
         ("-rms_norm", 3, "eager", [0, 1, 1, 1], True),
         #
@@ -71,22 +72,13 @@ class Relu3(ReLUSquaredActivation):
         # Only ReLU3
         ("none,+relu3", 3, "inductor", [0, 0, 0, 1], False),
         # All but RMSNorm
-        ("all,-rms_norm", 4, True, [0, 1, 1, 1], True),
-    ],
-)
-def test_enabled_ops(
-    env: str | None,
-    torch_level: int,
-    use_inductor: bool,
-    ops_enabled: list[int],
-    default_on: bool,
-):
-    custom_ops = env.split(",") if env else []
-    vllm_config = VllmConfig(
-        compilation_config=CompilationConfig(
-            use_inductor=bool(use_inductor), level=torch_level, custom_ops=custom_ops
-        )
-    )
+        ("all,-rms_norm", 4, "inductor", [0, 1, 1, 1], True),
+    ])
+def test_enabled_ops(env: str | None, torch_level: int, backend: str,
+                     ops_enabled: list[int], default_on: bool):
+    custom_ops = env.split(',') if env else []
+    vllm_config = VllmConfig(compilation_config=CompilationConfig(
+        backend=backend, level=torch_level, custom_ops=custom_ops))
     with set_current_vllm_config(vllm_config):
 
         assert CustomOp.default_on() == default_on
