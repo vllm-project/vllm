@@ -577,6 +577,9 @@ class MambaMixer2(MambaBase, CustomOp):
         )
 
         if cache_enabled:
+            # If prefix caching is enabled, retrieve the relevant variables
+            # for prefill and decode
+
             # Split decodes and prefills:
             last_state_idx_d, last_state_idx_p = torch.split(
                 attn_metadata.last_computed_token_block_idx,
@@ -623,8 +626,17 @@ class MambaMixer2(MambaBase, CustomOp):
         # Process prefill requests
         if has_prefill:
             # 2. Convolution sequence transformation
-            # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "state_indices_tensor"
+            # - It will read the initial states for every sequence,
+            #   that has "has_initial_states_p" == True,
+            #   from "cache_indices", using "state_indices_tensor_p".
+            # - It updates the "conv_state" cache in positions pointed
+            #   to by "state_indices_tensor_p".
+            #   In particular, it will always write the state at the
+            #   sequence end.
+            #   In addition, "current_first_idx_p" and "current_last_idx_p"
+            #   are provided (which are pointers into
+            #   "state_indices_tensor_p"), it will write additional cache
+            #   states aligned at "block_size_to_align".
             x = hidden_states_B_C_p.transpose(
                 0, 1)  # this is the form that causal-conv see
             hidden_states_B_C_p = causal_conv1d_fn(
@@ -686,8 +698,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 state_dtype=ssm_state.dtype)
 
             if cache_enabled:
-                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
                 # Save states for sequences with more than just the final state:
+                n_blocks_to_fill = current_last_idx_p - current_first_idx_p
                 for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
                     cache_blocks_to_fill = state_indices_tensor_p[
                         seq_idx, current_first_idx_p[seq_idx]:
