@@ -391,7 +391,9 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
      When num_tokens is large, a smaller block size allows
      for increased block occupancy on CUs and better latency
      hiding on global mem ops. */
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  bool batch_invariant_launch = vllm::vllm_kernel_override_batch_invariant();
+  const int max_block_size =
+      (num_tokens < 256 && batch_invariant_launch) ? 1024 : 256;
   dim3 block(std::min(hidden_size, max_block_size));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -414,7 +416,6 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                           wt_ptr % req_alignment_bytes == 0;
   bool offsets_are_multiple_of_vector_width =
       hidden_size % vector_width == 0 && input_stride % vector_width == 0;
-  bool batch_invariant_launch = vllm::vllm_kernel_override_batch_invariant();
   if (ptrs_are_aligned && offsets_are_multiple_of_vector_width &&
       !batch_invariant_launch) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);

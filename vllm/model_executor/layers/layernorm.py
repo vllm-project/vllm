@@ -8,6 +8,8 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.batch_invariant import (
+    rms_norm_batch_invariant, vllm_kernel_override_batch_invariant)
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
@@ -19,6 +21,8 @@ def is_rocm_aiter_rmsnorm_enabled() -> bool:
 
 def rms_norm(x: torch.Tensor, weight: torch.Tensor,
              variance_epsilon: float) -> torch.Tensor:
+    if vllm_kernel_override_batch_invariant():
+        return rms_norm_batch_invariant(x, weight, variance_epsilon)
     from vllm import _custom_ops as ops
     out = torch.empty_like(x)
     ops.rms_norm(
@@ -33,6 +37,9 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor,
 def fused_add_rms_norm(
         x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
         variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+    if vllm_kernel_override_batch_invariant():
+        return rms_norm_batch_invariant(x + residual, weight,
+                                        variance_epsilon), x + residual
     from vllm import _custom_ops as ops
     ops.fused_add_rms_norm(
         x,

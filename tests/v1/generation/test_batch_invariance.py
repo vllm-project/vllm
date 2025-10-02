@@ -215,30 +215,27 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN():
         model=model_name,
         tensor_parallel_size=tp_size,
         enforce_eager=True,  # helps reduce nondeterminism from some backends
+        max_num_seqs=128,
+        max_num_batched_tokens=8192,
+        gpu_memory_utilization=0.9,
+        enable_prefix_caching=False,
     )
 
-    prompts = [
-        "The capital of France is",
-        "The capital of Germany is",
-        _random_prompt(10, 1024),
-        _random_prompt(10, 1024),
-        _random_prompt(10, 1024),
-        _random_prompt(10, 1024),
-        _random_prompt(10, 1024),
-    ]
+    prompts = [_random_prompt(10, 1024) for i in range(1000)]
 
     sp = SamplingParams(
         temperature=0.6,
         top_p=1.0,
-        max_tokens=8,
+        max_tokens=4,
         # Seed shouldn't matter at temperature=0, but keeping it stable anyway.
         seed=1234,
         logprobs=5,
     )
 
     # BS=1: run prompts individually and collect logprobs per step.
+    N_test = 1000
     bs1_logprobs_per_prompt = []
-    for p in prompts:
+    for p in prompts[:N_test]:
         outs = llm.generate([p], sp, use_tqdm=False)
         assert len(outs) == 1
         step_logprobs = _extract_step_logprobs(outs[0])
@@ -252,7 +249,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN():
     outs_batched = llm.generate(prompts, sp, use_tqdm=False)
     assert len(outs_batched) == len(prompts)
     bsN_logprobs_per_prompt = []
-    for o in outs_batched:
+    for o in outs_batched[:N_test]:
         step_logprobs = _extract_step_logprobs(o)
         if step_logprobs is None:
             pytest.skip("Logits are not available on RequestOutput; "
@@ -260,6 +257,9 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN():
         bsN_logprobs_per_prompt.append(step_logprobs)
 
     # Compare step-by-step logprobs for each prompt between BS=1 and BS=N runs.
+
+    exact_match_count = 0
+    total_count = 0
     for i, (logprobs_bs1, logprobs_bsN) in enumerate(
             zip(bs1_logprobs_per_prompt, bsN_logprobs_per_prompt)):
         assert len(logprobs_bs1) == len(logprobs_bsN), (
@@ -270,9 +270,14 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN():
                 f"Logits shape mismatch at prompt {i}, step {t}: "
                 f"{a.shape} vs {b.shape}")
             # Bitwise exact equality.
-            assert torch.equal(
-                a, b), (f"Bitwise logprobs mismatch at prompt {i}, step {t} "
-                        f"(dtype={a.dtype}, shape={a.shape}).")
+            if torch.equal(a, b):
+                exact_match_count += 1
+            else:
+                print(f"Bitwise logprobs mismatch at prompt {i}, step {t} "
+                      f"(dtype={a.dtype}, shape={a.shape}).")
+            total_count += 1
+    assert exact_match_count == total_count, \
+        f"only {exact_match_count} / {total_count} matched exactly"
 
 
 def LLM_with_max_seqs(

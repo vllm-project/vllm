@@ -271,8 +271,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.prefill_fixed_split_size = 4096
             self.disable_split_kv = True
         else:
-            self.decode_fixed_split_size = None
-            self.prefill_fixed_split_size = None
+            self.decode_fixed_split_size = -1
+            self.prefill_fixed_split_size = -1
             self.disable_split_kv = False
 
         self.compilation_config = vllm_config.compilation_config
