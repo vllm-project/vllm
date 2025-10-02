@@ -10,12 +10,12 @@ from collections.abc import Iterable
 from typing import Any, Optional, Union
 
 import pytest
+import regex as re
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 from vllm.attention.backends.registry import _Backend
-from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.config import CompilationConfig, CompilationLevel, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
@@ -235,7 +235,8 @@ INDUCTOR_GRAPH_PARTITION = (
 )
 
 # TODO(luka) test both in nightly
-CUSTOM_OPS_FP8 = ["-quant_fp8"]  # , "+quant_fp8"]
+# TODO(luka) change to -
+CUSTOM_OPS_FP8 = ["+quant_fp8"]  # , "+quant_fp8"]
 
 
 @pytest.mark.parametrize(
@@ -252,8 +253,7 @@ def test_e2e_fusion_attn_quant(
     backend: _Backend,
     custom_ops: str,
     inductor_graph_partition: bool,
-    caplog_vllm,
-    caplog_mp_workaround,
+    caplog_mp_spawn,
     monkeypatch,
 ):
     custom_ops_list = custom_ops.split(",") if custom_ops else []
@@ -269,7 +269,11 @@ def test_e2e_fusion_attn_quant(
     # Otherwise, we can't verify fusion happened through the logs.
     # Log capture also doesn't work with multiprocessing yet.
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-    # monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    # To capture subprocess logs, we need to know whether spawn or fork is used.
+    # Force spawn as it is more general.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
 
     compilation_config = CompilationConfig(
         # Testing properties
@@ -284,18 +288,15 @@ def test_e2e_fusion_attn_quant(
         inductor_compile_config={"force_disable_caches": True},
     )
 
-    with (
-        caplog_vllm.at_level(logging.DEBUG),
-        caplog_mp_workaround(),
-        global_force_attn_backend_context_manager(backend),
-    ):
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
         run_model(compilation_config, model_name, **model_kwargs)
 
-    assert "Fused quant onto 48 attention nodes" in caplog_vllm.text, caplog_vllm.text
+    assert "Fused quant onto 48 attention nodes" in log_holder.text, log_holder.text
 
 
 # TODO(luka) test both in nightly
-CUSTOM_OPS_RMS_NORM = ["-rms_norm"]  # , "+rms_norm"]
+# TODO(luka) change to -
+CUSTOM_OPS_RMS_NORM = ["+rms_norm"]  # , "+rms_norm"]
 
 
 def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
@@ -321,14 +322,13 @@ def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
     or not current_platform.has_device_capability((10, 0)),
     reason="allreduce+rmsnorm fusion only supported on blackwell",
 )
-@pytest.mark.skip(reason="Still no solution for capturing logs from subprocess")
 def test_e2e_fusion_tp2_attn_quant_allreduce_rmsnorm(
     model_name,
     model_kwargs,
     backend,
     custom_ops: str,
     inductor_graph_partition: bool,
-    caplog_vllm,
+    caplog_mp_spawn,
     monkeypatch,
 ):
     custom_ops_list = custom_ops.split(",") if custom_ops else []
@@ -344,8 +344,11 @@ def test_e2e_fusion_tp2_attn_quant_allreduce_rmsnorm(
     # Otherwise, we can't verify fusion happened through the logs.
     # Log capture also doesn't work with multiprocessing yet.
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-    # TODO
-    # monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    # To capture subprocess logs, we need to know whether spawn or fork is used.
+    # Force spawn as it is more general.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
 
     compilation_config = CompilationConfig(
         # Testing properties
@@ -364,18 +367,17 @@ def test_e2e_fusion_tp2_attn_quant_allreduce_rmsnorm(
         inductor_compile_config={"force_disable_caches": True},
     )
 
-    with (
-        caplog_vllm.at_level(logging.DEBUG),
-        global_force_attn_backend_context_manager(backend),
-    ):
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
         run_model(
             compilation_config, model_name, tensor_parallel_size=2, **model_kwargs
         )
 
-    assert "Fused quant onto 48 attention nodes" in caplog_vllm.text, caplog_vllm.text
+    assert "Fused quant onto 48 attention nodes" in log_holder.text, log_holder.text
 
-    # TODO fill in correct number
-    assert "Replaced 96 patterns" in caplog_vllm.text, caplog_vllm.text
+    matches = re.findall(
+        r"\[collective_fusion.py:\d+] Replaced 96 patterns", log_holder.text
+    )
+    assert len(matches) == 2, log_holder.text
 
 
 def run_model(
