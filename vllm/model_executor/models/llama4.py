@@ -98,6 +98,7 @@ class Llama4MoE(nn.Module):
             custom_routing_function=Llama4MoE.custom_routing_function,
             intermediate_size=intermediate_size_moe,
             apply_router_weight_on_input=True,
+            reduce_results=False,
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -110,7 +111,8 @@ class Llama4MoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         router_logits, _ = self.router(hidden_states)
-        experts_out = self.experts(
+
+        shared_out, routed_out = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )

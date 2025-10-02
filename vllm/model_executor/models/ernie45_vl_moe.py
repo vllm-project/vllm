@@ -70,10 +70,10 @@ class Ernie4_5_VLMoeMLP(Ernie4_5_MoeMLP):
         self.shared_experts = shared_experts
 
     def forward(self, x):
-        out = super().forward(x)
         if self.shared_experts is not None:
-            out = out + self.shared_experts(x)
-        return out
+            return self.shared_experts(x) + super().forward(x)
+        else:
+            return super().forward(x)
 
 
 class Ernie4_5_VLMoeAttention(nn.Module):
@@ -244,6 +244,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 top_k=config.moe_k,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size[0],
+                reduce_results=False,
                 renormalize=True,
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[0],
@@ -275,6 +276,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 top_k=config.moe_k,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size[1],
+                reduce_results=False,
                 renormalize=True,
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[1],
@@ -336,6 +338,15 @@ class Ernie4_5_VLMoeMoE(nn.Module):
 
             final_hidden_states = self.text_experts(
                 hidden_states=hidden_states, router_logits=text_router_logits)
+
+        if self.has_shared_experts:
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[
+                1]
+
+        if self.tp_size > 1:
+            final_hidden_states = (
+                self.text_experts.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states))
 
         return final_hidden_states.view(orig_shape)
 

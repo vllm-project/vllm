@@ -125,7 +125,6 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                                      bias=False,
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
-
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = Qwen2MoeMLP(
                 hidden_size=config.hidden_size,
@@ -136,26 +135,19 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                 expert_gate=torch.nn.Linear(config.hidden_size, 1, bias=False),
                 prefix=f"{prefix}.shared_expert",
             )
-            self.experts = SharedFusedMoE(
-                shared_experts=self.shared_expert,
-                num_experts=config.num_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                prefix=f"{prefix}.experts")
         else:
-            self.experts = FusedMoE(
-                num_experts=config.num_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                prefix=f"{prefix}.experts")
             self.shared_expert = None
+
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_expert,
+            num_experts=config.num_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -167,6 +159,12 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
+        if self.shared_expert is not None:
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[
+                1]
+        if self.tp_size > 1:
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
+                final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
 

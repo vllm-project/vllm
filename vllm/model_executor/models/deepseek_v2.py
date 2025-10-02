@@ -36,7 +36,7 @@ from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, VllmConfig,
+from vllm.config import (CacheConfig, ParallelConfig, VllmConfig,
                          get_current_vllm_config)
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
@@ -133,7 +133,6 @@ class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
         config: Union[DeepseekV2Config, DeepseekV3Config],
-        model_config: ModelConfig,
         parallel_config: ParallelConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -184,8 +183,6 @@ class DeepseekV2MoE(nn.Module):
 
         if config.n_shared_experts is None:
             self.shared_experts = None
-            fused_output_scaling_factor = 1.0
-            shared_output_scaling_factor = 1.0
         else:
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
@@ -196,28 +193,17 @@ class DeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 is_sequence_parallel=self.is_sequence_parallel,
-                reduce_results=False,  # XXXXX
+                reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
 
-            # Fix FP16 overflow
-            # See DeepseekV2DecoderLayer for more details.
-            if model_config.dtype != torch.float16:
-                fused_output_scaling_factor = self.routed_scaling_factor
-                shared_output_scaling_factor = 1.0
-            else:
-                fused_output_scaling_factor = 1.0
-                shared_output_scaling_factor = (1. /
-                                                self.routed_scaling_factor)
-
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
-            fused_output_scaling_factor=fused_output_scaling_factor,
-            shared_output_scaling_factor=shared_output_scaling_factor,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
@@ -247,15 +233,36 @@ class DeepseekV2MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        final_hidden_states = self.experts(hidden_states=hidden_states,
-                                           router_logits=router_logits)
+        fused_moe_out = self.experts(hidden_states=hidden_states,
+                                     router_logits=router_logits)
+
+        if self.shared_experts is not None:
+            shared_output, final_hidden_states = fused_moe_out
+        else:
+            shared_output = None
+            final_hidden_states = fused_moe_out
+
+        # Fix FP16 overflow
+        # See DeepseekV2DecoderLayer for more details.
+        if hidden_states.dtype != torch.float16:
+            final_hidden_states *= self.routed_scaling_factor
+        elif self.shared_experts is not None:
+            assert shared_output is not None
+            shared_output *= (1. / self.routed_scaling_factor)
+
+        if self.shared_experts is not None:
+            assert shared_output is not None
+            final_hidden_states += shared_output
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0)
             final_hidden_states = final_hidden_states[:num_tokens]
+        elif self.tp_size > 1:
+            final_hidden_states = (
+                self.experts.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states))
 
-        # TODO(bnell): why is this view needed?
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
@@ -1009,7 +1016,6 @@ class DeepseekV2DecoderLayer(nn.Module):
                 and layer_idx % config.moe_layer_freq == 0):
             self.mlp = DeepseekV2MoE(
                 config=config,
-                model_config=model_config,
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
