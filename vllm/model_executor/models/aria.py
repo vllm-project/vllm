@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Optional, Union
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -38,8 +38,8 @@ from .idefics2_vision_model import (
 # yapf: enable
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    is_pp_missing_parameter, maybe_prefix)
+from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
+                    maybe_prefix)
 
 
 class AriaImagePixelInputs(TensorSchema):
@@ -51,6 +51,8 @@ class AriaImagePixelInputs(TensorSchema):
         - h: Height of each image
         - w: Width of each image
     """
+
+    type: Literal["pixel_values"]
 
     pixel_values: Annotated[
         torch.Tensor,
@@ -485,6 +487,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     This model combines a vision tower, a multi-modal projector, and a language
     model to perform tasks that involve both image and text inputs.
     """
+    merge_by_field_config = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -551,12 +555,15 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             return None
 
         return AriaImagePixelInputs(
-            pixel_values=flatten_bn(pixel_values, concat=True),
-            pixel_mask=flatten_bn(pixel_mask, concat=True),
+            type="pixel_values",
+            pixel_values=pixel_values,
+            pixel_mask=pixel_mask,
         )
 
     def _create_patch_attention_mask(
-            self, pixel_mask: Optional[torch.Tensor]) -> torch.Tensor:
+        self,
+        pixel_mask: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
         if pixel_mask is None:
             return None
 
