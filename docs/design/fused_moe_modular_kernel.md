@@ -54,8 +54,8 @@ The `FusedMoEModularKernel` acts as a bridge between the `FusedMoEPermuteExperts
 
 ### FusedMoEPrepareAndFinalize
 
-The `FusedMoEPrepareAndFinalize` abstract class exposes `prepare` and `finalize` functions.
-The `prepare` function is responsible for input activation Quantization and All2All Dispatch. The `finalize` function is responsible for invoking the All2All Combine. Additionally the `finalize` function may or may not do the TopK weight application and reduction (Please refer to the TopKWeightAndReduce section)
+The `FusedMoEPrepareAndFinalize` abstract class exposes `prepare`, `prepare_no_receive`  and `finalize` functions.
+The `prepare` function is responsible for input activation Quantization and All2All Dispatch. If implemented, The `prepare_no_receive` is like `prepare` except it does not wait to receive results from other workers.  Instead it returns a "receiver" callback that must be invoked to wait for the final results of worker. It is not required that this method is supported by all `FusedMoEPrepareAndFinalize` classes, but if it is available, it can be used to interleave work with the initial all to all communication, e.g. interleaving shared experts with fused experts.  The `finalize` function is responsible for invoking the All2All Combine. Additionally the `finalize` function may or may not do the TopK weight application and reduction (Please refer to the TopKWeightAndReduce section)
 
 ![](../assets/design/fused_moe_modular_kernel/prepare_and_finalize_blocks.png "FusedMoEPrepareAndFinalize Blocks")
 
@@ -145,6 +145,10 @@ The purpose of the All2All Manager is to set up the All2All kernel implementatio
 This section describes the significance of the various functions exposed by the `FusedMoEPrepareAndFinalize` abstract class.
 
 `FusedMoEPrepareAndFinalize::prepare()`: The prepare method implements the Quantization and All2All Dispatch. Typically the Dispatch function from the relevant All2All Manager is invoked.
+
+`FusedMoEPrepareAndFinalize::has_prepare_no_receive()`: Indicates whether or not this subclass implements `prepare_no_receive`. Defaults to False.
+
+`FusedMoEPrepareAndFinalize::prepare_no_receive()`: The prepare_no_receive method implements the Quantization and All2All Dispatch. It does not wait for the result of the dispatch operation but instead returns a thunk that can be invoked to wait for the final results. Typically the Dispatch function from the relevant All2All Manager is invoked.
 
 `FusedMoEPrepareAndFinalize::finalize()`: Maybe perform TopK Weight Application and Reduction and All2All Combine. Typically the Combine function from the relevant All2AllManager is invoked.
 
@@ -238,30 +242,8 @@ Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kern
 
 ## FusedMoEPrepareAndFinalize Implementations
 
-The following table lists the `FusedMoEPrepareAndFinalize` implementations at the time of writing,
-
-| Implementation | Type | Comments |
-| :--- | :--- | :--- |
-| DeepEPHTPrepareAndFinalize | Contiguous / Non-Batched | Uses the DeepEP High-Throughput all2all kernels. |
-| DeepEPLLPrepareAndFinalize | Batched | Uses the DeepEP Low-Latency all2all kernels. |
-| PplxPrepareAndFinalize | Batched | Uses the Perplexity all2all kernels. |
-| FlashInferCutlassMoEPrepareAndFinalize | Contiguous | |
-| MoEPrepareAndFinalizeNoEP | Contiguous | This implementation is used when there is no EP. i.e. no all2all kernels are invoked. |
-| BatchedPrepareAndFinalize | Batched | A reference prepare/finalize class that reorganizes the tokens into expert batched format, i.e. E x max_num_tokens x K. (Doesn’t use any all2all kernels. This is primarily used in unit testing) |
+See [Fused MoE Kernel features](./moe_kernel_features.md#fused-moe-modular-all2all-backends) for a list of all the available modular prepare and finalize subclasses.
 
 ## FusedMoEPermuteExpertsUnpermute
 
-The following table lists the `FusedMoEPermuteExpertsUnpermute` implementations at the time of writing,
-
-| Implementation | Type | Comment |
-| :--- | :--- | :--- |
-| BatchedDeepGemmExperts | Batched | Uses the DeepGemm’s Masked Grouped Gemm kernels for the fused_moe operation. |
-| BatchedTritonExperts | Batched | Uses a Triton Kernel for the Batched matmuls. |
-| BatchedTritonOrDeepGemmExperts | Batched | Chooses either the `BatchedDeepGemmExperts` or `BatchedTritonExperts` based on environment settings. |
-| DeepGemmExperts | Contiguous / Non-Batched | Uses DeepGemm’s Grouped Gemm kernels for fused_moe operation. |
-| TritonExperts | Contiguous / Non-Batched | Uses a Triton Kernel for fused_moe matmuls. |
-| TritonOrDeepGemmExperts | Contiguous / Non-Batched | Chooses either the `DeepGemmExperts` or `TritonExperts` based on fused_moe inputs. |
-| CutlassExpertsFP8 | Supports both Batched and Contiguous formats | Uses Cutlass Grouped Gemm implementations for the fp8 matmuls. |
-| CutlassExpertsFP4 | Supports both Batched and Contiguous formats | Uses Cutlass Grouped Gemm implementations for the fp4 matmuls. |
-| FlashInferExperts | Contiguous | Uses fused_moe operation from FlashInfer |
-| NaiveBatchedExperts | Batched | Reference Batched Experts implementation. Primarily used in unit tests. |
+See [Fused MoE Kernel features](./moe_kernel_features.md#fused-moe-experts-kernels) for a list of all the available modular experts.

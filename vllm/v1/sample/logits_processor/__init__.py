@@ -1,16 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
+import inspect
 import itertools
+from abc import abstractmethod
 from collections.abc import Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
+from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
                                                      MinPLogitsProcessor,
-                                                     MinTokensLogitsProcessor)
+                                                     MinTokensLogitsProcessor,
+                                                     process_dict_updates)
 from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
                                                        LogitsProcessor,
                                                        MoveDirectionality)
@@ -177,9 +183,112 @@ def build_logitsprocs(
             BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes))
 
 
+class AdapterLogitsProcessor(LogitsProcessor):
+    """Wrapper for per-request logits processors
+    
+    To wrap a specific per-request logits processor,
+    * Subclass `AdapterLogitsProcessor`
+    * Implement `self.is_argmax_invariant()` base-class method
+    * Implement `self.new_req_logits_processor(params)`
+    
+    `self.__init__(vllm_config, device, is_pin_memory)` does not need to be
+    overridden in general. However, to implement custom constructor behavior -
+    especially any logic which operates on or stores `vllm_config`, `device`,
+    or `is_pin_memory` - `self.__init__(vllm_config, device, is_pin_memory)`
+    must be overridden and the override must call
+    `super().__init__(vllm_config, device, is_pin_memory)`
+    """
+
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
+                 is_pin_memory: bool):
+        """Subclass must invoke
+        `super().__init__(vllm_config, device, is_pin_memory)`.
+
+        Subclass constructor may find it useful to utilize the `vllm_config`,
+        `device` and `is_pin_memory` argument. However regardless of whether
+        these arguments are used, the vLLM logits processor interface requires
+        all three arguments to be present.
+        """
+
+        # Map req index -> logits processor state
+        #
+        # State representation is a partial[Tensor] comprising a request-level
+        # logits processor with the output token ids argument and (if required)
+        # the prompt token ids argument pre-populated
+        #
+        # Note that the partial carries a *reference* to output token ids, and
+        # will thus always operate on the list as it is currently, not as it
+        # was when the partial was created.
+        self.req_info: dict[int, partial[torch.Tensor]] = {}
+
+    @abstractmethod
+    def new_req_logits_processor(
+        self,
+        params: SamplingParams,
+    ) -> Optional[RequestLogitsProcessor]:
+        """Consume request info; return a per-request logits processor.
+
+        Return None if logits processor does not need to be applied to request
+
+        Args:
+          params: request sampling params
+
+        Returns:
+          None if logits processor should not be applied to request; otherwise
+          returns a `RequestLogitsProcessor` instance
+        
+        """
+        raise NotImplementedError
+
+    def _new_state(
+        self,
+        params: SamplingParams,
+        prompt_ids: Optional[list[int]],
+        output_ids: list[int],
+    ) -> Optional[partial[torch.Tensor]]:
+        """Return state representation for new request
+
+        Returns None if logits processor is not applicable to request
+
+        Args:
+          params: request sampling params
+          prompt_ids: request prompt token ids
+          output_ids: decoded tokens so far for this request
+
+        Returns:
+          logits processor partial[Tensor] or None
+        
+        """
+        if req_lp := self.new_req_logits_processor(params):
+            args = [prompt_ids, output_ids] if (len(
+                inspect.signature(req_lp).parameters) == 3) else [output_ids]
+            return partial(req_lp, *args)
+        return None
+
+    def update_state(self, batch_update: Optional[BatchUpdate]):
+        process_dict_updates(
+            self.req_info,
+            batch_update,
+            self._new_state,
+        )
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if self.req_info:
+            # Apply per-request logits processors to corresponding rows of
+            # logits tensor
+            for req_idx, req_lp in self.req_info.items():
+                req_logits = logits[req_idx]
+                new_logits = req_lp(req_logits)
+                if new_logits is not req_logits:
+                    # Modify logits tensor row in-place if necessary
+                    logits[req_idx] = new_logits
+        return logits
+
+
 __all__ = [
     "LogitsProcessor", "LogitBiasLogitsProcessor", "MinPLogitsProcessor",
     "MinTokensLogitsProcessor", "BatchUpdate", "BatchUpdateBuilder",
     "MoveDirectionality", "LogitsProcessors", "build_logitsprocs",
-    "STR_POOLING_REJECTS_LOGITSPROCS", "LOGITSPROCS_GROUP"
+    "STR_POOLING_REJECTS_LOGITSPROCS", "LOGITSPROCS_GROUP",
+    "AdapterLogitsProcessor"
 ]

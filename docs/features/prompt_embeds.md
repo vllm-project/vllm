@@ -6,9 +6,6 @@ This page teaches you how to pass prompt embedding inputs to vLLM.
 
 The traditional flow of text data for a Large Language Model goes from text to token ids (via a tokenizer) then from token ids to prompt embeddings. For a traditional decoder-only model (such as meta-llama/Llama-3.1-8B-Instruct), this step of converting token ids to prompt embeddings happens via a look-up from a learned embedding matrix, but the model is not limited to processing only the embeddings corresponding to its token vocabulary.
 
-!!! note
-    Prompt embeddings are currently only supported in the v0 engine.
-
 ## Offline Inference
 
 To input multi-modal data, follow this schema in [vllm.inputs.EmbedsPrompt][]:

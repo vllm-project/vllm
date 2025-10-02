@@ -27,7 +27,7 @@ class CustomMultiprocExecutor(MultiprocExecutor):
                        kwargs: Optional[dict] = None,
                        non_block: bool = False,
                        unique_reply_rank: Optional[int] = None) -> list[Any]:
-        # Drop marker to show that this was ran
+        # Drop marker to show that this was run
         with open(".marker", "w"):
             ...
         return super().collective_rpc(method, timeout, args, kwargs)

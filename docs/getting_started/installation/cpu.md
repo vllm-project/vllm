@@ -180,7 +180,7 @@ Inference batch size is an important parameter for the performance. Larger batch
     - Offline Inference: `256 * world_size`
     - Online Serving: `128 * world_size`
 
-vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel (PP) to leverage multiple CPU sockets and memory nodes. For more details of tuning DP, TP and PP, please refer to [Optimization and Tuning](../../configuration/optimization.md). For vLLM CPU, it is recommend to use DP, TP and PP together if there are enough CPU sockets and memory nodes.
+vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel (PP) to leverage multiple CPU sockets and memory nodes. For more details of tuning DP, TP and PP, please refer to [Optimization and Tuning](../../configuration/optimization.md). For vLLM CPU, it is recommended to use DP, TP and PP together if there are enough CPU sockets and memory nodes.
 
 ### Which quantization configs does vLLM CPU support?
 
@@ -194,3 +194,35 @@ vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel
 - Both of them require `amx` CPU flag.
     - `VLLM_CPU_MOE_PREPACK` can provides better performance for MoE models
     - `VLLM_CPU_SGL_KERNEL` can provides better performance for MoE models and small-batch scenarios.
+
+### Why do I see `get_mempolicy: Operation not permitted` when running in Docker?
+
+In some container environments (like Docker), NUMA-related syscalls used by vLLM (e.g., `get_mempolicy`, `migrate_pages`) are blocked/denied in the runtime's default seccomp/capabilities settings. This may lead to warnings like `get_mempolicy: Operation not permitted`. Functionality is not affected, but NUMA memory binding/migration optimizations may not take effect and performance can be suboptimal.
+
+To enable these optimizations inside Docker with the least privilege, you can follow below tips:
+
+```bash
+docker run ... --cap-add SYS_NICE --security-opt seccomp=unconfined  ...
+
+# 1) `--cap-add SYS_NICE` is to address `get_mempolicy` EPERM issue.
+
+# 2) `--security-opt seccomp=unconfined` is to enable `migrate_pages` for `numa_migrate_pages()`.
+# Actually, `seccomp=unconfined` bypasses the seccomp for container,
+# if it's unacceptable, you can customize your own seccomp profile,
+# based on docker/runtime default.json and add `migrate_pages` to `SCMP_ACT_ALLOW` list.
+
+# reference : https://docs.docker.com/engine/security/seccomp/
+```
+
+Alternatively, running with `--privileged=true` also works but is broader and not generally recommended.
+
+In K8S, the following configuration can be added to workload yaml to achieve the same effect as above:
+
+```yaml
+securityContext:
+  seccompProfile:
+    type: Unconfined
+  capabilities:
+    add:
+    - SYS_NICE
+```

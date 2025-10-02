@@ -27,8 +27,13 @@ class SymmMemCommunicator:
         "10.0": [6, 8],
     }
 
-    def __init__(self, group: ProcessGroup, device: Union[int, str,
-                                                          torch.device]):
+    def __init__(
+            self,
+            group: ProcessGroup,
+            device: Union[int, str, torch.device],
+            # add options for testing
+            force_multimem: Optional[bool] = None,
+            max_size_override: Optional[int] = None):
         self.disabled = True
 
         if not symm_mem_available:
@@ -64,8 +69,17 @@ class SymmMemCommunicator:
                 self.world_size,
             )
             return
-        self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
-            self.world_size]
+        # Use override max_size if provided, otherwise use default
+        if max_size_override is not None:
+            self.max_size = max_size_override
+            logger.info(
+                "SymmMemCommunicator: Using override max_size: %s bytes",
+                self.max_size,
+            )
+        else:
+            self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[
+                self.device_capability][self.world_size]
+
         self.buffer = torch_symm_mem.empty(
             self.max_size // self.dtype.itemsize,
             device=self.device,
@@ -76,6 +90,7 @@ class SymmMemCommunicator:
             logger.warning("SymmMemCommunicator: symmetric memory "
                            "multicast operations are not supported.")
             return
+        self.force_multimem = force_multimem
         self.disabled = False
 
     def should_use_symm_mem(self, inp: torch.Tensor):
@@ -98,8 +113,18 @@ class SymmMemCommunicator:
         if out is None:
             out = torch.empty_like(inp)
         self.buffer[:inp.numel()].copy_(inp.view(-1))
-        if self.world_size in self._WORLD_SIZES_MULTIMEM[
-                self.device_capability]:
+
+        # Determine which algorithm to use
+        use_multimem = False
+        if self.force_multimem is not None:
+            # Test override: use forced setting
+            use_multimem = self.force_multimem
+        else:
+            # Normal logic: use multimem for supported world sizes
+            use_multimem = self.world_size in self._WORLD_SIZES_MULTIMEM[
+                self.device_capability]
+
+        if use_multimem:
             torch.ops.symm_mem.multimem_all_reduce_(self.buffer[:inp.numel()],
                                                     "sum",
                                                     self.group.group_name)

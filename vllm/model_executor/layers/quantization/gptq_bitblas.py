@@ -9,9 +9,8 @@ from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
-from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import (QuantizationConfig,
+                                                     QuantizationMethods)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     BitBLASLinearKernel, MPLinearLayerConfig)
 from vllm.model_executor.layers.quantization.utils.bitblas_utils import (
@@ -265,9 +264,9 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
             scales ('scales'), and zeros ('zeros').
 
         Raises:
-            ValueError: If `params_dtype` is not `torch.float16` or 
-            if the input size per partition is not divisible by the 
-            group size in `quant_config`.
+            ValueError: If `params_dtype` is not `torch.float16` or if the input
+                size per partition is not divisible by the group size
+                in `quant_config`.
         """
         if params_dtype != torch.float16:
             raise ValueError("Parameter data type must be torch.float16, "

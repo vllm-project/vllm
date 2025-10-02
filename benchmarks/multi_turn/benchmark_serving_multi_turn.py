@@ -962,7 +962,7 @@ async def main_mp(
 
     # At this point all the clients finished,
     # collect results (TTFT, TPOT, etc.) from all the clients.
-    # This needs to happens before calling join on the clients
+    # This needs to happen before calling join on the clients
     # (result_queue should be emptied).
     while not result_queue.empty():
         client_metrics.append(result_queue.get())

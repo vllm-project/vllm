@@ -19,7 +19,7 @@ from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
                           GenerationConfig, GenerationMixin)
 from transformers.video_utils import VideoMetadata
 
-from vllm.sequence import SampleLogprobs
+from vllm.logprobs import SampleLogprobs
 from vllm.utils import is_list_of
 
 from .....conftest import HfRunner, ImageAsset, ImageTestAssets

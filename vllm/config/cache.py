@@ -22,9 +22,10 @@ else:
 logger = init_logger(__name__)
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
-CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
+CacheDType = Literal["auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2",
+                     "fp8_inc"]
 MambaDType = Literal["auto", "float32"]
-PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor_64bit"]
+PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
 
 
 @config
@@ -33,9 +34,8 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     block_size: SkipValidation[BlockSize] = None  # type: ignore
-    """Size of a contiguous cache block in number of tokens. This is ignored on
-    neuron devices and set to `--max-model-len`. On CUDA devices, only block
-    sizes up to 32 are supported. On HPU devices, block size defaults to 128.
+    """Size of a contiguous cache block in number of tokens. On CUDA devices,
+    only block sizes up to 32 are supported.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `Platform.check_and_update_config()` based on the current
@@ -53,7 +53,11 @@ class CacheConfig:
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
-    fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc)."""
+    fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc).
+    Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
+    bfloat16 instead, this is an invalid option for models that do not default
+    to fp8.
+    """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
@@ -64,17 +68,12 @@ class CacheConfig:
     """Sliding window size for the KV cache. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: Optional[bool] = None
-    """Whether to enable prefix caching. Disabled by default for V0. Enabled by
-    default for V1."""
-    prefix_caching_hash_algo: PrefixCachingHashAlgo = "builtin"
+    """Whether to enable prefix caching. Enabled by default for V1."""
+    prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
-    - "builtin" is Python's built-in hash.\n
-    - "sha256" is collision resistant but with certain overheads.
-    This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible
-    hash. It serializes objects using canonical CBOR and hashes them with
-    SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
-    digest."""
+    - "sha256" uses Pickle for object serialization before hashing.\n
+    - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
+    serializes objects using canonical CBOR and hashes them with SHA-256."""
     cpu_offload_gb: float = 0
     """The space in GiB to offload to CPU, per GPU. Default is 0, which means
     no offloading. Intuitively, this argument can be seen as a virtual way to
@@ -119,6 +118,15 @@ class CacheConfig:
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
 
+    kv_cache_memory_bytes: Optional[int] = None
+    """Size of KV Cache per GPU in bytes. By default, this is set to None
+    and vllm can automatically infer the kv cache size based on
+    gpu_memory_utilization. However, users may want to manually specify
+    the kv cache memory size. kv_cache_memory_bytes allows more fine-grain
+    control of how much memory gets used when compared with using
+    gpu_memory_memory_utilization. Note that kv_cache_memory_bytes
+    (when not-None) ignores gpu_memory_utilization"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -145,18 +153,11 @@ class CacheConfig:
 
         self._verify_cache_dtype()
         self._verify_prefix_caching()
-        self._verify_kv_sharing_fast_prefill()
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
-
-    def _verify_kv_sharing_fast_prefill(self) -> None:
-        if self.kv_sharing_fast_prefill and not envs.VLLM_USE_V1:
-            raise NotImplementedError(
-                "Fast prefill optimization for KV sharing is not supported "
-                "in V0 currently.")
 
     @model_validator(mode='after')
     def _verify_args(self) -> Self:
@@ -175,11 +176,12 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype in get_args(CacheDType):
-            logger.info(
-                "Using fp8 data type to store kv cache. It reduces the GPU "
-                "memory footprint and boosts the performance. "
-                "Meanwhile, it may cause accuracy drop without a proper "
-                "scaling factor.")
+            if self.cache_dtype.startswith("fp8"):
+                logger.info(
+                    "Using fp8 data type to store kv cache. It reduces the GPU "
+                    "memory footprint and boosts the performance. "
+                    "Meanwhile, it may cause accuracy drop without a proper "
+                    "scaling factor.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 

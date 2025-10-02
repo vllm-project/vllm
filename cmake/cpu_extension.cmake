@@ -88,6 +88,7 @@ is_avx512_disabled(AVX512_DISABLED)
 
 if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     message(STATUS "Apple Silicon Detected")
+    set(APPLE_SILICON_FOUND TRUE)
     set(ENABLE_NUMA OFF)
     check_sysctl(hw.optional.neon ASIMD_FOUND)
     check_sysctl(hw.optional.arm.FEAT_BF16 ARM_BF16_FOUND)
@@ -100,6 +101,7 @@ else()
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
+    find_isa(${CPUINFO} "v" RVV_FOUND) # Check for RISC-V RVV support
 endif()
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
@@ -176,8 +178,14 @@ elseif (S390_FOUND)
         "-mzvector"
         "-march=native"
         "-mtune=native")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    if(RVV_FOUND)
+	    message(FAIL_ERROR "Can't support rvv now.")
+    else()
+        list(APPEND CXX_COMPILE_FLAGS "-march=rv64gc")
+    endif()
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA, S390X ISA or ARMv8 support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA, S390X ISA, ARMv8 or RISC-V support.")
 endif()
 
 #
@@ -189,7 +197,7 @@ else()
     set(USE_ACL OFF)
 endif()
 
-if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR ASIMD_FOUND OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
+if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     FetchContent_Declare(
         oneDNN
         GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
@@ -257,7 +265,8 @@ set(VLLM_EXT_SRC
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
-    "csrc/cpu/torch_bindings.cpp")
+    "csrc/cpu/torch_bindings.cpp"
+    "csrc/moe/dynamic_4bit_int_moe_cpu.cpp")
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC

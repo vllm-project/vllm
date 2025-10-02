@@ -5,19 +5,20 @@ from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from enum import IntEnum
 from itertools import groupby
-from typing import Callable, Optional, TypeVar, Union, cast
+from typing import Callable, Optional, TypeVar, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, PoolerConfig
+from vllm.config import ModelConfig, PoolerConfig, get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.models.adapters import _load_st_projector
 from vllm.pooling_params import PoolingParams
-from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
 from vllm.tasks import PoolingTask
-from vllm.utils import current_stream, resolve_obj_by_qualname
+from vllm.utils import resolve_obj_by_qualname
+from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata
 
 logger = init_logger(__name__)
@@ -189,19 +190,6 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
     return PoolerClassify()
 
 
-def build_output(
-    all_data: Union[torch.Tensor, list[torch.Tensor]], ) -> PoolerOutput:
-    # Pooling models D2H & synchronize occurs here
-    if isinstance(all_data, list):
-        all_data = [d.to("cpu", non_blocking=True) for d in all_data]
-    else:
-        all_data = all_data.to("cpu", non_blocking=True)
-    current_stream().synchronize()
-
-    all_outputs = [PoolingSequenceGroupOutput(data) for data in all_data]
-    return PoolerOutput(outputs=all_outputs)
-
-
 class PoolingMethod(nn.Module, ABC):
 
     @staticmethod
@@ -362,14 +350,13 @@ class PoolerIdentity(PoolerActivation):
 class PoolerNormalize(PoolerActivation):
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        x = F.normalize(pooled_data.float(), p=2, dim=-1)
-        return x.to(pooled_data.dtype)
+        return F.normalize(pooled_data, p=2, dim=-1)
 
 
 class PoolerMultiLabelClassify(PoolerActivation):
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
+        return F.sigmoid(pooled_data)
 
 
 class PoolerClassify(PoolerActivation):
@@ -378,7 +365,6 @@ class PoolerClassify(PoolerActivation):
         super().__init__()
 
         if static_num_labels:
-            from vllm.config import get_current_vllm_config
             vllm_config = get_current_vllm_config()
             self.num_labels = getattr(vllm_config.model_config.hf_config,
                                       "num_labels", 0)
@@ -394,9 +380,9 @@ class PoolerClassify(PoolerActivation):
                       pooled_data.shape[-1])
 
         if num_labels < 2:
-            return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
+            return F.sigmoid(pooled_data)
 
-        return F.softmax(pooled_data.float(), dim=-1).to(pooled_data.dtype)
+        return F.softmax(pooled_data, dim=-1)
 
 
 class LambdaPoolerActivation(PoolerActivation):
@@ -428,12 +414,11 @@ class EmbeddingPoolerHead(PoolerHead):
         super().__init__(activation=PoolerNormalize())
 
         # Load ST projector if available
-        from vllm.config import get_current_vllm_config
-        from vllm.model_executor.models.adapters import _load_st_projector
 
         vllm_config = get_current_vllm_config()
-        self.projector = _load_st_projector(
+        self.projector: Optional[nn.Module] = _load_st_projector(
             vllm_config.model_config) if vllm_config else None
+        self.head_dtype = vllm_config.model_config.head_dtype
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
@@ -442,16 +427,11 @@ class EmbeddingPoolerHead(PoolerHead):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_dimension]
 
+        pooled_data = pooled_data.to(self.head_dtype)
+
         # Apply ST projector
         if self.projector is not None:
-            projector = cast(nn.Module, self.projector)
-
-            def _proj(x: torch.Tensor) -> torch.Tensor:
-                orig_dtype = x.dtype
-                y = projector(x.to(torch.float32))
-                return y.to(orig_dtype)
-
-            pooled_data = _proj(pooled_data)
+            pooled_data = self.projector(pooled_data)
         # pooled_data shape: [batchsize, embedding_dimension]
 
         pooling_params = get_pooling_params(pooling_metadata)
@@ -494,8 +474,17 @@ class RewardPoolerHead(PoolerHead):
     def __init__(self) -> None:
         super().__init__(activation=PoolerClassify(static_num_labels=False))
 
+        vllm_config = get_current_vllm_config()
+        self.head_dtype = vllm_config.model_config.head_dtype
+
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
+
+        if isinstance(pooled_data, list):
+            pooled_data = [p.to(self.head_dtype) for p in pooled_data]
+        else:
+            pooled_data = pooled_data.to(self.head_dtype)
+
         pooling_params = get_pooling_params(pooling_metadata)
 
         # for softmax
@@ -554,7 +543,7 @@ class SimplePooler(Pooler):
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
-        return build_output(pooled_data)
+        return pooled_data
 
 
 class StepPooler(Pooler):
@@ -605,7 +594,7 @@ class StepPooler(Pooler):
     ) -> PoolerOutput:
         pooled_data = self.extract_states(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
-        return build_output(pooled_data)
+        return pooled_data
 
 
 class ClassifierPooler(Pooler):
@@ -633,9 +622,14 @@ class ClassifierPooler(Pooler):
     ) -> None:
         super().__init__()
 
+        vllm_config = get_current_vllm_config()
+
         self.pooling = pooling
         self.classifier = classifier
         self.act_fn = act_fn or PoolerClassify()
+        self.logit_bias: Optional[
+            float] = vllm_config.model_config.pooler_config.logit_bias
+        self.head_dtype = vllm_config.model_config.head_dtype
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify", "score"}
@@ -650,9 +644,14 @@ class ClassifierPooler(Pooler):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_size]
 
+        pooled_data = pooled_data.to(self.head_dtype)
+
         if self.classifier is not None:
             pooled_data = self.classifier(pooled_data)
         # pooled_data shape: [batchsize, num_labels]
+
+        if self.logit_bias is not None:
+            pooled_data -= self.logit_bias
 
         pooling_params = get_pooling_params(pooling_metadata)
         flags = [p.activation for p in pooling_params]
@@ -666,7 +665,7 @@ class ClassifierPooler(Pooler):
             ]
 
         # scores shape: [batchsize, num_labels]
-        return build_output(scores)
+        return scores
 
 
 class DispatchPooler(Pooler):
@@ -696,7 +695,7 @@ class DispatchPooler(Pooler):
     ) -> PoolerOutput:
         poolers_by_task = self.poolers_by_task
 
-        outputs = list[PoolingSequenceGroupOutput]()
+        outputs = list[torch.Tensor]()
         offset = 0
         for task, group in groupby(get_tasks(pooling_metadata)):
             if not (pooler := poolers_by_task.get(task)):
@@ -710,7 +709,11 @@ class DispatchPooler(Pooler):
                 pooling_metadata[offset:offset + num_items],
             )
 
-            outputs.extend(group_output.outputs)
+            outputs.extend(group_output)
             offset += num_items
 
-        return PoolerOutput(outputs)
+        return outputs
+
+    def extra_repr(self) -> str:
+        s = f"supported_task={self.get_supported_tasks()}"
+        return s

@@ -18,10 +18,12 @@ from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
-from vllm.inputs import InputProcessingContext
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+from vllm.model_executor.models.interfaces import (SupportsMultiModal,
+                                                   supports_multimodal)
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        InputProcessingContext)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils import is_list_of
@@ -41,9 +43,6 @@ ARCH_NEEDS_EXTRAS = [
 ]
 REPO_ID_TO_SKIP = {
     "nm-testing/pixtral-12b-FP8-dynamic": "duplicated test",
-    # FIXME(Isotr0py): enable GPT-OSS based InternVL3.5 model
-    # after support PP for GPT-OSS
-    "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview": "Broken model",
 }
 
 ImageInput = list[Image.Image]
@@ -91,6 +90,7 @@ def resize_mm_data(
 
 
 def create_batched_mm_kwargs(
+    model_cls: type[SupportsMultiModal],
     model_config: ModelConfig,
     processor: BaseMultiModalProcessor,
     size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
@@ -130,16 +130,22 @@ def create_batched_mm_kwargs(
         mm_data=resized_mm_data,
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
-    )["mm_kwargs"]
+    )["mm_kwargs"].require_data()
     items = [
         item for modality in supported_mm_limits
         for item in mm_kwargs[modality]
     ]
-    return group_mm_kwargs_by_modality(items)
+    return group_mm_kwargs_by_modality(
+        items,
+        merge_by_field_config=model_cls.merge_by_field_config,
+    )
 
 
 @contextmanager
-def initialize_dummy_model(model_cls: nn.Module, model_config: ModelConfig):
+def initialize_dummy_model(
+    model_cls: type[nn.Module],
+    model_config: ModelConfig,
+):
     temp_file = tempfile.mkstemp()[1]
     init_distributed_environment(
         world_size=1,
@@ -199,8 +205,14 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=hf_overrides_fn,
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype,
     )
+
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
+    assert supports_multimodal(model_cls)
+
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
 
     inputs_parse_methods = []
@@ -229,7 +241,7 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
 
     with initialize_dummy_model(model_cls, model_config) as model:
         for modality, _, mm_kwargs in create_batched_mm_kwargs(
-                model_config, processor):
+                model_cls, model_config, processor):
             for method_name in inputs_parse_methods:
                 print(f"Testing `{method_name}` with modality={modality} "
                       f"and mm_kwargs{list(mm_kwargs.keys())}")

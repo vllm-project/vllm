@@ -83,7 +83,7 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 | Model Type                  | Status                                                                             |
 |-----------------------------|------------------------------------------------------------------------------------|
 | **Decoder-only Models**     | <nobr>🚀 Optimized</nobr>                                                          |
-| **Encoder-Decoder Models**  | <nobr>🟠 Delayed</nobr>                                                            |
+| **Encoder-Decoder Models**  | <nobr>🟢 Whisper only</nobr>                                                       |
 | **Embedding Models**        | <nobr>🟢 Functional</nobr>                                                         |
 | **Mamba Models**            | <nobr>🟢 (Mamba-2), 🟢 (Mamba-1)</nobr>                                            |
 | **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
@@ -110,7 +110,7 @@ Models using selective state-space mechanisms instead of standard transformer at
 Models that use Mamba-2 and Mamba-1 layers (e.g., `Mamba2ForCausalLM`, `MambaForCausalLM`,`FalconMambaForCausalLM`) are supported.
 
 Hybrid models that combine Mamba-2 and Mamba-1 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
-`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`).
+`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`, `Plamo2ForCausalLM`).
 
 Hybrid models with mechanisms different to Mamba are also supported (e.g, `MiniMaxText01ForCausalLM`, `MiniMaxM1ForCausalLM`, `Lfm2ForCausalLM`).
 
@@ -118,8 +118,9 @@ Please note that prefix caching is not yet supported for any of the above models
 
 #### Encoder-Decoder Models
 
-Models requiring cross-attention between separate encoder and decoder (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`)
-are not yet supported.
+Whisper is supported. Other models requiring cross-attention between separate
+encoder and decoder (e.g., `BartForConditionalGeneration`,
+`MllamaForConditionalGeneration`) are not supported.
 
 ### Features
 
