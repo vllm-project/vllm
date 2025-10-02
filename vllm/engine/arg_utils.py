@@ -366,6 +366,7 @@ class EngineArgs:
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
+    enable_aggregated_log_stats: bool = False
     revision: Optional[str] = ModelConfig.revision
     code_revision: Optional[str] = ModelConfig.code_revision
     rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
@@ -943,6 +944,9 @@ class EngineArgs:
                             action='store_true',
                             help='Disable logging statistics.')
 
+        parser.add_argument('--enable-aggregated-log-stats',
+                            action='store_true',
+                            help='Enable aggregated logging statistics.')
         return parser
 
     @classmethod

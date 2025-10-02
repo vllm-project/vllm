@@ -51,6 +51,7 @@ class LLMEngine:
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
+        enable_aggregated_log_stats: bool = False,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
@@ -126,6 +127,7 @@ class LLMEngine:
                 vllm_config=vllm_config,
                 custom_stat_loggers=stat_loggers,
                 enable_default_loggers=log_stats,
+                enable_aggregated_logger=enable_aggregated_log_stats,
             )
             self.logger_manager.log_engine_initialized()
 

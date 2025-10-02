@@ -21,8 +21,7 @@ from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 logger = init_logger(__name__)
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
-StatLoggerFactory = Union[PerEngineStatLoggerFactory,
-                          type["AggregatedStatLoggerBase"]]
+StatLoggerFactory = Union[PerEngineStatLoggerFactory, type["StatLoggerBase"]]
 
 
 class StatLoggerBase(ABC):
@@ -52,9 +51,9 @@ class StatLoggerBase(ABC):
         pass
 
 
-class AggregatedStatLoggerBase(StatLoggerBase):
+class GlobalStatLoggerBase(StatLoggerBase):
     """Abstract base class for loggers that
-       aggregates statistics across multiple engines."""
+       across multiple engines."""
 
     @abstractmethod
     def __init__(self, vllm_config: VllmConfig,
@@ -78,6 +77,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
         self.engine_is_idle = False
+        self.aggregated = False
 
     def _reset(self, now):
         self.last_log_time = now
@@ -115,9 +115,10 @@ class LoggingStatLogger(StatLoggerBase):
                     scheduler_stats.spec_decoding_stats)
             if kv_connector_stats := scheduler_stats.kv_connector_stats:
                 self.kv_connector_logging.observe(kv_connector_stats)
-            self.last_scheduler_stats = scheduler_stats
+            if not self.aggregated:
+                self.last_scheduler_stats = scheduler_stats
 
-    def get_log_stats(self):
+    def _update_stats(self):
         now = time.monotonic()
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
         generation_throughput = self._get_throughput(
@@ -131,7 +132,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_prompt_throughput = prompt_throughput
 
     def log(self):
-        self.get_log_stats()
+        self._update_stats()
         log_fn = logger.info
         if self.engine_is_idle:
             # Avoid log noise on an idle production system
@@ -163,19 +164,18 @@ class LoggingStatLogger(StatLoggerBase):
                 self.vllm_config.cache_config.num_gpu_blocks)
 
 
-class AggregatedStatLogger(LoggingStatLogger, AggregatedStatLoggerBase):
+class AggregatedStatLogger(LoggingStatLogger, GlobalStatLoggerBase):
 
     def __init__(self,
                  vllm_config: VllmConfig,
-                 engine_idxs: Optional[list[int]] = None):
-        if engine_idxs is None:
-            engine_idxs = [0]
-        self.engine_idxs = engine_idxs
+                 engine_indexes: Optional[list[int]] = None):
+        self.engine_indexes = engine_indexes or [0]
         self.last_scheduler_stats_dict: dict[int, SchedulerStats] = {
             idx: SchedulerStats()
-            for idx in engine_idxs
+            for idx in self.engine_indexes
         }
         LoggingStatLogger.__init__(self, vllm_config, engine_index=-1)
+        self.aggregated = True
 
     def record(
         self,
@@ -183,34 +183,36 @@ class AggregatedStatLogger(LoggingStatLogger, AggregatedStatLoggerBase):
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
     ):
-        if engine_idx not in self.engine_idxs:
+        if engine_idx not in self.engine_indexes:
             logger.warning("Unexpected engine_idx: %d", engine_idx)
             return
+        # don't auto set last_scheduler_stat
         LoggingStatLogger.record(self, scheduler_stats, iteration_stats,
                                  engine_idx)
         if scheduler_stats is not None:
             self.last_scheduler_stats_dict[engine_idx] = scheduler_stats
 
     def aggregate_scheduler_stats(self):
-        for idx in self.engine_idxs:
+        self.last_scheduler_stats = SchedulerStats()
+        for last_scheduler_stats in self.last_scheduler_stats_dict.values():
             self.last_scheduler_stats.num_waiting_reqs += \
-                self.last_scheduler_stats_dict[idx].num_waiting_reqs
+                last_scheduler_stats.num_waiting_reqs
             self.last_scheduler_stats.num_running_reqs += \
-                self.last_scheduler_stats_dict[idx].num_running_reqs
+                last_scheduler_stats.num_running_reqs
             self.last_scheduler_stats.num_corrupted_reqs += \
-                self.last_scheduler_stats_dict[idx].num_corrupted_reqs
+                last_scheduler_stats.num_corrupted_reqs
             self.last_scheduler_stats.kv_cache_usage += \
-                self.last_scheduler_stats_dict[idx].kv_cache_usage
-        self.last_scheduler_stats.kv_cache_usage /= len(self.engine_idxs)
+                last_scheduler_stats.kv_cache_usage
+        self.last_scheduler_stats.kv_cache_usage /= \
+            len(self.last_scheduler_stats_dict)
 
     def log(self):
-        self.get_log_stats()
+        self._update_stats()
         self.aggregate_scheduler_stats()
-        log_fn = logger.info
-        if self.engine_is_idle:
-            # Avoid log noise on an idle production system
-            log_fn = logger.debug
+        # Avoid log noise on an idle production system
+        log_fn = logger.debug if self.engine_is_idle else logger.info
         # Format and print output.
+        last_scheduler_stats = self.last_scheduler_stats
         log_fn(
             "%s Engines Aggregated: "
             "Avg prompt throughput: %.1f tokens/s, "
@@ -218,25 +220,62 @@ class AggregatedStatLogger(LoggingStatLogger, AggregatedStatLoggerBase):
             "Running: %d reqs, Waiting: %d reqs, "
             "GPU KV cache usage: %.1f%%, "
             "Prefix cache hit rate: %.1f%%",
-            len(self.engine_idxs),
+            len(self.engine_indexes),
             self.last_prompt_throughput,
             self.last_generation_throughput,
-            self.last_scheduler_stats.num_running_reqs,
-            self.last_scheduler_stats.num_waiting_reqs,
-            self.last_scheduler_stats.kv_cache_usage * 100,
+            last_scheduler_stats.num_running_reqs,
+            last_scheduler_stats.num_waiting_reqs,
+            last_scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
+        self.kv_transfer_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
             logger.info(
                 "%d Engines: vllm cache_config_info with initialization "
-                "after num_gpu_blocks is: %d", len(self.engine_idxs),
+                "after num_gpu_blocks is: %d", len(self.engine_indexes),
                 self.vllm_config.cache_config.num_gpu_blocks)
 
 
-class PrometheusStatLogger(AggregatedStatLoggerBase):
+class PerEngineStatLogger(GlobalStatLoggerBase):
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_indexes: Optional[list[int]] = None,
+        per_engine_stat_logger_factory: StatLoggerFactory = LoggingStatLogger
+    ) -> None:
+        self.per_engine_stat_loggers = {}
+        if engine_indexes is None:
+            engine_indexes = [0]
+        self.engine_indexes = engine_indexes
+        for engine_index in engine_indexes:
+            self.per_engine_stat_loggers[engine_index] = \
+                per_engine_stat_logger_factory(vllm_config, engine_index)
+
+    def record(
+        self,
+        scheduler_stats: Optional[SchedulerStats],
+        iteration_stats: Optional[IterationStats],
+        engine_idx: int = 0,
+    ):
+        if engine_idx not in self.per_engine_stat_loggers:
+            logger.warning("Unexpected engine_idx: %d", engine_idx)
+            return
+        self.per_engine_stat_loggers[engine_idx].record(
+            scheduler_stats, iteration_stats, engine_idx)
+
+    def log(self):
+        for per_engine_stat_logger in self.per_engine_stat_loggers.values():
+            per_engine_stat_logger.log()
+
+    def log_engine_initialized(self):
+        pass
+
+
+class PrometheusStatLogger(GlobalStatLoggerBase):
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
@@ -711,9 +750,9 @@ PromMetric = Union[
 ]
 
 
-def make_per_engine(metric: PromMetric, engine_idxs: list[int],
+def make_per_engine(metric: PromMetric, engine_indexes: list[int],
                     model_name: str) -> dict[int, PromMetric]:
-    return {idx: metric.labels(model_name, str(idx)) for idx in engine_idxs}
+    return {idx: metric.labels(model_name, str(idx)) for idx in engine_indexes}
 
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
@@ -762,50 +801,49 @@ class StatLoggerManager:
         engine_idxs: Optional[list[int]] = None,
         custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
         enable_default_loggers: bool = True,
+        enable_aggregated_logger: bool = False,
         client_count: int = 1,
     ):
-        self.engine_idxs = engine_idxs if engine_idxs else [0]
-
-        factories: list[StatLoggerFactory] = []
-        if custom_stat_loggers is not None:
-            factories.extend(custom_stat_loggers)
-
-        if enable_default_loggers and logger.isEnabledFor(logging.INFO):
+        self.engine_indexes = engine_idxs if engine_idxs else [0]
+        prompetheuse_logger_enabled: bool = False
+        self.stat_loggers: list[GlobalStatLoggerBase] = []
+        stat_logger_factories: list[StatLoggerFactory] = (
+            [] if custom_stat_loggers is None else custom_stat_loggers)
+        if logger.isEnabledFor(logging.INFO):
             if client_count > 1:
                 logger.warning(
                     "AsyncLLM created with api_server_count more than 1; "
                     "disabling stats logging to avoid incomplete stats.")
             else:
-                factories.append(LoggingStatLogger)
-
-        # engine_idx: StatLogger
-        self.per_engine_logger_dict: dict[int, list[StatLoggerBase]] = {}
-        self.aggregated_loggers: list[AggregatedStatLoggerBase] = []
-
-        aggregated_loggers_factories = set()
-        for engine_idx in self.engine_idxs:
-            loggers: list[StatLoggerBase] = []
-            for logger_factory in factories:
-                # If we get a custom prometheus logger or aggregated logger,
-                # We initialize it separately with all engine idxs.
-                # A custom prometheus logger is typically used for the ray.
-                if (isinstance(logger_factory, type) and issubclass(
-                        logger_factory, AggregatedStatLoggerBase)):
-                    aggregated_loggers_factories.add(logger_factory)
-                else:
-                    loggers.append(logger_factory(vllm_config,
-                                                  engine_idx))  # type: ignore
-            self.per_engine_logger_dict[engine_idx] = loggers
-        # If no custom aggregated logger is provide,
-        # we by default use PrometheusStatLogger
-        if not aggregated_loggers_factories:
-            aggregated_loggers_factories.add(PrometheusStatLogger)
-        # For custom aggregated logger(or default Prometheus Logger)
-        # need to share the metrics between EngineCores.
-        # Each EngineCore's metrics are expressed as a unique label.
-        for aggregated_loggers_factory in aggregated_loggers_factories:
-            self.aggregated_loggers.append(
-                aggregated_loggers_factory(vllm_config, engine_idxs))
+                if enable_default_loggers:
+                    stat_logger_factories.append(LoggingStatLogger)
+                if enable_aggregated_logger:
+                    stat_logger_factories.append(AggregatedStatLogger)
+        for stat_logger_factory in stat_logger_factories:
+            if isinstance(stat_logger_factory, type) and \
+                issubclass(stat_logger_factory, GlobalStatLoggerBase):
+                global_stat_logger = stat_logger_factory(
+                    vllm_config=vllm_config,
+                    engine_indexes=self.engine_indexes,
+                )
+            else:
+                # per engine logger
+                # assert callable(stat_logger_factory)
+                global_stat_logger = PerEngineStatLogger(
+                    vllm_config=vllm_config,
+                    engine_indexes=self.engine_indexes,
+                    per_engine_stat_logger_factory=
+                    stat_logger_factory,  # type: ignore[arg-type]
+                )
+            self.stat_loggers.append(global_stat_logger)
+            if isinstance(logger, PrometheusStatLogger):
+                prompetheuse_logger_enabled = True
+        if not prompetheuse_logger_enabled:
+            self.stat_loggers.append(
+                PrometheusStatLogger(
+                    vllm_config,
+                    self.engine_indexes,
+                ))
 
     def record(
         self,
@@ -815,23 +853,13 @@ class StatLoggerManager:
     ):
         if engine_idx is None:
             engine_idx = 0
-
-        per_engine_loggers = self.per_engine_logger_dict[engine_idx]
-        for logger in per_engine_loggers:
-            logger.record(scheduler_stats, iteration_stats, engine_idx)
-        for logger in self.aggregated_loggers:
+        for logger in self.stat_loggers:
             logger.record(scheduler_stats, iteration_stats, engine_idx)
 
     def log(self):
-        for per_engine_loggers in self.per_engine_logger_dict.values():
-            for logger in per_engine_loggers:
-                logger.log()
-        for logger in self.aggregated_loggers:
+        for logger in self.stat_loggers:
             logger.log()
 
     def log_engine_initialized(self):
-        for agg_logger in self.aggregated_loggers:
+        for agg_logger in self.stat_loggers:
             agg_logger.log_engine_initialized()
-        for per_engine_loggers in self.per_engine_logger_dict.values():
-            for logger in per_engine_loggers:
-                logger.log_engine_initialized()

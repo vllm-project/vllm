@@ -55,8 +55,8 @@ async def main():
 
     engine_client = AsyncLLMEngine.from_engine_args(
         engine_args,
-        # Example: Using both regular loggers and aggregated logger
-        stat_loggers=[per_engine_logger_factory, AggregatedStatLogger],
+        # Example: Using aggregated logger
+        stat_loggers=[AggregatedStatLogger],
     )
     stop_logging_event = threading.Event()
     logging_thread = threading.Thread(
