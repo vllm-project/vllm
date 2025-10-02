@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import cache
 from fractions import Fraction
-from functools import partial
+from functools import cache, partial
 from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4, quant_dequant_mxfp4)
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
@@ -21,6 +21,9 @@ from vllm.model_executor.parameter import (GroupQuantScaleParameter,
 from vllm.platforms import current_platform
 
 from .quark_scheme import QuarkScheme
+
+logger = init_logger(__name__)
+
 
 @cache
 def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
@@ -143,7 +146,10 @@ class QuarkOCP_MX(QuarkScheme):
                 "QuarkOCP_MX with static input scales is currently not "
                 "implemented. Please open an issue.")
 
-        self.emulate = not current_platform.supports_mx()
+        # TODO: integrate (or test) mixed-precision kernel.
+        self.emulate = not current_platform.supports_mx() or (
+            self.input_dtype != "fp4" or self.weight_dtype != "fp4")
+
         self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
 
         if not self.emulate and (dynamic_mxfp4_quant is None
@@ -153,6 +159,23 @@ class QuarkOCP_MX(QuarkScheme):
                 f"{self.__class__.__name__} requires AITER to be installed "
                 "for non-emulation mode! Please refer to "
                 "https://github.com/ROCm/aiter for installation details.")
+
+        if not current_platform.supports_mx():
+            logger.warning_once(
+                "The current platform does not support native MXFP4/MXFP6 "
+                "computation. Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision.")
+
+        if current_platform.supports_mx() and (self.input_dtype != "fp4"
+                                               or self.weight_dtype != "fp4"):
+            logger.warning_once(
+                "The current platform supports native MXFP4/MXFP6 "
+                f"computation, but kernels for input_dtype={self.input_dtype} "
+                f"and weight_dtype={self.weight_dtype} are not yet integrated "
+                "in vLLM. Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision.")
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
         if quant_dtype == "fp4":
@@ -177,8 +200,8 @@ class QuarkOCP_MX(QuarkScheme):
                                           requires_grad=False)
 
         if self.emulate:
-        	layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
-                                                	requires_grad=False)
+            layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
+                                                    requires_grad=False)
         else:
             if self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
