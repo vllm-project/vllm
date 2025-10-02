@@ -335,7 +335,7 @@ class Attention(nn.Module, AttentionLayerBase):
                         include_kv_cache_update=True)
                 else:
                     torch.ops.vllm.unified_kv_cache_update(
-                        key, value, self.layer_name)
+                        key, value, output, self.layer_name)
                     torch.ops.vllm.unified_attention_with_output(
                         query,
                         key,
@@ -607,6 +607,7 @@ direct_register_custom_op(
 def unified_kv_cache_update(
     key: torch.Tensor,
     value: torch.Tensor,
+    output: torch.Tensor,
     layer_name: str,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
@@ -631,6 +632,7 @@ def unified_kv_cache_update(
 def unified_kv_cache_update_fake(
     key: torch.Tensor,
     value: torch.Tensor,
+    output: torch.Tensor,
     layer_name: str,
 ) -> None:
     return
@@ -642,6 +644,7 @@ direct_register_custom_op(
     op_name="unified_kv_cache_update",
     op_func=unified_kv_cache_update,
     fake_impl=unified_kv_cache_update_fake,
+    mutates_args=["output"],  # fake dependency hack for piecewise cudagraphs
     tags=tag_cudagraph_unsafe,
 )
 
@@ -656,8 +659,8 @@ def unified_attention_with_output(
     output_block_scale: Optional[torch.Tensor] = None,
     include_kv_cache_update: bool = True,
 ) -> None:
-    if not include_kv_cache_update:
-        wait_for_kv_layer_from_connector(layer_name)
+    # if include_kv_cache_update:
+    wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
