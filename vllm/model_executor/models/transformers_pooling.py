@@ -20,7 +20,7 @@ from typing import Optional, Union
 import torch
 from transformers import AutoModelForSequenceClassification
 
-from vllm.attention import AttentionType
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import (ClassifierPooler, CLSPool,
@@ -80,7 +80,9 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
         self.padding_idx = self.text_config.pad_token_id
 
     def create_attention_instances(
-            self, attn_type: AttentionType = AttentionType.DECODER):
+        self,
+        attn_type: AttentionType = AttentionType.DECODER
+    ) -> dict[int, Attention]:
         # TODO(hmellor): Better way to detect encoder models
         # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda m: not getattr(m, "is_causal", True)
