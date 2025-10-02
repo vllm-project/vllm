@@ -136,7 +136,7 @@ class CustomOp(nn.Module):
         compilation_config = get_cached_compilation_config()
         default_on = (
             compilation_config.level < CompilationLevel.PIECEWISE
-            or not compilation_config.use_inductor
+            or not compilation_config.backend == "inductor"
         )
         count_none = compilation_config.custom_ops.count("none")
         count_all = compilation_config.custom_ops.count("all")
