@@ -27,7 +27,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -350,29 +349,11 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         vision_tower: SiglipVisionModel,
         pixel_values: torch.Tensor,
-        **kwargs,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
-        target_dtype: torch.dtype = \
-            vision_tower.get_input_embeddings().weight.dtype
-        image_features: Union[torch.Tensor, tuple[torch.Tensor, ...]] = \
-            vision_tower(pixel_values.to(dtype=target_dtype), **kwargs)
-
-        def select_features(leaf: torch.Tensor):
-            return self._select_image_features(
-                leaf,
-                strategy=self.config.vision_feature_select_strategy,
-            )
-
-        return json_map_leaves(select_features, image_features)
-
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
-        if strategy == "default":
-            return image_features[:, 1:]
-        elif strategy == "full":
-            return image_features
-
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
+        return vision_tower(
+            pixel_values.to(dtype=vision_tower.dtype),
+            feature_select_strategy=self.config.vision_feature_select_strategy,
+        )
 
     def _process_image_input(self, image_input: AyaVisionImagePixelInputs,
                              **kwargs) -> list[torch.Tensor]:
@@ -426,17 +407,6 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=input_ids == self.config.image_token_index,
-            )
-            input_ids = None
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,

@@ -43,7 +43,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    isin_list, maybe_prefix)
+                    maybe_prefix)
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -1370,22 +1370,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         if intermediate_tensors is not None:
             input_ids = None
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            context_token_ids = [
-                token_id for token_id in (self.img_context_token_id,
-                                          self.video_context_token_id)
-                if token_id is not None
-            ]
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=isin_list(input_ids, context_token_ids),
-            )
-            input_ids = None
 
         forward_kwargs = {
             "input_ids": input_ids,

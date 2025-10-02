@@ -13,9 +13,8 @@ from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
-from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import (QuantizationConfig,
+                                                     QuantizationMethods)
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
