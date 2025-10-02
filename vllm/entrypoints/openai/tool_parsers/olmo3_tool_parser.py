@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 import json
 from collections.abc import Sequence
@@ -14,7 +16,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
-from vllm.entrypoints.openai.tool_parsers.pythonic_tool_parser import PythonicToolParser
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -27,11 +28,12 @@ class _UnexpectedAstError(Exception):
 @ToolParserManager.register_module("olmo3")
 class Olmo3PythonicToolParser(ToolParser):
     """
-    Tool call parser for Olmo 3 models that produce tool calls as newline-separated pythonic strings.
+    Tool call parser for Olmo 3 models that produce tool calls as
+    newline-separated pythonic strings.
     Used when --enable-auto-tool-choice --tool-call-parser pythonic are all set
-    Code copied from vllm/entrypoints/openai/tool_parsers/pythonic_tool_parser.py and updated to
-    - support newline separated pythonic tool calls.
-    - handle the argument values being null/true/false instead of Pythonic literals.
+    Code copied from pythonic_tool_parser.py and updated to handle
+    - newline separated pythonic tool calls.
+    - argument values being null/true/false instead of Pythonic literals.
     """
     # TODO(mdepinet): Possible future improvements:
     #   1. Support text + tools separated by either <|python_tag|> or \n\n
@@ -64,13 +66,12 @@ class Olmo3PythonicToolParser(ToolParser):
         """
         original_model_output = model_output
         # Remove xml tags.
-        model_output = (
-            model_output.replace("<function_calls>", "").replace("</function_calls>", "").strip()
-        )
+        model_output = (model_output.replace("<function_calls>", "").replace(
+            "</function_calls>", "").strip())
         # Make the newline separated function calls into a list.
-        model_output = ", ".join(
-            [line.strip() for line in model_output.splitlines() if line.strip()]
-        ) 
+        model_output = ", ".join([
+            line.strip() for line in model_output.splitlines() if line.strip()
+        ])
         model_output = f"[{model_output}]"
 
         is_tool_call_pattern = False
@@ -121,7 +122,8 @@ class Olmo3PythonicToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
-        # All function calls start with the <function_calls> tag. But since this is a streaming parser, we may have seen only part of the tag.
+        # All function calls start with the <function_calls> tag.
+        # But since this is streaming, we may have seen only part of the tag.
         if not current_text.startswith("<"):
             return DeltaMessage(content=delta_text)
 
@@ -139,16 +141,18 @@ class Olmo3PythonicToolParser(ToolParser):
             valid_text, added_text = valid_and_added_text
 
             # Make the newline separated function calls into a list.
-            valid_text = ", ".join(
-                [line.strip() for line in valid_text.splitlines() if line.strip()]
-            )
+            valid_text = ", ".join([
+                line.strip() for line in valid_text.splitlines()
+                if line.strip()
+            ])
             valid_text = f"[{valid_text}]"
             module = ast.parse(valid_text)
             parsed = getattr(module.body[0], "value", None)
             if not isinstance(parsed, ast.List) or not all(
                     isinstance(e, ast.Call) for e in parsed.elts):
                 raise _UnexpectedAstError(
-                    "Tool output must be a sequence of newline-separated function calls")
+                    "Tool output must be a sequence of newline-separated calls"
+                )
             tool_calls = [
                 _handle_single_tool(e)  # type: ignore
                 for e in parsed.elts
@@ -158,7 +162,7 @@ class Olmo3PythonicToolParser(ToolParser):
             for index, new_call in enumerate(tool_calls):
                 if index < self.current_tool_index:
                     continue
-                
+
                 self.current_tool_index = index
                 if len(self.streamed_args_for_tool) == index:
                     self.streamed_args_for_tool.append("")
@@ -208,7 +212,7 @@ class Olmo3PythonicToolParser(ToolParser):
                 "Skipping chunk as a result of tool streaming extraction "
                 "error")
             return None
-    
+
 
 def _get_parameter_value(val: ast.expr) -> Any:
     if isinstance(val, ast.Constant):
@@ -223,7 +227,8 @@ def _get_parameter_value(val: ast.expr) -> Any:
         }
     elif isinstance(val, ast.List):
         return [_get_parameter_value(v) for v in val.elts]
-    # The model may return function calls where the values are null/true/false because the system prompt has API description in json.
+    # The model may return function calls where the values are null/true/false
+    # because the system prompt has API description in json.
     elif isinstance(val, ast.Name) and val.id in ["null", "true", "false"]:
         if val.id == "null":
             return None

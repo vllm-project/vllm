@@ -79,59 +79,83 @@ def test_no_tool_call(streaming: bool):
 
 TEST_CASES = [
     pytest.param(True,
-                 f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}</function_calls>", [SIMPLE_FUNCTION_CALL],
+                 f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}</function_calls>",
+                 [SIMPLE_FUNCTION_CALL],
                  id="simple_streaming"),
     pytest.param(False,
-                 f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}</function_calls>", [SIMPLE_FUNCTION_CALL],
+                 f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}</function_calls>",
+                 [SIMPLE_FUNCTION_CALL],
                  id="simple_nonstreaming"),
-    pytest.param(True,
-                 f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>", [MORE_TYPES_FUNCTION_CALL],
-                 id="more_types_streaming"),
-    pytest.param(False,
-                 f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>", [MORE_TYPES_FUNCTION_CALL],
-                 id="more_types_nonstreaming"),
-    pytest.param(True,
-                 f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT_JSON_LITERALS}</function_calls>", [MORE_TYPES_FUNCTION_CALL],
-                 id="more_types_streaming_json_literals"),
-    pytest.param(False,
-                 f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT_JSON_LITERALS}</function_calls>", [MORE_TYPES_FUNCTION_CALL],
-                 id="more_types_nonstreaming_json_literals"),
-    pytest.param(True,
-                 f"<function_calls>{PARAMETERLESS_FUNCTION_OUTPUT}</function_calls>",
-                 [PARAMETERLESS_FUNCTION_CALL],
-                 id="parameterless_streaming"),
-    pytest.param(False,
-                 f"<function_calls>{PARAMETERLESS_FUNCTION_OUTPUT}</function_calls>",
-                 [PARAMETERLESS_FUNCTION_CALL],
-                 id="parameterless_nonstreaming"),
-    pytest.param(True,
-                 f"<function_calls>{EMPTY_DICT_FUNCTION_OUTPUT}</function_calls>", [EMPTY_DICT_FUNCTION_CALL],
-                 id="empty_dict_streaming"),
-    pytest.param(False,
-                 f"<function_calls>{EMPTY_DICT_FUNCTION_OUTPUT}</function_calls>", [EMPTY_DICT_FUNCTION_CALL],
-                 id="empty_dict_nonstreaming"),
-    pytest.param(True,
-                 f"<function_calls>{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>", [EMPTY_LIST_FUNCTION_CALL],
-                 id="empty_list_streaming"),
-    pytest.param(False,
-                 f"<function_calls>{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>", [EMPTY_LIST_FUNCTION_CALL],
-                 id="empty_list_nonstreaming"),
-    pytest.param(True,
-                 f"<function_calls>{ESCAPED_STRING_FUNCTION_OUTPUT}</function_calls>",
-                 [ESCAPED_STRING_FUNCTION_CALL],
-                 id="escaped_string_streaming"),
-    pytest.param(False,
-                 f"<function_calls>{ESCAPED_STRING_FUNCTION_OUTPUT}</function_calls>",
-                 [ESCAPED_STRING_FUNCTION_CALL],
-                 id="escaped_string_nonstreaming"),
-    pytest.param(True,
-                 f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}\n{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
-                 [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
-                 id="parallel_calls_streaming"),
-    pytest.param(False,
-                 f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}\n{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
-                 [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
-                 id="parallel_calls_nonstreaming"),
+    pytest.param(
+        True,
+        f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
+        [MORE_TYPES_FUNCTION_CALL],
+        id="more_types_streaming"),
+    pytest.param(
+        False,
+        f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
+        [MORE_TYPES_FUNCTION_CALL],
+        id="more_types_nonstreaming"),
+    pytest.param(
+        True,
+        f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT_JSON_LITERALS}</function_calls>",
+        [MORE_TYPES_FUNCTION_CALL],
+        id="more_types_streaming_json_literals"),
+    pytest.param(
+        False,
+        f"<function_calls>{MORE_TYPES_FUNCTION_OUTPUT_JSON_LITERALS}</function_calls>",
+        [MORE_TYPES_FUNCTION_CALL],
+        id="more_types_nonstreaming_json_literals"),
+    pytest.param(
+        True,
+        f"<function_calls>{PARAMETERLESS_FUNCTION_OUTPUT}</function_calls>",
+        [PARAMETERLESS_FUNCTION_CALL],
+        id="parameterless_streaming"),
+    pytest.param(
+        False,
+        f"<function_calls>{PARAMETERLESS_FUNCTION_OUTPUT}</function_calls>",
+        [PARAMETERLESS_FUNCTION_CALL],
+        id="parameterless_nonstreaming"),
+    pytest.param(
+        True,
+        f"<function_calls>{EMPTY_DICT_FUNCTION_OUTPUT}</function_calls>",
+        [EMPTY_DICT_FUNCTION_CALL],
+        id="empty_dict_streaming"),
+    pytest.param(
+        False,
+        f"<function_calls>{EMPTY_DICT_FUNCTION_OUTPUT}</function_calls>",
+        [EMPTY_DICT_FUNCTION_CALL],
+        id="empty_dict_nonstreaming"),
+    pytest.param(
+        True,
+        f"<function_calls>{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>",
+        [EMPTY_LIST_FUNCTION_CALL],
+        id="empty_list_streaming"),
+    pytest.param(
+        False,
+        f"<function_calls>{EMPTY_LIST_FUNCTION_OUTPUT}</function_calls>",
+        [EMPTY_LIST_FUNCTION_CALL],
+        id="empty_list_nonstreaming"),
+    pytest.param(
+        True,
+        f"<function_calls>{ESCAPED_STRING_FUNCTION_OUTPUT}</function_calls>",
+        [ESCAPED_STRING_FUNCTION_CALL],
+        id="escaped_string_streaming"),
+    pytest.param(
+        False,
+        f"<function_calls>{ESCAPED_STRING_FUNCTION_OUTPUT}</function_calls>",
+        [ESCAPED_STRING_FUNCTION_CALL],
+        id="escaped_string_nonstreaming"),
+    pytest.param(
+        True,
+        f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}\n{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
+        [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
+        id="parallel_calls_streaming"),
+    pytest.param(
+        False,
+        f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}\n{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
+        [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
+        id="parallel_calls_nonstreaming"),
 ]
 
 
@@ -179,8 +203,8 @@ def test_streaming_tool_call_with_large_steps():
 def test_regex_timeout_handling(streaming: bool):
     """test regex timeout is handled gracefully"""
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
-        "olmo3")(mock_tokenizer)
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        mock_tokenizer)
 
     fake_problematic_input = "hello world[A(A=" + "\t)A(A=,\t" * 2
 
