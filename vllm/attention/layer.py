@@ -94,8 +94,6 @@ class Attention(nn.Module, AttentionLayerBase):
         quant_config: Optional[QuantizationConfig] = None,
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
-        use_mla: bool = False,
-        use_sparse: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -155,8 +153,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # the quant op after this attention layer.
         self._o_scale_float: Optional[float] = None
 
-        self.use_mla = use_mla
-        self.use_sparse = use_sparse
+        
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -188,9 +185,8 @@ class Attention(nn.Module, AttentionLayerBase):
                                                  dtype,
                                                  kv_cache_dtype,
                                                  block_size,
-                                                 use_mla=use_mla,
-                                                 has_sink=self.has_sink,
-                                                 use_sparse=use_sparse)
+                                                 use_mla=False,
+                                                 has_sink=self.has_sink)
         else:
             self.attn_backend = attn_backend
 
@@ -544,6 +540,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_sparse: bool = False,
+        indexer: Optional[object] = None,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -571,7 +569,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                                              dtype,
                                              kv_cache_dtype,
                                              block_size,
-                                             use_mla=True)
+                                             use_mla=True,
+                                             use_sparse=use_sparse)
         impl_cls = cast(type[MLAAttentionImpl],
                         self.attn_backend.get_impl_cls())
         self.impl = impl_cls(
@@ -593,6 +592,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
+            indexer=indexer,
         )
 
         self.use_direct_call = not current_platform.opaque_attention_op()
@@ -620,6 +620,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
         self._o_scale_float: Optional[float] = None
+
+        self.use_sparse = use_sparse
 
         # Initialize q/k/v range constants.
         try:
