@@ -1147,23 +1147,21 @@ class FusedMoE(CustomOp):
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
 
+        # TODO(bnell): make these into methods on PrepareAndFinalize or all2all?
+        self.must_reduce_shared_experts = (self.use_pplx_kernels
+                                           or self.use_deepep_ht_kernels
+                                           or self.use_deepep_ll_kernels)
+
         self.use_dp_chunking = (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
-            # Route to the chunked forward path using the FlashInfer Cutlass
-            # kernel only when data parallelism (DP) is enabled.
             or (self.dp_size > 1
                 and self.moe_config.use_flashinfer_cutlass_kernels))
 
-        # TODO(bnell): make this into a method on prepare finalize (or all2all?)
-        self.must_reduce_shared = (self.use_pplx_kernels
-                                   or self.use_deepep_ht_kernels
-                                   or self.use_deepep_ll_kernels)
-
-        states_shape: tuple[int, ...]
-        logits_shape: tuple[int, ...]
-
         if self.use_dp_chunking:
+            states_shape: tuple[int, ...]
+            logits_shape: tuple[int, ...]
+
             if vllm_config.parallel_config.enable_dbo:
                 states_shape = (2, moe.max_num_tokens, self.hidden_size)
                 logits_shape = (2, moe.max_num_tokens, num_experts)
@@ -1829,14 +1827,14 @@ class FusedMoE(CustomOp):
         Therefore it is required that we reduce the shared_experts output
         early.
         """
-        return self.must_reduce_shared
+        return self.must_reduce_shared_experts
 
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """
         Some combine kernels reduce across GPU ranks by default.
         """
-        if self.must_reduce_shared:
+        if self.must_reduce_shared_experts:
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
