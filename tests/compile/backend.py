@@ -4,7 +4,6 @@
 import weakref
 from collections.abc import Sequence
 from copy import deepcopy
-from pathlib import Path
 from typing import Callable, Union
 
 import depyf
@@ -55,12 +54,8 @@ class TestBackend:
         self.inductor_config["force_disable_caches"] = True
         self.inductor_config["post_grad_custom_post_pass"] = self.post_pass
 
-        if compile_config.debug_dump_path:
-            self.debug_dump_path = (
-                Path(compile_config.debug_dump_path)
-                / f"rank_{vllm_config.parallel_config.rank}"
-            )
-            self.ctx = depyf.prepare_debug(str(self.debug_dump_path))
+        if debug_dump_path := vllm_config.compile_debug_dump_path():
+            self.ctx = depyf.prepare_debug(debug_dump_path.as_posix())
             self.ctx.__enter__()
         else:
             self.ctx = None
