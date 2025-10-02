@@ -85,7 +85,7 @@ class EagleProposer:
         compilation_config = self.vllm_config.compilation_config
         if compilation_config.level == CompilationLevel.PIECEWISE:
             cudagraph_mode = compilation_config.cudagraph_mode
-            if cudagraph_mode == CUDAGraphMode.NONE and \
+            if cudagraph_mode != CUDAGraphMode.NONE and \
                 not cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE):
                 logger.warning(
                     "Currently the eagle proposer only supports cudagraph_mode "
