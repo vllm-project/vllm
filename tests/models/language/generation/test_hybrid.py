@@ -398,7 +398,8 @@ def test_apc_single_prompt(
     except ValueError:
         pass
 
-    compare_operator = check_logprobs_close if num_logprobs > 0 else check_outputs_equal
+    compare_operator = check_logprobs_close if num_logprobs > 0 \
+                                            else check_outputs_equal
 
     MULTIPLE = 300
 
@@ -463,7 +464,8 @@ def test_apc_single_prompt_block_align_alignment(
     except ValueError:
         pass
 
-    compare_operator = check_logprobs_close if num_logprobs > 0 else check_outputs_equal
+    compare_operator = check_logprobs_close if num_logprobs > 0 \
+                                            else check_outputs_equal
 
     MULTIPLE = 300
 
@@ -493,8 +495,8 @@ def test_apc_single_prompt_block_align_alignment(
     ]:
 
         vllm_runner_kwargs[
-            'max_num_batched_tokens'] = mamba_block_size_multiplier * mamba_block_size - \
-                                        offsets
+            'max_num_batched_tokens'] = mamba_block_size_multiplier * \
+                                        mamba_block_size - offsets
         vllm_outputs_cache_rep, _ = _get_vLLM_output(vllm_runner,
                                                      vllm_runner_kwargs,
                                                      generated_prompts,
@@ -544,7 +546,8 @@ def test_apc_multiple_prompts_all_cached_outputs(
     except ValueError:
         pass
 
-    compare_operator = check_logprobs_close if num_logprobs > 0 else check_outputs_equal
+    compare_operator = check_logprobs_close if num_logprobs > 0 \
+                                            else check_outputs_equal
 
     MULTIPLE = 300
 
@@ -610,7 +613,8 @@ def test_apc_multiple_prompts_block_align_alignment(
     except ValueError:
         pass
 
-    compare_operator = check_logprobs_close if num_logprobs > 0 else check_outputs_equal
+    compare_operator = check_logprobs_close if num_logprobs > 0 \
+                                            else check_outputs_equal
 
     MULTIPLE = 300
 
@@ -680,7 +684,8 @@ def test_apc_multiple_prompts_partial_cached_outputs(
     except ValueError:
         pass
 
-    compare_operator = check_logprobs_close if num_logprobs > 0 else check_outputs_equal
+    compare_operator = check_logprobs_close if num_logprobs > 0 \
+                                            else check_outputs_equal
 
     MULTIPLE = 300
 
