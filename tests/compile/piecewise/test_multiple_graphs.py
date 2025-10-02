@@ -174,6 +174,7 @@ def run_model(vllm_config: VllmConfig, model: nn.Module, inputs: torch.Tensor,
         return output.cpu()
 
 
+# TODO use_inductor_cg_partition both true and false
 def test_multi_graph_piecewise_compile_outputs_equal():
     outputs = []
 
@@ -212,7 +213,9 @@ def test_multi_graph_piecewise_compile_outputs_equal():
 
     # no compile or cudagraph
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        level=CompilationLevel.NO_COMPILATION, ))
+        level=CompilationLevel.NO_COMPILATION,
+        use_inductor_graph_partition=False,
+    ))
     cudagraph_runtime_mode = CUDAGraphMode.NONE
 
     with set_current_vllm_config(vllm_config):

@@ -256,7 +256,9 @@ def run_model(llama_config,
         cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
     else:
         compilation_config = CompilationConfig(
-            level=CompilationLevel.NO_COMPILATION, )
+            level=CompilationLevel.NO_COMPILATION,
+            use_inductor_graph_partition=False,  # TODO try both?
+        )
         cudagraph_runtime_mode = CUDAGraphMode.NONE
 
     vllm_config = VllmConfig(compilation_config=compilation_config,
