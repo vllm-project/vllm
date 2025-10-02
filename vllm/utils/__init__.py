@@ -2740,10 +2740,11 @@ class MemorySnapshot:
         self.free_memory, self.total_memory = torch.cuda.mem_get_info()
         shared_sysmem_device_mem_sms = (87, 110, 121)  # Orin, Thor, Spark
         if self._get_device_sm() in shared_sysmem_device_mem_sms:
-            # On these devices, which use sysmem as device mem, torch.cuda.mem_get_info()
-            # only reports "free" memory, which can be lower than what is actually
-            # available due to not including cache memory. So we use the system available
-            # memory metric instead.
+            # On these devices, which use sysmem as device mem,
+            # torch.cuda.mem_get_info() only reports "free" memory,
+            # which can be lower than what is actually
+            # available due to not including cache memory.
+            # So we use the system available memory metric instead.
             self.free_memory = psutil.virtual_memory().available
 
         self.cuda_memory = self.total_memory - self.free_memory
