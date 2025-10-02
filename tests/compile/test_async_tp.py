@@ -468,7 +468,7 @@ def test_fp8_allgather_pass_correctness(
         'compile_sizes': [2, 4, 8],
         'splitting_ops': [],
         'pass_config': {
-            'enable_async_tp': True,
+            'enable_async_tp': False,
             'enable_fp8_allgather_opt': False
         },
     }
