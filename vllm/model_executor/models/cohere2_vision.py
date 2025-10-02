@@ -36,7 +36,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix)
 
 
@@ -317,6 +317,7 @@ class Cohere2VisionMultiModalProcessor(
     dummy_inputs=Cohere2VisionDummyInputsBuilder)
 class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                             SupportsPP):
+    merge_by_field_config = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -399,8 +400,8 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return Cohere2VisionImagePixelInputs(
             type="pixel_values",
-            pixel_values=flatten_bn(pixel_values, concat=True),
-            num_patches=flatten_bn(num_patches, concat=True),
+            pixel_values=pixel_values,
+            num_patches=num_patches,
             resolve_bindings={
                 "h": self.config.vision_config.image_size,
                 "w": self.config.vision_config.image_size,
