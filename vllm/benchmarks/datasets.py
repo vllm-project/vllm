@@ -246,7 +246,7 @@ class BenchmarkDataset(ABC):
                         num_requests)
 
         ids = [req.request_id for req in requests]
-        if None not in ids and len(ids) != len(set(ids)):
+        if len(ids) != len(set(ids)):
             raise ValueError("Duplicate request_id found in the sampled "
                              "requests. Please ensure that each request_id "
                              "is unique.")
