@@ -184,7 +184,7 @@ class CompilationConfig:
     """The directory to store the compiled graph, to accelerate Inductor
     compilation. By default, it will use model-related information to generate
     a cache directory."""
-    backend: str = ""
+    backend: str = "inductor"
     """The backend for compilation. It needs to be a string:
 
     - "" (empty string): use the default backend.
@@ -548,6 +548,11 @@ class CompilationConfig:
                     "(where 'op' is the registered op name)"
                 )
 
+        # Currently only eager and inductor backend are supported for piecewise compilation. 
+        # Update when more backends are supported.
+        if self.level == CompilationLevel.PIECEWISE and self.backend not in ["", "eager", "inductor"]:
+            raise ValueError(f"Invalid backend for piecewise compilation: {self.backend}")
+
         logger.warning_once(
             "The 'use_inductor' flag is deprecated and will be removed in a future release. "
             "Please use the 'backend' option instead.",
@@ -731,6 +736,16 @@ class CompilationConfig:
         if not self.use_inductor_graph_partition:
             # Dynamo-level FX split case
             return self.level == CompilationLevel.PIECEWISE
+        inductor_used = (
+            self.level == CompilationLevel.PIECEWISE and self.backend == "inductor"
+        ) or (
+            self.level >= CompilationLevel.DYNAMO_AS_IS and self.backend == "inductor"
+        )
+        use_inductor_piecewise_compilation = (
+            inductor_used
+            and self.use_inductor_graph_partition
+            and not self.splitting_ops_contain_attention()
+        )
 
         # Inductor partition case
         return self.level > CompilationLevel.NO_COMPILATION and self.use_inductor
