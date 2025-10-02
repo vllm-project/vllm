@@ -285,28 +285,31 @@ def _get_decode_attn_bias(
 ) -> list[BlockDiagonalGappyKeysMask]:
     """
     Generate attention bias masks for decode phase in context parallel.
-    
-    This function creates attention masks that allow queries to attend to KV cache
-    distributed across different CP ranks. Each sequence's KV cache is owned by a specific
-    rank, and we need to create appropriate masks for cross-rank attention.
-    
+
+    This function creates attention masks that allow queries to attend to
+    KV cache distributed across different CP ranks. Each sequence's KV cache
+    is owned by a specific rank, and we need to create appropriate masks for
+    cross-rank attention.
+
     Example:
         If we have 2 CP ranks and 3 sequences:
         - q_seqlens = [1, 1, 1]  # Each decode query has length 1
         - kv_seqlens = [10, 15, 8]  # KV cache lengths for each sequence
-        - current_kv_rank = [0, 1, 0]  # Which rank owns the CURRENT token's KV pair
-        
+        - current_kv_rank = [0, 1, 0]  # Which rank owns the CURRENT token's
+          KV pair
+
         For src_rank=0: mask=[0, -1, 0] -> adjusted_kv_seqlens=[10, 14, 8]
         For src_rank=1: mask=[-1, 0, -1] -> adjusted_kv_seqlens=[9, 15, 7]
-        
-        This creates masks where sequences not owned by src_rank have reduced length,
-        effectively masking out the last token position.
-    
+
+        This creates masks where sequences not owned by src_rank have reduced
+        length, effectively masking out the last token position.
+
     Args:
         q_seqlens: Query sequence lengths for each sequence in the batch
-        kv_seqlens: Key-value cache lengths for each sequence  
-        current_kv_rank: Tensor indicating which CP rank owns each sequence's KV cache
-        
+        kv_seqlens: Key-value cache lengths for each sequence
+        current_kv_rank: Tensor indicating which CP rank owns each sequence's
+            KV cache
+
     Returns:
         List of BlockDiagonalGappyKeysMask objects, one for each source rank
     """
@@ -348,30 +351,32 @@ def _get_prefill_attn_bias(
 ) -> list[BlockDiagonalGappyKeysMask]:
     """
     Generate attention bias masks for prefill phase in context parallel.
-    
-    This function creates attention masks for distributed prefill computation where
-    queries and KV cache are sharded across multiple CP ranks. It handles
-    both causal masking (for local rank) and block diagonal masking (for remote ranks).
-    
+
+    This function creates attention masks for distributed prefill computation
+    where queries and KV cache are sharded across multiple CP ranks. It handles
+    both causal masking (for local rank) and block diagonal masking (for remote
+    ranks).
+
     Example with 2 CP ranks and 2 requests:
-        cp_sharded_q_seqlen = [[4, 6], [3, 5]]  # Sharded query lengths per request
+        cp_sharded_q_seqlen = [[4, 6], [3, 5]]  # Sharded query lengths per req
         cp_sharded_pass_x_kvlens_per_rank = [
             [[8, 12], [6, 10]],  # KV lengths for rank 0
             [[7, 11], [5, 9]]    # KV lengths for rank 1
         ]
-        
+
         For rank 0 (cp_rank=0):
-        - Uses BlockDiagonalCausalWithOffsetGappyKeysMask for local data (rank 0)
-        - Uses BlockDiagonalGappyKeysMask for remote data (rank 1)
-        
+        - Uses BlockDiagonalCausalWithOffsetGappyKeysMask for local data
+        - Uses BlockDiagonalGappyKeysMask for remote data
+
         For rank 1 (cp_rank=1):
-        - Uses BlockDiagonalGappyKeysMask for remote data (rank 0)
-        - Uses BlockDiagonalCausalWithOffsetGappyKeysMask for local data (rank 1)
-    
+        - Uses BlockDiagonalGappyKeysMask for remote data
+        - Uses BlockDiagonalCausalWithOffsetGappyKeysMask for local data
+
     Args:
         cp_sharded_q_seqlen: Query sequence lengths [request][cp_shard]
-        cp_sharded_pass_x_kvlens_per_rank: KV lengths [src_rank][request][cp_shard]
-        
+        cp_sharded_pass_x_kvlens_per_rank: KV lengths
+            [src_rank][request][cp_shard]
+
     Returns:
         List of attention bias masks, one for each source rank
     """
@@ -386,19 +391,25 @@ def _get_prefill_attn_bias(
     cp_sharded_q_seqlen_flatten = flatten(cp_sharded_q_seqlen)
 
     # Determine bias type for each source rank:
-    # - Causal mask for local rank (allows attending to past and current tokens)
-    # - Block diagonal mask for remote ranks (allows attending to all tokens in block)
-    # TODO: use PagedBlockDiagonalCausalWithOffsetGappyKeysMask for local attention
+    # - Causal mask for local rank (allows attending to past and current
+    #   tokens)
+    # - Block diagonal mask for remote ranks (allows attending to all tokens
+    #   in block)
+    # TODO: use PagedBlockDiagonalCausalWithOffsetGappyKeysMask for local
+    #   attention
     bias_type = [(BlockDiagonalCausalWithOffsetGappyKeysMask
                   if cp_rank == i else BlockDiagonalGappyKeysMask)
                  for i in range(cp_size)]
 
     def get_kv_seqstarts(kv_seqlen: list[int]) -> list[int]:
         """
-        Calculate starting positions for KV sequences in attention computation.
-        
-        Processes pairs of KV lengths to determine where each sequence block starts.
-        Example: kv_seqlen=[8, 12, 6, 10] -> kv_seqstarts=[0, 0, 12, 12, 22]
+        Calculate starting positions for KV sequences in attention
+        computation.
+
+        Processes pairs of KV lengths to determine where each sequence
+        block starts.
+        Example: kv_seqlen=[8, 12, 6, 10] ->
+        kv_seqstarts=[0, 0, 12, 12, 22]
         """
         kv_seqstarts = [0]
         for i in range(0, len(kv_seqlen), 2):
@@ -425,7 +436,7 @@ def _cp_partial_prefill_get_kv_seqlens(
     num_computed_tokens: int,
 ) -> list[list[int]]:
     # For prefill by passing KV among CP group, get
-    # the KV seqlens (part of the attention bias) for computing partial attention
+    # the KV seqlens (part of the attention bias) for computing partial attn
     # on KV received from each CP rank.
     cp_world_size = get_context_parallel_world_size()
     cp_rank = get_context_parallel_rank()
@@ -476,7 +487,7 @@ def _merge_attn_flash_partial(
     attn_out: list[torch.Tensor],
     attn_lse: list[torch.Tensor],
 ) -> torch.Tensor:
-    # merges the partial attention outputs from flash varseq fwd to get the final attention output
+    # merges partial attention outputs from flash varseq fwd to final output
     assert len(attn_out) == len(attn_lse)
     assert len(attn_out) >= 1
 
@@ -494,29 +505,32 @@ def _merge_attn_flash_partial(
 
 
 def _prefill_pass_kv_attention(
-    cp_world_size: int,
-    cp_rank: int,
-    cache_k: torch.Tensor,
-    cache_v: torch.Tensor,
-    xq_out: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    B_T: int,
-    N_H_L: int,
-    D_H: int,
-    attn_bias: list[BlockDiagonalGappyKeysMask],
+        cp_world_size: int,
+        cp_rank: int,
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        xq_out: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        B_T: int,
+        N_H_L: int,
+        D_H: int,
+        attn_bias: list[BlockDiagonalGappyKeysMask],  # type: ignore
 ) -> torch.Tensor:
     """
-    Computes attention for fused varseq prompt by passing KV among CP group for best
-    overlap between CP comms and attention compute. KV from different prefill batches
-    are padded to the maximum seqlen in the fused prefill.
+    Computes attention for fused varseq prompt by passing KV among CP group for
+    best overlap between CP comms and attention compute. KV from different
+    prefill batches are padded to the maximum seqlen in the fused prefill.
 
     Args:
-        max_global_kvlen: maximum seqlen in current batch, used for pass_kv only
+        max_global_kvlen: maximum seqlen in current batch, used for pass_kv
+            only
         prefetched_lengths: indicates the starting position of cache, used for
             duplicate_kv with persistent cache enabled
         varseq_batch_dedup: batch indices of the current batch.
         varseq_seqlen: padded seqlen after cp sharding
     """
+
+    assert XFORMERS_AVAILABLE
     # TODO: extract KV pieces after local attention
     cache_k_ = torch.index_select(cache_k, 1, slot_mapping)
     cache_v_ = torch.index_select(cache_v, 1, slot_mapping)
@@ -533,7 +547,7 @@ def _prefill_pass_kv_attention(
     next_tensors, reqs = cp_pass_around([cache_k_, cache_v_, src_rank],
                                         to_rank, from_rank)
     # local partial attn
-    attn_out_self, lse_out_self = xops.fmha.memory_efficient_attention_partial(
+    attn_out_self, lse_out_self = xops.fmha.memory_efficient_attention_partial(  # type: ignore
         xq_out,
         cache_k_self,
         cache_v_self,
@@ -557,7 +571,7 @@ def _prefill_pass_kv_attention(
         cache_k_i_, cache_v_i_ = (t.view(1, -1, N_H_L, D_H)
                                   for t in (cache_k_i, cache_v_i))
 
-        attn_out_i, lse_out_i = xops.fmha.memory_efficient_attention_partial(
+        attn_out_i, lse_out_i = xops.fmha.memory_efficient_attention_partial(  # type: ignore
             xq_out,
             cache_k_i_,
             cache_v_i_,
@@ -573,25 +587,28 @@ def _prefill_pass_kv_attention(
 
 
 def _decode_allgather_attention(
-    cache_k: torch.Tensor,
-    cache_v: torch.Tensor,
-    xq_out: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    B_T: int,
-    N_H_L: int,
-    D_H: int,
-    attn_bias: list[BlockDiagonalGappyKeysMask],
+        cache_k: torch.Tensor,
+        cache_v: torch.Tensor,
+        xq_out: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        B_T: int,
+        N_H_L: int,
+        D_H: int,
+        attn_bias: list[BlockDiagonalGappyKeysMask],  # type: ignore
 ) -> torch.Tensor:
     """
     Supports CP decode by allgather partial attention among CP ranks.
     This function distributes attention computation across multiple CP ranks by:
-    1. Each CP rank computes partial attention: Attn(local_Q, local_KV) 
-    2. All ranks gather partial attention outputs and log-sum-exp values via allgather
+    1. Each CP rank computes partial attention: Attn(local_Q, local_KV)
+    2. All ranks gather partial attention outputs and log-sum-exp values via
+       allgather
     3. Merges all partial attention results to produce final attention output
 
     Returns:
         Merged attention output tensor [1, B_T, N_H_L * D_H]
     """
+
+    assert XFORMERS_AVAILABLE
     cp_rank = get_context_parallel_rank()
 
     cache_k_ = torch.index_select(cache_k, 1,
@@ -601,7 +618,7 @@ def _decode_allgather_attention(
 
     xq_out = xq_out.view(1, B_T, N_H_L, D_H)
 
-    attn_out_ = xops.fmha.memory_efficient_attention_partial(
+    attn_out_ = xops.fmha.memory_efficient_attention_partial(  # type: ignore
         xq_out,
         cache_k_,
         cache_v_,
