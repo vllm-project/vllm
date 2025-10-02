@@ -7,6 +7,7 @@ from collections import Counter
 from dataclasses import asdict, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
+
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
@@ -213,7 +214,8 @@ class CompilationConfig:
     """
     Whether to use inductor compilation.
 
-    This flag is deprecated and will be removed. Please use the 'backend' option instead.
+    This flag is deprecated and will be removed.
+    Please use the 'backend' option instead.
 
     - False: inductor compilation is not used. graph runs in eager
         (custom_ops enabled by default).
@@ -528,17 +530,22 @@ class CompilationConfig:
                     "(where 'op' is the registered op name)"
                 )
 
-        # Currently only eager and inductor backend are supported for piecewise compilation. 
-        # Update when more backends are supported.
-        if self.level == CompilationLevel.PIECEWISE and self.backend not in ["", "eager", "inductor"]:
-            raise ValueError(f"Invalid backend for piecewise compilation: {self.backend}")
+        # Currently only eager and inductor backend are supported
+        # for piecewise compilation. Update when more backends are supported.
+        if self.level == CompilationLevel.PIECEWISE and self.backend not in [
+                "", "eager", "inductor"
+        ]:
+            raise ValueError(
+                f"Invalid backend for piecewise compilation: {self.backend}")
+
+        if self.backend == "":
+            self.backend = "inductor"
 
         logger.warning_once(
-            "The 'use_inductor' flag is deprecated and will be removed in a future release. "
-            "Please use the 'backend' option instead.",
-        )
-    
-   
+            "The 'use_inductor' flag is deprecated and will be\
+                 removed in a future release."
+            "Please use the 'backend' option instead.", )
+
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         """
         Initialize the backend for the compilation config from a vllm config.
@@ -548,7 +555,10 @@ class CompilationConfig:
             The backend for the compilation config.
         """
         if self.level is None:
-            raise ValueError("No compilation level is set. This method should only be called via vllm config where the level is set if none is provided.")
+            raise ValueError(
+                "No compilation level is set. This method should only be \
+                called via vllm config where the level is set if none is \
+                provided.")
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
@@ -567,8 +577,10 @@ class CompilationConfig:
             elif self.backend in ["eager", "inductor"]:
                 vllm_config.compilation_config.backend = self.backend
             else:
-                raise ValueError(f"Invalid backend for piecewise compilation: {self.backend}")
-       
+                raise ValueError(
+                    f"Invalid backend for piecewise compilation: {self.backend}"
+                )
+
         assert self.level == CompilationLevel.PIECEWISE
 
         from vllm.compilation.backends import VllmBackend
