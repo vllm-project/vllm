@@ -191,7 +191,7 @@ def trim_accepted_and_rejected_tokens(
 
     new_cad: CommonAttentionMetadata = cad.replace(
         query_start_loc=new_query_start_loc,
-        query_start_loc_cpu=new_query_start_loc.to("cpu"),
+        query_start_loc_cpu=new_query_start_loc.to("cpu", non_blocking=True),
         num_actual_tokens=new_token_ids.shape[0],
         max_query_len=new_query_lens.max().item(),
         slot_mapping=new_slot_mapping,
@@ -201,18 +201,25 @@ def trim_accepted_and_rejected_tokens(
                             cad=new_cad)
 
 
-def compute_subrange_indices(from_locs: torch.Tensor, to_locs: torch.Tensor):
+def compute_subrange_indices(start_locs: torch.Tensor, end_locs: torch.Tensor):
+    """
+    Given two tensor of the same length containing start and end locations,
+    returns a tensor of indices with each subrange. E.g.
+        start_locs = [s1, s2, s3, ...], and
+        end_locs = [e1, e2, e3, ...],
+        return [*s1:e1, *s2:e2, *s3:e3, ...] as a flat tensor
+    """
     # Compute lengths of each subrange
-    lengths = to_locs - from_locs + 1
+    lengths = end_locs - start_locs + 1
     # Build an index for each subrange
     # torch.arange(max_len) creates [0, 1, ..., max_len-1]
     # broadcasting + masking ensures we only keep valid positions
     max_len = lengths.max()
-    offsets = torch.arange(max_len, device=from_locs.device).unsqueeze(
+    offsets = torch.arange(max_len, device=start_locs.device).unsqueeze(
         0)  # shape [1, max_len]
     mask = offsets < lengths.unsqueeze(1)  # shape [n, max_len]
     # Build all indices
-    all_indices = from_locs.unsqueeze(1) + offsets
+    all_indices = start_locs.unsqueeze(1) + offsets
     all_indices = all_indices[mask]  # flatten valid indices only
     return all_indices
 

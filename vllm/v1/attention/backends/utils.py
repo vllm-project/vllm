@@ -126,9 +126,9 @@ def extend_all_queries_by_1(
 
     new_cad = CommonAttentionMetadata(
         query_start_loc=new_query_start_loc,
-        query_start_loc_cpu=new_query_start_loc.to("cpu"),
+        query_start_loc_cpu=new_query_start_loc.to("cpu", non_blocking=True),
         seq_lens=new_seq_lens,
-        seq_lens_cpu=new_seq_lens.to("cpu"),
+        seq_lens_cpu=new_seq_lens.to("cpu", non_blocking=True),
         num_reqs=cad.num_reqs,  # num requests stays unchanged
         num_computed_tokens_cpu=cad.num_computed_tokens_cpu + 1,
         # each request is extended by 1 token -> batch_size tokens are added

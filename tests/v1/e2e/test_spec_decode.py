@@ -16,6 +16,7 @@ from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
+from vllm.v1.spec_decode.draft_model import compute_subrange_indices
 from vllm.v1.spec_decode.metrics import (compute_acceptance_len,
                                          compute_acceptance_rate)
 
@@ -426,3 +427,17 @@ def compute_exact_matches(ref_outputs: list[RequestOutput],
             print(f"ref_output: {ref_output.outputs[0].text}")
             print(f"spec_output: {spec_output.outputs[0].text}")
     return matches / len(ref_outputs)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_compute_subrange_indices(device: str):
+    start_locs = torch.tensor([3, 6, 12], device=device)
+    end_locs = torch.tensor([5, 6, 15], device=device)
+    # fmt: off
+    expected_indices = torch.tensor([3, 4, 5,
+                                     6,
+                                     12, 13, 14, 15],
+                                    device=device)
+    # fmt: on
+    indices = compute_subrange_indices(start_locs, end_locs)
+    assert torch.equal(indices, expected_indices)
