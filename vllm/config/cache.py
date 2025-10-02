@@ -127,6 +127,12 @@ class CacheConfig:
     gpu_memory_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    enable_wa_policy: bool = False
+    """This feature enable workload-aware policy for KVcache pool
+    """
+    wa_offline_param_path: str = ""
+    """The offline parameter used by workload-aware policy"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -170,6 +176,10 @@ class CacheConfig:
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
 
+        if not self.enable_prefix_caching and self.enable_wa_policy:
+            raise ValueError(
+                "workload-aware policy must be enabled with prefix caching")
+
         return self
 
     def _verify_cache_dtype(self) -> None:
@@ -200,6 +210,16 @@ class CacheConfig:
                 "Unknown prefix caching hash algorithm: "
                 f"{self.prefix_caching_hash_algo}. Must be one of "
                 f"{get_args(PrefixCachingHashAlgo)}.")
+
+        if (self.enable_wa_policy and self.wa_offline_param_path == ""):
+            raise ValueError(
+                f"Wa offline param must be specified when wa policy is enabled "
+                f"{self.wa_offline_param_path=}")
+
+        if (self.wa_offline_param_path != "" and not self.enable_wa_policy):
+            raise ValueError(
+                f"Wa offline param must be specified when wa policy is enabled"
+                f"{self.wa_offline_param_path=}")
 
     def verify_with_parallel_config(
         self,
