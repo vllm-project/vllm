@@ -21,8 +21,6 @@ class _Backend(enum.Enum):
     FLASH_ATTN_MLA = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
-    DUAL_CHUNK_FLASH_ATTN = enum.auto()
-    DIFFERENTIAL_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
