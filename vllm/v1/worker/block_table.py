@@ -38,8 +38,8 @@ class BlockTable:
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
 
         cp_size = get_context_parallel_world_size()
-        # For context parallel case (cp_size > 1), slot_mapping is also used to for
-        # previously computed tokens, so we need larger buffer size
+        # For context parallel case (cp_size > 1), slot_mapping is also used
+        # for previously computed tokens, so we need larger buffer size
         slot_mapping_size = (max_num_reqs * max_num_blocks_per_req * block_size
                              if cp_size > 1 else self.max_num_batched_tokens)
         self.slot_mapping = self._make_buffer(slot_mapping_size,
@@ -79,8 +79,10 @@ class BlockTable:
         self.num_blocks_per_row[src_tgt] = self.num_blocks_per_row[tgt_src]
         self.block_table.np[src_tgt] = self.block_table.np[tgt_src]
 
-    def compute_slot_mapping(self, req_indices: np.ndarray,
-                             positions: np.ndarray, offset: int = 0) -> None:
+    def compute_slot_mapping(self,
+                             req_indices: np.ndarray,
+                             positions: np.ndarray,
+                             offset: int = 0) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
         # where K is the max_num_blocks_per_req and the block size is 2.
@@ -195,8 +197,10 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
 
-    def compute_slot_mapping(self, req_indices: np.ndarray,
-                             positions: np.ndarray, offset: int = 0) -> None:
+    def compute_slot_mapping(self,
+                             req_indices: np.ndarray,
+                             positions: np.ndarray,
+                             offset: int = 0) -> None:
         for block_table in self.block_tables:
             block_table.compute_slot_mapping(req_indices, positions, offset)
 
