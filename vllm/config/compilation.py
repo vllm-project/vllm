@@ -464,7 +464,7 @@ class CompilationConfig:
             return CUDAGraphMode[value.upper()]
         return value
 
-    def __post_init__(self, **kwargs) -> None:
+    def __post_init__(self) -> None:
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
