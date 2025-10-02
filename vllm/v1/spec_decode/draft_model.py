@@ -8,13 +8,14 @@ import torch
 from vllm.attention.layer import Attention
 from vllm.config import ModelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               extend_all_queries_by_1,
                                               extend_flat_seqs)
 from vllm.v1.outputs import SamplerOutput
-from vllm.v1.spec_decode.eagle import (PADDING_SLOT_ID, SpecDecodeBaseProposer,
+from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.eagle import (PADDING_SLOT_ID, CudaGraphArgs,
+                                       SpecDecodeBaseProposer,
                                        num_rejected_tokens)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
@@ -36,15 +37,60 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self._raise_if_mrope()
         self._raise_if_disabled_padded_drafter_batch()
 
-    def update_propose_kwargs(
-            self, propose_kwargs: dict, sampler_output: SamplerOutput,
-            spec_decode_metadata: Optional[SpecDecodeMetadata]):
-        return update_propose_kwargs(arange=self.arange,
-                                     propose_kwargs=propose_kwargs,
-                                     sampler_output=sampler_output,
-                                     spec_decode_metadata=spec_decode_metadata,
-                                     block_size=self.block_size,
-                                     max_model_len=self.max_model_len)
+    def propose(
+        self,
+        # [num_tokens]
+        target_token_ids: torch.Tensor,
+        # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
+        target_positions: torch.Tensor,
+        # [num_tokens, hidden_size]
+        target_hidden_states: torch.Tensor,
+        # [batch_size]
+        next_token_ids: torch.Tensor,
+        last_token_indices: Optional[torch.Tensor],
+        common_attn_metadata: CommonAttentionMetadata,
+        sampling_metadata: SamplingMetadata,
+        cudagraph_args: "CudaGraphArgs",
+        sampler_output: SamplerOutput,
+        spec_decode_metadata: Optional[SpecDecodeMetadata],
+        mm_embed_inputs: Optional[tuple[list[torch.Tensor],
+                                        torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """
+        - Trims unnecessary tokens from the input, like those rejected by 
+        the sampler, or those already processed by the draft model.
+        - Merges the next_token_ids with the existing token ids into 
+        a flat sequence.
+        """
+        inputs = DraftModelInputs(cad=common_attn_metadata,
+                                  token_ids=target_token_ids,
+                                  positions=target_positions)
+        inputs = trim_accepted_and_rejected_tokens(
+            inputs=inputs,
+            sampler_output=sampler_output,
+            spec_decode_metadata=spec_decode_metadata)
+        inputs = merge_next_token_ids_into_token_ids(
+            inputs=inputs,
+            next_token_ids=next_token_ids,
+            block_size=self.block_size,
+            max_model_len=self.max_model_len,
+            arange=self.arange)
+
+        draft_token_ids = super().propose(
+            target_token_ids=inputs.token_ids,
+            target_positions=inputs.positions,
+            common_attn_metadata=inputs.cad,
+            cudagraph_args=cudagraph_args,
+            sampling_metadata=sampling_metadata,
+            sampler_output=sampler_output,
+            spec_decode_metadata=spec_decode_metadata,
+            # below are are not used by draft model
+            target_hidden_states=None,
+            next_token_ids=None,
+            last_token_indices=None,
+            mm_embed_inputs=None,
+        )
+        return draft_token_ids
 
     def _raise_if_multimodal(self):
         if self.supports_mm_inputs:
@@ -112,43 +158,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
         self.attn_layer_names = list(draft_attn_layer_names)
-
-
-logger = init_logger(__name__)
-
-
-def update_propose_kwargs(arange: torch.Tensor, propose_kwargs: dict,
-                          sampler_output: SamplerOutput,
-                          spec_decode_metadata: Optional[SpecDecodeMetadata],
-                          block_size: int, max_model_len: int) -> dict:
-    """
-    - Trims unnecessary tokens from the input, like those rejected by 
-    the sampler, or those already processed by the draft model.
-    - Merges the next_token_ids with the existing token ids into 
-    a flat sequence.
-    """
-    cad: CommonAttentionMetadata = propose_kwargs["common_attn_metadata"]
-    inputs = DraftModelInputs(cad=cad,
-                              token_ids=propose_kwargs["target_token_ids"],
-                              positions=propose_kwargs["target_positions"])
-    inputs = trim_accepted_and_rejected_tokens(
-        inputs=inputs,
-        sampler_output=sampler_output,
-        spec_decode_metadata=spec_decode_metadata)
-    inputs = merge_next_token_ids_into_token_ids(
-        inputs=inputs,
-        next_token_ids=propose_kwargs["next_token_ids"],
-        block_size=block_size,
-        max_model_len=max_model_len,
-        arange=arange)
-    new_propose_kwargs = dict(
-        target_token_ids=inputs.token_ids,
-        target_positions=inputs.positions,
-        next_token_ids=None,
-        last_token_indices=None,
-        common_attn_metadata=inputs.cad,
-    )
-    return propose_kwargs | new_propose_kwargs
 
 
 @dataclass

@@ -2670,7 +2670,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_descriptor,
             )
-            propose_kwargs = dict(
+            draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -2680,11 +2680,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
                 cudagraph_args=cudagraph_args,
+                sampler_output=sampler_output,
+                spec_decode_metadata=spec_decode_metadata,
             )
-            if isinstance(self.drafter, DraftModelProposer):
-                propose_kwargs = self.drafter.update_propose_kwargs(
-                    propose_kwargs, sampler_output, spec_decode_metadata)
-            draft_token_ids = self.drafter.propose(**propose_kwargs)
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:

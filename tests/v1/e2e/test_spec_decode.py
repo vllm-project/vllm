@@ -248,46 +248,6 @@ def test_eagle_correctness(
         cleanup_dist_env_and_memory()
 
 
-@dataclass
-class ArgsTest:
-    model: str
-    draft_model: str
-    sampling_config: SamplingParams
-    num_speculative_tokens: int
-    expected_acceptance_rate: float
-    expected_acceptance_len: float
-    expected_same_output_fraction: float
-    # Defaults
-    target_tensor_parallel_size: int = 1
-    draft_tensor_parallel_size: int = 1
-    max_model_len: int = 1024
-    gpu_memory_utilization: float = 0.5
-
-
-cases = [
-    # Same model for draft and target, greedy sampling.
-    ArgsTest(
-        model="Qwen/Qwen3-0.6B",
-        draft_model="Qwen/Qwen3-0.6B",
-        sampling_config=greedy_sampling(),
-        num_speculative_tokens=3,  # K 
-        expected_acceptance_len=3 + 1,  # K + 1
-        expected_acceptance_rate=1.0,
-        expected_same_output_fraction=1.0,
-    ),
-    # Smaller draft model, stochastic sampling.
-    ArgsTest(
-        model="Qwen/Qwen3-1.7B",
-        draft_model="Qwen/Qwen3-0.6B",
-        sampling_config=stochastic_sampling(),
-        num_speculative_tokens=3,
-        expected_acceptance_len=2.85 + 1,
-        expected_acceptance_rate=0.9,
-        expected_same_output_fraction=0.9,
-    ),
-]
-
-
 @pytest.mark.parametrize(["model_setup", "mm_enabled"], [
     (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False),
     (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False),
@@ -349,6 +309,46 @@ def test_mtp_correctness(
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
+
+
+@dataclass
+class ArgsTest:
+    model: str
+    draft_model: str
+    sampling_config: SamplingParams
+    num_speculative_tokens: int
+    expected_acceptance_rate: float
+    expected_acceptance_len: float
+    expected_same_output_fraction: float
+    # Defaults
+    target_tensor_parallel_size: int = 1
+    draft_tensor_parallel_size: int = 1
+    max_model_len: int = 1024
+    gpu_memory_utilization: float = 0.5
+
+
+cases = [
+    # Same model for draft and target, greedy sampling.
+    ArgsTest(
+        model="Qwen/Qwen3-0.6B",
+        draft_model="Qwen/Qwen3-0.6B",
+        sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,  # K 
+        expected_acceptance_len=3 + 1,  # K + 1
+        expected_acceptance_rate=1.0,
+        expected_same_output_fraction=1.0,
+    ),
+    # Smaller draft model, stochastic sampling.
+    ArgsTest(
+        model="Qwen/Qwen3-1.7B",
+        draft_model="Qwen/Qwen3-0.6B",
+        sampling_config=stochastic_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=2.85 + 1,
+        expected_acceptance_rate=0.9,
+        expected_same_output_fraction=0.9,
+    ),
+]
 
 
 @pytest.mark.parametrize("args", cases)
