@@ -54,7 +54,7 @@ class _LiteTransaction:
             self._profiler._emit(self)
         return False
 
-    # Public helpers -----------------------------------------------------
+    # Public helpers
     def scope(self, name: str):
         return _LiteScope(self, name)
 
@@ -66,7 +66,7 @@ class _LiteTransaction:
         bucket[0] += int(elapsed_ns)
         bucket[1] += int(count)
 
-    # Internal accessors -------------------------------------------------
+    # Internal accessors
     @property
     def metrics(self) -> dict[str, list[int]]:
         return self._metrics
@@ -95,14 +95,13 @@ class LiteProfiler:
         self._logger = init_logger("vllm.lite_profiler")
         self._log_path: Optional[str] = None
 
-    # ------------------------------------------------------------------
     def is_enabled(self) -> bool:
         try:
             return bool(envs.VLLM_LITE_PROFILER)
         except AttributeError:  # pragma: no cover - env not wired in tests
             return False
 
-    # Transaction handling ---------------------------------------------
+    # Transaction handling
     def transaction(self, tag: str):
         if not self.is_enabled():
             return _NullTransaction()
@@ -130,7 +129,7 @@ class LiteProfiler:
         stack = getattr(self._local, "stack", None)
         return bool(stack)
 
-    # Scope helpers -----------------------------------------------------
+    # Scope helpers
     def scope(self, name: str):
         if not self.is_enabled():
             return None
@@ -151,7 +150,7 @@ class LiteProfiler:
             return
         transaction.record(name, elapsed_ns, count=count)
 
-    # Emission ----------------------------------------------------------
+    # Emission
     def _ensure_log_handler(self) -> None:
         log_path = getattr(envs, "VLLM_LITE_PROFILER_LOG_PATH", None)
         if not log_path:
