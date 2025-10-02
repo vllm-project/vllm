@@ -1081,7 +1081,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             return_lse=return_softmax_lse,
         )
 
-        if type(ret) is tuple:
+        if isinstance(ret, tuple):
             # Convert from (q_len, num_heads) to (num_heads, q_len)
             return ret[0], ret[1].transpose(0, 1).contiguous()
         return ret
