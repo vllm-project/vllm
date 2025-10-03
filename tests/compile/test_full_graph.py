@@ -19,6 +19,7 @@ from vllm.attention.backends.registry import _Backend
 from vllm.config import CompilationConfig, CompilationLevel, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.flashinfer import has_flashinfer
 
 from ..utils import create_new_process_for_each_test, flat_product, multi_gpu_test
 
@@ -314,8 +315,9 @@ def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(
     not current_platform.is_cuda()
-    or not current_platform.has_device_capability((10, 0)),
-    reason="allreduce+rmsnorm fusion only supported on blackwell",
+    or not has_flashinfer()
+    or not current_platform.has_device_capability(90),
+    reason="allreduce+rmsnorm fusion requires flashinfer",
 )
 def test_e2e_fusion_tp2_attn_quant_allreduce_rmsnorm(
     model_name,
