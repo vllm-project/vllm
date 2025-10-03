@@ -29,20 +29,27 @@ logger = init_logger(__name__)
 
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
+
     def __init__(
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
         config: Optional[LlamaConfig] = None,
+        layer_idx: int = 0,
     ) -> None:
         super().__init__(vllm_config, prefix=prefix, config=config)
 
         config = config or vllm_config.model_config.hf_config
         quant_config = self.get_quant_config(vllm_config)
 
+        # First layer uses 2*hidden_size (embeds + hidden_states concatenated)
+        # Subsequent layers use hidden_size (only hidden_states, no embeds)
+        qkv_input_size = (2 * self.hidden_size
+                          if layer_idx == 0 else self.hidden_size)
+
         # override qkv
         self.self_attn.qkv_proj = QKVParallelLinear(
-            2 * self.hidden_size,
+            qkv_input_size,
             self.self_attn.head_dim,
             self.self_attn.total_num_heads,
             self.self_attn.total_num_kv_heads,
@@ -52,6 +59,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         )
 
         self.hidden_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.layer_idx = layer_idx
 
         if getattr(config, "norm_before_residual", False):
             self._residual_norm = self._norm_before_residual
@@ -90,11 +98,18 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        embeds = self.input_layernorm(embeds)
 
-        hidden_states, residual = self._residual_norm(hidden_states=hidden_states)
+        if self.layer_idx == 0:
+            embeds = self.input_layernorm(embeds)
+            hidden_states, residual = self._residual_norm(
+                hidden_states=hidden_states)
+            hidden_states = torch.cat([embeds, hidden_states], dim=-1)
+        else:
+            # Subsequent layers: only process hidden_states
+            # (no embeds, no input_layernorm)
+            hidden_states, residual = self._residual_norm(
+                hidden_states=hidden_states)
 
-        hidden_states = torch.cat([embeds, hidden_states], dim=-1)
         # Self Attention
         hidden_states = self.self_attn(
             positions=positions,
@@ -129,15 +144,15 @@ class LlamaModel(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
-        self.layers = nn.ModuleList(
-            [
-                LlamaDecoderLayer(
-                    current_vllm_config,
-                    prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
-                    config=self.config,
-                )
-            ]
-        )
+        self.layers = nn.ModuleList([
+            LlamaDecoderLayer(current_vllm_config,
+                              prefix=maybe_prefix(
+                                  prefix,
+                                  f"layers.{layer_idx + start_layer_id}"),
+                              config=self.config,
+                              layer_idx=layer_idx)
+            for layer_idx in range(self.config.num_hidden_layers)
+        ])
         if hasattr(self.config, "target_hidden_size"):
             self.fc = torch.nn.Linear(
                 self.config.target_hidden_size * 3, self.config.hidden_size, bias=False
@@ -166,13 +181,13 @@ class LlamaModel(nn.Module):
         assert hidden_states.shape[-1] == input_embeds.shape[-1]
 
         residual = None
-        hidden_states, residual = self.layers[0](
-            positions,
-            input_embeds,
-            hidden_states,
-            residual,
-        )
-
+        for layer in self.layers:
+            hidden_states, residual = layer(
+                positions=positions,
+                embeds=input_embeds,
+                hidden_states=hidden_states,
+                residual=residual,
+            )
         hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
         return hidden_states, hidden_prenorm
 
