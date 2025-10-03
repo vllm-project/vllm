@@ -21,7 +21,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     bias_ptr,
     initial_states_ptr,  # conv_states_ptr
     cache_indices_ptr,  # (batch, n_blocks + padding) The second dimension contains
-    # the block indices relevant for each sequence 
+    # the block indices relevant for each sequence
     # plus potential 0-padding at the beginning and at the end
     has_initial_states_ptr,
     query_start_loc_ptr,
@@ -592,7 +592,9 @@ def causal_conv1d_fn(
         assert (dim, width) == weight.shape
         assert is_channel_last, "Need to run in channel-last layout"
         if block_size_to_align is not None and block_size_to_align > 0:
-            assert block_size_to_align % BLOCK_M, "The mamba block size needs to be divisible by the BLOCK_M"
+            assert (
+                block_size_to_align % BLOCK_M
+            ) == 0, "The mamba block size needs to be divisible by the BLOCK_M"
         else:
             block_size_to_align = BLOCK_M
 
