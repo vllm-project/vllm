@@ -17,6 +17,7 @@ On the client side, run:
 """
 import argparse
 import asyncio
+import contextlib
 import gc
 import importlib.util
 import json
@@ -446,7 +447,8 @@ def calculate_metrics(
     return metrics, actual_output_lens
 
 
-async def _fetch_metrics(base_url: str, session: aiohttp.ClientSession) -> Optional[MetricsSnapshot]:
+async def _fetch_metrics(base_url: str,
+                        session: aiohttp.ClientSession) -> Optional[MetricsSnapshot]:
     """Fetch metrics from /metrics endpoint."""
     try:
         async with session.get(f"{base_url}/metrics") as response:
@@ -456,11 +458,14 @@ async def _fetch_metrics(base_url: str, session: aiohttp.ClientSession) -> Optio
 
                 for line in text.split('\n'):
                     if line.startswith('vllm:num_requests_running'):
-                        metrics.num_requests_running = int(float(line.split()[1]))
+                        metrics.num_requests_running = int(
+                            float(line.split()[1]))
                     elif line.startswith('vllm:num_requests_swapped'):
-                        metrics.num_requests_swapped = int(float(line.split()[1]))
+                        metrics.num_requests_swapped = int(
+                            float(line.split()[1]))
                     elif line.startswith('vllm:num_requests_waiting'):
-                        metrics.num_requests_waiting = int(float(line.split()[1]))
+                        metrics.num_requests_waiting = int(
+                            float(line.split()[1]))
 
                 return metrics
     except Exception:
@@ -468,14 +473,16 @@ async def _fetch_metrics(base_url: str, session: aiohttp.ClientSession) -> Optio
     return None
 
 
-def _calculate_throughput(current: MetricsSnapshot, previous: MetricsSnapshot) -> MetricsSnapshot:
+def _calculate_throughput(current: MetricsSnapshot,
+                         previous: MetricsSnapshot) -> MetricsSnapshot:
     """Calculate throughput between two snapshots."""
     current.prompt_throughput = 0.0
     current.generation_throughput = 0.0
     return current
 
 
-def _detect_decode_phase_start_metrics(metrics_history: list[MetricsSnapshot]) -> bool:
+def _detect_decode_phase_start_metrics(
+        metrics_history: list[MetricsSnapshot]) -> bool:
     """Detect decode phase start based on metrics."""
     if len(metrics_history) < 3:
         return False
@@ -485,7 +492,7 @@ def _detect_decode_phase_start_metrics(metrics_history: list[MetricsSnapshot]) -
 
 
 def _detect_decode_phase_end_metrics(metrics_history: list[MetricsSnapshot],
-                                   start_time: float) -> bool:
+                                    start_time: float) -> bool:
     """Detect decode phase end based on metrics."""
     if len(metrics_history) < 2:
         return False
@@ -494,10 +501,12 @@ def _detect_decode_phase_end_metrics(metrics_history: list[MetricsSnapshot],
     return all(m.num_requests_running == 0 for m in recent)
 
 
-async def _start_profiler(request_func, base_url: str, model_id: str, model_name: str,
-                        test_prompt: str, test_prompt_len: int, test_output_len: int,
-                        logprobs: Optional[int], test_mm_content, ignore_eos: bool,
-                        extra_headers: Optional[dict], extra_body: Optional[dict]) -> bool:
+async def _start_profiler(request_func, base_url: str, model_id: str,
+                        model_name: str, test_prompt: str, test_prompt_len: int,
+                        test_output_len: int, logprobs: Optional[int],
+                        test_mm_content, ignore_eos: bool,
+                        extra_headers: Optional[dict],
+                        extra_body: Optional[dict]) -> bool:
     """Start profiler."""
     try:
         profile_input = RequestFuncInput(
@@ -522,6 +531,121 @@ async def _start_profiler(request_func, base_url: str, model_id: str, model_name
             return profile_output.success
     except Exception:
         return False
+
+
+async def _setup_decode_profiling(base_url: str, metrics_interval: float) -> tuple[
+    Optional[aiohttp.ClientSession], Optional[MetricsSnapshot]
+]:
+    """Set up decode profiling and test metrics endpoint availability."""
+    print(f"Decode-only profiling enabled - monitoring metrics "
+          f"every {metrics_interval}s")
+
+    # Create shared session for profiling operations
+    profile_session = aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=60.0))
+
+    # Test metrics endpoint availability
+    test_metrics = await _fetch_metrics(base_url, profile_session)
+    if not test_metrics:
+        print("Metrics endpoint not available. Disabling decode profiling.")
+        await profile_session.close()
+        return None, None
+    else:
+        print("Metrics endpoint available")
+        return profile_session, test_metrics
+
+
+async def _monitor_and_profile(
+    profile_session: aiohttp.ClientSession,
+    base_url: str,
+    metrics_interval: float,
+    decode_profile_duration: Optional[float],
+    metrics_history: list[MetricsSnapshot],
+    request_func,
+    model_id: str,
+    model_name: str,
+    test_prompt: str,
+    test_prompt_len: int,
+    test_output_len: int,
+    logprobs: Optional[int],
+    test_mm_content,
+    ignore_eos: bool,
+    extra_headers: Optional[dict],
+    extra_body: Optional[dict]
+) -> None:
+    """Monitor metrics and handle decode profiling lifecycle."""
+    decode_profiling_active = False
+    decode_start_time = 0.0
+    previous_snapshot = metrics_history[0] if metrics_history else None
+
+    while True:
+        await asyncio.sleep(metrics_interval)
+
+        # Fetch current metrics
+        current_snapshot = await _fetch_metrics(base_url, profile_session)
+        if not current_snapshot:
+            continue
+
+        # Calculate throughput
+        if previous_snapshot:
+            current_snapshot = _calculate_throughput(
+                current_snapshot, previous_snapshot)
+
+        metrics_history.append(current_snapshot)
+
+        # Check for decode phase start
+        if (not decode_profiling_active and
+                _detect_decode_phase_start_metrics(metrics_history)):
+            print("Decode phase detected - starting profiler")
+            decode_start_time = current_snapshot.timestamp
+
+            success = await _start_profiler(
+                request_func, base_url, model_id, model_name,
+                test_prompt, test_prompt_len, test_output_len,
+                logprobs, test_mm_content, ignore_eos,
+                extra_headers, extra_body
+            )
+
+            if success:
+                decode_profiling_active = True
+                print("Decode profiling started")
+            else:
+                print("Failed to start decode profiling")
+
+        # Check for decode phase end
+        elif decode_profiling_active:
+            should_stop = False
+
+            if decode_profile_duration is not None:
+                # Use fixed duration
+                elapsed = current_snapshot.timestamp - decode_start_time
+                if elapsed >= decode_profile_duration:
+                    should_stop = True
+            else:
+                # Use auto-detection
+                if _detect_decode_phase_end_metrics(
+                        metrics_history, decode_start_time):
+                    should_stop = True
+
+            if should_stop:
+                print("Stopping decode profiler")
+                # Stop profiler logic would go here
+                break
+
+        previous_snapshot = current_snapshot
+
+
+async def _cleanup_decode_profiling(
+    monitor_task: Optional[asyncio.Task],
+    profile_session: Optional[aiohttp.ClientSession]
+) -> None:
+    """Clean up decode profiling resources."""
+    if monitor_task:
+        monitor_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await monitor_task
+    if profile_session:
+        await profile_session.close()
 
 
 async def benchmark(
@@ -736,95 +860,27 @@ async def benchmark(
                                      session=session,
                                      pbar=pbar)))
 
-    # Decode-only profiling logic
+    # Decode-only profiling setup
+    profile_session = None
+    monitor_task = None
     if profile_decode_only:
-        print(f"Decode-only profiling enabled - monitoring metrics every {metrics_interval}s")
+        profile_session, test_metrics = await _setup_decode_profiling(
+            base_url, metrics_interval)
 
-        # Create shared session for profiling operations
-        profile_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60.0))
-
-        # Test metrics endpoint availability
-        test_metrics = await _fetch_metrics(base_url, profile_session)
-        if not test_metrics:
-            print("Metrics endpoint not available. Disabling decode profiling.")
-            profile_decode_only = False
-        else:
-            print("Metrics endpoint available")
-
-            # Initialize monitoring variables
-            decode_profiling_active = False
-            decode_start_time = 0.0
+        if profile_session and test_metrics:
             metrics_history = [test_metrics]
-            previous_snapshot = test_metrics
-
-            # Create monitoring task
-            async def monitor_and_profile():
-                nonlocal decode_profiling_active, decode_start_time
-
-                while True:
-                    await asyncio.sleep(metrics_interval)
-
-                    # Fetch current metrics
-                    current_snapshot = await _fetch_metrics(base_url, profile_session)
-                    if not current_snapshot:
-                        continue
-
-                    # Calculate throughput
-                    if previous_snapshot:
-                        current_snapshot = _calculate_throughput(current_snapshot, previous_snapshot)
-
-                    metrics_history.append(current_snapshot)
-
-                    # Check for decode phase start
-                    if not decode_profiling_active and _detect_decode_phase_start_metrics(metrics_history):
-                        print("Decode phase detected - starting profiler")
-                        decode_start_time = current_snapshot.timestamp
-
-                        success = await _start_profiler(
-                            request_func, base_url, model_id, model_name,
-                            test_prompt, test_prompt_len, test_output_len,
-                            logprobs, test_mm_content, ignore_eos,
-                            extra_headers, extra_body
-                        )
-
-                        if success:
-                            decode_profiling_active = True
-                            print("Decode profiling started")
-                        else:
-                            print("Failed to start decode profiling")
-
-                    # Check for decode phase end
-                    elif decode_profiling_active:
-                        should_stop = False
-
-                        if decode_profile_duration is not None:
-                            # Use fixed duration
-                            elapsed = current_snapshot.timestamp - decode_start_time
-                            if elapsed >= decode_profile_duration:
-                                should_stop = True
-                        else:
-                            # Use auto-detection
-                            if _detect_decode_phase_end_metrics(metrics_history, decode_start_time):
-                                should_stop = True
-
-                        if should_stop:
-                            print("Stopping decode profiler")
-                            # Stop profiler logic would go here
-                            break
-
-            # Start monitoring task
-            monitor_task = asyncio.create_task(monitor_and_profile())
+            monitor_task = asyncio.create_task(_monitor_and_profile(
+                profile_session, base_url, metrics_interval,
+                decode_profile_duration, metrics_history, request_func,
+                model_id, model_name, test_prompt, test_prompt_len,
+                test_output_len, logprobs, test_mm_content, ignore_eos,
+                extra_headers, extra_body
+            ))
 
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     # Clean up decode profiling
-    if profile_decode_only and 'monitor_task' in locals():
-        monitor_task.cancel()
-        try:
-            await monitor_task
-        except asyncio.CancelledError:
-            pass
-        await profile_session.close()
+    await _cleanup_decode_profiling(monitor_task, profile_session)
 
     if pbar is not None:
         pbar.close()
@@ -1155,13 +1211,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--metrics-interval",
         type=float,
         default=1.0,
-        help="Interval in seconds for metrics monitoring during decode profiling.",
+        help="Interval in seconds for metrics monitoring during "
+             "decode profiling.",
     )
     parser.add_argument(
         "--decode-profile-duration",
         type=float,
         default=None,
-        help="Duration in seconds for decode profiling. If not specified, uses auto-detection.",
+        help="Duration in seconds for decode profiling. "
+             "If not specified, uses auto-detection.",
     )
     parser.add_argument(
         "--save-result",
