@@ -445,7 +445,7 @@ def test_apc_single_prompt(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[4]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 @pytest.mark.parametrize("enforce_eager", [True])
@@ -504,6 +504,11 @@ def test_apc_single_prompt_block_align_alignment(
         # Retrieve the default mamba state block size
         mamba_block_size = vllm_model.llm.llm_engine.cache_config. \
             mamba_block_size
+
+    # In case the hybrid model does not have the
+    # "mamba_block_size" assume a fixed constant
+    if mamba_block_size is None:
+        mamba_block_size = 512
 
     mamba_block_size_multiplier = 10
     for offsets in [
@@ -665,6 +670,11 @@ def test_apc_multiple_prompts_block_align_alignment(
         # Retrieve the default mamba state block size
         mamba_block_size = vllm_model.llm.llm_engine.cache_config. \
             mamba_block_size
+
+    # In case the hybrid model does not have the
+    # "mamba_block_size" assume a fixed constant
+    if mamba_block_size is None:
+        mamba_block_size = 512
 
     mamba_block_size_multiplier = 10
     for offsets in [
