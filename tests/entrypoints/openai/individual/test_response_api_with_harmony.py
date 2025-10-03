@@ -700,6 +700,22 @@ async def test_function_calling_required(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_system_message_with_tools(client: OpenAI, model_name: str):
+    from vllm.entrypoints.harmony_utils import get_system_message
+
+    # Test with custom tools enabled - commentary channel should be available
+    sys_msg = get_system_message(with_custom_tools=True)
+    valid_channels = sys_msg.content[0].channel_config.valid_channels
+    assert "commentary" in valid_channels
+
+    # Test with custom tools disabled - commentary channel should be removed
+    sys_msg = get_system_message(with_custom_tools=False)
+    valid_channels = sys_msg.content[0].channel_config.valid_channels
+    assert "commentary" not in valid_channels
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_function_calling_full_history(client: OpenAI, model_name: str):
     tools = [{
         "type": "function",
