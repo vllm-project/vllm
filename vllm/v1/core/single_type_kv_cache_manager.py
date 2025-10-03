@@ -545,7 +545,7 @@ class MambaManager(SingleTypeKVCacheManager):
         assert dcp_world_size == 1, "DCP not support mamba now."
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
-        if kv_cache_spec.cache_strategy == "disabled":
+        if kv_cache_spec.enable_prefix_caching == False:
             return computed_blocks  #return empty list if cache is disabled
 
         max_num_blocks = max_length // kv_cache_spec.block_size
@@ -567,25 +567,17 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
-        # TODO: For "all" strategy, and potentially for "last"
-        #  we should already start removing initial blocks
+        # Here unused blocks may be freed up for running requests.
+        # Future enhancement: Free up all blocks that aren't needed by Mamba2
+        #  (for which find_longest_cache_hit returns block_pool.null_block)
         pass
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
-        assert isinstance(self.kv_cache_spec, MambaSpec)
-        if self.kv_cache_spec.cache_strategy == "disabled":
-            return 0
-
-        # Same as full attention logic:
-        blocks = self.req_to_blocks[request_id]
-        num_common_blocks = 0
-        for block in blocks:
-            if block.ref_cnt == num_running_requests:
-                num_common_blocks += 1
-            else:
-                break
-        return num_common_blocks
+        """
+        cascade attention is not supported by mamba
+        """
+        return 0
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
@@ -629,7 +621,7 @@ class MambaManager(SingleTypeKVCacheManager):
             num_tokens += (self.kv_cache_spec.block_size *
                            self.kv_cache_spec.num_speculative_blocks)
 
-        if self.kv_cache_spec.cache_strategy == "disabled":
+        if self.kv_cache_spec.enable_prefix_caching == False:
             new_blocks = super().allocate_new_blocks(request_id, num_tokens)
             assert len(self.req_to_blocks[request_id]) == 1, (
                 "MambaManager should only allocate 1 block for each request.")
@@ -641,14 +633,7 @@ class MambaManager(SingleTypeKVCacheManager):
         if num_new_blocks <= 0:
             return []
         else:
-            if num_new_blocks > 2 and \
-                self.kv_cache_spec.cache_strategy == "last":
-                # for the last strategy only - allocate 2 blocks:
-                #  one for block_size aligned state
-                #  and one for the last temporary state
-                new_blocks = self.block_pool.get_new_blocks(2)
-            else:
-                new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
             return new_blocks
 

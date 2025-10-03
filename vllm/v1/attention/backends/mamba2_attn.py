@@ -75,7 +75,7 @@ class Mamba2AttentionMetadataBuilder(
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models")
         assert isinstance(kv_cache_spec, MambaSpec)
-        if kv_cache_spec.cache_strategy == "all":
+        if kv_cache_spec.enable_prefix_caching:
             self.state_indices_tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,
                  cdiv(vllm_config.model_config.max_model_len,
@@ -129,17 +129,7 @@ class Mamba2AttentionMetadataBuilder(
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        if self.kv_cache_spec.cache_strategy == "disabled":
-            # Always return just a single block per each request:
-            state_indices_tensor = common_attn_metadata.block_table_tensor[:,
-                                                                           0]
-            # Additional cache-related varaiables:
-            current_last_token_block_idx = None
-            current_first_token_block_idx = None
-            last_computed_token_block_idx = None
-            last_computed_token_block_offset = None
-            seq_lens_completed = None
-        else:
+        if self.kv_cache_spec.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
 
@@ -168,6 +158,16 @@ class Mamba2AttentionMetadataBuilder(
             # -1 in case it's non-computed and causes later issues with indexing
             last_computed_token_block_idx = \
                 last_computed_token_block_idx.clamp(min=0)
+        else:
+            # Always return just a single block per each request:
+            state_indices_tensor = common_attn_metadata.block_table_tensor[:,
+                                                                           0]
+            # Additional cache-related varaiables:
+            current_last_token_block_idx = None
+            current_first_token_block_idx = None
+            last_computed_token_block_idx = None
+            last_computed_token_block_offset = None
+            seq_lens_completed = None
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -261,7 +261,7 @@ class Mamba2AttentionMetadataBuilder(
             state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
-            if self.kv_cache_spec.cache_strategy != 'disabled':
+            if self.kv_cache_spec.enable_prefix_caching:
                 self.current_last_token_block_idx[:num_decodes].copy_(
                     current_last_token_block_idx, non_blocking=True)
                 current_last_token_block_idx = \

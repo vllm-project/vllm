@@ -506,8 +506,7 @@ class MambaMixer2(MambaBase, CustomOp):
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
             mamba_block_size = attn_metadata.cache_spec.block_size
-            cache_strategy = attn_metadata.cache_spec.cache_strategy
-            cache_enabled = (cache_strategy != 'disabled')
+            cache_enabled = attn_metadata.cache_spec.enable_prefix_caching
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
