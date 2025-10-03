@@ -518,13 +518,20 @@ class FlexAttentionMetadata:
             block_mask_kwargs["compute_q_blocks"] = False
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
+    def _get_effective_mask_mod(self) -> Optional[_mask_mod_signature]:
+        """Return the mask_mod to use for block-mask materialization."""
+
+        mask_mod = self.mask_mod
+        if mask_mod is None:
+            return None
+        if self.causal and (self.doc_ids is None or self.doc_ids.numel() == 0):
+            return None
+        return mask_mod
+
     def build_block_mask(self) -> BlockMask:
-        if self.causal:
-            mask_mod = self.get_causal_mask_mod()
-            kv_len = self.total_cache_tokens
-        else:
-            mask_mod = self.get_bidirectional_mask_mod()
-            kv_len = self.num_actual_tokens
+        mask_mod = self._get_effective_mask_mod()
+        kv_len = (self.total_cache_tokens
+                  if self.causal else self.num_actual_tokens)
 
         if (self.num_reqs == 0 or self.num_actual_tokens == 0 or kv_len == 0
                 or self.doc_ids is None or self.doc_ids.numel() == 0):
@@ -533,29 +540,35 @@ class FlexAttentionMetadata:
             # (e.g. during CUDA graph capture we rebuild the mask with the
             # padded dimensions).
             return self._build_dense_block_mask(max(self.q_block_size, 1),
-                                                max(self.kv_block_size, 1))
-        else:
-            # NOTE: torch.compile(create_block_mask, ...) intermittently hits
-            # illegal memory access on large multi-GPU captures; stick to eager.
-            block_mask = create_block_mask(
-                mask_mod,
-                None,
-                None,
-                self.num_actual_tokens,
-                kv_len,
-                device=self.block_table.device,
-                BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
-            )
+                                                max(self.kv_block_size, 1),
+                                                mask_mod)
+
+        # NOTE: torch.compile(create_block_mask, ...) intermittently hits
+        # illegal memory access on large multi-GPU captures; stick to eager.
+        block_mask = create_block_mask(
+            mask_mod,
+            None,
+            None,
+            self.num_actual_tokens,
+            kv_len,
+            device=self.block_table.device,
+            BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
+        )
         return block_mask
 
-    def _build_dense_block_mask(self, q_len: int, kv_len: int) -> BlockMask:
+    def _build_dense_block_mask(
+        self,
+        q_len: int,
+        kv_len: int,
+        mask_mod: Optional[_mask_mod_signature],
+    ) -> BlockMask:
         """Create a dense block mask covering the provided logical lengths.
 
         This is used for warmup / dummy runs where we may not have meaningful
-        block-table metadata yet (e.g. CUDA Graph captures with zero active
+        block-table metadata yet (e.g. CUDA graph captures with zero active
         requests). The mask simply enables all KV blocks for the queried
-        sequence length and uses `mask_mod=None` to avoid additional tensor
-        allocations during capture.
+        sequence length without forcing additional allocations from PyTorch's
+        fallback implementations.
         """
 
         device = self.block_table.device
@@ -583,7 +596,7 @@ class FlexAttentionMetadata:
             full_kv_num_blocks=None,
             full_kv_indices=None,
             BLOCK_SIZE=(self.q_block_size, self.kv_block_size),
-            mask_mod=self.mask_mod,
+            mask_mod=mask_mod,
         )
         return block_mask
 
@@ -615,7 +628,11 @@ class FlexAttentionMetadata:
                 rebuilt = None
 
         if rebuilt is None:
-            rebuilt = self._build_dense_block_mask(q_len, kv_len)
+            rebuilt = self._build_dense_block_mask(
+                q_len,
+                kv_len,
+                self._get_effective_mask_mod(),
+            )
 
         self.block_mask = rebuilt
         return rebuilt
@@ -642,10 +659,8 @@ class FlexAttentionMetadata:
 
 class FlexAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlexAttentionMetadata]):
-    # TODO: Re-enable CUDA graph support once PyTorch's FlexAttention
-    # fallback stops allocating tensors during capture. The current fallback
-    # instantiates new GPU scalars (e.g. -inf), which breaks capture.
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    # CUDA graphs are supported when we can stay on the direct mask build path.
+    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -663,6 +678,10 @@ class FlexAttentionMetadataBuilder(
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.direct_build: bool = is_torch_equal_or_newer("2.9.0.dev0")
+        self.cudagraph_support = (
+            AttentionCGSupport.ALWAYS if self.direct_build else
+            AttentionCGSupport.NEVER)
+
         self.q_block_size: int = 16 if is_torch_equal_or_newer(
             "2.9.0.dev0") else 128
         self.kv_block_size: int = 16 if is_torch_equal_or_newer(
