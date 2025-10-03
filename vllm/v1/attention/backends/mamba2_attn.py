@@ -122,11 +122,11 @@ class Mamba2AttentionMetadata:
     last_chunk_indices_p: Optional[torch.Tensor]
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
-    current_last_token_block_idx: torch.Tensor
-    current_first_token_block_idx: torch.Tensor
-    last_computed_token_block_idx: torch.Tensor
-    context_lens: torch.Tensor
-    last_computed_token_block_offset: torch.Tensor
+    current_last_idx: torch.Tensor
+    current_first_idx_p: torch.Tensor
+    last_state_idx: torch.Tensor
+    context_lens_p: torch.Tensor
+    last_computed_offset_p: torch.Tensor
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: Optional[dict] = None
@@ -151,27 +151,27 @@ class Mamba2AttentionMetadataBuilder(
                 dtype=torch.int32,
                 device=device,
             )
-            self.current_last_token_block_idx = torch.empty(
+            self.current_last_idx = torch.empty(
                 (self.decode_cudagraph_max_bs, ),
                 dtype=torch.int32,
                 device=device,
             )
-            self.current_first_token_block_idx = torch.empty(
+            self.current_first_idx_p = torch.empty(
                 (self.decode_cudagraph_max_bs, ),
                 dtype=torch.int32,
                 device=device,
             )
-            self.last_computed_token_block_idx = torch.empty(
+            self.last_state_idx = torch.empty(
                 (self.decode_cudagraph_max_bs, ),
                 dtype=torch.int32,
                 device=device,
             )
-            self.context_lens = torch.empty(
+            self.context_lens_p = torch.empty(
                 (self.decode_cudagraph_max_bs, ),
                 dtype=torch.int32,
                 device=device,
             )
-            self.last_computed_token_block_offset = torch.empty(
+            self.last_computed_offset_p = torch.empty(
                 (self.decode_cudagraph_max_bs, ),
                 dtype=torch.int32,
                 device=device,
@@ -205,10 +205,10 @@ class Mamba2AttentionMetadataBuilder(
             seq_lens_pending = (
                 torch.roll(common_attn_metadata.query_start_loc, -1, -1) -
                 common_attn_metadata.query_start_loc)[:-1]
-            context_lens = common_attn_metadata.seq_lens - \
+            context_lens_p = common_attn_metadata.seq_lens - \
                                  seq_lens_pending
-            last_computed_token_block_offset = \
-                context_lens % mamba_block_size
+            last_computed_offset_p = \
+                context_lens_p % mamba_block_size
             # Indices: last_computed <= current_first <= current_last
             # Cases:
             #  last_computed == current_first  if last state was partially
@@ -216,25 +216,24 @@ class Mamba2AttentionMetadataBuilder(
             #  current_first == current_last   if no block crossing occurs, and
             #                                  only one state will be stored
             # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
-            current_last_token_block_idx = cdiv(
-                context_lens + seq_lens_pending, mamba_block_size) - 1
-            current_first_token_block_idx = cdiv(context_lens + 1,
-                                                 mamba_block_size) - 1
-            last_computed_token_block_idx = cdiv(context_lens,
-                                                 mamba_block_size) - 1
+            current_last_idx = cdiv(context_lens_p + seq_lens_pending,
+                                    mamba_block_size) - 1
+            current_first_idx_p = cdiv(context_lens_p + 1,
+                                       mamba_block_size) - 1
+            last_state_idx = cdiv(context_lens_p, mamba_block_size) - 1
             # -1 in case it's non-computed and causes later issues with indexing
-            last_computed_token_block_idx = \
-                last_computed_token_block_idx.clamp(min=0)
+            last_state_idx = \
+                last_state_idx.clamp(min=0)
         else:
             # Always return just a single block per each request:
             state_indices_tensor = common_attn_metadata.block_table_tensor[:,
                                                                            0]
             # Additional cache-related varaiables:
-            current_last_token_block_idx = None
-            current_first_token_block_idx = None
-            last_computed_token_block_idx = None
-            last_computed_token_block_offset = None
-            context_lens = None
+            current_last_idx = None
+            current_first_idx_p = None
+            last_state_idx = None
+            last_computed_offset_p = None
+            context_lens_p = None
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -329,34 +328,34 @@ class Mamba2AttentionMetadataBuilder(
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
             if self.vllm_config.cache_config.enable_prefix_caching:
-                self.current_last_token_block_idx[:num_decodes].copy_(
-                    current_last_token_block_idx, non_blocking=True)
-                current_last_token_block_idx = \
-                    self.current_last_token_block_idx[:num_input_tokens]
-                current_last_token_block_idx[num_decodes:] = 0
+                self.current_last_idx[:num_decodes].copy_(current_last_idx,
+                                                          non_blocking=True)
+                current_last_idx = \
+                    self.current_last_idx[:num_input_tokens]
+                current_last_idx[num_decodes:] = 0
 
-                self.current_first_token_block_idx[:num_decodes].copy_(
-                    current_first_token_block_idx, non_blocking=True)
-                current_first_token_block_idx = \
-                    self.current_first_token_block_idx[:num_input_tokens]
-                current_first_token_block_idx[num_decodes:] = 0
+                self.current_first_idx_p[:num_decodes].copy_(
+                    current_first_idx_p, non_blocking=True)
+                current_first_idx_p = \
+                    self.current_first_idx_p[:num_input_tokens]
+                current_first_idx_p[num_decodes:] = 0
 
-                self.last_computed_token_block_idx[:num_decodes].copy_(
-                    last_computed_token_block_idx, non_blocking=True)
-                last_computed_token_block_idx = \
-                    self.last_computed_token_block_idx[:num_input_tokens]
-                last_computed_token_block_idx[num_decodes:] = 0
+                self.last_state_idx[:num_decodes].copy_(last_state_idx,
+                                                        non_blocking=True)
+                last_state_idx = \
+                    self.last_state_idx[:num_input_tokens]
+                last_state_idx[num_decodes:] = 0
 
-                self.context_lens[:num_decodes].copy_(context_lens,
-                                                      non_blocking=True)
-                context_lens = self.context_lens[:num_input_tokens]
-                context_lens[num_decodes:] = 0
+                self.context_lens_p[:num_decodes].copy_(context_lens_p,
+                                                        non_blocking=True)
+                context_lens_p = self.context_lens_p[:num_input_tokens]
+                context_lens_p[num_decodes:] = 0
 
-                self.last_computed_token_block_offset[:num_decodes].copy_(
-                    last_computed_token_block_offset, non_blocking=True)
-                last_computed_token_block_offset = \
-                    self.last_computed_token_block_offset[:num_input_tokens]
-                last_computed_token_block_offset[num_decodes:] = 0
+                self.last_computed_offset_p[:num_decodes].copy_(
+                    last_computed_offset_p, non_blocking=True)
+                last_computed_offset_p = \
+                    self.last_computed_offset_p[:num_input_tokens]
+                last_computed_offset_p[num_decodes:] = 0
 
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,
@@ -375,10 +374,10 @@ class Mamba2AttentionMetadataBuilder(
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
-            current_last_token_block_idx=current_last_token_block_idx,
-            current_first_token_block_idx=current_first_token_block_idx,
-            last_computed_token_block_idx=last_computed_token_block_idx,
-            context_lens=context_lens,
-            last_computed_token_block_offset=last_computed_token_block_offset,
+            current_last_idx=current_last_idx,
+            current_first_idx_p=current_first_idx_p,
+            last_state_idx=last_state_idx,
+            context_lens_p=context_lens_p,
+            last_computed_offset_p=last_computed_offset_p,
         )
         return attn_metadata

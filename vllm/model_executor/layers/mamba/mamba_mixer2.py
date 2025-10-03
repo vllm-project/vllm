@@ -582,25 +582,15 @@ class MambaMixer2(MambaBase, CustomOp):
 
             # Split decodes and prefills:
             last_state_idx_d, last_state_idx_p = torch.split(
-                attn_metadata.last_computed_token_block_idx,
-                [num_decodes, num_prefills],
+                attn_metadata.last_state_idx, [num_decodes, num_prefills],
                 dim=0)
             current_last_idx_d, current_last_idx_p = torch.split(
-                attn_metadata.current_last_token_block_idx,
-                [num_decodes, num_prefills],
+                attn_metadata.current_last_idx, [num_decodes, num_prefills],
                 dim=0)
             # Prefill-only variables:
-            _, current_first_idx_p = torch.split(
-                attn_metadata.current_first_token_block_idx,
-                [num_decodes, num_prefills],
-                dim=0)
-            _, context_lens_p = torch.split(attn_metadata.context_lens,
-                                            [num_decodes, num_prefills],
-                                            dim=0)
-            _, last_computed_offset_p = torch.split(
-                attn_metadata.last_computed_token_block_offset,
-                [num_decodes, num_prefills],
-                dim=0)
+            current_first_idx_p = attn_metadata.current_first_idx_p
+            context_lens_p = attn_metadata.context_lens_p
+            last_computed_offset_p = attn_metadata.last_computed_offset_p
         else:
             last_state_idx_d, last_state_idx_p = None, None
             current_last_idx_d, current_last_idx_p = None, None
