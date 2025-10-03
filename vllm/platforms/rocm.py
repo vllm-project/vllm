@@ -281,6 +281,9 @@ class RocmPlatform(Platform):
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """
+        if envs.VLLM_SKIP_INTERCONNECT_CHECK:
+            logger.info("Skipping interconnect check.")
+            return True
         handles = [
             amdsmi_get_processor_handles()[i] for i in physical_device_ids
         ]
