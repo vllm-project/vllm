@@ -46,6 +46,7 @@ from transformers.models.glm4v.video_processing_glm4v import (
     Glm4vVideoProcessor)
 from transformers.video_utils import VideoMetadata
 
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_world_size,
@@ -69,7 +70,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 

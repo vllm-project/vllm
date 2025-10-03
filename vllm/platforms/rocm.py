@@ -14,10 +14,13 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
+else:
+    _Backend = None
 
 logger = init_logger(__name__)
 
@@ -182,7 +185,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> _Backend:
+                             dtype: torch.dtype) -> "_Backend":
+        from vllm.attention.backends.registry import _Backend
         if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
                 and on_gfx9()):
             # Note: AITER FA is only supported for Qwen-VL models.
@@ -196,6 +200,7 @@ class RocmPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink, use_sparse) -> str:
+        from vllm.attention.backends.registry import _Backend
         if use_sparse:
             raise NotImplementedError(
                 "Sparse Attention is not supported on ROCm.")
