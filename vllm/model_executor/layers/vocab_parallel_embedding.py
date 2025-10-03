@@ -54,7 +54,14 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
 
     def embedding(self, layer: torch.nn.Module,
                   input_: torch.Tensor) -> torch.Tensor:
-        return F.embedding(input_, layer.weight)
+        # Handle -1 padding values that come from attention masking in
+        # speculative decoding. These represent tokens that exceed max_model_len
+        # and should be ignored in final output. Clamp to valid token range to
+        # prevent embedding lookup errors.
+        vocab_size = layer.weight.size(0)
+        input_clamped = torch.clamp(input_, min=0, max=vocab_size - 1)
+
+        return F.embedding(input_clamped, layer.weight)
 
 
 def pad_vocab_size(vocab_size: int,
