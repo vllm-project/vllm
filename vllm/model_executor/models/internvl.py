@@ -514,7 +514,7 @@ def preprocess_images(
     batch_sizes = []
     for img in images:
         img_info = get_image_info(img)
-        if img_info['format'] != 'JPEG' and img_info['mode'] != 'RGB':
+        if not (img_info['format'] == 'JPEG' and img_info['mode'] == 'RGB'):
             raise ValueError(f"HPU media pipeline only supports JPEG images in RGB mode. Detected format={img_info['format']}, mode={img_info['mode']}")
         if img_size==None:
             img_size = img_info['size']
@@ -1605,7 +1605,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
             self, **kwargs: object) -> Optional[InternVLVideoPixelInputs]:
         pixel_values_flat_video = kwargs.pop("pixel_values_flat_video", None)
         video_num_patches = kwargs.pop("video_num_patches", None)
-        video_embeds = kwargs.pop("image_embeds", None)
+        video_embeds = kwargs.pop("video_embeds", None)
 
         if pixel_values_flat_video is None and video_embeds is None:
             return None
