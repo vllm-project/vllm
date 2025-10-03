@@ -650,11 +650,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # then use it to update actual num_computed_tokens of each request.
         if self.valid_sampled_token_count_event is not None:
             self.valid_sampled_token_count_event.synchronize()
-        valid_sampled_token_count = []
-        if (self.input_batch.prev_sampled_token_ids is not None
-                and self.num_spec_tokens > 0):
-            valid_sampled_token_count = self.valid_sampled_token_count_cpu[  # noqa
-                :self.input_batch.prev_sampled_token_ids.shape[0]].tolist()
+        valid_sampled_token_count = self.valid_sampled_token_count_cpu.tolist()
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = self._update_computed_tokens(
@@ -750,7 +746,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # in the async scheduling mode, token_ids_cpu assigned from
             # spec_token_ids are placeholders and will be overwritten in
             # _prepare_input_ids.
-            if spec_token_ids and not self.use_async_scheduling:
+            if spec_token_ids:
                 num_spec_tokens = len(spec_token_ids)
                 start_index = self.input_batch.num_tokens_no_spec[req_index]
                 end_token_index = start_index + num_spec_tokens
@@ -977,12 +973,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
         num_commmon_tokens = 0
 
-        def handle_prev_common_reqs(prev_index_, req_id_):
+        def handle_prev_common_reqs(prev_index, req_id):
             nonlocal indices_match, max_flattened_index, num_commmon_tokens
-            prev_common_req_indices.append(prev_index_)
+            prev_common_req_indices.append(prev_index)
             # We need to compute the flattened input_ids index of the
             # last token in each common request.
-            draft_len = len(spec_tokens.get(req_id_, []))
+            draft_len = len(spec_tokens.get(req_id, []))
             flattened_index = cu_num_tokens[cur_index].item() - 1
             # example: cu_num_tokens = [2, 5, 8], draft_tokens = [1, 2, 2]
             # sample_flattened_indices = [0, 2, 5]
@@ -990,7 +986,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sample_flattened_indices.append(flattened_index - draft_len)
             spec_flattened_indices.extend(
                 range(flattened_index - draft_len + 1, flattened_index + 1))
-            start = prev_index_ * self.num_spec_tokens
+            start = prev_index * self.num_spec_tokens
             # prev_draft_token_indices is used to find which draft_tokens_id
             # should be copied to input_ids
             # example: prev draft_tokens_id [[1,2], [3,4], [5, 6]]
@@ -998,7 +994,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # draft_len of each request [1, 2, 1]
             # then prev_draft_token_indices is [0,   2, 3,   4]
             prev_draft_token_indices.extend(range(start, start + draft_len))
-            indices_match &= (prev_index_ == flattened_index)
+            indices_match &= (prev_index == flattened_index)
             max_flattened_index = max(max_flattened_index, flattened_index)
             num_commmon_tokens += 1
 
@@ -1075,7 +1071,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.input_ids.gpu.scatter_(
             dim=0,
             index=sampled_tokens_index_tensor,
-            src=prev_sampled_token_ids[prev_common_req_indices_tensor, 0])
+            src=self.input_batch.prev_sampled_token_ids[
+                prev_common_req_indices_tensor, 0])
 
         # scatter the draft tokens after the sampled tokens are scattered.
         if self._draft_token_ids is None or not spec_flattened_indices:
@@ -2438,9 +2435,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
 
-                req_id = req_ids[req_idx]
-                req_state = self.requests[req_id]
-                req_state.output_token_ids.extend(sampled_ids)
+            req_id = req_ids[req_idx]
+            req_state = self.requests[req_id]
+            req_state.output_token_ids.extend(sampled_ids)
 
         return (
             num_nans_in_logits,

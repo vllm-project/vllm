@@ -63,13 +63,19 @@ class AsyncScheduler(Scheduler):
         request: Request,
         scheduled_spec_token_ids: list[int],
         generated_token_ids: list[int],
-        spec_decoding_status: Optional[SpecDecodingStats],
+        spec_decoding_stats: Optional[SpecDecodingStats],
     ):
+        """Update the computed tokens for each request,  which is necessary
+        for spec decoding. in sync scheduler, we need to revert 
+        num_computed_tokens by minus num_rejected tokens, 
+        but in async scheduler, we also need to revert num_output_placeholders
+        by minus num_rejected tokens for spec decoding.
+        """
         num_draft_tokens = len(scheduled_spec_token_ids)
         num_accepted = len(generated_token_ids) - 1
         num_rejected = num_draft_tokens - num_accepted
         # when enable spec decoding, the number of num_output_placeholders
-        # is incrased by num_spec_tokens in _update_after_schedule.
+        # is increased by num_spec_tokens in _update_after_schedule.
         # update num_output_placeholders here to reflect the actual number
         # of accepted output tokens.
         request.num_output_placeholders -= num_rejected
@@ -80,7 +86,7 @@ class AsyncScheduler(Scheduler):
         # tokens.
         request.num_computed_tokens -= num_rejected
         spec_decoding_stats = self.make_spec_decoding_stats(
-            spec_decoding_status,
+            spec_decoding_stats,
             num_draft_tokens=num_draft_tokens,
             num_accepted_tokens=num_accepted,
         )

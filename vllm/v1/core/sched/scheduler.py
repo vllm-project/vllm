@@ -281,7 +281,7 @@ class Scheduler(SchedulerInterface):
                 preempted_req.status = RequestStatus.PREEMPTED
                 preempted_req.num_computed_tokens = 0
                 preempted_req.num_preemptions += 1
-                # both sync and async scheduling don'use spec_token_ids
+                # both sync and async scheduling don't use spec_token_ids
                 # in waiting queue, so we can just clear it here.
                 preempted_req.spec_token_ids.clear()
                 if self.log_stats:
