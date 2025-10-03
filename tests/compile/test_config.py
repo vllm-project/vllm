@@ -157,6 +157,7 @@ def test_splitting_ops_dynamic():
 
     # When attn_fusion pass enabled.
     config = VllmConfig(compilation_config=CompilationConfig(
+        level=CompilationLevel.PIECEWISE,
         pass_config={
             "enable_attn_fusion": True,
             "enable_noop": True
