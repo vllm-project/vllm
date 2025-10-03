@@ -37,7 +37,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self._raise_if_mrope()
 
     def _raise_if_multimodal(self):
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
             raise NotImplementedError("Speculative Decoding with draft models "
                                       "does not support multimodal models yet")
 
