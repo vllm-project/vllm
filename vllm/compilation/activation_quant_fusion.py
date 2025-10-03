@@ -37,6 +37,36 @@ if silu_and_mul_nvfp4_quant_supported:
         kNvfp4Quant] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
 
 
+class ActivationQuantPattern(ABC):
+    """
+    The base class for Activation+Quant fusions.
+    Should not be used directly.
+    """
+
+    def __init__(
+        self,
+        quant_key: QuantKey,
+    ):
+        self.quant_key = quant_key
+        self.quant_dtype = quant_key.dtype
+
+        assert self.quant_key in QUANT_OPS, \
+            f"unsupported quantization scheme {self.quant_key}"
+        self.QUANT_OP = QUANT_OPS[self.quant_key]
+
+        assert self.quant_key in FUSED_OPS, \
+            f"unsupported fusion scheme {self.quant_key}"
+        self.FUSED_OP = FUSED_OPS[self.quant_key]
+
+    def empty_quant(self, *args, **kwargs):
+        kwargs = {'dtype': self.quant_dtype, 'device': "cuda", **kwargs}
+        return torch.empty(*args, **kwargs)
+
+    @abstractmethod
+    def register(self, pm_pass: PatternMatcherPass):
+        raise NotImplementedError
+
+
 def is_rocm_aiter_linear_enabled() -> bool:
     return current_platform.is_rocm(
     ) and envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
@@ -86,7 +116,7 @@ if is_rocm_aiter_linear_enabled():
     AITER_BLOCK_LINEAR_OP = \
         torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale.default
 
-    class AiterSiluMulFp8BlockQuantPattern:
+    class AiterSiluMulFp8BlockQuantPattern(ActivationQuantPattern):
 
         def __init__(self):
             pass
@@ -131,36 +161,6 @@ if is_rocm_aiter_linear_enabled():
 
             register_replacement(pattern, replacement, inputs, fwd_only,
                                  pm_pass)
-
-
-class ActivationQuantPattern(ABC):
-    """
-    The base class for Activation+Quant fusions.
-    Should not be used directly.
-    """
-
-    def __init__(
-        self,
-        quant_key: QuantKey,
-    ):
-        self.quant_key = quant_key
-        self.quant_dtype = quant_key.dtype
-
-        assert self.quant_key in QUANT_OPS, \
-            f"unsupported quantization scheme {self.quant_key}"
-        self.QUANT_OP = QUANT_OPS[self.quant_key]
-
-        assert self.quant_key in FUSED_OPS, \
-            f"unsupported fusion scheme {self.quant_key}"
-        self.FUSED_OP = FUSED_OPS[self.quant_key]
-
-    def empty_quant(self, *args, **kwargs):
-        kwargs = {'dtype': self.quant_dtype, 'device': "cuda", **kwargs}
-        return torch.empty(*args, **kwargs)
-
-    @abstractmethod
-    def register(self, pm_pass: PatternMatcherPass):
-        raise NotImplementedError
 
 
 class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
@@ -286,7 +286,11 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self):
-        return VllmInductorPass.hash_source(self, ActivationQuantPattern,
-                                            SiluMulFp8StaticQuantPattern,
-                                            SiluMulNvfp4QuantPattern,
-                                            AiterSiluMulFp8BlockQuantPattern)
+        fusion_patterns = [
+            ActivationQuantPattern,
+            SiluMulFp8StaticQuantPattern,
+            SiluMulNvfp4QuantPattern,
+        ]
+        if is_rocm_aiter_linear_enabled():
+            fusion_patterns.append(AiterSiluMulFp8BlockQuantPattern)
+        return VllmInductorPass.hash_source(self, *fusion_patterns)
