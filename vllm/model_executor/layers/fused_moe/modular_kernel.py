@@ -510,7 +510,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
         Inputs:
         - M_chunk: current number of tokens due to chunking, otherwise same as
-          M_full.
+          M_full, generally used for intermediate workspace shapes.
         - M_full: full number of tokens, generally used to compute output shape.
         - N: Row (or column) dimension of expert weights.
         - K: hidden dimension
