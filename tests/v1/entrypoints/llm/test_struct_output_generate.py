@@ -123,13 +123,10 @@ def test_structured_output(
     if current_platform.is_tpu() and speculative_config:
         pytest.skip("TPU does not support speculative decoding")
 
-    # Don't use eager execution on TPUs because we want to test for no
-    # recompilation at runtime
-    enforce_eager = bool(not current_platform.is_tpu())
     # Use a single LLM instance for several scenarios to
     # speed up the test suite.
     llm = LLM(model=model_name,
-              enforce_eager=enforce_eager,
+              enforce_eager=True,
               max_model_len=1024,
               structured_outputs_config=dict(backend=backend,
                                              disable_any_whitespace=backend

@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
+from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 if TYPE_CHECKING:
@@ -142,6 +143,11 @@ try:
                 # but may still be finished requests.
                 assert not output or not output.req_ids
                 output = scheduler_output, None
+            # Ensure outputs crossing Ray compiled DAG are serializable.
+            # AsyncModelRunnerOutput holds CUDA events and cannot be
+            # pickled.
+            if isinstance(output, AsyncModelRunnerOutput):
+                output = output.get_output()
             return output
 
         def override_env_vars(self, vars: Dict[str, str]):

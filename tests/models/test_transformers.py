@@ -66,6 +66,7 @@ def check_implementation(
     [
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
         ("hmellor/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
+        ("allenai/OLMoE-1B-7B-0924", "transformers"),  # MoE
     ])  # trust_remote_code=True by default
 def test_models(
     hf_runner: type[HfRunner],
@@ -74,6 +75,14 @@ def test_models(
     model: str,
     model_impl: str,
 ) -> None:
+    import transformers
+    from packaging.version import Version
+    installed = Version(transformers.__version__)
+    required = Version("4.57.0.dev0")
+    if model == "allenai/OLMoE-1B-7B-0924" and installed < required:
+        pytest.skip("MoE models with the Transformers backend require "
+                    f"transformers>={required}, but got {installed}")
+
     check_implementation(hf_runner,
                          vllm_runner,
                          example_prompts,
