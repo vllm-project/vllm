@@ -178,6 +178,9 @@ class XPUPlatform(Platform):
     def support_static_graph_mode(cls) -> bool:
         return False
 
+    def is_sleep_mode_available(self) -> bool:
+        return True
+
     @classmethod
     def is_pin_memory_available(cls):
         return True
