@@ -3,6 +3,7 @@
 
 import weakref
 from collections.abc import Sequence
+from contextlib import nullcontext
 from copy import deepcopy
 from typing import Callable, Union
 
@@ -16,6 +17,9 @@ from vllm.compilation.inductor_pass import InductorPass
 from vllm.compilation.pass_manager import with_pattern_match_debug
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.logger import init_logger
+
+logger = init_logger("vllm.tests.compile.backend")
 
 
 class LazyInitPass(InductorPass):
@@ -55,16 +59,19 @@ class TestBackend:
         self.inductor_config["post_grad_custom_post_pass"] = self.post_pass
 
         if debug_dump_path := vllm_config.compile_debug_dump_path():
-            self.ctx = depyf.prepare_debug(debug_dump_path.as_posix())
-            self.ctx.__enter__()
+            logger.debug("Dumping depyf output to %s", debug_dump_path)
+            self.debug_ctx = depyf.prepare_debug(debug_dump_path.as_posix())
         else:
-            self.ctx = None
+            self.debug_ctx = nullcontext()
 
     def __call__(self, graph: fx.GraphModule, example_inputs):
         self.graph_pre_compile = deepcopy(graph)
         from torch._inductor.compile_fx import compile_fx
 
-        return compile_fx(graph, example_inputs, config_patches=self.inductor_config)
+        with self.debug_ctx:
+            return compile_fx(
+                graph, example_inputs, config_patches=self.inductor_config
+            )
 
     @with_pattern_match_debug
     def post_pass(self, graph: fx.Graph):
@@ -82,9 +89,6 @@ class TestBackend:
         lazy_format_graph_code("graph_post_pass", graph.owning_module)
         # assign by reference, will reflect the final state of the graph
         self.final_graph = graph
-
-        if self.ctx is not None:
-            self.ctx.__exit__(None, None, None)
 
     def check_before_ops(self, ops: Sequence[OpOverload], fully_replaced=True):
         for op in ops:
