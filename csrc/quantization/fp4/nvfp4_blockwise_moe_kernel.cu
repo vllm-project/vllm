@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "core/registration.h"
+
 #include <torch/all.h>
 #include <cutlass/arch/arch.h>
 
@@ -417,4 +419,8 @@ void cutlass_fp4_group_mm(
       "be compiled with ENABLE_NVFP4_SM100 for SM100+ and CUDA "
       "12.8 or above.");
 #endif
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("cutlass_fp4_group_mm", &cutlass_fp4_group_mm);
 }
