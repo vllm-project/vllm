@@ -449,7 +449,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         'max_tokens is deprecated in favor of the max_completion_tokens field')
     max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
-    presence_penalty: Optional[float] = 0.0
+    presence_penalty: Optional[float] = None
     response_format: Optional[AnyResponseFormat] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: Optional[Union[str, list[str]]] = []
@@ -670,6 +670,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
         "min_p": 0.0,
+        "presence_penalty": 0.0,
     }
 
     def to_beam_search_params(
@@ -715,6 +716,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if (min_p := self.min_p) is None:
             min_p = default_sampling_params.get(
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get(
+                "presence_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["presence_penalty"],
+            )
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
@@ -769,7 +775,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
-            presence_penalty=self.presence_penalty,
+            presence_penalty=presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
             temperature=temperature,
@@ -1045,7 +1051,7 @@ class CompletionRequest(OpenAIBaseModel):
     logprobs: Optional[int] = None
     max_tokens: Optional[int] = 16
     n: int = 1
-    presence_penalty: Optional[float] = 0.0
+    presence_penalty: Optional[float] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
     stop: Optional[Union[str, list[str]]] = []
     stream: Optional[bool] = False
@@ -1205,6 +1211,7 @@ class CompletionRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
         "min_p": 0.0,
+        "presence_penalty": 0.0,
     }
 
     def to_beam_search_params(
@@ -1257,6 +1264,11 @@ class CompletionRequest(OpenAIBaseModel):
         if (min_p := self.min_p) is None:
             min_p = default_sampling_params.get(
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get(
+                "presence_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["presence_penalty"],
+            )
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
@@ -1289,7 +1301,7 @@ class CompletionRequest(OpenAIBaseModel):
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
-            presence_penalty=self.presence_penalty,
+            presence_penalty=presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
             temperature=temperature,
