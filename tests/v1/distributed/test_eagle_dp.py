@@ -33,36 +33,49 @@ async def test_run_eagle_dp(use_vllm_v1):
         data_parallel_size=DP_SIZE,
         data_parallel_backend="mp",  # ray takes more time
         trust_remote_code=True,
-        speculative_config={
-            "model": draft_model,
-            "method": "eagle",
-            "num_speculative_tokens": 3,
-        })
+    )
 
-    if not current_platform.supports_v1(engine_args.create_model_config()):
+    eagle_engine_args = engine_args.replace(speculative_config={
+        "model": draft_model,
+        "method": "eagle",
+        "num_speculative_tokens": 3,
+    })
+
+    if not current_platform.supports_v1(
+            eagle_engine_args.create_model_config()):
         pytest.skip(reason="Requires V1-supporting platform.",
                     allow_module_level=True)
 
-    async with AsyncExitStack() as after:
-        engine = AsyncLLM.from_engine_args(engine_args)
-        after.callback(engine.shutdown)
+    prompt = "This is a test of data parallel with eagle"
+    num_expected_tokens = 100
+    sampling_params = SamplingParams(min_tokens=num_expected_tokens,
+                                     max_tokens=num_expected_tokens,
+                                     ignore_eos=True,
+                                     output_kind=RequestOutputKind.FINAL_ONLY,
+                                     temperature=0)
 
-        prompt = "This is a test of data parallel with eagle"
-        num_expected_tokens = 100
-        sampling_params = SamplingParams(
-            min_tokens=num_expected_tokens,
-            max_tokens=num_expected_tokens,
-            ignore_eos=True,
-            output_kind=RequestOutputKind.FINAL_ONLY,
-            temperature=0)
+    async def generate_with_timeout(given_engine: AsyncLLM):
+        async for out in given_engine.generate(
+                request_id="test-eagle-dp",
+                prompt=prompt,
+                sampling_params=sampling_params):
+            token_ids = out.outputs[0].token_ids
+            assert len(token_ids) == num_expected_tokens
+            return token_ids
 
-        async def generate_with_timeout():
-            async for out in engine.generate(request_id="eagle-dp",
-                                             prompt=prompt,
-                                             sampling_params=sampling_params):
-                num_tokens = len(out.outputs[0].token_ids)
-                assert num_tokens == num_expected_tokens
+    async def engine_create_and_generate(engine_args: AsyncEngineArgs):
+        async with AsyncExitStack() as after:
+            engine = AsyncLLM.from_engine_args(engine_args)
+            after.callback(engine.shutdown)
 
-        await asyncio.wait_for(generate_with_timeout(), timeout=30)
+            token_ids = await asyncio.wait_for(generate_with_timeout(engine),
+                                               timeout=30)
 
-        assert not engine.output_processor.has_unfinished_requests()
+            assert not engine.output_processor.has_unfinished_requests()
+        return token_ids
+
+    token_ids_with_eagle = await engine_create_and_generate(eagle_engine_args)
+    token_ids_no_eagle = await engine_create_and_generate(engine_args)
+
+    # Test for correctness
+    assert token_ids_with_eagle == token_ids_no_eagle
