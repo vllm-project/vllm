@@ -212,7 +212,7 @@ def test_resolve_operator_overload():
             is torch.ops.aten.mm.default)
     with pytest.raises(ValueError):
         _parse_operator_name("flash_attention")
-    assert (_resolve_operator_overload("aten::addmm.default")
+    assert (_resolve_operator_overload("aten.addmm.default")
             is torch.ops.aten.addmm.default)
 
     with pytest.raises(ValueError):
