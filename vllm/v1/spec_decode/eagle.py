@@ -580,10 +580,28 @@ class EagleProposer:
             causal=True,
         )
 
+        # NOTE(Tomas Ruiz): The update has no effect?
+        # Before and after are always the same
+        # Is the update only a shallow object copy?
+        b = common_attn_metadata
+        a = spec_common_attn_metadata
+        assert b.query_start_loc.eq(a.query_start_loc).all()
+        assert b.query_start_loc_cpu.eq(a.query_start_loc_cpu).all()
+        assert b.seq_lens.eq(a.seq_lens).all()
+        assert b.seq_lens_cpu.eq(a.seq_lens_cpu).all()
+        assert b.num_computed_tokens_cpu.eq(a.num_computed_tokens_cpu).all()
+        assert b.num_reqs == a.num_reqs
+        assert b.num_actual_tokens == a.num_actual_tokens
+        assert b.max_query_len == a.max_query_len
+        assert b.max_seq_len == a.max_seq_len
+        assert b.block_table_tensor.eq(a.block_table_tensor).all()
+        assert b.slot_mapping.eq(a.slot_mapping).all()
+        assert b.causal == a.causal
+
         token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1 \
             - num_rejected_tokens_gpu
 
-        return spec_common_attn_metadata, token_indices, token_indices_to_sample
+        return common_attn_metadata, token_indices, token_indices_to_sample
 
     def propose_tree(
         self,
