@@ -345,7 +345,9 @@ def test_random_mm_bucket_config_not_mutated(
 
 
 @pytest.mark.benchmark
-def test_random_mm_video_sampling(hf_tokenizer: PreTrainedTokenizerBase) -> None:
+def test_random_mm_video_sampling(
+    hf_tokenizer: PreTrainedTokenizerBase
+) -> None:
     """Test video sampling functionality in RandomMultiModalDataset."""
     ds = RandomMultiModalDataset(random_seed=42)
     
@@ -395,7 +397,9 @@ def test_random_mm_video_sampling(hf_tokenizer: PreTrainedTokenizerBase) -> None
 
 
 @pytest.mark.benchmark
-def test_random_mm_video_only_sampling(hf_tokenizer: PreTrainedTokenizerBase) -> None:
+def test_random_mm_video_only_sampling(
+        hf_tokenizer: PreTrainedTokenizerBase
+) -> None:
     """Test sampling with only video buckets."""
     ds = RandomMultiModalDataset(random_seed=42)
     
@@ -428,7 +432,9 @@ def test_random_mm_video_only_sampling(hf_tokenizer: PreTrainedTokenizerBase) ->
 
 
 @pytest.mark.benchmark
-def test_random_mm_video_deterministic_sampling(hf_tokenizer: PreTrainedTokenizerBase) -> None:
+def test_random_mm_video_deterministic_sampling(
+        hf_tokenizer: PreTrainedTokenizerBase
+) -> None:
     """Test that video sampling is deterministic with same seed."""
     seed = 123
     ds_a = RandomMultiModalDataset(random_seed=seed)
