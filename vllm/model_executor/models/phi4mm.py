@@ -11,6 +11,7 @@ from transformers import (BatchFeature, PretrainedConfig, ProcessorMixin,
                           SequenceFeatureExtractor, SiglipVisionConfig)
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -749,6 +750,7 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
@@ -756,14 +758,19 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
+        image_overrides = mm_options.get("image") if mm_options else None
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         mm_data = {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images),
+                                   num_images=num_images,
+                                   overrides=image_overrides),
             "audio":
             self._get_dummy_audios(length=_AUDIO_MAX_SOUNDFILE_SIZE,
-                                   num_audios=num_audios),
+                                   num_audios=num_audios,
+                                   overrides=audio_overrides),
         }
 
         return mm_data

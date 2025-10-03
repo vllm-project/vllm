@@ -28,6 +28,8 @@ from terratorch.vllm import (DummyDataGenerator, InferenceRunner,
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
+from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import AutoWeightsLoader
@@ -47,6 +49,8 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import (IsAttentionFree, MultiModalEmbeddings,
                          SupportsMultiModal)
 from .interfaces_base import default_pooling_type
+
+logger = init_logger(__name__)
 
 
 def _terratorch_field_names(pretrained_cfg: dict):
@@ -97,9 +101,16 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         # Dummy data is generated based on the 'input' section
         # defined in the HF configuration file
+
+        if mm_options:
+            logger.warning("Configurable multimodal profiling "
+                           "options are not supported for Terratorch. "
+                           "They are ignored for now.")
+
         return self.dummy_data_generator.get_dummy_mm_data()
 
 

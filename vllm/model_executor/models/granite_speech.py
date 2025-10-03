@@ -33,6 +33,7 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -181,13 +182,17 @@ class GraniteSpeechDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         return {
             "audio":
             self._get_dummy_audios(
                 length=self.info.get_max_audio_len(),
                 num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 
