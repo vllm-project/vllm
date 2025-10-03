@@ -322,6 +322,9 @@ class VllmConfig:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
+        else:
+            assert self.compilation_config.level >= 0
+            assert self.compilation_config.level <= 3
 
         # If user does not set custom ops via none or all set it here based on
         # compilation level and backend.
