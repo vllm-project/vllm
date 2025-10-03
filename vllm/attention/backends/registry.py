@@ -32,7 +32,7 @@ class _Backend(enum.Enum):
 BACKEND_MAP = {}
 
 
-def register_attn_backend(backend: _Backend, class_path: str | None = None):
+def register_attn_backend(backend: _Backend, class_path: Optional[str] = None):
     """
     Decorator: register a custom attention backend into BACKEND_MAPPING.
     - If class_path is provided, use it.
