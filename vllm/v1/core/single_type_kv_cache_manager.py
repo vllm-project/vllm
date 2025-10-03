@@ -619,21 +619,7 @@ class MambaManager(SingleTypeKVCacheManager):
             num_tokens += (self.kv_cache_spec.block_size *
                            self.kv_cache_spec.num_speculative_blocks)
 
-        if not self.kv_cache_spec.enable_prefix_caching:
-            new_blocks = super().allocate_new_blocks(request_id, num_tokens)
-            assert len(self.req_to_blocks[request_id]) == 1, (
-                "MambaManager should only allocate 1 block for each request.")
-            return new_blocks
-
-        req_blocks = self.req_to_blocks[request_id]
-        num_required_blocks = cdiv(num_tokens, self.block_size)
-        num_new_blocks = num_required_blocks - len(req_blocks)
-        if num_new_blocks <= 0:
-            return []
-        else:
-            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
-            req_blocks.extend(new_blocks)
-            return new_blocks
+        return super().allocate_new_blocks(request_id, num_tokens)
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
