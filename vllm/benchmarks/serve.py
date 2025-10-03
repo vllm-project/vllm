@@ -1077,6 +1077,27 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "openai-compatible backends. If not specified, default to greedy "
         "decoding (i.e. temperature==0.0).",
     )
+    sampling_group.add_argument(
+        "--frequency-penalty",
+        type=float,
+        default=None,
+        help="Frequency penalty sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
+    sampling_group.add_argument(
+        "--presence-penalty",
+        type=float,
+        default=None,
+        help="Presence penalty sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
+    sampling_group.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=None,
+        help="Repetition penalty sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
 
     parser.add_argument(
         '--tokenizer-mode',
@@ -1211,6 +1232,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "top_k": args.top_k,
             "min_p": args.min_p,
             "temperature": args.temperature,
+            "frequency_penalty": args.frequency_penalty,
+            "presence_penalty": args.presence_penalty,
+            "repetition_penalty": args.repetition_penalty,
         }.items() if v is not None
     }
 
