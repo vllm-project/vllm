@@ -206,7 +206,7 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
                              dtype: torch.dtype) -> "_Backend":
-        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.backends.registry import _Backend, backend_to_class
 
         # For Blackwell GPUs, force TORCH_SDPA for now.
         # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
@@ -217,11 +217,9 @@ class CudaPlatformBase(Platform):
             return _Backend.XFORMERS
 
         if cls.has_device_capability(80):
-            FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
-            from vllm.attention.selector import is_attn_backend_supported
-            is_default_fa_supported = is_attn_backend_supported(
-                FLASH_ATTN_V1, head_size, dtype, allow_import_error=False)
-            if is_default_fa_supported:
+            backend_class = backend_to_class(_Backend.FLASH_ATTN)
+            if (backend_class.supports_head_size(head_size)
+                    and backend_class.supports_dtype(dtype)):
                 return _Backend.FLASH_ATTN
             else:
                 # Fallback to XFORMERS
