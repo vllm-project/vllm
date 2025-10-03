@@ -4,7 +4,7 @@
 import math
 from functools import cache
 from importlib.util import find_spec
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
 
@@ -72,7 +72,9 @@ def apply_rotary_emb_dispatch(x: torch.Tensor, cos: torch.Tensor,
 
 
 @cache
-def dispatch_rotary_emb_function() -> Callable[..., torch.Tensor]:
+def dispatch_rotary_emb_function(
+    default: Optional[Callable[..., torch.Tensor]] = None
+) -> Callable[..., torch.Tensor]:
     if current_platform.is_cuda():
         return apply_rotary_emb
 
@@ -85,7 +87,10 @@ def dispatch_rotary_emb_function() -> Callable[..., torch.Tensor]:
                 "flash_attn is not installed. Falling back to PyTorch "
                 "implementation for rotary embeddings.")
 
-    return apply_rotary_emb_torch
+    if default is not None:
+        return default
+    else:
+        return apply_rotary_emb_torch
 
 
 # yarn functions
