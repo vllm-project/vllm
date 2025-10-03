@@ -758,6 +758,10 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
                         "video.num_frames override (%d) exceeds model's "
                         "maximum number of frames (%d), will be ignored",
                         num_frames_override, target_num_frames)
+                if num_frames_override < 2:
+                    logger.warning(
+                        "video.num_frames override (%d) cannot be less "
+                        "than 2, will be ignored", num_frames_override)
                 target_num_frames = min(target_num_frames, num_frames_override)
         target_num_frames = max(target_num_frames, 2)
 
@@ -812,7 +816,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         num_frames: int,
         num_videos: int,
     ) -> list[VideoItem]:
-        num_frames = max(num_frames, 2)
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         video_items = []
         for i in range(num_videos):
