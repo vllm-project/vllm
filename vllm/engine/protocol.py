@@ -54,11 +54,11 @@ class EngineClient(ABC):
         sampling_params: SamplingParams,
         request_id: str,
         *,
+        prompt_text: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-        prompt_text: Optional[str] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
         data_parallel_rank: Optional[int] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
