@@ -575,17 +575,23 @@ class RandomDataset(BenchmarkDataset):
         input_buckets, input_pdf = np.array(pdf["input_pdf"]).T
         input_buckets = input_buckets.astype(int)
         input_pdf[-1] = 0.0
+        # at least some probability somewhere
+        assert np.any(input_pdf > 0.0)
+        # buckets must be strictly increasing
+        assert np.all(input_buckets[1:] - input_buckets[:-1] > 0)
 
         output_buckets, output_pdf = np.array(pdf["output_pdf"]).T
         output_buckets = output_buckets.astype(int)
         output_pdf[-1] = 0.0
+        assert np.any(output_pdf > 0.0)
+        assert np.all(output_buckets[1:] - output_buckets[:-1] > 0)
 
         def sampler(low, high, size, buckets, cdf):
             del low, high # only here to adapt from _rng.integers interface
             indices = np.searchsorted(cdf, self._rng.random(size))
             intra_bucket = self._rng.random(size)
-            return (intra_bucket * buckets[indices] +
-                (1 - intra_bucket) * buckets[indices + 1]).astype(int)
+            return (buckets[indices] + intra_bucket *
+                (buckets[indices + 1] - buckets[indices])).astype(int)
 
         return (
             partial(sampler,
