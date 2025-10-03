@@ -18,8 +18,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import (BatchEncoding, BatchFeature, PretrainedConfig,
-                          TensorType)
+from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
@@ -38,8 +37,7 @@ from vllm.model_executor.models.utils import (flatten_bn,
                                               maybe_prefix)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, MultiModalKwargsItems,
-                                    NestedTensors)
+                                    MultiModalKwargs, MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -298,7 +296,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         else:
             pixel_values_lst = self._images_to_pixel_values_lst(
                 images, max_num_tiles)
-            image_inputs: dict[str, NestedTensors] = {
+            image_inputs = {
                 "pixel_values_flat":
                 torch.cat(pixel_values_lst),
                 "image_num_patches":
@@ -326,7 +324,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         images: Optional[Union[Image.Image, list[Image.Image]]] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         max_num_tiles: Optional[int] = None,
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         # Use default if not provided
         if max_num_tiles is None:
             max_num_tiles = 12
@@ -341,10 +339,9 @@ class BaseNanoNemotronVLProcessor(ABC):
 
         text_inputs = self.tokenizer(text, add_special_tokens=False)
 
-        return {
-            **BatchEncoding(text_inputs, tensor_type=return_tensors),
-            **image_inputs,
-        }
+        combined_outputs = {**text_inputs, **image_inputs}
+
+        return BatchFeature(combined_outputs, tensor_type=return_tensors)
 
 
 class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
@@ -420,7 +417,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 dynamic_image_size=dynamic_image_size,
             )
 
-            video_inputs: dict[str, NestedTensors] = {
+            video_inputs = {
                 "pixel_values_flat_video":
                 torch.cat(pixel_values_lst_video),
                 "video_num_patches":
@@ -443,7 +440,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         return_tensors: Optional[Union[str, TensorType]] = None,
         max_num_tiles: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         # Use default if not provided
         if max_num_tiles is None:
             max_num_tiles = 12
@@ -467,11 +464,9 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         text_inputs = self.tokenizer(text, add_special_tokens=False)
 
-        return BatchFeature({
-            **BatchEncoding(text_inputs, tensor_type=return_tensors),
-            **image_inputs,
-            **video_inputs,
-        })
+        combined_outputs = {**text_inputs, **image_inputs, **video_inputs}
+
+        return BatchFeature(combined_outputs, tensor_type=return_tensors)
 
     def get_image_repl(
         self,
@@ -625,7 +620,7 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -645,7 +640,7 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: Mapping[str, NestedTensors],
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
@@ -724,7 +719,7 @@ class NanoNemotronVLMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(prompt, mm_data,
                                                        mm_kwargs, tok_kwargs)
 
@@ -736,7 +731,7 @@ class NanoNemotronVLMultiModalProcessor(
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: Mapping[str, NestedTensors],
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_fields = super()._get_mm_fields_config(hf_inputs,
