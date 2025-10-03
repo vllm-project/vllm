@@ -101,16 +101,16 @@ class TorchSDPAMetadata(AttentionMetadata):
     """Metadata for PagedAttention."""
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
-    seq_lens_tensor: Optional[torch.Tensor]
+    decode_seq_lens_tensor: Optional[torch.Tensor]
     # Maximum sequence length in the batch. 0 if it is prefill-only batch.
-    max_decode_seq_len: int
+    decode_max_seq_len: int
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
     # in the kv cache. Each block can contain up to block_size tokens.
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
-    block_tables: Optional[torch.Tensor]
+    decode_block_tables: Optional[torch.Tensor]
     """Metadata for TorchSDPABackend.
     """
     # Currently, input sequences can only contain all prompts
@@ -120,9 +120,9 @@ class TorchSDPAMetadata(AttentionMetadata):
 
     # For chunked prefill only
     max_query_len: Optional[int] = None
-    max_kv_len: Optional[int] = None
+    prefill_max_seq_len: Optional[int] = None
     prefill_query_start_loc: Optional[torch.Tensor] = None
-    kv_start_loc: Optional[torch.Tensor] = None
+    prefill_seq_start_loc: Optional[torch.Tensor] = None
     prefill_block_tables: Optional[torch.Tensor] = None
 
     # For V1 logits index only
@@ -306,8 +306,8 @@ class TorchSDPAMetadata(AttentionMetadata):
                 or attn_type == AttentionType.ENCODER_ONLY):
             # Decoder self-attention
             # Choose max_seq_len based on whether we are in prompt_run
-            return (self.seq_lens_tensor, self.max_decode_seq_len,
-                    self.block_tables)
+            return (self.decode_seq_lens_tensor, self.decode_max_seq_len,
+                    self.decode_block_tables)
         elif attn_type == AttentionType.ENCODER_DECODER:
             # Enc/dec cross-attention KVs match encoder sequence length;
             # cross-attention utilizes special "cross" block tables
@@ -375,16 +375,16 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
             slot_mapping=slot_mapping,
             # to ensure inference when chunked_prefill is disabled
             seq_lens=seq_lens_cpu.tolist(),
-            seq_lens_tensor=seq_lens_cpu[:num_decodes],  # decode
-            max_decode_seq_len=max_decode_seq_len,  # decode
-            block_tables=block_table_tensor[:num_decodes],  # decode
+            decode_seq_lens_tensor=seq_lens_cpu[:num_decodes],  # decode
+            decode_max_seq_len=max_decode_seq_len,  # decode
+            decode_block_tables=block_table_tensor[:num_decodes],  # decode
             chunked_prefill=self.scheduler_config.chunked_prefill_enabled,
             max_query_len=max_query_len,
-            max_kv_len=max_prefill_seq_len,
+            prefill_max_seq_len=max_prefill_seq_len,
             prefill_query_start_loc=query_start_loc_cpu[num_decodes:num_reqs +
                                                         1],  # prefill
-            kv_start_loc=self.seq_start_loc_cpu[num_decodes:num_reqs +
-                                                1],  # prefill
+            prefill_seq_start_loc=self.seq_start_loc_cpu[num_decodes:num_reqs +
+                                                         1],  # prefill
             prefill_block_tables=block_table_tensor[
                 num_decodes:num_reqs],  # prefill
             query_start_loc=query_start_loc_cpu[:num_reqs +
@@ -556,9 +556,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     key_cache,
                     value_cache,
                     prefill_meta.prefill_query_start_loc,
-                    prefill_meta.kv_start_loc,
+                    prefill_meta.prefill_seq_start_loc,
                     prefill_meta.max_query_len,
-                    prefill_meta.max_kv_len,
+                    prefill_meta.prefill_max_seq_len,
                     self.scale,
                     True,
                     prefill_meta.prefill_block_tables,
