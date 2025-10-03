@@ -24,8 +24,9 @@ from collections.abc import Iterator, Mapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, partial
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Callable, Optional, Union, cast
 
 import numpy as np
@@ -418,11 +419,17 @@ class RandomDataset(BenchmarkDataset):
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
+        probability_density_function: Path | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
 
         input_lens, output_lens, offsets = self.get_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
+            num_requests,
+            range_ratio,
+            input_len,
+            output_len,
+            tokenizer,
+            probability_density_function
         )
 
         # Generate prefix once
@@ -478,6 +485,52 @@ class RandomDataset(BenchmarkDataset):
             else []
         )
 
+    def build_pdf_sampler(
+        self,
+        probability_density_function: Path,
+    ) -> tuple[Callable, Callable]:
+        """
+            Opens a .json file containing the probability density function
+            for the input and output lengths.
+            Returns a tuple of callables that can be used to sample from the
+            probability density function (assuming uniform distribution within
+            each bucket).
+
+            File should contain two probability density functions (histograms):
+            {
+              "input_pdf": [[1, 0.01], [100, 0.02], ..., [1000, 0.0]],
+              "output_pdf": [[1, 0.04], [100, 0.02], ..., [1000, 0.0]]
+            }
+            For example, probability of sampling input size in [0, 100) is 0.01.
+            The last bucket MUST be 0.
+        """
+        with open(probability_density_function) as f:
+            pdf = json.load(f)
+
+        input_buckets, input_pdf = np.array(pdf["input_pdf"]).T
+        input_buckets = input_buckets.astype(int)
+        input_pdf[-1] = 0.0
+
+        output_buckets, output_pdf = np.array(pdf["output_pdf"]).T
+        output_buckets = output_buckets.astype(int)
+        output_pdf[-1] = 0.0
+
+        def sampler(low, high, size, buckets, cdf):
+            del low, high # only here to adapt from _rng.integers interface
+            indices = np.searchsorted(cdf, self._rng.random(size))
+            intra_bucket = self._rng.random(size)
+            return (intra_bucket * buckets[indices] +
+                (1 - intra_bucket) * buckets[indices + 1]).astype(int)
+
+        return (
+            partial(sampler,
+                    buckets=input_buckets,
+                    cdf=np.cumsum(input_pdf) / np.sum(input_pdf)),
+            partial(sampler,
+                    buckets=output_buckets,
+                    cdf=np.cumsum(output_pdf) / np.sum(output_pdf))
+        )
+
     def get_sampling_params(
         self,
         num_requests: int,
@@ -485,6 +538,7 @@ class RandomDataset(BenchmarkDataset):
         input_len: int,
         output_len: int,
         tokenizer: AnyTokenizer,
+        probability_density_function: Path | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Get the sampling parameters for the dataset.
@@ -522,10 +576,17 @@ class RandomDataset(BenchmarkDataset):
             output_high,
         )
 
-        input_lens = self._rng.integers(input_low, input_high + 1,
-                                           size=num_requests)
-        output_lens = self._rng.integers(output_low, output_high + 1,
-                                            size=num_requests)
+        if probability_density_function is not None:
+            input_lens_sampler, output_lens_sampler = self.build_pdf_sampler(
+                    probability_density_function)
+        else:
+            input_lens_sampler = self._rng.integers
+            output_lens_sampler = self._rng.integers
+
+        input_lens = input_lens_sampler(input_low, input_high + 1,
+                                        size=num_requests)
+        output_lens = output_lens_sampler(output_low, output_high + 1,
+                                          size=num_requests)
         offsets = self._rng.integers(0, tokenizer.vocab_size, 
                                         size=num_requests)
         return input_lens, output_lens, offsets
@@ -851,6 +912,7 @@ class RandomMultiModalDataset(RandomDataset):
         bucket_config: dict[tuple[int, int, int], float] = 
                                         DEFAULT_MM_ITEM_BUCKET_CONFIG,
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
+        probability_density_function: Path | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
 
@@ -863,7 +925,12 @@ class RandomMultiModalDataset(RandomDataset):
 
         # Get the sampling parameters for the dataset
         input_lens, output_lens, offsets = self.get_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
+            num_requests,
+            range_ratio,
+            input_len,
+            output_len,
+            tokenizer,
+            probability_density_function
         )
 
         (
@@ -1180,6 +1247,15 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "used only for random sampling. Must be in the range [0, 1) to define "
         "a symmetric sampling range"
         "[length * (1 - range_ratio), length * (1 + range_ratio)].",
+    )
+    random_group.add_argument(
+        "--random-probability-density-function",
+        type=Path,
+        default=None,
+        help=("Path to json file specifying a PDF for input/output lenghts. "
+              "Overrides random-input-len, random-output-len, and "
+              "random-range-ratio args. See RandomDataset.build_pdf_sampler "
+              "documentation for more details."),
     )
     random_group.add_argument(
         "--random-prefix-len",
@@ -1531,6 +1607,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
                 no_oversample=args.no_oversample,
+                probability_density_function=args.random_probability_density_function,
             ),
             "random-mm":
             lambda: RandomMultiModalDataset(
@@ -1548,6 +1625,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 bucket_config=args.random_mm_bucket_config,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
+                probability_density_function=args.random_probability_density_function,
             ),
             "prefix_repetition":
             lambda: PrefixRepetitionRandomDataset(
