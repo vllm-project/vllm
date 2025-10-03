@@ -345,24 +345,16 @@ class Attention(nn.Module, AttentionLayerBase):
                     value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
                 if not self.attn_backend.include_kv_cache:
-                     unified_kv_cache_update(
-                        key, value, output, self.layer_name)
-                unified_attention_with_output(
-                    query,
-                    key,
-                    value,
-                    output,
-                    self.layer_name)
+                    unified_kv_cache_update(key, value, output,
+                                            self.layer_name)
+                unified_attention_with_output(query, key, value, output,
+                                              self.layer_name)
             else:
                 if not self.attn_backend.include_kv_cache:
                     torch.ops.vllm.unified_kv_cache_update(
                         key, value, output, self.layer_name)
                 torch.ops.vllm.unified_attention_with_output(
-                    query,
-                    key,
-                    value,
-                    output,
-                    self.layer_name)
+                    query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
             assert self.attn_backend.include_kv_cache, "Attention backend does not support kv cache"  # noqa: E501
