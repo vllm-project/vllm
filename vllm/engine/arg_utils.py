@@ -376,7 +376,7 @@ class EngineArgs:
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    limit_mm_per_prompt: dict[str, int] = \
+    limit_mm_per_prompt: dict[str, Union[int, dict[str, int]]] = \
         get_field(MultiModalConfig, "limit_per_prompt")
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str,
