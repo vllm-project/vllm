@@ -2,9 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for OCI model loader."""
 
-import os
-from unittest.mock import MagicMock, Mock, patch
-
 import pytest
 
 from vllm.config.load import LoadConfig
@@ -18,7 +15,7 @@ class TestOciModelLoader:
         """Test normalization with full OCI reference."""
         load_config = LoadConfig(load_format="oci")
         loader = OciModelLoader(load_config)
-        
+
         # Full reference should remain unchanged
         ref = "ghcr.io/user/model:tag"
         normalized = loader._normalize_oci_reference(ref)
@@ -28,7 +25,7 @@ class TestOciModelLoader:
         """Test normalization without registry (should default to docker.io)."""
         load_config = LoadConfig(load_format="oci")
         loader = OciModelLoader(load_config)
-        
+
         # Without registry, should prepend docker.io
         ref = "user/model:tag"
         normalized = loader._normalize_oci_reference(ref)
@@ -38,7 +35,7 @@ class TestOciModelLoader:
         """Test normalization with single name (should add library)."""
         load_config = LoadConfig(load_format="oci")
         loader = OciModelLoader(load_config)
-        
+
         # Single name should prepend docker.io/library
         ref = "model"
         normalized = loader._normalize_oci_reference(ref)
@@ -48,11 +45,11 @@ class TestOciModelLoader:
         """Test cache directory creation."""
         load_config = LoadConfig(load_format="oci")
         loader = OciModelLoader(load_config)
-        
+
         # Test cache directory path generation
         ref = "docker.io/user/model:tag"
         cache_dir = loader._get_cache_dir(ref)
-        
+
         # Should contain 'oci' and sanitized reference
         assert "oci" in cache_dir
         assert "docker.io_user_model_tag" in cache_dir
@@ -61,7 +58,7 @@ class TestOciModelLoader:
         """Test that media type constants are correctly defined."""
         load_config = LoadConfig(load_format="oci")
         loader = OciModelLoader(load_config)
-        
+
         assert loader.SAFETENSORS_MEDIA_TYPE == \
             "application/vnd.docker.ai.safetensors"
         assert loader.CONFIG_TAR_MEDIA_TYPE == \
@@ -69,7 +66,8 @@ class TestOciModelLoader:
         assert loader.DEFAULT_REGISTRY == "docker.io"
 
 
-@pytest.mark.skip(reason="Integration test - requires actual OCI registry access")
+@pytest.mark.skip(
+    reason="Integration test - requires actual OCI registry access")
 class TestOciModelLoaderIntegration:
     """Integration tests for OCI model loader (requires network access)."""
 
@@ -83,9 +81,8 @@ class TestOciModelLoaderIntegration:
         To run this test, remove the skip decorator and ensure you have
         a valid test model available in a public registry.
         """
-        load_config = LoadConfig(load_format="oci")
-        
         # Example: test with a real model
+        # load_config = LoadConfig(load_format="oci")
         # loader = OciModelLoader(load_config)
         # model_config = ModelConfig(
         #     model="aistaging/smollm2-vllm",

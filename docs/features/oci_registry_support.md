@@ -5,6 +5,7 @@ vLLM supports loading models directly from OCI (Open Container Initiative) regis
 ## Overview
 
 OCI Registry support allows you to:
+
 - Store and distribute models as OCI artifacts in container registries
 - Pull models directly from Docker Hub, GitHub Container Registry (ghcr.io), or any OCI-compliant registry
 - Leverage existing registry infrastructure for model distribution
@@ -148,7 +149,8 @@ OCI Registry support is built into vLLM and uses the standard `requests` library
 ### Cache Location
 
 Downloaded OCI layers are cached in:
-```
+
+```bash
 ~/.cache/vllm/oci/{normalized-reference}/
 ├── manifest.json
 ├── layers/
