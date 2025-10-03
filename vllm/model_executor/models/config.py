@@ -292,15 +292,14 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
 
-        # TODO: find a way to keep this list updated, or redundant
+        # TODO(@tdoublep) find a better way to do this than whitelist
         MAMBA2_MODELS = [
             "BambaForCausalLM",
-            #"FalconH1ForCausalLM",
+            "FalconH1ForCausalLM",
             "GraniteMoeHybridForCausalLM",
             "Mamba2ForCausalLM",
-            #"NemotronHForCausalLM",
-            #"Plamo2ForCausalLM",
-            #"Zamba2ForCausalLM",
+            "NemotronHForCausalLM",
+            "Zamba2ForCausalLM",
         ]
         if cache_config.enable_prefix_caching:
             if model_config.architecture in MAMBA2_MODELS:
