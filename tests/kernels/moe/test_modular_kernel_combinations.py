@@ -168,11 +168,14 @@ def is_nyi_config(config: Config) -> bool:
 def generate_valid_test_cases(world_size: int,
                               prepare_finalize_types) -> list[tuple[Any, ...]]:
     cases = []
+    total = 0
 
     for k, n, e, dtype, quant_config, combination, chunk_size in product(
             Ks, Ns, Es, DTYPEs, MK_QUANT_CONFIGS,
             product(prepare_finalize_types, MK_FUSED_EXPERT_TYPES),
             FUSED_MOE_CHUNK_SIZEs):
+
+        total = total + 1
 
         config = Config(
             Ms=Ms,
@@ -188,23 +191,25 @@ def generate_valid_test_cases(world_size: int,
             world_size=world_size,
         )
 
-        # TODO
+        # TODO(bnell): figure out how to get verbose flag here.
         verbose = False  #pytestconfig.getoption('verbose') > 0
 
         valid, reason = config.is_valid()
 
         if not valid:
             if verbose:
-                print(f"Tests config {config} is not valid: {reason}")
+                print(f"Test config {config} is not valid: {reason}")
             continue
 
         if is_nyi_config(config):
             if verbose:
-                print(f"Tests config {config} is nyi.")
+                print(f"Test config {config} is nyi.")
             continue
 
         cases.append((k, n, e, dtype, quant_config, combination[0],
                       combination[1], chunk_size, world_size))
+
+    print(f"{len(cases)} of {total} valid configs generated.")
 
     return cases
 

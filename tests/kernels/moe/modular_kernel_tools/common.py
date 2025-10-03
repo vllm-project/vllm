@@ -229,17 +229,21 @@ class Config:
             + int(self.quant_block_shape is not None)
         ) > 1:
             # invalid quant config
-            return False, "Bad quant_config."
+            return False, f"Bad quant_config {self.quant_config}."
 
         # check type support
         if self.quant_dtype is None:
             if (self.dtype not in self.pf_supported_types()
                     or self.dtype not in self.fe_supported_types()):
-                return False, "Unsupported type 1."
+                return False, (f"Unsupported type {self.dtype} not in "
+                               f"{self.pf_supported_types()} and "
+                               f"{self.fe_supported_types()}.")
         else:
             if (self.quant_dtype not in self.pf_supported_types()
                     or self.quant_dtype not in self.fe_supported_types()):
-                return False, "Unsupported type 2."
+                return False, (f"Unsupported quant type {self.quant_dtype} "
+                               f"not in {self.pf_supported_types()} and "
+                               f"{self.fe_supported_types()}.")
 
         # Check block quanization support
         is_block_quatized = self.quant_block_shape is not None
@@ -255,11 +259,11 @@ class Config:
 
         # Check dependencies (turn into asserts?)
         if self.needs_deep_ep() and not has_deep_ep():
-            return False, "Needs DeepEP."
+            return False, "Needs DeepEP, but DeepEP not available."
         if self.needs_deep_gemm() and not has_deep_gemm():
-            return False, "Needs DeepGEMM."
+            return False, "Needs DeepGEMM, but DeepGEMM not available."
         if self.needs_pplx() and not has_pplx():  # noqa: SIM103
-            return False, "Needs PPLX."
+            return False, "Needs PPLX, but PPLX not available."
 
         return True, None
 
