@@ -129,13 +129,13 @@ class Mistral3MultiModalProjector(nn.Module):
         self.linear_1 = ColumnParallelLinear(vision_hidden_size,
                                              text_hidden_size,
                                              bias=multimodal_projector_bias,
-                                             quant_config=quant_config,
+                                             quant_config=None,
                                              prefix=f"{prefix}.linear_1")
         self.act = get_act_fn(projector_hidden_act)
         self.linear_2 = RowParallelLinear(text_hidden_size,
                                           text_hidden_size,
                                           bias=multimodal_projector_bias,
-                                          quant_config=quant_config,
+                                          quant_config=None,
                                           prefix=f"{prefix}.linear_2")
 
     def forward(self, image_features: torch.Tensor,
