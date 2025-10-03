@@ -2,6 +2,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
+#include <c10/util/Optional.h>
 
 #include "cuda_utils.h"
 #include "cuda_compat.h"
@@ -508,51 +509,61 @@ __global__ void upconvert_ds_mla_tokens_kernel(
     const uint8_t* __restrict__ src_cache,      // [num_blocks, block_size, 656]
     __nv_bfloat16* __restrict__ dst_workspace,  // [num_slots, head_dim]
     const int32_t* __restrict__ indices,        // [num_indices]
-    const int64_t num_indices, const int64_t block_stride,
-    const int64_t entry_stride, const int32_t block_size,
-    const int32_t head_dim, const int64_t num_slots) {
-  const int64_t list_idx = blockIdx.x;
-  if (list_idx >= num_indices) {
+    const int32_t* __restrict__ unique_count_ptr, const int64_t num_indices,
+    const int64_t block_stride, const int64_t entry_stride,
+    const int32_t block_size, const int32_t head_dim, const int64_t num_slots) {
+  int64_t work_items = num_indices;
+  if (unique_count_ptr != nullptr) {
+    const int64_t unique_count = static_cast<int64_t>(unique_count_ptr[0]);
+    work_items =
+        std::min<int64_t>(num_indices, std::max<int64_t>(0, unique_count));
+  }
+
+  if (work_items <= 0) {
     return;
   }
 
-  const int64_t token_index = static_cast<int64_t>(indices[list_idx]);
-  if (token_index < 0 || token_index >= num_slots) {
-    return;
-  }
+  for (int64_t list_idx = blockIdx.x; list_idx < work_items;
+       list_idx += gridDim.x) {
+    const int64_t token_index = static_cast<int64_t>(indices[list_idx]);
+    if (token_index < 0 || token_index >= num_slots) {
+      continue;
+    }
 
-  const int64_t block_idx = token_index / block_size;
-  const int64_t block_offset = token_index % block_size;
-  const uint8_t* token_ptr =
-      src_cache + block_idx * block_stride + block_offset * entry_stride;
-  __nv_bfloat16* dst_ptr =
-      dst_workspace + token_index * static_cast<int64_t>(head_dim);
+    const int64_t block_idx = token_index / block_size;
+    const int64_t block_offset = token_index % block_size;
+    const uint8_t* token_ptr =
+        src_cache + block_idx * block_stride + block_offset * entry_stride;
+    __nv_bfloat16* dst_ptr =
+        dst_workspace + token_index * static_cast<int64_t>(head_dim);
 
-  const uint8_t* no_pe_ptr = token_ptr;
-  const float* scales_ptr =
-      reinterpret_cast<const float*>(token_ptr + 512);  // 4 tiles of 128
-  const __nv_bfloat16* rope_ptr =
-      reinterpret_cast<const __nv_bfloat16*>(token_ptr + 512 + 16);
+    const uint8_t* no_pe_ptr = token_ptr;
+    const float* scales_ptr =
+        reinterpret_cast<const float*>(token_ptr + 512);  // 4 tiles of 128
+    const __nv_bfloat16* rope_ptr =
+        reinterpret_cast<const __nv_bfloat16*>(token_ptr + 512 + 16);
 
-  for (int i = threadIdx.x; i < 512; i += blockDim.x) {
-    const int tile = i >> 7;  // each tile is 128 elements
-    const float scale = scales_ptr[tile];
-    const uint8_t val = no_pe_ptr[i];
-    dst_ptr[i] =
-        fp8::scaled_convert<__nv_bfloat16, uint8_t,
-                            vllm::Fp8KVCacheDataType::kFp8E4M3>(val, scale);
-  }
+    for (int i = threadIdx.x; i < 512; i += blockDim.x) {
+      const int tile = i >> 7;  // each tile is 128 elements
+      const float scale = scales_ptr[tile];
+      const uint8_t val = no_pe_ptr[i];
+      dst_ptr[i] =
+          fp8::scaled_convert<__nv_bfloat16, uint8_t,
+                              vllm::Fp8KVCacheDataType::kFp8E4M3>(val, scale);
+    }
 
-  for (int j = threadIdx.x; j < 64; j += blockDim.x) {
-    dst_ptr[512 + j] = rope_ptr[j];
+    for (int j = threadIdx.x; j < 64; j += blockDim.x) {
+      dst_ptr[512 + j] = rope_ptr[j];
+    }
   }
 }
 
 }  // namespace vllm
 
-void upconvert_ds_mla_tokens(torch::Tensor const& src_cache,
-                             torch::Tensor& dst_workspace,
-                             torch::Tensor const& indices) {
+void upconvert_ds_mla_tokens(
+    torch::Tensor const& src_cache, torch::Tensor& dst_workspace,
+    torch::Tensor const& indices,
+    c10::optional<torch::Tensor> const& unique_count_opt) {
   if (indices.numel() == 0) {
     return;
   }
@@ -585,14 +596,30 @@ void upconvert_ds_mla_tokens(torch::Tensor const& src_cache,
   TORCH_CHECK(num_slots == src_cache.size(0) * static_cast<int64_t>(block_size),
               "Workspace rows must match kv-cache slots");
 
-  const dim3 grid(indices.size(0));
+  const int device_sm_count =
+      at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const dim3 grid(device_sm_count);
   const dim3 block(256);
+
+  const int32_t* unique_count_ptr = nullptr;
+  if (unique_count_opt.has_value()) {
+    const torch::Tensor& unique_count = unique_count_opt.value();
+    TORCH_CHECK(unique_count.scalar_type() == at::kInt,
+                "prefill_unique_count must be int32");
+    TORCH_CHECK(unique_count.is_cuda(),
+                "prefill_unique_count must be on CUDA device");
+    TORCH_CHECK(unique_count.numel() == 1,
+                "prefill_unique_count must contain a single element");
+    TORCH_CHECK(unique_count.device() == src_cache.device(),
+                "prefill_unique_count must be on the same device as src_cache");
+    unique_count_ptr = unique_count.data_ptr<int32_t>();
+  }
 
   vllm::upconvert_ds_mla_tokens_kernel<<<grid, block, 0, stream>>>(
       reinterpret_cast<const uint8_t*>(src_cache.data_ptr()),
       reinterpret_cast<__nv_bfloat16*>(dst_workspace.data_ptr()),
-      indices.data_ptr<int32_t>(), indices.size(0), block_stride, entry_stride,
-      block_size, head_dim, num_slots);
+      indices.data_ptr<int32_t>(), unique_count_ptr, indices.size(0),
+      block_stride, entry_stride, block_size, head_dim, num_slots);
 }
 
 namespace vllm {

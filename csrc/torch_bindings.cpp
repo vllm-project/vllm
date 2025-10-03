@@ -694,7 +694,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
 
   cache_ops.def(
       "upconvert_ds_mla_tokens(Tensor src_cache, Tensor! dst_workspace,"
-      "                        Tensor indices) -> ()");
+      "                        Tensor indices, Tensor? unique_count=None) -> "
+      "()");
   cache_ops.impl("upconvert_ds_mla_tokens", torch::kCUDA,
                  &upconvert_ds_mla_tokens);
 

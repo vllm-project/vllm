@@ -597,16 +597,9 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
-        fallback_to_bf16 = False
-        page_block_size = attn_metadata.block_size
-        if use_fp8_cache and kv_cache.numel() > 0 and kv_cache.dim() >= 2:
-            page_block_size = kv_cache.shape[1]
-            if page_block_size != 64:
-                fallback_to_bf16 = True
 
         prefill_token_mask: Optional[torch.Tensor] = None
-        if (use_fp8_cache and not fallback_to_bf16
-                and attn_metadata.num_prefill_tokens > 0):
+        if (use_fp8_cache and attn_metadata.num_prefill_tokens > 0):
             if kv_cache.numel() == 0:
                 raise RuntimeError("Expected non-empty kv_cache for fp8_ds_mla"
                                    " prefill handling")
@@ -627,12 +620,12 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 BLOCK_SIZE=attn_metadata.block_size,
                 NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
                 prefill_token_mask=prefill_token_mask,
-                prefill_seen=self.prefill_seen_buffer if
-                (use_fp8_cache and not fallback_to_bf16) else None,
-                prefill_unique_out=self.prefill_unique_output if
-                (use_fp8_cache and not fallback_to_bf16) else None,
-                prefill_unique_count=self.prefill_unique_count if
-                (use_fp8_cache and not fallback_to_bf16) else None)
+                prefill_seen=self.prefill_seen_buffer \
+                    if use_fp8_cache else None,
+                prefill_unique_out=self.prefill_unique_output \
+                    if use_fp8_cache else None,
+                prefill_unique_count=self.prefill_unique_count \
+                    if use_fp8_cache else None)
 
         q = torch.cat([ql_nope, q_pe], dim=-1)
 
@@ -647,22 +640,8 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 scale=layer._k_scale,
             )
 
-        kv_tensor_for_forward = kv_cache
-        if fallback_to_bf16 and kv_cache.numel() > 0:
-            num_slots = kv_cache.shape[0] * page_block_size
-            self._ensure_prefill_buffers(num_slots, kv_cache.device)
-            valid_mask = topk_indices_global >= 0
-            if valid_mask.any():
-                unique_indices = torch.unique(topk_indices_global[valid_mask])
-                if unique_indices.numel() > 0:
-                    ops.upconvert_ds_mla_tokens(
-                        kv_cache, self.prefill_bf16_workspace,
-                        unique_indices.to(dtype=torch.int32).contiguous())
-            kv_tensor_for_forward = self.prefill_bf16_workspace
-
-        if not use_fp8_cache or fallback_to_bf16:
-            attn_out = self._forward_bf16_kv(q, kv_tensor_for_forward,
-                                             topk_indices_global,
+        if not use_fp8_cache:
+            attn_out = self._forward_bf16_kv(q, kv_cache, topk_indices_global,
                                              attn_metadata)
         else:
             num_decode_tokens = attn_metadata.num_decode_tokens
@@ -687,13 +666,16 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                         and unique_prefill_indices.numel() > 0):
                     indices_for_upconvert = unique_prefill_indices.to(
                         dtype=torch.int32, copy=False)
+                    print("upconverting cache")
                     ops.upconvert_ds_mla_tokens(
                         kv_cache, self.prefill_bf16_workspace,
-                        indices_for_upconvert.contiguous())
+                        indices_for_upconvert.contiguous(),
+                        self.prefill_unique_count)
                 # Zero the bitmap wholesale; cheaper than selectively
                 # clearing the visited slots and keeps next call ready.
                 assert self.prefill_seen_buffer is not None
                 self.prefill_seen_buffer.zero_()
+                print("bf16 prefill")
                 attn_out[prefill_start:] = self._forward_bf16_kv(
                     q[prefill_start:],
                     self.prefill_bf16_workspace,
