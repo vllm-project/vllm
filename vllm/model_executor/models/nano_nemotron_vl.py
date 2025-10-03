@@ -37,6 +37,7 @@ from vllm.model_executor.models.utils import (flatten_bn,
                                               init_vllm_registered_model,
                                               maybe_prefix)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.evs import compute_retained_tokens_count
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, MultiModalKwargsItems,
                                     NestedTensors)
@@ -203,6 +204,8 @@ def video_to_pixel_values(
     # with image path
     frames_tensors: list[torch.Tensor] = []
     for frame in video:
+        # (ekvhedchenia) TODO: we probably should not use tiling at all for videos as we take
+        # thumbnail tile of fixed size anyway
         pil_frame = dynamic_preprocess(
             Image.fromarray(frame, mode="RGB"),
             image_size=input_size,
@@ -212,7 +215,9 @@ def video_to_pixel_values(
         )
         # dynamic_preprocess returns tensors already; take the single tile
         assert len(pil_frame) >= 1
-        frames_tensors.append(pil_frame[0])
+        # frames_tensors.append(pil_frame[0])
+        # (ekvhedchenia) I think what we meant is take thumbnail tile (Which happen to be last one)
+        frames_tensors.append(pil_frame[-1])
 
     return torch.stack(frames_tensors)
 
@@ -435,6 +440,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
                 video_repl = self.get_video_repl(self.num_image_token,
                                                  num_patches, self.video_token)
+
                 text = [t.replace('<video>', video_repl.full, 1) for t in text]
         return text, video_inputs
 
@@ -497,10 +503,46 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         repl_features = video_context_token * feature_size
         repl_features_with_sep = IMG_START + repl_features + IMG_END
         # num_patches is equal to num_frames
+
+        # (ekhvedchenia) TODO: Not sure whether we should support this or not, but there is more complex prefix
+        # when video metadata is avaialble
+        #  https://gitlab-master.nvidia.com/charlwang/vlm-hf-code/-/blob/main/nano_vl_v2/processing.py?ref_type=heads#L171
         repl_full = ''.join([
             f'Frame{i+1}: {repl_features_with_sep}' for i in range(num_patches)
         ])
 
+        return PromptUpdateDetails.select_text(repl_full, repl_full)
+
+    @classmethod
+    def get_video_repl_for_evs(
+        cls,
+        num_frames: int,
+        num_video_tokens: int,
+        video_context_token: str = IMG_CONTEXT,
+    ) -> PromptUpdateDetails[str]:
+        """
+        Build dummy prompt replacement for a video with EVS
+        Args:
+            num_frames (int): number of frames in video
+            num_video_tokens (int): total number of video tokens after pruning
+        """
+
+        # (ekhvedchenia) TODO: Not sure whether we should support this or not, but there is more complex prefix
+        # when video metadata is avaialble
+        #  https://gitlab-master.nvidia.com/charlwang/vlm-hf-code/-/blob/main/nano_vl_v2/processing.py?ref_type=heads#L171
+
+        # As we don't know actual pruning mask in this stage, we build dummy prompt replacement which has same
+        # total tokens length, but rearranged order of tokens.
+        # It starts with all the prefixes, then empty {IMG_START}{IMG_END},
+        # followed by video_context_token repeated num_video_tokens times.
+        prefixes = [
+            f'Frame{i + 1}: {IMG_START}{IMG_END}' for i in range(num_frames)
+        ]
+        placeholder_tokens = [video_context_token] * num_video_tokens
+        repl_full = ''.join(prefixes + placeholder_tokens)
+
+        # In the video postprocessing logic we will build a correct prompt replacement and ensure
+        # video embeddings has correct interleaving of prefix / video embeddings
         return PromptUpdateDetails.select_text(repl_full, repl_full)
 
 
@@ -789,21 +831,25 @@ class NanoNemotronVLMultiModalProcessor(
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            # # TODO: EVS-specific code here. This is basically copied from Qwen2-VL. Need to validate it.
-            # video_pruning_rate = \
-            #   self.info.ctx.get_mm_config().video_pruning_rate
-            # if video_pruning_rate is not None and video_pruning_rate > 0.0:
-            #     num_tokens = compute_retained_tokens_count(
-            #         feature_size,
-            #         num_patches,
-            #         video_pruning_rate,
-            #     )
-            # # End of EVS-specific code
-
-            return hf_processor.get_video_repl(
-                feature_size,  # number of tokens per frame
-                num_patches,  # number of frames
-                video_context_token=hf_processor.video_token)
+            video_pruning_rate = self.info.ctx.get_mm_config(
+            ).video_pruning_rate
+            if video_pruning_rate is not None and video_pruning_rate > 0.0:
+                # Start of EVS-specific code
+                num_tokens = compute_retained_tokens_count(
+                    tokens_per_frame=feature_size,
+                    num_frames=num_patches,
+                    q=video_pruning_rate,
+                )
+                return hf_processor.get_video_repl_for_evs(
+                    num_frames=num_patches,  # number of frames
+                    num_video_tokens=num_tokens,
+                    video_context_token=hf_processor.video_token)
+                # End of EVS-specific code
+            else:
+                return hf_processor.get_video_repl(
+                    feature_size,  # number of tokens per frame
+                    num_patches,  # number of frames
+                    video_context_token=hf_processor.video_token)
 
         if self.info.supports_video:
             prompt_repl = [
@@ -1072,7 +1118,8 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
             # Compute retention mask and prune the video embeddings.
             # Then, pass number of retained tokens per frame to the _create_final_video_embeddings function,
             # which will use it to create the video_repl_text with correct number of tokens per frame.
-            # EVS compute_retention_mask will need to change a bit, since we don't have here any THW data (although maybe it can be computed from num_patches and feature_size... I'm not sure)
+            # EVS compute_retention_mask will need to change a bit, since we don't have here any THW data
+            # (although maybe it can be computed from num_patches and feature_size... I'm not sure)
 
             num_patches = video_input["num_patches"][i].item()
             assert single_video_embeddings.shape[0] % num_patches == 0
@@ -1105,13 +1152,11 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
         video_repl_text = NanoNemotronVLProcessor.get_video_repl(
             feature_size, num_patches, IMG_CONTEXT).full
         tokenizer = cached_tokenizer_from_config(self.model_config)
-        repl_token_ids = torch.tensor(_seq2tokens(tokenizer,
-                                                  video_repl_text),
+        repl_token_ids = torch.tensor(_seq2tokens(tokenizer, video_repl_text),
                                       device=device)
 
         # Get embedding token IDs for image context
-        embed_token_ids = torch.tensor(encode_tokens(self.tokenizer,
-                                                     IMG_CONTEXT),
+        embed_token_ids = torch.tensor(encode_tokens(tokenizer, IMG_CONTEXT),
                                        device=device)
 
         # Create mask for video embedding positions
