@@ -409,6 +409,7 @@ class HunYuanSparseMoeBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
+            eplb_record_metrics=eplb_config.eplb_record_metrics,
             num_redundant_experts=self.n_redundant_experts,
         )
 
