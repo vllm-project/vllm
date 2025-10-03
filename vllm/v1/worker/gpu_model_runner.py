@@ -3060,7 +3060,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert not uniform_decode
             # Create mixed batch:
             # first half decode tokens, second half one prefill
-            num_decode_tokens = num_tokens // 2
+            num_decode_tokens = min(max_num_reqs - 1, num_tokens // 2)
             num_prefill_tokens = num_tokens - num_decode_tokens
             num_reqs = num_decode_tokens + 1
 
@@ -3072,7 +3072,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_query_len = num_prefill_tokens
         elif uniform_decode:
             assert not create_mixed_batch
-            num_reqs = cdiv(num_tokens, max_query_len)
+            num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
@@ -3517,7 +3517,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
-        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         @contextmanager
         def freeze_gc():
@@ -3540,6 +3539,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
         with freeze_gc(), graph_capture(device=self.device):
+            start_free_gpu_memory = torch.cuda.mem_get_info()[0]
             cudagraph_mode = self.compilation_config.cudagraph_mode
             assert cudagraph_mode is not None
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
@@ -3568,6 +3568,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
                     uniform_decode=True)
 
+            torch.cuda.synchronize()
+            end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
         # Note: We don't put it into graph_capture context manager because
@@ -3576,7 +3579,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         set_cudagraph_capturing_enabled(False)
 
         end_time = time.perf_counter()
-        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.

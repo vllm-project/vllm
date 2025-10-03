@@ -97,7 +97,7 @@ try:
         dispatch_key=current_platform.dispatch_key,
     )
 
-except ImportError:
+except (ImportError, AttributeError):
     dynamic_mxfp4_quant = gemm_afp4wfp4 = None
 
 __all__ = ["QuarkW4A4MXFP4"]
