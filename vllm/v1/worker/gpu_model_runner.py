@@ -4240,7 +4240,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     not in ["qwen3_next"]):
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")
-            mamba_block_size = (self.vllm_config.cache_config.mamba_block_size)
+            mamba_block_size = self.vllm_config.cache_config.mamba_block_size
             page_size_padded = (
                 self.vllm_config.cache_config.mamba_page_size_padded)
 
@@ -4249,8 +4249,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     shapes=mamba_module.get_state_shape(),
                     dtypes=mamba_module.get_state_dtype(),
                     block_size=mamba_block_size,
-                    enable_prefix_caching=self.vllm_config.cache_config.
-                    enable_prefix_caching,
                     page_size_padded=page_size_padded,
                     mamba_type=mamba_module.mamba_type,
                     num_speculative_blocks=(
