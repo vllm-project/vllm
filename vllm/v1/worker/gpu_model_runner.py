@@ -750,16 +750,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return
 
         # Find the number of accepted tokens for each sequence.
-        num_accepted_tokens = (torch.cat(
-            [
-                output_token_ids,
-                torch.full((output_token_ids.size(0), 1),
-                           -1,
-                           device=output_token_ids.device),
-            ],
-            dim=1) == -1).int().argmax(-1).cpu().numpy()
-        for i, num_tokens in enumerate(num_accepted_tokens):
-            self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+        mask = output_token_ids == -1
+        num_accepted_tokens = torch.where(
+            mask.any(dim=1),
+            mask.int().argmax(dim=1),
+            output_token_ids.size(1),
+        )
+        buf = self.input_batch.num_accepted_tokens_cpu[:num_accepted_tokens.
+                                                       size(0)]
+        buf.copy_(num_accepted_tokens, non_blocking=True)
+        self.input_batch.num_accepted_tokens_event.record()
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         image_grid_thw = []
@@ -1183,9 +1183,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
         spec_decode_common_attn_metadata = None
         if use_spec_decode:
-            self.num_accepted_tokens.np[:num_reqs] = (
+            self.input_batch.num_accepted_tokens_event.synchronize()
+            self.num_accepted_tokens.cpu[:num_reqs].copy_(
                 self.input_batch.num_accepted_tokens_cpu[:num_reqs])
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.cpu[num_reqs:].fill_(1)
             self.num_accepted_tokens.copy_to_gpu()
 
         # Prepare the attention metadata for each KV cache group and make layers
