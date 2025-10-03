@@ -8,7 +8,7 @@ This test verifies the following behavior: allow prefill and decodes on the
 model's maximum context length ``max_model_len`` and get one more token.
 
 Test strategy
-- Build a textual prompt that tokenizes to exactly ``prompt_len`` tokens.
+- Build a prompt consisting of exactly ``prompt_len`` tokens.
 - Run vLLM generation requesting ``max_tokens`` new tokens.
 - Run HF generation on the same prompt requesting the same number of tokens.
 - Assert both return the same number of generated tokens and the same ids.
@@ -66,6 +66,7 @@ def test_max_context_length(
     llm = LLM(
         model=model,
         tokenizer=model,
+        max_model_len=2048,
         max_num_seqs=1,
         tensor_parallel_size=1,
     )
