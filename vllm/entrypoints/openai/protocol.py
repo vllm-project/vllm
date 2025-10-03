@@ -1998,7 +1998,8 @@ class ResponsesResponse(OpenAIBaseModel):
     output_messages: Optional[list[ChatCompletionMessageParam]] = None
     # --8<-- [end:responses-extra-params]
 
-    # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
+    # NOTE: openAI harmony doesn't serialize TextContent properly,
+    # TODO: this fixes for TextContent, but need to verify for tools etc
     # https://github.com/openai/harmony/issues/78
     @field_serializer("output_messages", when_used="json")
     def serialize_output_messages(self, msgs, _info):
