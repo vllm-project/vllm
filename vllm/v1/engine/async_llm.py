@@ -269,7 +269,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
-        prompt_str: Optional[str] = None,
+        prompt_text: Optional[str] = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -282,19 +282,23 @@ class AsyncLLM(EngineClient):
         queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
-        request = prompt
-        if not isinstance(request, EngineCoreRequest):
-            assert prompt_str is None
+        if isinstance(prompt, EngineCoreRequest):
+            request = prompt
+        else:
+            assert prompt_text is None
             logger.warning_once(
                 "Processor has been moved under OpenAIServing and will "
                 "be removed from AsyncLLM in v0.13.")
-            prompt_str, request = self.processor.process_inputs(
-                request_id, request, params, arrival_time, lora_request,
-                tokenization_kwargs, trace_headers, priority,
-                data_parallel_rank)
+            request = self.processor.process_inputs(request_id, prompt, params,
+                                                    arrival_time, lora_request,
+                                                    tokenization_kwargs,
+                                                    trace_headers, priority,
+                                                    data_parallel_rank)
+            prompt_text = (prompt if isinstance(prompt, str) else
+                           prompt.get("prompt"))
 
         if is_pooling or params.n == 1:
-            await self._add_request(request, prompt_str, None, 0, queue)
+            await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
         # Get the updated SamplingParams from the request, which
@@ -310,7 +314,7 @@ class AsyncLLM(EngineClient):
                 request)
             child_request.request_id = request_id
             child_request.sampling_params = child_params
-            await self._add_request(child_request, prompt_str, parent_request,
+            await self._add_request(child_request, prompt_text, parent_request,
                                     idx, queue)
         return queue
 
@@ -340,7 +344,7 @@ class AsyncLLM(EngineClient):
         sampling_params: SamplingParams,
         request_id: str,
         *,
-        prompt_str: Optional[str] = None,
+        prompt_text: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -393,7 +397,7 @@ class AsyncLLM(EngineClient):
                                        trace_headers=trace_headers,
                                        priority=priority,
                                        data_parallel_rank=data_parallel_rank,
-                                       prompt_str=prompt_str)
+                                       prompt_text=prompt_text)
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.

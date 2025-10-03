@@ -274,7 +274,8 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                sampling_params: Union[SamplingParams, BeamSearchParams]
+                prompt_str, _, _ = (self._get_prompt_components(
+                    request_prompts[i]))
 
                 if self.default_sampling_params is None:
                     self.default_sampling_params = {}
@@ -285,6 +286,7 @@ class OpenAIServingChat(OpenAIServing):
                     input_length=len(engine_prompt["prompt_token_ids"]),
                     default_sampling_params=self.default_sampling_params)
 
+                sampling_params: Union[SamplingParams, BeamSearchParams]
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         max_tokens, self.default_sampling_params)
@@ -309,7 +311,7 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
-                    prompt_str, engine_request, tokenization_kwargs = (
+                    engine_request, tokenization_kwargs = (
                         await self._process_inputs(
                             request_id,
                             engine_prompt,

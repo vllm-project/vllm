@@ -7,7 +7,8 @@ import traceback
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import Any, Callable, ClassVar, Generic, Optional, TypeVar, Union
+from typing import (Any, Callable, ClassVar, Generic, NamedTuple, Optional,
+                    TypeVar, Union)
 
 import torch
 from fastapi import Request
@@ -137,6 +138,12 @@ def is_text_tokens_prompt(prompt: RequestPrompt) -> TypeIs[TextTokensPrompt]:
 def is_embeds_prompt(prompt: RequestPrompt) -> TypeIs[EmbedsPrompt]:
     return (isinstance(prompt, dict) and "prompt_token_ids" not in prompt
             and "prompt_embeds" in prompt)
+
+
+class PromptComponents(NamedTuple):
+    text: Optional[str] = None
+    token_ids: Optional[list[int]] = None
+    embeds: Optional[torch.Tensor] = None
 
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
@@ -874,7 +881,7 @@ class OpenAIServing:
         lora_request: Optional[LoRARequest],
         trace_headers: Optional[Mapping[str, str]],
         priority: int,
-    ) -> tuple[Optional[str], EngineCoreRequest, dict]:
+    ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """
         using the Processor to process inputs for AsyncLLM
         """
@@ -884,7 +891,7 @@ class OpenAIServing:
                                   tokenization_kwargs)
 
         processor = await self._get_processor()
-        prompt_str, engine_request = processor.process_inputs(
+        engine_request = processor.process_inputs(
             request_id,
             engine_prompt,
             sampling_params,
@@ -893,7 +900,7 @@ class OpenAIServing:
             trace_headers=trace_headers,
             priority=priority,
         )
-        return prompt_str, engine_request, tokenization_kwargs
+        return engine_request, tokenization_kwargs
 
     async def _generate_with_builtin_tools(
         self,
@@ -906,6 +913,7 @@ class OpenAIServing:
         priority: int = 0,
         **kwargs,
     ):
+        prompt_str, _, _ = self._get_prompt_components(request_prompt)
         orig_priority = priority
         while True:
             self._log_inputs(
@@ -915,15 +923,14 @@ class OpenAIServing:
                 lora_request=lora_request,
             )
             trace_headers = kwargs.get("trace_headers")
-            prompt_str, engine_request, tokenization_kwargs = (
-                await self._process_inputs(
-                    request_id,
-                    engine_prompt,
-                    sampling_params,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=priority,
-                ))
+            engine_request, tokenization_kwargs = (await self._process_inputs(
+                request_id,
+                engine_prompt,
+                sampling_params,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                priority=priority,
+            ))
 
             generator = self.engine_client.generate(
                 engine_request,
@@ -964,6 +971,28 @@ class OpenAIServing:
             # OPTIMIZATION
             priority = orig_priority - 1
 
+    def _get_prompt_components(
+        self,
+        inputs: Union[RequestPrompt, PromptType],
+    ) -> PromptComponents:
+        if isinstance(inputs, str):
+            return PromptComponents(text=inputs)
+        if isinstance(inputs, list):
+            return PromptComponents(token_ids=inputs)
+        if isinstance(inputs, dict):
+            return PromptComponents(
+                text=inputs.get("prompt"),  # type: ignore[arg-type]
+                token_ids=inputs.get(
+                    "prompt_token_ids"),  # type: ignore[arg-type]
+                embeds=inputs.get("prompt_embeds"),
+            )
+
+        return PromptComponents(
+            text=getattr(inputs, "prompt", None),
+            token_ids=getattr(inputs, "prompt_token_ids", None),
+            embeds=getattr(inputs, "prompt_embeds", None),
+        )
+
     def _log_inputs(
         self,
         request_id: str,
@@ -974,14 +1003,9 @@ class OpenAIServing:
     ) -> None:
         if self.request_logger is None:
             return
-        prompt, prompt_token_ids, prompt_embeds = None, None, None
-        if isinstance(inputs, str):
-            prompt = inputs
-        elif isinstance(inputs, list):
-            prompt_token_ids = inputs
-        else:
-            prompt = getattr(inputs, 'prompt', None)
-            prompt_token_ids = getattr(inputs, 'prompt_token_ids', None)
+
+        prompt, prompt_token_ids, prompt_embeds = (
+            self._get_prompt_components(inputs))
 
         self.request_logger.log_inputs(
             request_id,
