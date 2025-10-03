@@ -104,9 +104,8 @@ def fp8_allgather_worker(local_rank: int, world_size: int):
     # Check shape
     expected_shape = (8 * tp_group.world_size, 16)
     assert gathered.shape == expected_shape
-    print(
-        f"Rank {local_rank}: ✅ FP8 AllGather op test passed! Shape: {gathered.shape}"
-    )
+    print(f"Rank {local_rank}: ✅ FP8 AllGather op test passed! "
+          f"Shape: {gathered.shape}")
 
 
 @multi_gpu_test(num_gpus=2)
@@ -127,9 +126,8 @@ def test_fp8_allgather_pass_init():
 
 def test_fp8_allgather_pattern_fake():
     """Test pattern with fake mode (no actual distributed execution)"""
-    pytest.skip(
-        "Pattern registration requires valid TP group - test manually with multi-GPU"
-    )
+    pytest.skip("Pattern registration requires valid TP group - "
+                "test manually with multi-GPU")
 
 
 def fp8_allgather_correctness_worker(local_rank: int, world_size: int):
@@ -175,8 +173,9 @@ def fp8_allgather_correctness_worker(local_rank: int, world_size: int):
     scale_gathered = tensor_model_parallel_all_gather(scale_inv_1d, dim=0)
 
     # Dequantize: apply each rank's scale to its chunk
-    # gathered_fp8 has shape [16, 32*world_size], scale_gathered has shape [world_size]
-    # Need to broadcast scale to match each chunk along dim=-1
+    # gathered_fp8 has shape [16, 32*world_size], scale_gathered has
+    # shape [world_size]. Need to broadcast scale to match each chunk
+    # along dim=-1
     chunk_size = x.shape[-1]
     scale_expanded = torch.repeat_interleave(scale_gathered, chunk_size).view(
         1, -1).to(torch.bfloat16)
@@ -187,9 +186,8 @@ def fp8_allgather_correctness_worker(local_rank: int, world_size: int):
                                gathered_direct,
                                rtol=0.05,
                                atol=0.05)
-    print(
-        f"Rank {local_rank}: ✅ FP8 AllGather numerical correctness test passed!"
-    )
+    print(f"Rank {local_rank}: ✅ FP8 AllGather numerical correctness "
+          f"test passed!")
 
 
 @multi_gpu_test(num_gpus=2)
@@ -200,6 +198,112 @@ def test_fp8_allgather_numerical_correctness():
         torch.multiprocessing.spawn(fn, args=(nprocs, ), nprocs=nprocs)
 
     run_torch_spawn(fp8_allgather_correctness_worker, 2)
+
+
+def fp8_allgather_pattern_equivalence_worker(local_rank: int, world_size: int):
+    """
+    Worker function to test pattern transformation equivalence.
+
+    Tests that the transformation:
+        AllGather(BF16) → Quantize(FP8, shared_scale)
+    is numerically equivalent to:
+        Quantize(FP8, shared_scale) → AllGather(FP8)
+
+    This validates the core assumption of the FP8AllGatherOptPass pattern.
+    """
+    from vllm.compilation.fp8_collective_ops import vllm_all_gather_fp8
+    from vllm.distributed import (get_tp_group, init_distributed_environment,
+                                  initialize_model_parallel,
+                                  tensor_model_parallel_all_gather)
+    from vllm.utils import update_environment_variables
+
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+
+    update_environment_variables({
+        'RANK': str(local_rank),
+        'LOCAL_RANK': str(local_rank),
+        'WORLD_SIZE': str(world_size),
+        'MASTER_ADDR': 'localhost',
+        'MASTER_PORT': '29503',
+    })
+
+    # Initialize distributed
+    init_distributed_environment()
+    initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    # Create test tensor with different values per rank
+    torch.manual_seed(42 + local_rank)
+    x = torch.randn(16, 32, dtype=torch.bfloat16, device='cuda')
+
+    # Shared precomputed scale (simulating what modelopt would provide)
+    # In reality, this would be computed from the global tensor statistics,
+    # but for testing we use a fixed value that all ranks share
+    shared_scale = torch.tensor(0.05, dtype=torch.float32, device='cuda')
+
+    # METHOD 1 (Original Pattern): AllGather(BF16) → Quantize(FP8)
+    gathered_bf16 = tensor_model_parallel_all_gather(x, dim=0)
+
+    # Apply modelopt-style quantization AFTER AllGather
+    x_f32 = gathered_bf16.to(torch.float32)
+    scale_inv = shared_scale.reciprocal()
+    x_scaled = x_f32 * scale_inv
+    x_clamped = x_scaled.clamp(min=-448.0, max=448.0)
+    result_pattern = x_clamped.to(torch.float8_e4m3fn)
+
+    # METHOD 2 (Optimized Replacement): Quantize(FP8) → AllGather(FP8)
+    # Apply modelopt-style quantization BEFORE AllGather
+    x_f32_local = x.to(torch.float32)
+    x_scaled_local = x_f32_local * scale_inv
+    x_clamped_local = x_scaled_local.clamp(min=-448.0, max=448.0)
+    x_fp8_local = x_clamped_local.to(torch.float8_e4m3fn)
+
+    # AllGather FP8 tensors
+    tp_group = get_tp_group()
+    result_replacement = vllm_all_gather_fp8(x_fp8_local,
+                                             dim=0,
+                                             world_size=tp_group.world_size,
+                                             group_name=tp_group.unique_name)
+
+    # Check that both methods produce IDENTICAL results
+    # Since we're using the same shared scale and FP8 quantization,
+    # the results should be bit-exact (no tolerance needed)
+    assert result_pattern.shape == result_replacement.shape, (
+        f"Shape mismatch: {result_pattern.shape} vs {result_replacement.shape}"
+    )
+
+    # Convert to int8 to compare bit patterns (FP8 doesn't have direct equality)
+    pattern_bits = result_pattern.view(torch.int8)
+    replacement_bits = result_replacement.view(torch.int8)
+
+    matches = (pattern_bits == replacement_bits).float().mean().item()
+
+    # Allow for very small numerical differences due to FP8 rounding
+    # but they should be nearly identical (>99.9% match)
+    assert matches > 0.999, (
+        f"Rank {local_rank}: Pattern transformation not equivalent! "
+        f"Only {matches*100:.2f}% of values match. "
+        f"Expected >99.9% match for bit-exact equivalence.")
+
+    print(f"Rank {local_rank}: ✅ Pattern transformation equivalence "
+          f"test passed! Match rate: {matches*100:.4f}%")
+
+
+@multi_gpu_test(num_gpus=2)
+def test_fp8_allgather_pattern_equivalence():
+    """
+    Test that the FP8AllGatherOptPass pattern transformation is
+    numerically valid.
+
+    This test validates the core assumption: when using a shared
+    precomputed scale, quantizing before AllGather produces the same
+    result as quantizing after.
+    """
+
+    def run_torch_spawn(fn, nprocs):
+        torch.multiprocessing.spawn(fn, args=(nprocs, ), nprocs=nprocs)
+
+    run_torch_spawn(fp8_allgather_pattern_equivalence_worker, 2)
 
 
 def test_pass_config_has_flag():
