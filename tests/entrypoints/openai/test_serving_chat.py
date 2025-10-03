@@ -266,7 +266,7 @@ def _build_serving_chat(engine: AsyncLLM,
 
     async def _fake_process_inputs(request_id, engine_prompt, sampling_params,
                                    *, lora_request, trace_headers, priority):
-        return None, dict(engine_prompt), {}
+        return dict(engine_prompt), {}
 
     serving_chat._process_inputs = AsyncMock(side_effect=_fake_process_inputs)
     return serving_chat
@@ -517,12 +517,12 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     # By default, cache_salt in the engine prompt is not set
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
-    engine_prompt = serving_chat._process_inputs.await_args_list[0].args[1]
+    engine_prompt = serving_chat._process_inputs.await_args_list[0].args[0]
     assert engine_prompt.get("cache_salt") is None
 
     # Test with certain cache_salt
     req.cache_salt = "test_salt"
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
-    engine_prompt = serving_chat._process_inputs.await_args_list[1].args[1]
+    engine_prompt = serving_chat._process_inputs.await_args_list[1].args[0]
     assert engine_prompt.get("cache_salt") == "test_salt"

@@ -122,8 +122,8 @@ def mock_serving_setup():
                                                  models,
                                                  request_logger=None)
 
-    serving_completion._process_inputs = AsyncMock(
-        return_value=(None, MagicMock(name="engine_request"), {}))
+    serving_completion._process_inputs = AsyncMock(return_value=(MagicMock(
+        name="engine_request"), {}))
 
     return mock_engine, serving_completion
 
