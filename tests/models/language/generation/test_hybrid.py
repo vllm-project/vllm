@@ -337,18 +337,12 @@ def test_fp32_cache_state(
 
 
 # Helper functions for the APC tests
-def _get_vllm_runner_params(model,
-                            enforce_eager,
-                            max_model_len,
-                            tensor_parallel_size=1):
+def _get_vllm_runner_params(model, max_model_len, tensor_parallel_size=1):
     return {
         'model_name': model,
         'enable_prefix_caching': False,
-        'enforce_eager': enforce_eager,
         'max_model_len': max_model_len,
         'tensor_parallel_size': tensor_parallel_size,
-        'disable_cascade_attn': True,  ## not verified yet
-        'disable_log_stats': False,  ## collect APC stats
         'gpu_memory_utilization': 0.4
     }
 
@@ -377,14 +371,11 @@ def _get_vLLM_output(vllm_runner,
 @pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
-@pytest.mark.parametrize("enforce_eager", [True])
 # If num_logprobs is set to -1, then the stringent version
 # of the test is executed using `check_outputs_equal`
 # instead of `check_logprobs_close`
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-@pytest.mark.parametrize("cache_dtype_param",
-                         ["mamba_ssm_cache_dtype", "mamba_cache_dtype"])
 def test_apc_single_prompt(
     hf_runner,
     vllm_runner,
@@ -393,10 +384,8 @@ def test_apc_single_prompt(
     model: str,
     max_tokens: int,
     n_repetitions: int,
-    enforce_eager: bool,
     num_logprobs: int,
     tensor_parallel_size: int,
-    cache_dtype_param: str,
 ) -> None:
 
     try:
@@ -417,11 +406,8 @@ def test_apc_single_prompt(
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
     vllm_runner_kwargs = _get_vllm_runner_params(
-        model,
-        enforce_eager,
-        max_model_len,
-        tensor_parallel_size=tensor_parallel_size)
-    vllm_runner_kwargs[cache_dtype_param] = "float32"
+        model, max_model_len, tensor_parallel_size=tensor_parallel_size)
+    vllm_runner_kwargs['mamba_ssm_cache_dtype'] = "float32"
     vllm_outputs_no_cache, _ = _get_vLLM_output(vllm_runner,
                                                 vllm_runner_kwargs,
                                                 generated_prompts, max_tokens,
@@ -448,14 +434,11 @@ def test_apc_single_prompt(
 @pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
-@pytest.mark.parametrize("enforce_eager", [True])
 # If num_logprobs is set to -1, then the stringent version
 # of the test is executed using `check_outputs_equal`
 # instead of `check_logprobs_close`
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-@pytest.mark.parametrize("cache_dtype_param",
-                         ["mamba_ssm_cache_dtype", "mamba_cache_dtype"])
 def test_apc_single_prompt_block_align_alignment(
     hf_runner,
     vllm_runner,
@@ -464,10 +447,8 @@ def test_apc_single_prompt_block_align_alignment(
     model: str,
     max_tokens: int,
     n_repetitions: int,
-    enforce_eager: bool,
     num_logprobs: int,
     tensor_parallel_size: int,
-    cache_dtype_param: str,
 ) -> None:
 
     try:
@@ -488,11 +469,8 @@ def test_apc_single_prompt_block_align_alignment(
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
     vllm_runner_kwargs = _get_vllm_runner_params(
-        model,
-        enforce_eager,
-        max_model_len,
-        tensor_parallel_size=tensor_parallel_size)
-    vllm_runner_kwargs[cache_dtype_param] = "float32"
+        model, max_model_len, tensor_parallel_size=tensor_parallel_size)
+    vllm_runner_kwargs['mamba_ssm_cache_dtype'] = "float32"
 
     vllm_outputs_no_cache, _ = _get_vLLM_output(vllm_runner,
                                                 vllm_runner_kwargs,
@@ -540,14 +518,11 @@ def test_apc_single_prompt_block_align_alignment(
 @pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
-@pytest.mark.parametrize("enforce_eager", [True])
 # If num_logprobs is set to -1, then the stringent version
 # of the test is executed using `check_outputs_equal`
 # instead of `check_logprobs_close`
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-@pytest.mark.parametrize("cache_dtype_param",
-                         ["mamba_ssm_cache_dtype", "mamba_cache_dtype"])
 def test_apc_multiple_prompts_all_cached_outputs(
     hf_runner,
     vllm_runner,
@@ -556,10 +531,8 @@ def test_apc_multiple_prompts_all_cached_outputs(
     model: str,
     max_tokens: int,
     n_repetitions: int,
-    enforce_eager: bool,
     num_logprobs: int,
     tensor_parallel_size: int,
-    cache_dtype_param: str,
 ) -> None:
 
     try:
@@ -580,11 +553,8 @@ def test_apc_multiple_prompts_all_cached_outputs(
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
     vllm_runner_kwargs = _get_vllm_runner_params(
-        model,
-        enforce_eager,
-        max_model_len,
-        tensor_parallel_size=tensor_parallel_size)
-    vllm_runner_kwargs[cache_dtype_param] = "float32"
+        model, max_model_len, tensor_parallel_size=tensor_parallel_size)
+    vllm_runner_kwargs['mamba_ssm_cache_dtype'] = "float32"
 
     vllm_outputs_no_cache, _ = _get_vLLM_output(vllm_runner,
                                                 vllm_runner_kwargs,
@@ -612,14 +582,11 @@ def test_apc_multiple_prompts_all_cached_outputs(
 @pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
-@pytest.mark.parametrize("enforce_eager", [True])
 # If num_logprobs is set to -1, then the stringent version
 # of the test is executed using `check_outputs_equal`
 # instead of `check_logprobs_close`
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-@pytest.mark.parametrize("cache_dtype_param",
-                         ["mamba_ssm_cache_dtype", "mamba_cache_dtype"])
 def test_apc_multiple_prompts_block_align_alignment(
     hf_runner,
     vllm_runner,
@@ -628,10 +595,8 @@ def test_apc_multiple_prompts_block_align_alignment(
     model: str,
     max_tokens: int,
     n_repetitions: int,
-    enforce_eager: bool,
     num_logprobs: int,
     tensor_parallel_size: int,
-    cache_dtype_param: str,
 ) -> None:
 
     try:
@@ -655,10 +620,9 @@ def test_apc_multiple_prompts_block_align_alignment(
 
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
-    vllm_runner_kwargs = _get_vllm_runner_params(model, enforce_eager,
-                                                 max_model_len,
+    vllm_runner_kwargs = _get_vllm_runner_params(model, max_model_len,
                                                  tensor_parallel_size)
-    vllm_runner_kwargs[cache_dtype_param] = "float32"
+    vllm_runner_kwargs['mamba_ssm_cache_dtype'] = "float32"
 
     vllm_outputs_no_cache, _ = _get_vLLM_output(vllm_runner,
                                                 vllm_runner_kwargs,
@@ -706,14 +670,11 @@ def test_apc_multiple_prompts_block_align_alignment(
 @pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
-@pytest.mark.parametrize("enforce_eager", [True])
 # If num_logprobs is set to -1, then the stringent version
 # of the test is executed using `check_outputs_equal`
 # instead of `check_logprobs_close`
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-@pytest.mark.parametrize("cache_dtype_param",
-                         ["mamba_ssm_cache_dtype", "mamba_cache_dtype"])
 def test_apc_multiple_prompts_partial_cached_outputs(
     hf_runner,
     vllm_runner,
@@ -722,10 +683,8 @@ def test_apc_multiple_prompts_partial_cached_outputs(
     model: str,
     max_tokens: int,
     n_repetitions: int,
-    enforce_eager: bool,
     num_logprobs: int,
     tensor_parallel_size: int,
-    cache_dtype_param: str,
 ) -> None:
 
     try:
@@ -746,11 +705,8 @@ def test_apc_multiple_prompts_partial_cached_outputs(
     max_model_len = max(
         len(prompt) + max_tokens for prompt in generated_prompts)
     vllm_runner_kwargs = _get_vllm_runner_params(
-        model,
-        enforce_eager,
-        max_model_len,
-        tensor_parallel_size=tensor_parallel_size)
-    vllm_runner_kwargs[cache_dtype_param] = "float32"
+        model, max_model_len, tensor_parallel_size=tensor_parallel_size)
+    vllm_runner_kwargs['mamba_ssm_cache_dtype'] = "float32"
 
     vllm_outputs_no_cache, _ = _get_vLLM_output(vllm_runner,
                                                 vllm_runner_kwargs,
