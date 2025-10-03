@@ -235,15 +235,21 @@ class BenchmarkDataset(ABC):
 
         if len(requests) < num_requests:
             random.seed(self.random_seed)
-            additional = deepcopy(
-                random.choices(requests, k=num_requests - len(requests))
-            )
-            for i in range(len(additional)):
-                req = additional[i]
+            needed = num_requests - len(requests)
+            additional = []
+            for i in range(needed):
+                req = deepcopy(random.choice(requests))
                 req.request_id = request_id_prefix + str(len(requests) + i)
+                additional.append(req)
             requests.extend(additional)
             logger.info("Oversampled requests to reach %d total samples.",
                         num_requests)
+
+        ids = [req.request_id for req in requests]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate request_id found in the sampled "
+                             "requests. Please ensure that each request_id "
+                             "is unique.")
 
 
 # -----------------------------------------------------------------------------
