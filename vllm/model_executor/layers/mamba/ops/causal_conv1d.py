@@ -493,11 +493,11 @@ def causal_conv1d_fn(
         in this case, the kernel will not process entries at
         indices 0 and 3
     current_first_idx: (batch,), dtype int32
-        The pointer into cache_indices, which signifies the first cache block to be filled.
+        The pointer into cache_indices, where the first cache block to be filled is located.
     current_last_idx: (batch,), dtype int32
-        The pointer into cache_indices, which signifies the last cache block to be filled.
+        The pointer into cache_indices, where the last cache block to be filled is located.
     initial_state_idx: (batch,), dtype int32
-        The pointer into cache_indices, which signifies the cache block containing the initial state.
+        The pointer into cache_indices, where the cache block containing the initial state is located.
     context_lens: (batch,), dtype int32
         The number of tokens already completed for each sequence
     block_size_to_align: int
@@ -1055,9 +1055,9 @@ def causal_conv1d_update(
         and we are selecting the batch coords specified by conv_state_indices.
         Useful for a continuous batching scenario.
     current_last_idx: (batch,), dtype int32
-        The pointer into cache_indices, which signifies the last cache block to be filled.
+        The pointer into conv_state_indices, where the last cache block to be filled is located.
     initial_state_idx: (batch,), dtype int32
-        The pointer into cache_indices, which signifies the cache block containing the initial state.
+        The pointer into conv_state_indices, where the cache block containing the initial state is located.
     num_accepted_tokens: (batch,), dtype int32
         If not None, it indicates the number of accepted tokens for each
         sequence in the batch.
@@ -1070,9 +1070,9 @@ def causal_conv1d_update(
         If query_start_loc is not None, this indicates the maximum query
         length in the batch.
     pad_slot_id: int
-            if cache_indices is passed, lets the kernel identify padded
+            if conv_state_indices is passed, lets the kernel identify padded
             entries that will not be processed,
-            for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
+            for example: conv_state_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
             in this case, the kernel will not process entries at
             indices 0 and 3
     out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
