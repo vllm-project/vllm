@@ -280,6 +280,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
+        eplb_record_metrics: bool = False,
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
@@ -484,6 +485,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
+        eplb_record_metrics: bool = False,
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
@@ -955,6 +957,7 @@ class FusedMoE(CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
+        eplb_record_metrics: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
         is_sequence_parallel=False,
@@ -1013,6 +1016,7 @@ class FusedMoE(CustomOp):
         self.layer_name = prefix
 
         self.enable_eplb = enable_eplb
+        self.eplb_record_metrics = eplb_record_metrics
         self.expert_load_view: Optional[torch.Tensor] = None
         self.logical_to_physical_map: Optional[torch.Tensor] = None
         self.logical_replica_count: Optional[torch.Tensor] = None
@@ -1702,6 +1706,7 @@ class FusedMoE(CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         indices_type: Optional[torch.dtype] = None,
         enable_eplb: bool = False,
+        eplb_record_metrics: bool = False,
         expert_map: Optional[torch.Tensor] = None,
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
@@ -1788,7 +1793,9 @@ class FusedMoE(CustomOp):
                 topk_ids=topk_ids,
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
+                eplb_record_metrics=eplb_record_metrics,
                 logical_replica_count=logical_replica_count,
+                
                 indices_type=indices_type,
             )
 
@@ -1957,6 +1964,7 @@ class FusedMoE(CustomOp):
                 e_score_correction_bias=self.e_score_correction_bias,
                 activation=self.activation,
                 enable_eplb=self.enable_eplb,
+                eplb_record_metrics=self.eplb_record_metrics,
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
@@ -2085,6 +2093,7 @@ class FusedMoE(CustomOp):
                 activation=self.activation,
                 apply_router_weight_on_input=self.apply_router_weight_on_input,
                 enable_eplb=self.enable_eplb,
+                eplb_record_metrics=self.eplb_record_metrics,
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
