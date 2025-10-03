@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import torch
 import torch.nn as nn
@@ -68,7 +68,37 @@ def check_upstream_fa_availability(dtype: torch.dtype):
     ) and current_platform.has_device_capability(80):
         from transformers.utils import is_flash_attn_2_available
         return is_flash_attn_2_available()
+    if current_platform.is_rocm():
+        from importlib.util import find_spec
+        return find_spec("flash_attn") is not None
     return False
+
+
+def maybe_get_vit_flash_attn_backend(
+        attn_backend: _Backend,
+        use_upstream_fa: bool) -> tuple[_Backend, Callable]:
+    if attn_backend != _Backend.FLASH_ATTN and \
+        attn_backend != _Backend.ROCM_AITER_FA and \
+                check_upstream_fa_availability(torch.get_default_dtype()):
+        attn_backend = _Backend.FLASH_ATTN
+        use_upstream_fa = True
+
+    if current_platform.is_rocm() and \
+        attn_backend == _Backend.FLASH_ATTN:
+        use_upstream_fa = True
+
+    if (attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}):
+        if attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+        else:
+            if use_upstream_fa:
+                from flash_attn import flash_attn_varlen_func
+            else:
+                from vllm.vllm_flash_attn import flash_attn_varlen_func
+    else:
+        flash_attn_varlen_func = None
+
+    return attn_backend, flash_attn_varlen_func
 
 
 class Attention(nn.Module, AttentionLayerBase):
@@ -410,13 +440,9 @@ class MultiHeadAttention(nn.Module):
         # to upstream flash attention if available.
         # If vllm native fa is selected, we use it directly.
         use_upstream_fa = False
-        if backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
-                dtype):
-            backend = _Backend.FLASH_ATTN
-            use_upstream_fa = True
 
-        if current_platform.is_rocm() or current_platform.is_xpu():
-            # currently, only torch_sdpa is supported on rocm/xpu
+        if current_platform.is_xpu():
+            # currently, only torch_sdpa is supported on xpu
             self.attn_backend = _Backend.TORCH_SDPA
         else:
 
@@ -428,17 +454,25 @@ class MultiHeadAttention(nn.Module):
                 _Backend.FLASH_ATTN,
             } else _Backend.TORCH_SDPA
 
+        self.attn_backend, self._flash_attn_varlen_func \
+            = maybe_get_vit_flash_attn_backend(
+                self.attn_backend,
+                use_upstream_fa,
+            )
+
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
             self.attn_backend = _Backend.TORCH_SDPA
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            if use_upstream_fa:
-                from flash_attn import flash_attn_varlen_func
-                self._flash_attn_varlen_func = flash_attn_varlen_func
-            else:
-                from vllm.vllm_flash_attn import flash_attn_varlen_func
-                self._flash_attn_varlen_func = flash_attn_varlen_func
+        self.is_flash_attn_backend = self.attn_backend in {
+            _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
+        }
+
+        # this condition is just to make sure that the
+        # use_upstream_fa in the log is correct
+        if current_platform.is_rocm() \
+            and self.attn_backend == _Backend.FLASH_ATTN:
+            use_upstream_fa = True
 
         logger.info_once(
             f"MultiHeadAttention attn_backend: {self.attn_backend}, "
@@ -466,7 +500,7 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if self.is_flash_attn_backend:
             cu_seqlens_q = torch.arange(0, (bsz + 1) * q_len,
                                         step=q_len,
                                         dtype=torch.int32,
@@ -507,14 +541,6 @@ class MultiHeadAttention(nn.Module):
             from torch_xla.experimental.custom_kernel import flash_attention
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend == _Backend.ROCM_AITER_FA:
-            from aiter import flash_attn_varlen_func
-
-            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
-            out = flash_attn_varlen_func(query,
-                                         key,
-                                         value,
-                                         softmax_scale=self.scale)
         else:
             # ViT attention hasn't supported this backend yet
             raise NotImplementedError(
