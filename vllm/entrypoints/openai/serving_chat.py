@@ -691,11 +691,13 @@ class OpenAIServingChat(OpenAIServing):
                     if self.use_harmony:
                         harmony_parser = harmony_parsers[i]
                         prev_recipient = harmony_parser.current_recipient
+                        delta_text = ""
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
+                            delta_text += (harmony_parser.last_content_delta
+                                           or "")
                         cur_channel = harmony_parser.current_channel
                         cur_recipient = harmony_parser.current_recipient
-                        delta_text = harmony_parser.last_content_delta or ""
                     else:
                         delta_text = output.text
 
