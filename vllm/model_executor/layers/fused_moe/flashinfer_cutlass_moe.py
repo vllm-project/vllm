@@ -81,8 +81,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        curr_M: int,
-        M: int,
+        M_chunk: int,
+        M_full: int,
         N: int,
         K: int,
         topk: int,
@@ -108,9 +108,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-        workspace1 = (curr_M, K)
+        workspace1 = (M_chunk, K)
         workspace2 = (0, )
-        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" else K)
+        output_shape = (M_full, K * 2 if self.quant_dtype == "nvfp4" else K)
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
         return (workspace1, workspace2, output_shape)

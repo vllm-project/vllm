@@ -181,8 +181,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        curr_M: int,
-        M: int,
+        M_chunk: int,
+        M_full: int,
         N: int,
         K: int,
         topk: int,
@@ -192,13 +192,13 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.block_shape is not None
         block_m = self.block_shape[0]
-        M_sum = compute_aligned_M(curr_M, topk, local_num_experts, block_m,
+        M_sum = compute_aligned_M(M_chunk, topk, local_num_experts, block_m,
                                   expert_tokens_meta)
         assert M_sum % block_m == 0
 
         workspace1 = (M_sum, max(N, K))
         workspace2 = (M_sum, max(N // 2, K))
-        output = (M, K)
+        output = (M_full, K)
         return (workspace1, workspace2, output)
 
     def apply(

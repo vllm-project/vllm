@@ -313,8 +313,8 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
 
     def workspace_shapes(
         self,
-        curr_M: int,
-        M: int,
+        M_chunk: int,
+        M_full: int,
         N: int,
         K: int,
         topk: int,
@@ -322,9 +322,9 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        workspace1 = (curr_M * topk, max(N, K))
-        workspace2 = (curr_M * topk, max(N // 2, K))
-        output = (M, K)
+        workspace1 = (M_chunk * topk, max(N, K))
+        workspace2 = (M_chunk * topk, max(N // 2, K))
+        output = (M_full, K)
         return (workspace1, workspace2, output)
 
 
@@ -371,8 +371,8 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
 
     def workspace_shapes(
         self,
-        curr_M: int,
-        M: int,
+        M_chunk: int,
+        M_full: int,
         N: int,
         K: int,
         topk: int,
@@ -382,9 +382,11 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         num_dp = self.num_dispatchers
         assert num_dp is not None
-        workspace1 = (self.max_experts_per_worker, M * num_dp, max(N, K))
-        workspace2 = (self.max_experts_per_worker, M * num_dp, max(N // 2, K))
-        output = (self.max_experts_per_worker, M, K)
+        assert M_chunk == M_full
+        workspace1 = (self.max_experts_per_worker, M_full * num_dp, max(N, K))
+        workspace2 = (self.max_experts_per_worker, M_full * num_dp,
+                      max(N // 2, K))
+        output = (self.max_experts_per_worker, M_full, K)
         return (workspace1, workspace2, output)
 
 
@@ -670,8 +672,8 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        curr_M: int,
-        M: int,
+        M_chunk: int,
+        M_full: int,
         N: int,
         K: int,
         topk: int,
@@ -683,13 +685,14 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: tuple[int, ...] = ()
         output: tuple[int, ...] = ()
         if self.use_batched_format:
-            workspace1 = (self.max_experts_per_worker, M, max(N, K))
-            workspace2 = (self.max_experts_per_worker, M, (N // 2))
-            output = (self.max_experts_per_worker, M, K)
+            assert M_chunk == M_full
+            workspace1 = (self.max_experts_per_worker, M_full, max(N, K))
+            workspace2 = (self.max_experts_per_worker, M_full, (N // 2))
+            output = (self.max_experts_per_worker, M_full, K)
         else:
-            workspace1 = (curr_M * topk, max(2 * N, K))
-            workspace2 = (curr_M * topk, N)
-            output = (M, K)
+            workspace1 = (M_chunk * topk, max(2 * N, K))
+            workspace2 = (M_chunk * topk, N)
+            output = (M_full, K)
         return (workspace1, workspace2, output)
 
     def apply(
