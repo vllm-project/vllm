@@ -1575,7 +1575,9 @@ class OpenAIServingChat(OpenAIServing):
         sys_msg = get_system_message(
             reasoning_effort=request.reasoning_effort,
             browser_description=None,
-            python_description=None)
+            python_description=None,
+            with_custom_tools=request.tools is not None
+            )
         messages.append(sys_msg)
 
         # Add developer message.
