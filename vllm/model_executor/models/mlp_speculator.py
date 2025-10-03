@@ -13,6 +13,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from .utils import maybe_prefix
+
 SQRT2 = 2**0.5
 
 
@@ -97,8 +99,13 @@ class MLPSpeculator(nn.Module):
             self.proj = nn.ModuleList([proj_first] + [proj_tied] *
                                       (self.max_speculative_tokens - 1))
 
-            head = ParallelLMHead(self.vocab_size, self.inner_dim, bias=False)
-            self.head = nn.ModuleList([head] * self.max_speculative_tokens)
+            self.head = nn.ModuleList([
+                ParallelLMHead(self.vocab_size,
+                               self.inner_dim,
+                               bias=False,
+                               prefix=maybe_prefix(prefix, f"head.{i}"))
+                for i in range(self.max_speculative_tokens)
+            ])
 
             ln = MLPSpeculatorLayerNorm(self.inner_dim,
                                         elementwise_scale_and_shift=True)
@@ -120,8 +127,11 @@ class MLPSpeculator(nn.Module):
             ])
 
             self.head = nn.ModuleList([
-                ParallelLMHead(self.vocab_size, self.inner_dim, bias=False)
-                for _ in range(self.max_speculative_tokens)
+                ParallelLMHead(self.vocab_size,
+                               self.inner_dim,
+                               bias=False,
+                               prefix=maybe_prefix(prefix, f"head.{i}"))
+                for i in range(self.max_speculative_tokens)
             ])
             self.ln = nn.ModuleList([
                 MLPSpeculatorLayerNorm(self.inner_dim,

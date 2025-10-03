@@ -28,13 +28,15 @@ class SharedHead(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        prefix: str,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.head = ParallelLMHead(config.vocab_size,
                                    config.hidden_size,
-                                   quant_config=quant_config)
+                                   quant_config=quant_config,
+                                   prefix=maybe_prefix(prefix, "head"))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.norm(hidden_states)
@@ -64,7 +66,9 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
                 device="cuda")
         else:
             topk_indices_buffer = None
-        self.shared_head = SharedHead(config=config, quant_config=quant_config)
+        self.shared_head = SharedHead(config=config,
+                                      prefix=prefix,
+                                      quant_config=quant_config)
         self.mtp_block = DeepseekV2DecoderLayer(vllm_config, prefix,
                                                 topk_indices_buffer)
 

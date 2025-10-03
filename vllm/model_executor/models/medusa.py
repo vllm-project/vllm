@@ -82,7 +82,8 @@ class Medusa(nn.Module):
                     config.hidden_size,
                     org_num_embeddings=self.truncated_vocab_size,
                     padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-                ) for _ in range(self.config.num_heads)
+                    prefix=maybe_prefix(prefix, f"lm_heads.{i}"),
+                ) for i in range(self.config.num_heads)
             ])
 
         logit_scale = getattr(config, "logit_scale", 1.0)
