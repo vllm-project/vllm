@@ -545,8 +545,6 @@ class MambaManager(SingleTypeKVCacheManager):
         assert dcp_world_size == 1, "DCP not support mamba now."
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
-        if not kv_cache_spec.enable_prefix_caching:
-            return computed_blocks  #return empty list if cache is disabled
 
         max_num_blocks = max_length // kv_cache_spec.block_size
         # Search from right to left and early stop when a match is found.
