@@ -14,8 +14,8 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import global_force_attn_backend_context_manager
-from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
+from vllm.compilation.fusion_rmsnorm_quant import QUANT_OPS
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
