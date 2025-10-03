@@ -767,6 +767,7 @@ def _resolve_operator_overload(op_name: str):
 @contextlib.contextmanager
 def _inductor_partition_rule_context(op_names: list[str]):
     if not op_names:
+        logger.info("No partition ops provided; skipping rule registration.")
         yield
         return
 
@@ -783,7 +784,7 @@ def _inductor_partition_rule_context(op_names: list[str]):
             overload, _always_partition)
 
     logger.info("Registered inductor partition rules for ops: %s",
-                 unique_names)
+                unique_names)
 
     try:
         yield
