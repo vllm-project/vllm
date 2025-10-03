@@ -2951,19 +2951,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 # Try to get auxiliary layers from speculative config,
                 # otherwise use model's default layers
-                aux_layers = (
-                    self._get_eagle3_aux_layers_from_config()
-                    or self.model.get_eagle3_aux_hidden_state_layers()
-                )
-
-                if (
-                    aux_layers
-                    != self.model.get_eagle3_aux_hidden_state_layers()
-                ):
+                aux_layers = self._get_eagle3_aux_layers_from_config()
+                if aux_layers:
                     logger.info(
                         "Using auxiliary layers from speculative config: %s",
                         aux_layers,
                     )
+                else:
+                    aux_layers = self.model.get_eagle3_aux_hidden_state_layers()
 
                 self.model.set_aux_hidden_state_layers(aux_layers)
             time_after_load = time.perf_counter()
@@ -3021,7 +3016,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
     def _get_eagle3_aux_layers_from_config(self) -> Optional[tuple[int, ...]]:
-        """Extract Eagle3 auxiliary layer IDs from speculative config.
+        """Extract Eagle3 auxiliary layer indices from speculative config.
+
+        These indices specify which hidden states from the base model should
+        be used as auxiliary inputs for the Eagle3 drafter model during
+        speculative decoding.
 
         Returns:
             Tuple of layer indices if found in draft model config,
@@ -3031,18 +3030,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 and self.speculative_config.draft_model_config):
             return None
 
-        try:
-            hf_config = self.speculative_config.draft_model_config.hf_config
-            if not hasattr(hf_config, 'eagle_aux_hidden_state_layer_ids'):
-                return None
+        hf_config = self.speculative_config.draft_model_config.hf_config
+        if not hasattr(hf_config, 'eagle_aux_hidden_state_layer_ids'):
+            return None
 
-            layer_ids = hf_config.eagle_aux_hidden_state_layer_ids
-            if layer_ids and isinstance(layer_ids, (list, tuple)):
-                return tuple(layer_ids)
-        except Exception as e:
-            logger.warning(
-                "Failed to read auxiliary layers from speculative config: %s",
-                e)
+        layer_ids = hf_config.eagle_aux_hidden_state_layer_ids
+        if layer_ids and isinstance(layer_ids, (list, tuple)):
+            return tuple(layer_ids)
 
         return None
 
