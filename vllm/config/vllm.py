@@ -386,10 +386,6 @@ class VllmConfig:
                     "Encoder-decoder model detected: setting "
                     "`max_num_encoder_input_tokens` to encoder length (%s)",
                     self.scheduler_config.max_num_encoder_input_tokens)
-                self.scheduler_config.disable_chunked_mm_input = True
-                disable_chunked_prefill_reasons.append(
-                    "Encoder-decoder models do not support chunked prefill nor"
-                    " prefix caching; disabling both.")
                 if (self.model_config.architecture
                         == "WhisperForConditionalGeneration"
                         and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
@@ -400,7 +396,10 @@ class VllmConfig:
                         "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
                         "to 'spawn'.")
 
-        if disable_chunked_prefill_reasons:
+        # Disable prefix caching only if chunked prefill is explicitly disabled
+        # (and not merely unset)
+        if (self.scheduler_config.chunked_prefill_enabled is False
+                or disable_chunked_prefill_reasons):
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
@@ -517,6 +516,23 @@ class VllmConfig:
                     " by VLLM_DEBUG_DUMP_PATH to %s", env_path)
             self.compilation_config.debug_dump_path = env_path
 
+        def has_blocked_weights():
+            if self.quant_config is not None:
+                if hasattr(self.quant_config, "weight_block_size"):
+                    return self.quant_config.weight_block_size is not None
+                elif hasattr(self.quant_config, "has_blocked_weights"):
+                    return self.quant_config.has_blocked_weights()
+            return False
+
+        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
+        # On H100 the CUDA kernel is faster than
+        # native implementation
+        # https://github.com/vllm-project/vllm/issues/25094
+        if has_blocked_weights():
+            custom_ops = self.compilation_config.custom_ops
+            if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
+                custom_ops.append("+quant_fp8")
+
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
@@ -581,9 +597,12 @@ class VllmConfig:
             not self.model_config.enforce_eager:
             cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
             if len(cuda_graph_sizes) == 1:
-                batch_size_capture_list = [1, 2, 4] + [
-                    i for i in range(8, cuda_graph_sizes[0] + 1, 8)
-                ]
+                max_graph_size = cuda_graph_sizes[0]
+                assert max_graph_size >= 1, "Maximum cudagraph size should be" \
+                                            " greater than or equal to 1."
+                batch_size_capture_list = [
+                    i for i in [1, 2, 4] if i <= max_graph_size
+                ] + list(range(8, max_graph_size + 1, 8))
             elif len(cuda_graph_sizes) > 1:
                 batch_size_capture_list = sorted(cuda_graph_sizes)
             else:

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# TODO: add benchmark for sampler
 import argparse
 import json
 import os
@@ -25,7 +24,7 @@ def main():
     parser.add_argument("--all_random", action="store_true", default=False)
     parser.add_argument("--all_greedy", action="store_true", default=False)
     parser.add_argument("--flashinfer", action="store_true", default=False)
-    parser.add_argument("--output_json", type=str, default="results.json")
+    parser.add_argument("--output_json", type=str, default=None)
     args = parser.parse_args()
 
     # whether use flashinfer
@@ -125,12 +124,6 @@ def main():
         sampler(logits, sampling_metadata)
         torch.cuda.synchronize()
         t2 = time.perf_counter()
-        log_message = (
-            f"batch_size: {args.batch_size}, "
-            f"vocab_size: {args.vocab_size}, "
-            f"Time: {t2 - t1} seconds"
-        )
-        print(log_message)
         results["latencies"].append(t2 - t1)
     tmp = vars(args)
     for key, value in tmp.items():
@@ -139,8 +132,13 @@ def main():
     results["percentiles"]["p50"] = np.percentile(np.array(results["latencies"]), 50)
     results["percentiles"]["p90"] = np.percentile(np.array(results["latencies"]), 90)
     results["percentiles"]["p99"] = np.percentile(np.array(results["latencies"]), 99)
-    with open(args.output_json, "w") as f:
-        json.dump(results, f, indent=4)
+    print("Average latency: ", results["avg_latency"])
+    print("P50 latency: ", results["percentiles"]["p50"])
+    print("P90 latency: ", results["percentiles"]["p90"])
+    print("P99 latency: ", results["percentiles"]["p99"])
+    if args.output_json is not None:
+        with open(args.output_json, "w") as f:
+            json.dump(results, f, indent=4)
 
 
 if __name__ == "__main__":

@@ -159,7 +159,7 @@ class NVLMMultiModalProcessor(
                                         dummy_inputs=NVLMDummyInputsBuilder)
 class NVLM_D_Model(InternVLChatModel):
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
+    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
         llm_intermediate_size = config.text_config.intermediate_size
         llm_hidden_size = config.text_config.hidden_size

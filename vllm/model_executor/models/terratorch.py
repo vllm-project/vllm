@@ -190,7 +190,6 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
 
         return MultiModalInputs(
             type="multimodal",
-            prompt=prompt,
             prompt_token_ids=[1],
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
