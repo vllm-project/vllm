@@ -39,7 +39,8 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 
 from vllm.attention.backends.registry import _Backend
-from vllm.attention.layer import check_upstream_fa_availability
+from vllm.attention.layer import (check_upstream_fa_availability,
+                                  maybe_get_vit_flash_attn_backend)
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -302,6 +303,11 @@ class Qwen2_5_VisionAttention(nn.Module):
                                       disable_tp=use_data_parallel)
         self.attn_backend = attn_backend
         self.use_upstream_fa = use_upstream_fa
+        self.attn_backend, self.flash_attn_varlen_func \
+            = maybe_get_vit_flash_attn_backend(
+                self.attn_backend,
+                self.use_upstream_fa,
+            )
         self.is_flash_attn_backend = self.attn_backend in {
             _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
         }
@@ -354,25 +360,18 @@ class Qwen2_5_VisionAttention(nn.Module):
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
-            if self.attn_backend == _Backend.ROCM_AITER_FA:
-                from aiter import flash_attn_varlen_func
-            else:
-                if self.use_upstream_fa:
-                    from flash_attn import flash_attn_varlen_func
-                else:
-                    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
-            output = flash_attn_varlen_func(q,
-                                            k,
-                                            v,
-                                            cu_seqlens_q=cu_seqlens,
-                                            cu_seqlens_k=cu_seqlens,
-                                            max_seqlen_q=max_seqlen,
-                                            max_seqlen_k=max_seqlen,
-                                            dropout_p=0.0,
-                                            causal=False)
+            output = self.flash_attn_varlen_func(q,
+                                                 k,
+                                                 v,
+                                                 cu_seqlens_q=cu_seqlens,
+                                                 cu_seqlens_k=cu_seqlens,
+                                                 max_seqlen_q=max_seqlen,
+                                                 max_seqlen_k=max_seqlen,
+                                                 dropout_p=0.0,
+                                                 causal=False)
 
             context_layer = rearrange(output,
                                       "(b s) h d -> s b (h d)",
@@ -618,6 +617,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim, dtype=torch.get_default_dtype())
         if self.attn_backend != _Backend.FLASH_ATTN and \
+            self.attn_backend != _Backend.ROCM_AITER_FA and \
             check_upstream_fa_availability(
                 torch.get_default_dtype()):
             self.attn_backend = _Backend.FLASH_ATTN
