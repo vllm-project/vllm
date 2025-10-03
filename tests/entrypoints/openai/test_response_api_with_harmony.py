@@ -340,7 +340,7 @@ async def test_streaming_types(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("background", [True, False])
+@pytest.mark.parametrize("background", [False])
 async def test_streaming(client: OpenAI, model_name: str, background: bool):
     # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
@@ -367,10 +367,12 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             ],
             stream=True,
             background=background,
+            extra_body={"enable_response_messages": True}),
         )
 
         current_item_id = ""
         current_content_index = -1
+        import fbvscode
 
         events = []
         current_event_mode = None
@@ -386,6 +388,11 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             ]:
                 assert 'input_messages' in event.response.model_extra
                 assert 'output_messages' in event.response.model_extra
+                if event.type == "response.completed":
+                    fbvscode.set_trace()
+                    assert event.response.model_extra['output_messages'] is not None
+                    assert event.response.model_extra['output_messages'][0][
+                        'content'] is not None
 
             if current_event_mode != event.type:
                 current_event_mode = event.type

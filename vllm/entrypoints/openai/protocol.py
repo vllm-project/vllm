@@ -1972,6 +1972,7 @@ class ResponsesResponse(OpenAIBaseModel):
     output: list[ResponseOutputItem]
     # These are populated when enable_response_messages is set to True
     # TODO: Currently an issue where content of harmony messages
+    # TODO: was this fixed?
     # is not available when these are serialized. Metadata is available
     input_messages: Optional[list[ChatCompletionMessageParam]] = None
     output_messages: Optional[list[ChatCompletionMessageParam]] = None
