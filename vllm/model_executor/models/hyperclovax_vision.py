@@ -29,6 +29,7 @@ from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
 from transformers.modeling_utils import no_init_weights
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
@@ -149,6 +150,7 @@ class HCXVisionDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -156,12 +158,17 @@ class HCXVisionDummyInputsBuilder(
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         target_num_frames = 32
+
+        image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=num_images,
+                overrides=image_overrides,
             ),
             "video":
             self._get_dummy_videos(
@@ -169,6 +176,7 @@ class HCXVisionDummyInputsBuilder(
                 height=target_height - 1,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
+                overrides=video_overrides,
             )
         }
 

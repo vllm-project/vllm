@@ -54,6 +54,7 @@ from transformers import BatchFeature
 from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -212,14 +213,18 @@ class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
+
+        image_overrides = mm_options.get("image") if mm_options else None
 
         return {
             "image":
             self._get_dummy_images(width=MaxImageTokenMeta.width,
                                    height=MaxImageTokenMeta.height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 

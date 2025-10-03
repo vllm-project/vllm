@@ -36,6 +36,7 @@ from torch.nn.functional import scaled_dot_product_attention
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -539,13 +540,17 @@ class MiDashengLMDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
+
+        audio_overrides = mm_options.get("audio") if mm_options else None
 
         return {
             "audio":
             self._get_dummy_audios(length=self.info.get_max_audio_len(),
-                                   num_audios=num_audios)
+                                   num_audios=num_audios,
+                                   overrides=audio_overrides)
         }
 
 

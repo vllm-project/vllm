@@ -11,6 +11,7 @@ from transformers import (BatchFeature, LlavaNextVideoConfig,
                           LlavaNextVideoProcessor)
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -150,6 +151,7 @@ class LlavaNextVideoDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_videos = mm_counts.get("video", 0)
 
@@ -158,6 +160,8 @@ class LlavaNextVideoDummyInputsBuilder(
         target_num_frames = \
             self.info.get_num_frames_with_most_features(seq_len, mm_counts)
 
+        video_overrides = mm_options.get("video") if mm_options else None
+
         return {
             "video":
             self._get_dummy_videos(
@@ -165,6 +169,7 @@ class LlavaNextVideoDummyInputsBuilder(
                 height=target_height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
+                overrides=video_overrides,
             )
         }
 
