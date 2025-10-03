@@ -48,6 +48,7 @@ from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+HTTP_STATUS_OK = 200
 
 TERM_PLOTLIB_AVAILABLE = ((importlib.util.find_spec("termplotlib") is not None)
                           and (shutil.which("gnuplot") is not None))
@@ -453,7 +454,7 @@ async def _fetch_metrics(
     """Fetch metrics from /metrics endpoint."""
     try:
         async with session.get(f"{base_url}/metrics") as response:
-            if response.status == 200:
+            if response.status == HTTP_STATUS_OK:
                 text = await response.text()
                 metrics = MetricsSnapshot(timestamp=time.perf_counter())
 
@@ -529,7 +530,41 @@ async def _start_profiler(request_func, base_url: str, model_id: str,
             profile_output = await request_func(
                 request_func_input=profile_input, session=session
             )
-            return profile_output.success
+            return (profile_output.success and
+                    profile_output.http_status == HTTP_STATUS_OK)
+    except Exception:
+        return False
+
+
+async def _stop_profiler(request_func, base_url: str, model_id: str,
+                        model_name: str, test_prompt: str, test_prompt_len: int,
+                        test_output_len: int, logprobs: Optional[int],
+                        test_mm_content, ignore_eos: bool,
+                        extra_headers: Optional[dict],
+                        extra_body: Optional[dict]) -> bool:
+    """Stop profiler."""
+    try:
+        profile_input = RequestFuncInput(
+            model=model_id,
+            model_name=model_name,
+            prompt=test_prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+            multi_modal_content=test_mm_content,
+            ignore_eos=ignore_eos,
+            extra_headers=extra_headers,
+            extra_body=extra_body,
+        )
+
+        # Use a temporary session for profiler stop
+        async with aiohttp.ClientSession() as session:
+            profile_output = await request_func(
+                request_func_input=profile_input, session=session
+            )
+            return (profile_output.success and
+                    profile_output.http_status == HTTP_STATUS_OK)
     except Exception:
         return False
 
@@ -630,7 +665,16 @@ async def _monitor_and_profile(
 
             if should_stop:
                 print("Stopping decode profiler")
-                # Stop profiler logic would go here
+                success = await _stop_profiler(
+                    request_func, base_url, model_id, model_name,
+                    test_prompt, test_prompt_len, test_output_len,
+                    logprobs, test_mm_content, ignore_eos,
+                    extra_headers, extra_body
+                )
+                if success:
+                    print("Decode profiling stopped successfully")
+                else:
+                    print("Failed to stop decode profiling")
                 break
 
         previous_snapshot = current_snapshot
