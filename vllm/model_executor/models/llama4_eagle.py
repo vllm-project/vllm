@@ -28,8 +28,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.torchao import TorchAOConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -68,9 +67,9 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             Llama4DecoderLayer(
-                self.config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                config=self.config,
             ) for i in range(self.config.num_hidden_layers)
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,

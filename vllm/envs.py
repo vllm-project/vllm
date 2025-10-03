@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
@@ -98,6 +99,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION: bool = False
+    VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
@@ -155,7 +157,7 @@ if TYPE_CHECKING:
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
-    VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
+    VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx",
                                   "deepep_high_throughput",
                                   "deepep_low_latency",
@@ -174,7 +176,7 @@ if TYPE_CHECKING:
                                                  "NONE"] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
-    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
@@ -199,11 +201,13 @@ if TYPE_CHECKING:
     VLLM_DBO_COMM_SMS: int = 20
     GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
+    VLLM_DEBUG_DUMP_PATH: Optional[str] = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
     VLLM_USE_FBGEMM: bool = False
+    VLLM_GC_DEBUG: str = ""
 
 
 def get_default_cache_root():
@@ -513,6 +517,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PATTERN_MATCH_DEBUG":
     lambda: os.environ.get("VLLM_PATTERN_MATCH_DEBUG", None),
 
+    # Dump fx graphs to the given directory.
+    # It will override CompilationConfig.debug_dump_path if set.
+    "VLLM_DEBUG_DUMP_PATH":
+    lambda: os.environ.get("VLLM_DEBUG_DUMP_PATH", None),
+
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":
@@ -610,8 +619,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # All possible options loaded dynamically from _Backend enum
     "VLLM_ATTENTION_BACKEND":
     env_with_choices("VLLM_ATTENTION_BACKEND", None,
-                     lambda: list(__import__('vllm.platforms.interface', \
-                        fromlist=['_Backend'])._Backend.__members__.keys())),
+                     lambda: list(__import__(
+                         'vllm.attention.backends.registry',
+                         fromlist=['_Backend'])._Backend.__members__.keys())),
 
     # If set, vllm will use flashinfer sampler
     "VLLM_USE_FLASHINFER_SAMPLER":
@@ -724,6 +734,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Whether to allow HTTP redirects when fetching from media URLs.
+    # Default to True
+    "VLLM_MEDIA_URL_ALLOW_REDIRECTS":
+    lambda: bool(int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1"))),
 
     # Max number of workers for the thread pool handling
     # media bytes loading. Set to 1 to disable parallel processing.
@@ -889,6 +904,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda:
     (os.getenv("VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION", "False").lower() in
              ("true", "1")),
+
+    # Disable pynccl (using torch.distributed instead)
+    "VLLM_DISABLE_PYNCCL":
+    lambda:
+    (os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")),
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":
@@ -1220,7 +1240,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT":
-    lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
+    lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")),
 
     # all2all backend for vllm's expert parallel communication
     # Available options:
@@ -1323,7 +1343,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # consumer. This is only applicable when using NixlConnector in a
     # disaggregated decode-prefill setup.
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
-    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120")),
+    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")),
 
     # Controls whether or not to use cudnn prefill
     "VLLM_USE_CUDNN_PREFILL":
@@ -1469,6 +1489,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
     # Flag to enable FBGemm kernels on model execution
     "VLLM_USE_FBGEMM": lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
+
+    # GC debug config
+    # - VLLM_GC_DEBUG=0: disable GC debugger
+    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+    # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
+    #                                      top 5 collected objects
+    "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
 }
 
 # --8<-- [end:env-vars-definition]

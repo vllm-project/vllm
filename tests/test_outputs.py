@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm.outputs import RequestOutput
+
+pytestmark = pytest.mark.cpu_test
 
 
 def test_request_output_forward_compatible():

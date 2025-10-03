@@ -26,12 +26,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .blip import BlipVisionModel
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix)
-
-# We use this internally as placeholders since there is no image token
-# defined on the HuggingFace repo
-_IMAGE_TOKEN_ID = 50265
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
 class Blip2ImagePixelInputs(TensorSchema):
@@ -514,6 +509,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
                                         dummy_inputs=Blip2DummyInputsBuilder)
 class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
                                     SupportsQuant):
+    merge_by_field_config = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -570,8 +566,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         if pixel_values is not None:
             expected_h = expected_w = self.config.vision_config.image_size
             return Blip2ImagePixelInputs(type="pixel_values",
-                                         data=flatten_bn(pixel_values,
-                                                         concat=True),
+                                         data=pixel_values,
                                          resolve_bindings={
                                              "h": expected_h,
                                              "w": expected_w
@@ -580,7 +575,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         if image_embeds is not None:
             return Blip2ImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
+                data=image_embeds,
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -671,17 +666,6 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=input_ids == _IMAGE_TOKEN_ID,
-            )
-            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,

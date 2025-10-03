@@ -235,15 +235,21 @@ class BenchmarkDataset(ABC):
 
         if len(requests) < num_requests:
             random.seed(self.random_seed)
-            additional = deepcopy(
-                random.choices(requests, k=num_requests - len(requests))
-            )
-            for i in range(len(additional)):
-                req = additional[i]
+            needed = num_requests - len(requests)
+            additional = []
+            for i in range(needed):
+                req = deepcopy(random.choice(requests))
                 req.request_id = request_id_prefix + str(len(requests) + i)
+                additional.append(req)
             requests.extend(additional)
             logger.info("Oversampled requests to reach %d total samples.",
                         num_requests)
+
+        ids = [req.request_id for req in requests]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate request_id found in the sampled "
+                             "requests. Please ensure that each request_id "
+                             "is unique.")
 
 
 # -----------------------------------------------------------------------------
@@ -366,10 +372,66 @@ def process_video(video: Any) -> Mapping[str, Any]:
         f"Invalid video input {video}. Must be a string of local path/remote url, or a dictionary with raw video bytes in the form of `{{'bytes': raw_video_bytes}}`."  # noqa: E501
     )
 
+
+def gen_prompt_decode_to_target_len(
+    tokenizer: PreTrainedTokenizerBase,
+    token_sequence: list[int],
+    target_token_len: int,
+    max_retry: int = 10,
+    add_special_tokens: bool = False,
+    rng: Optional[np.random.Generator] = None,
+) -> tuple[str, list[int]]:
+    """
+    Ensure decoded-then-encoded prompt length matches the target token length.
+
+    This function decodes an initial token sequence to text and re-encodes it
+    , iteratively adjusting the token sequence length to match a target. 
+    This is necessary because some tokenizers do not guarantee a 1:1 mapping 
+    between consecutive tokens and the decoded-then-encoded sequence length.
+    For example, for GPT2Tokenizer:
+    [6880, 6881] -> ['Ġcalls', 'here'] ->
+    [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+
+    Returns a tuple of the final prompt string and the adjusted token sequence.
+    """
+    remain_num_try = max_retry
+    token_mismatch = 0
+    while True:
+        prompt = tokenizer.decode(token_sequence)
+        token_sequence = tokenizer.encode(
+            prompt, add_special_tokens=add_special_tokens
+        )
+        if remain_num_try <= 0:
+            if len(token_sequence) != target_token_len:
+                token_mismatch = len(token_sequence) - target_token_len
+            break
+        
+        if len(token_sequence) == target_token_len:
+            break
+        elif len(token_sequence) < target_token_len:
+            if rng is not None:
+                extra_tokens = rng.integers(
+                    0,
+                    tokenizer.vocab_size,
+                    size=target_token_len - len(token_sequence),
+                ).tolist()
+            else:
+                extra_tokens = np.random.randint(
+                    0,
+                    tokenizer.vocab_size,
+                    size=target_token_len - len(token_sequence),
+                ).tolist()
+            token_sequence.extend(extra_tokens)
+        elif len(token_sequence) > target_token_len:
+            token_sequence = token_sequence[:target_token_len]
+
+        remain_num_try -= 1
+
+    return prompt, token_sequence, token_mismatch
+
 # -----------------------------------------------------------------------------
 # Random Dataset Implementation (Synthetic Data)
 # -----------------------------------------------------------------------------
-
 
 class RandomDataset(BenchmarkDataset):
     """
@@ -420,8 +482,9 @@ class RandomDataset(BenchmarkDataset):
         vocab_size = tokenizer.vocab_size
 
         requests = []
+        token_mismatch_total = 0
         for i in range(num_requests):
-            prompt, total_input_len = self.generate_token_sequence(
+            prompt, total_input_len, token_mismatch = self.generate_token_sequence( # noqa: E501
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
                 prefix_len=prefix_len,
@@ -430,6 +493,7 @@ class RandomDataset(BenchmarkDataset):
                 offset=int(offsets[i]),
                 index=i,
             )
+            token_mismatch_total += token_mismatch
             requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -453,6 +517,18 @@ class RandomDataset(BenchmarkDataset):
                     )
                 )
             requests = batch_requests
+        
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
+
         return requests
 
     def get_prefix(
@@ -530,7 +606,7 @@ class RandomDataset(BenchmarkDataset):
         input_len: int,
         offset: int,
         index: int,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, int]:
         """
         Returns (prompt, total_input_len).
 
@@ -549,15 +625,16 @@ class RandomDataset(BenchmarkDataset):
         token_sequence = prefix_token_ids + inner_seq
 
         # Decode, then re-encode and truncate to preserve token count invariants
-        prompt = tokenizer.decode(token_sequence)
         total_input_len = prefix_len + int(input_len)
-
-        re_encoded_sequence = tokenizer.encode(
-            prompt, add_special_tokens=False)[:total_input_len]
-        prompt = tokenizer.decode(re_encoded_sequence)
-        total_input_len = len(re_encoded_sequence)
-
-        return prompt, total_input_len
+        prompt, adjusted_token_sequence, token_mismatch = gen_prompt_decode_to_target_len( # noqa: E501
+            tokenizer=tokenizer,
+            token_sequence=token_sequence,
+            target_token_len=total_input_len,
+            add_special_tokens=False,
+            rng=self._rng,
+        )
+        total_input_len = len(adjusted_token_sequence)
+        return prompt, total_input_len, token_mismatch
 
 
 # -----------------------------------------------------------------------------
@@ -873,8 +950,9 @@ class RandomMultiModalDataset(RandomDataset):
         vocab_size = tokenizer.vocab_size
         # Add synthetic multimodal items to each request
         mm_requests = []
+        token_mismatch_total = 0
         for i in range(num_requests):
-            prompt, total_input_len = self.generate_token_sequence(
+            prompt, total_input_len, token_mismatch = self.generate_token_sequence( # noqa: E501
                 tokenizer=tokenizer,
                 prefix_token_ids=prefix_token_ids,
                 prefix_len=prefix_len,
@@ -883,6 +961,7 @@ class RandomMultiModalDataset(RandomDataset):
                 offset=int(offsets[i]),
                 index=i,
             )
+            token_mismatch_total += token_mismatch
             # Get multimodal item iterator for a given request
             mm_item_iterator = self.get_mm_item_iterator(
                 min_num_mm_items,
@@ -918,6 +997,18 @@ class RandomMultiModalDataset(RandomDataset):
                     request_id=request_id_prefix + str(i),
                 )
             mm_requests.append(sample_request)
+
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
+
         return mm_requests
 
 # -----------------------------------------------------------------------------
@@ -1066,6 +1157,12 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         help="Do not oversample if the dataset has " \
         "fewer samples than num-prompts.",
     )
+    parser.add_argument(
+        "--skip-chat-template",
+        action="store_true",
+        help=
+        "Skip applying chat template to prompt for datasets that support it.",
+    )
 
     # group for dataset specific arguments
     custom_group = parser.add_argument_group("custom dataset options")
@@ -1075,12 +1172,6 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=256,
         help=
         "Number of output tokens per request, used only for custom dataset.",
-    )
-    custom_group.add_argument(
-        "--custom-skip-chat-template",
-        action="store_true",
-        help=
-        "Skip applying chat template to prompt, used only for custom dataset.",
     )
 
     spec_bench_group = parser.add_argument_group("spec bench dataset options")
@@ -1350,7 +1441,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
-            skip_chat_template=args.custom_skip_chat_template,
+            skip_chat_template=args.skip_chat_template,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
@@ -1491,6 +1582,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             output_len=args.hf_output_len,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
+            skip_chat_template=args.skip_chat_template,
             **hf_kwargs
         )
 
@@ -1730,7 +1822,6 @@ class SpecBench(CustomDataset):
 
     def sample(self, **kwargs) -> list:
         # leverage CustomDataset sample
-        kwargs["skip_chat_template"] = False
         return super().sample(**kwargs)
 
 
@@ -2136,6 +2227,7 @@ class InstructCoderDataset(HuggingFaceDataset):
                num_requests: int,
                output_len: Optional[int] = None,
                enable_multimodal_chat: bool = False,
+               skip_chat_template: bool = False,
                request_id_prefix: str = "",
                no_oversample: bool = False,
                **kwargs) -> list:
@@ -2151,14 +2243,15 @@ class InstructCoderDataset(HuggingFaceDataset):
             )
 
             # apply template
-            prompt = tokenizer.apply_chat_template(
-                [{
-                    "role": "user",
-                    "content": prompt
-                }],
-                add_generation_prompt=True,
-                tokenize=False,
-            )
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{
+                        "role": "user",
+                        "content": prompt
+                    }],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
 
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
@@ -2199,6 +2292,7 @@ class MTBenchDataset(HuggingFaceDataset):
         num_requests: int,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2213,14 +2307,15 @@ class MTBenchDataset(HuggingFaceDataset):
             prompt = item["turns"][0]
 
             # apply template
-            prompt = tokenizer.apply_chat_template(
-                [{
-                    "role": "user",
-                    "content": prompt
-                }],
-                add_generation_prompt=True,
-                tokenize=False,
-            )
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{
+                        "role": "user",
+                        "content": prompt
+                    }],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
 
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
@@ -2264,6 +2359,7 @@ class BlazeditDataset(HuggingFaceDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         output_len: Optional[int] = None,
+        skip_chat_template: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         min_distance: float = 0.0,
@@ -2287,7 +2383,7 @@ class BlazeditDataset(HuggingFaceDataset):
 
             # template copied from
             # https://github.com/ise-uiuc/blazedit/blob/7765137e656fd62de877422d2e4cf8de51228054/dataset/create_refined_dataset.py#L94-L105 # noqa: E501
-            instruction = f"""Given a code file, please apply the change requests and generate the new file.
+            prompt = f"""Given a code file, please apply the change requests and generate the new file.
 
 Original file:
 ```python
@@ -2300,14 +2396,15 @@ Change request:
 Please generate the new code file in the "New file" section below.""" # noqa: E501
 
             # apply template
-            prompt = tokenizer.apply_chat_template(
-                [{
-                    "role": "user",
-                    "content": instruction
-                }],
-                add_generation_prompt=True,
-                tokenize=False,
-            )
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{
+                        "role": "user",
+                        "content": prompt
+                    }],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
 
             prompt_len = len(tokenizer(prompt).input_ids)
 
@@ -2694,27 +2791,23 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
             # Generate random tokens
             tokens = np.random.randint(
                 0, vocab_size, size=target_length).tolist()
-            text = tokenizer.decode(tokens)
-            re_encoded = tokenizer.encode(text, add_special_tokens=False)
 
-            if len(re_encoded) == target_length:
-                return re_encoded
-            elif len(re_encoded) < target_length:
-                # Recursively generate additional consistent tokens
-                needed = target_length - len(re_encoded)
-                extra_tokens = _generate_exact_length_tokens(needed)
-                return re_encoded + extra_tokens
-            else:
-                # Truncate to target length
-                return re_encoded[:target_length]
+            _, adjusted_tokens, token_mismatch = gen_prompt_decode_to_target_len( # noqa: E501
+                tokenizer=tokenizer,
+                token_sequence=tokens,
+                target_token_len=target_length,
+                add_special_tokens=False,
+            )
+            return adjusted_tokens, token_mismatch
 
         requests = []
+        token_mismatch_total = 0
         for _ in range(num_prefixes):
             prefix_tokens = _generate_exact_length_tokens(prefix_len)
 
             for _ in range(prompts_per_prefix):
-                suffix_tokens = _generate_exact_length_tokens(suffix_len)
-
+                suffix_tokens, token_mistmatch = _generate_exact_length_tokens(suffix_len) # noqa: E501
+                token_mismatch_total += token_mistmatch
                 combined_tokens = prefix_tokens + suffix_tokens
                 prompt = tokenizer.decode(combined_tokens)
                 prompt_len = len(combined_tokens)
@@ -2726,6 +2819,16 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
                     )
                 )
 
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
         random.shuffle(requests)
         return requests
 
