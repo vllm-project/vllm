@@ -399,7 +399,6 @@ steps:
     - pytest -v -s compile/test_fusion_attn.py
     - pytest -v -s compile/test_silu_mul_quant_fusion.py
     - pytest -v -s compile/test_sequence_parallelism.py
-    - pytest -v -s compile/test_async_tp.py
     - pytest -v -s compile/test_fusion_all_reduce.py
     - pytest -v -s compile/test_decorator.py
     - pytest -v -s compile/test_noop_elimination.py
@@ -919,6 +918,7 @@ steps:
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
+  - tests/compile/test_async_tp.py
   - tests/compile/test_basic_correctness.py
   - tests/compile/test_wrapper.py
   - tests/distributed/
@@ -932,6 +932,7 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s ./compile/test_async_tp.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
