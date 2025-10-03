@@ -1319,6 +1319,8 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 )
 class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                                     SupportsLoRA, SupportsPP):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1381,22 +1383,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(
-                f"Incorrect type of {name}. Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            if mm_input.ndim == 2:
-                return mm_input
-            if mm_input.ndim != 3:
-                raise ValueError(f"{name} should be 2D or batched 3D tensor. "
-                                 f"Got ndim: {mm_input.ndim} "
-                                 f"(shape={mm_input.shape})")
-            return mm_input.reshape(-1, mm_input.shape[-1])
-        else:
-            return torch.concat(mm_input)
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Glm4vImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -1407,11 +1393,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, "image pixel values")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
             return Glm4vImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values,
@@ -1419,11 +1400,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             )
 
         if image_embeds is not None:
-            image_embeds = self._validate_and_reshape_mm_tensor(
-                image_embeds, "image embeds")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
             return Glm4vImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
@@ -1440,11 +1416,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         if pixel_values_videos is not None:
-            pixel_values_videos = self._validate_and_reshape_mm_tensor(
-                pixel_values_videos, "video pixel values")
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw")
-
             return Glm4vVideoPixelInputs(
                 type="pixel_values_videos",
                 pixel_values_videos=pixel_values_videos,
@@ -1452,11 +1423,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             )
 
         if video_embeds is not None:
-            video_embeds = self._validate_and_reshape_mm_tensor(
-                video_embeds, "video embeds")
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw")
-
             return Glm4vVideoEmbeddingInputs(
                 type="video_embeds",
                 video_embeds=video_embeds,
