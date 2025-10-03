@@ -31,14 +31,13 @@ if(NOT qutlass_SOURCE_DIR)
 endif()
 message(STATUS "[QUTLASS] QuTLASS is available at ${qutlass_SOURCE_DIR}")
 
-#cuda_archs_loose_intersection(QUTLASS_ARCHS "12.0a;10.0a" "${CUDA_ARCHS}")
-cuda_archs_loose_intersection(QUTLASS_ARCHS "10.0a" "${CUDA_ARCHS}")
+cuda_archs_loose_intersection(QUTLASS_ARCHS "12.0a;10.0a" "${CUDA_ARCHS}")
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND QUTLASS_ARCHS)
 
-  if(QUTLASS_ARCHS MATCHES "12\\.0a")
-    set(QUTLASS_TARGET_CC 120)
-  elseif(QUTLASS_ARCHS MATCHES "10\\.0a")
+  if(QUTLASS_ARCHS MATCHES "10\\.0a")
     set(QUTLASS_TARGET_CC 100)
+  elseif(QUTLASS_ARCHS MATCHES "12\\.0a")
+    set(QUTLASS_TARGET_CC 120)
   else()
     message(FATAL_ERROR "[QUTLASS] internal error parsing CUDA_ARCHS='${QUTLASS_ARCHS}'.")
   endif()
@@ -74,12 +73,6 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND QUTLASS_ARCHS)
     SRCS "${QUTLASS_SOURCES}"
     CUDA_ARCHS "${QUTLASS_ARCHS}"
   )
-
-  set(_QUTLASS_ARCHS_PROP "${QUTLASS_ARCHS}")
-  #string(REPLACE "12.0a" "120a" _QUTLASS_ARCHS_PROP "${_QUTLASS_ARCHS_PROP}")
-  string(REPLACE "10.0a" "100a" _QUTLASS_ARCHS_PROP "${_QUTLASS_ARCHS_PROP}")
-  message(STATUS "[QUTLASS] _QUTLASS_ARCHS_PROP='${_QUTLASS_ARCHS_PROP}'")
-  set_source_files_properties(${QUTLASS_SOURCES} PROPERTIES CUDA_ARCHITECTURES "${_QUTLASS_ARCHS_PROP}")
 
   target_sources(_C PRIVATE ${QUTLASS_SOURCES})
   target_include_directories(_C PRIVATE ${QUTLASS_INCLUDES})
