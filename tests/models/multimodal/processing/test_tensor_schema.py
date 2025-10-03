@@ -15,6 +15,8 @@ from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config.multimodal import (AudioDummyOptions, BaseDummyOptions,
+                                    ImageDummyOptions, VideoDummyOptions)
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
@@ -236,7 +238,20 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
         modality: 3 if limit is None else limit
         for modality, limit in supported_mm_limits.items()
     }
-    model_config.get_multimodal_config().limit_per_prompt = limit_mm_per_prompt
+
+    def _to_dummy_options(modality: str, count: int) -> BaseDummyOptions:
+        if modality == "video":
+            return VideoDummyOptions(count=count)
+        if modality == "image":
+            return ImageDummyOptions(count=count)
+        if modality == "audio":
+            return AudioDummyOptions(count=count)
+        return BaseDummyOptions(count=count)
+
+    model_config.get_multimodal_config().limit_per_prompt = {
+        modality: _to_dummy_options(modality, count)
+        for modality, count in limit_mm_per_prompt.items()
+    }
     processor = factories.build_processor(ctx, cache=None)
 
     with initialize_dummy_model(model_cls, model_config) as model:
