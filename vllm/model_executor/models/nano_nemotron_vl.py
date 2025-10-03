@@ -21,6 +21,7 @@ from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -809,6 +810,7 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         # Use default max_num_tiles for dummy data generation
         max_num_tiles = 12
@@ -816,11 +818,14 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             self.info.get_image_size_with_most_features(max_num_tiles))
         num_images = mm_counts.get("image", 0)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 
@@ -837,21 +842,25 @@ class NanoNemotronVLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         dummy_image = super().get_dummy_mm_data(seq_len=seq_len,
-                                                mm_counts=mm_counts)
+                                                mm_counts=mm_counts,
+                                                mm_options=mm_options)
         if self.info.supports_video:
             config = self.info.get_hf_config()
             image_size: int = config.force_image_size
             target_num_frames = \
                 self.info.get_num_frames_with_most_features(seq_len, mm_counts)
             num_videos = mm_counts.get("video", 0)
+            video_overrides = mm_options.get("video") if mm_options else None
             dummy_video = {
                 "video":
                 self._get_dummy_videos(width=image_size,
                                        height=image_size,
                                        num_frames=target_num_frames,
-                                       num_videos=num_videos)
+                                       num_videos=num_videos,
+                                       overrides=video_overrides)
             }
         else:
             dummy_video = {}
