@@ -93,6 +93,9 @@ def test_max_context_length(
         # HF returns the prompt + generated tokens. Slice off the prompt.
         hf_output_ids = hf_generated.cpu().tolist()[0][len(prompt_ids[0]):]
 
+    # check that exactly max_tokens tokens were generated with vLLM and HF
+    assert len(vllm_output_ids) == len(hf_output_ids) == max_tokens
+
     # check that vLLM outputs (token ids) match HF outputs
     # Note: for simplicity don't pass detokenized string
     check_outputs_equal(
