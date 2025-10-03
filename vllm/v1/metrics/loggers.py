@@ -229,7 +229,7 @@ class AggregatedStatLogger(LoggingStatLogger, GlobalStatLoggerBase):
             self.prefix_caching_metrics.hit_rate * 100,
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
-        self.kv_transfer_logging.log(log_fn=log_fn)
+        self.kv_connector_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
