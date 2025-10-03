@@ -891,12 +891,21 @@ class Scheduler(SchedulerInterface):
             # count to trigger recomputation of the invalid blocks.
             failed_kv_load_req_ids = self._handle_invalid_blocks(
                 kv_connector_output.invalid_block_ids)
+        stopped_running_reqs: set[Request] = set()
+        stopped_preempted_reqs: set[Request] = set()
 
         # handle requests that encountered unrecoverable transfer failures
         if kv_connector_output and kv_connector_output.failed_req_ids:
             for req_id in kv_connector_output.failed_req_ids:
                 request = self.requests.get(req_id)
                 if request is not None:
+                    # track which queue the request is in before we abort it
+                    if request.status == RequestStatus.RUNNING:
+                        stopped_running_reqs.add(request)
+                    else:
+                        stopped_preempted_reqs.add(request)
+
+                    # now abort and free the request
                     request.status = RequestStatus.FINISHED_ABORTED
                     kv_transfer_params = self._free_request(request)
                     outputs[request.client_index].append(
@@ -920,8 +929,6 @@ class Scheduler(SchedulerInterface):
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
-        stopped_running_reqs: set[Request] = set()
-        stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
