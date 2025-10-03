@@ -8,7 +8,7 @@ This test verifies the following behavior: allow prefill and decodes on the
 model's maximum context length ``max_model_len`` and get one more token.
 
 Test strategy
-- Build a textual prompt that tokenizes to exactly ``max_model_len`` tokens.
+- Build a textual prompt that tokenizes to exactly ``prompt_len`` tokens.
 - Run vLLM generation requesting ``max_tokens`` new tokens.
 - Run HF generation on the same prompt requesting the same number of tokens.
 - Assert both return the same number of generated tokens and the same ids.
@@ -35,15 +35,15 @@ from vllm.inputs import TokensPrompt
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("model", ["JackFram/llama-160m"])
 @pytest.mark.parametrize(
-    "max_model_len, max_tokens",
+    "prompt_len, max_tokens",
     [
-        (2048, 1),
-        (2047, 2),
+        (2048, 1),  # prompt_len = max_model_len
+        (2047, 2),  # prompt_len = max_model_len - 1
     ],
 )
 def test_max_context_length(
     model: str,
-    max_model_len: int,
+    prompt_len: int,
     max_tokens: int,
 ) -> None:
     """Compare vLLM and HuggingFace when the prompt already fills the
@@ -54,8 +54,8 @@ def test_max_context_length(
     single token when given the same inputs.
     """
 
-    # Construct a prompt of size max_model_len
-    prompt_ids = [[43] * max_model_len]
+    # Construct a prompt of size prompt_len
+    prompt_ids = [[43] * prompt_len]
 
     # Generate max_tokens new tokens deterministically.
     sampling_params = [
