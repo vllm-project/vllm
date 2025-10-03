@@ -131,6 +131,10 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def is_sparse(cls) -> bool:
+        return False
+
+    @classmethod
     def get_min_compute_capability(cls) -> Optional[int]:
         return None
 
@@ -156,7 +160,7 @@ class AttentionBackend(ABC):
     @classmethod
     def validate_configuration(cls, head_size: int, dtype: torch.dtype,
                                kv_cache_dtype: Optional[str], block_size: int,
-                               use_v1: bool, use_mla: bool, has_sink: bool,
+                               use_mla: bool, has_sink: bool, use_sparse: bool,
                                device_capability: int) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -174,12 +178,17 @@ class AttentionBackend(ABC):
                 invalid_reasons.append("non-MLA not supported")
         if (has_sink and not cls.supports_sink()):
             invalid_reasons.append("sink setting not supported")
+        if (use_sparse != cls.is_sparse()):
+            if use_sparse:
+                invalid_reasons.append("sparse not supported")
+            else:
+                invalid_reasons.append("non-sparse not supported")
         if not cls.supports_compute_capability(device_capability):
             invalid_reasons.append("compute capability not supported")
         combination_reason = cls.supports_combination(head_size, dtype,
                                                       kv_cache_dtype,
-                                                      block_size, use_v1,
-                                                      use_mla, has_sink,
+                                                      block_size, use_mla,
+                                                      has_sink, use_sparse,
                                                       device_capability)
         if combination_reason is not None:
             invalid_reasons.append(combination_reason)
