@@ -447,8 +447,9 @@ def calculate_metrics(
     return metrics, actual_output_lens
 
 
-async def _fetch_metrics(base_url: str,
-                        session: aiohttp.ClientSession) -> Optional[MetricsSnapshot]:
+async def _fetch_metrics(
+    base_url: str, session: aiohttp.ClientSession
+) -> Optional[MetricsSnapshot]:
     """Fetch metrics from /metrics endpoint."""
     try:
         async with session.get(f"{base_url}/metrics") as response:
@@ -533,9 +534,9 @@ async def _start_profiler(request_func, base_url: str, model_id: str,
         return False
 
 
-async def _setup_decode_profiling(base_url: str, metrics_interval: float) -> tuple[
-    Optional[aiohttp.ClientSession], Optional[MetricsSnapshot]
-]:
+async def _setup_decode_profiling(
+    base_url: str, metrics_interval: float
+) -> tuple[Optional[aiohttp.ClientSession], Optional[MetricsSnapshot]]:
     """Set up decode profiling and test metrics endpoint availability."""
     print(f"Decode-only profiling enabled - monitoring metrics "
           f"every {metrics_interval}s")
