@@ -20,7 +20,7 @@ from typing import Optional, Union
 import torch
 from transformers import AutoModelForSequenceClassification
 
-from vllm.attention import AttentionType
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import (ClassifierPooler, CLSPool,
@@ -29,6 +29,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces_base import VllmModelForPooling
 from .transformers import TransformersBase, can_enable_torch_compile
+from .transformers_moe import TransformersMoEBase
 from .utils import WeightsMapper
 
 
@@ -79,7 +80,9 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
         self.padding_idx = self.text_config.pad_token_id
 
     def create_attention_instances(
-            self, attn_type: AttentionType = AttentionType.DECODER):
+        self,
+        attn_type: AttentionType = AttentionType.DECODER
+    ) -> dict[int, Attention]:
         # TODO(hmellor): Better way to detect encoder models
         # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda m: not getattr(m, "is_causal", True)
@@ -90,14 +93,7 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
 
         # Check minimum transformers version for encoder models support
         if attn_type == AttentionType.ENCODER_ONLY:
-            import transformers
-            from packaging.version import Version
-            installed = Version(transformers.__version__)
-            required = Version("4.57.0.dev0")
-            if installed < required:
-                raise ValueError(
-                    "Encoder models with the Transformers backend require "
-                    f"transformers>={required}, but got {installed}")
+            self.check_version("4.57.0.dev0", "encoder models support")
 
         return super().create_attention_instances(attn_type)
 
@@ -198,3 +194,15 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
                     vllm_config.model_config),
             ),
         })
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersMoEEmbeddingModel(TransformersMoEBase,
+                                    TransformersEmbeddingModel):
+    pass
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersMoEForSequenceClassification(
+        TransformersMoEBase, TransformersForSequenceClassification):
+    pass
