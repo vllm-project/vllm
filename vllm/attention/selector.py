@@ -30,8 +30,7 @@ def get_env_variable_attn_backend() -> Optional[_Backend]:
     * None otherwise
     '''
     backend_name = os.environ.get(STR_BACKEND_ENV_VAR)
-    return (None
-            if backend_name is None else backend_name_to_enum(backend_name))
+    return (None if backend_name is None else _Backend[backend_name])
 
 
 # Global state allows a particular choice of backend
@@ -184,7 +183,7 @@ def _cached_get_attn_backend(
                     "environment variable setting.", STR_BACKEND_ENV_VAR)
                 backend_by_env_var = backend_by_env_var.removesuffix(
                     "_VLLM_V1")
-            selected_backend = backend_name_to_enum(backend_by_env_var)
+            selected_backend = _Backend[backend_by_env_var]
             if selected_backend is None:
                 raise ValueError(
                     f"Invalid attention backend: '{backend_by_env_var}'. "
