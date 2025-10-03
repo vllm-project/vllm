@@ -26,7 +26,6 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -41,6 +40,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
+from .eplb_process.eplb_process import EPLBProcess
 from .rebalance_algo import rebalance_experts
 from .rebalance_execute import rearrange_expert_weights_inplace
 
@@ -155,6 +155,16 @@ class EplbState:
     """
     Interval for expert rearrangement steps.
     This is a constant and is taken from the config.
+    """
+
+    num_wait_worker_iterations: int = 0
+    """
+    Number of iterations to wait before applying a redistribution plan
+    """
+
+    _async_processor: Optional[EPLBProcess] = None
+    """
+    Asynchronous process manager
     """
 
     @staticmethod
@@ -324,7 +334,15 @@ class EplbState:
             expert_load_window_size=expert_load_window_size,
             expert_rearrangement_step=expert_rearrangement_step,
             expert_rearrangement_step_interval=eplb_step_interval,
+            num_wait_worker_iterations=parallel_config.eplb_config.
+            num_wait_worker_iterations,
         )
+
+    def __post_init__(self):
+        # Initialize asynchronous process manager
+        self._async_processor = EPLBProcess(
+            target_func=rebalance_experts,
+            num_wait_worker_iterations=self.num_wait_worker_iterations)
 
     def step(self,
              model: MixtureOfExperts,
@@ -410,28 +428,28 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
-    def rearrange(
-        self,
-        model: MixtureOfExperts,
-        is_profile: bool = False,
-        execute_shuffle: bool = True,
-        global_expert_load: Optional[torch.Tensor] = None,
-        rank_mapping: Optional[dict[int,
-                                    int]] = None) -> Optional[torch.Tensor]:
+        if self._async_processor and self._async_processor.has_pending_task:
+            logger.error("EPLBState step1")
+            try:
+                if self._async_processor.step():
+                    # Process results
+                    self._process_async_result()
+            except Exception as e:
+                logger.error("Error processing async rebalance results: {}",
+                             str(e))
+                self._async_processor.cleanup()
+
+    def rearrange(self,
+                  model: MixtureOfExperts,
+                  is_profile: bool = False,
+                  execute_shuffle: bool = True,
+                  global_expert_load: Optional[torch.Tensor] = None,
+                  rank_mapping: Optional[dict[int, int]] = None) -> None:
         """
         Rearrange the experts according to the current load.
         """
 
         ep_group = get_ep_group().device_group
-        ep_rank = ep_group.rank()
-
-        time_start = None
-        is_main_rank = ep_rank == 0
-        if is_main_rank:
-            torch.cuda.synchronize()
-            time_start = time.perf_counter()
-            logger.info("Rearranging experts %s...",
-                        "(profile)" if is_profile else "")
 
         if global_expert_load is None:
             # Map the physical expert load to global logical experts
@@ -501,18 +519,83 @@ class EplbState:
                 "not using hierarchical rearrangement algorithm.\n"
                 f"{num_gpus=}, {num_nodes=}")
 
-        # Get new expert mappings
-        (
-            new_physical_to_logical_map,
-            new_logical_to_physical_map,
-            new_logical_replica_count,
-        ) = (rebalance_experts(
-            global_expert_load_window,
+        # Prepare async execution parameters
+        input_args = (
+            global_expert_load_window.cpu(),
             num_replicas,
             num_groups,
             num_nodes,
             num_gpus,
-        ))
+        )
+
+        # Prepare post-processing parameters
+        post_process_args = {
+            "model": model,
+            "ep_group": ep_group,
+            "is_profile": is_profile,
+            "rank_mapping": rank_mapping,
+            "device": self.physical_to_logical_map.device
+        }
+
+        # Submit task to asynchronous process
+        if self._async_processor is None:
+            logger.error(
+                "Async processor is not initialized, cannot submit task")
+            return None
+
+        if self._async_processor.has_pending_task:
+            logger.info(
+                "EPLB async process already has a pending task, skipping "
+                "new submission")
+            return None
+
+        if self._async_processor.is_post_processing:
+            logger.info(
+                "EPLB async process is pending post processing task, skipping "
+                "new submission")
+            return None
+
+        try:
+            success = self._async_processor.submit_task(
+                args=input_args, post_process_args=post_process_args)
+        except Exception as e:
+            logger.error("Error submitting task to async process: %s", str(e))
+            success = False
+
+        if success:
+            logger.info(
+                "rebalance_experts task has been submitted to async process, "
+                "will check results after maximum %s steps",
+                str(self.num_wait_worker_iterations))
+        else:
+            logger.error("Failed to submit rebalance task to async process")
+        return None
+
+    def _process_async_result(self):
+        """Process asynchronously returned results"""
+        if not self._async_processor:
+            return
+
+        result = self._async_processor.result
+        post_args = self._async_processor.post_process_args
+        if not result or not post_args:
+            logger.error("Async process did not return valid results, "
+                         "skipping post-processing")
+            return
+        self._async_processor.is_post_processing = True
+        # Parse parameters and results
+        model = post_args["model"]
+        ep_group = post_args["ep_group"]
+        is_profile = post_args["is_profile"]
+        rank_mapping = post_args["rank_mapping"]
+        device = post_args["device"]
+
+        (new_physical_to_logical_map, new_logical_to_physical_map,
+         new_logical_replica_count) = result
+        # Restore tensors to original device
+        new_physical_to_logical_map = new_physical_to_logical_map.to(device)
+        new_logical_to_physical_map = new_logical_to_physical_map.to(device)
+        new_logical_replica_count = new_logical_replica_count.to(device)
 
         # Update expert weights
         rearrange_expert_weights_inplace(
@@ -525,12 +608,13 @@ class EplbState:
         )
 
         if not is_profile:
+            # Update state mappings
             if self.physical_to_logical_map.shape[
                     1] != new_physical_to_logical_map.shape[1]:
-                self.physical_to_logical_map = new_physical_to_logical_map.to(
-                    self.physical_to_logical_map.device)
+                self.physical_to_logical_map = new_physical_to_logical_map
             else:
                 self.physical_to_logical_map.copy_(new_physical_to_logical_map)
+
             max_physical_slots = new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
             new_logical_to_physical_map = torch.nn.functional.pad(
@@ -541,17 +625,8 @@ class EplbState:
             )
             self.logical_to_physical_map.copy_(new_logical_to_physical_map)
             self.logical_replica_count.copy_(new_logical_replica_count)
-
-        if is_main_rank:
-            assert time_start is not None
-            torch.cuda.synchronize()
-            time_end = time.perf_counter()
-            logger.info(
-                "Rearranged experts%sin %.2f seconds.",
-                " (profile) " if is_profile else " ",
-                time_end - time_start,
-            )
-        return None
+        self._async_processor.is_post_processing = False
+        logger.info("rebalance_experts result processing completed")
 
     @staticmethod
     def recv_state() -> tuple[torch.Tensor, torch.Tensor]:
@@ -581,6 +656,11 @@ class EplbState:
                                     group_src=0)
 
         return global_expert_load, old_global_expert_indices
+
+    def __del__(self):
+        """Clean up async process resources"""
+        if self._async_processor:
+            self._async_processor.cleanup()
 
 
 def _node_count_with_rank_mapping(
