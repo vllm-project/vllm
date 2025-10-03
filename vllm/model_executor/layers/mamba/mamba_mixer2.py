@@ -455,6 +455,8 @@ class MambaMixer2(MambaBase, CustomOp):
         self.cache_config = cache_config
         self.prefix = prefix
 
+        assert self.cache_config is not None
+
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -488,7 +490,8 @@ class MambaMixer2(MambaBase, CustomOp):
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        cache_enabled = False
+        assert self.cache_config is not None
+        prefix_caching_enabled = self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
@@ -506,7 +509,6 @@ class MambaMixer2(MambaBase, CustomOp):
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
             mamba_block_size = attn_metadata.cache_spec.block_size
-            cache_enabled = attn_metadata.cache_spec.enable_prefix_caching
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -575,7 +577,7 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=0,
         )
 
-        if cache_enabled:
+        if prefix_caching_enabled:
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
 
@@ -662,7 +664,7 @@ class MambaMixer2(MambaBase, CustomOp):
             initial_states = None
             if (has_initial_states_p is not None and prep_initial_states):
                 kernel_ssm_indices = state_indices_tensor_p
-                if cache_enabled:
+                if prefix_caching_enabled:
                     kernel_ssm_indices = state_indices_tensor_p.gather(
                         1, last_state_idx_p.unsqueeze(1)).squeeze(1)
                 initial_states = torch.where(
@@ -689,14 +691,14 @@ class MambaMixer2(MambaBase, CustomOp):
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
                 last_chunk_indices=last_chunk_indices_p,
                 initial_states=initial_states,
-                return_intermediate_states=cache_enabled,
+                return_intermediate_states=prefix_caching_enabled,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1,
                                                 self.head_dim),
                 state_dtype=ssm_state.dtype)
 
-            if cache_enabled:
+            if prefix_caching_enabled:
                 # Save states for sequences with more than just the final state:
                 n_blocks_to_fill = current_last_idx_p - current_first_idx_p
                 for seq_idx in (n_blocks_to_fill > 0).nonzero().squeeze(1):
@@ -739,7 +741,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # Process decode requests
         if has_decode:
-            if cache_enabled:
+            if prefix_caching_enabled:
                 state_indices_tensor_d_input = \
                     state_indices_tensor_d.gather(1,
                         last_state_idx_d.unsqueeze(1)).squeeze(1)
