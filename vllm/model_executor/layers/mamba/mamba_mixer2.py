@@ -649,7 +649,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 cache_indices=state_indices_tensor_p,
                 current_first_idx=current_first_idx_p,
                 current_last_idx=current_last_idx_p,
-                last_state_idx=last_state_idx_p,
+                initial_state_idx=last_state_idx_p,
                 seq_lens_completed=seq_lens_completed_p,
                 block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
@@ -764,7 +764,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 self.activation,
                 conv_state_indices=state_indices_tensor_d,
                 current_last_idx=current_last_idx_d,
-                last_state_idx=last_state_idx_d,
+                initial_state_idx=last_state_idx_d,
             )
 
             hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(
