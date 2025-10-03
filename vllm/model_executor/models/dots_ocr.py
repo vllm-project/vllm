@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -9,8 +9,11 @@ import torch.nn.functional as F
 from torch.nn import LayerNorm
 from transformers.models.qwen2_vl import Qwen2VLProcessor
 
-from vllm.attention.layer import check_upstream_fa_availability
+from vllm.attention.backends.registry import _Backend
+from vllm.attention.layer import (check_upstream_fa_availability,
+                                  maybe_get_vit_flash_attn_backend)
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import utils as dist_utils
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
@@ -38,38 +41,41 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict
-from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.dotsocr import (DotsOCRConfig,
                                                      DotsVisionConfig)
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .vision import run_dp_sharded_mrope_vision_model
 
 IMAGE_TOKEN = "<|imgpad|>"
 
 
-class DotsOCRImagePixelInputs(TypedDict):
-    type: Literal["pixel_values", "image_grid_thw"]
-
-    pixel_values: torch.Tensor
-    image_grid_thw: torch.Tensor
-
-
-class DotsOCRImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds", "image_grid_thw"]
-    image_embeds: torch.Tensor
-    """Supported types:
-    - List[`torch.Tensor`]: A list of tensors holding all images' features.
-        Each tensor holds an image's features.
-    - `torch.Tensor`: A tensor holding all images' features
-        (concatenation of all images' feature tensors).
-    Tensor shape: `(num_image_features, hidden_size)`
-    - `num_image_features` varies based on
-        the number and resolution of the images.
-    - `hidden_size` must match the hidden size of language model backbone.
+class DotsOCRImagePixelInputs(TensorSchema):
     """
+    Dimensions:
+        - np: The total number of patches over each image over each prompt in
+              the batch
+        - ni: Number of images
+        - cps: Number of channels * patch_size * patch_size
+    """
+    type: Literal["pixel_values"]
 
-    image_grid_thw: torch.Tensor
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "cps")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
+
+
+class DotsOCRImageEmbeddingInputs(TensorSchema):
+    """
+    Dimensions:
+        - nf: Number of image features
+        - hs: Hidden size
+        - ni: Number of images
+    """
+    type: Literal["image_embeds"]
+
+    image_embeds: Annotated[torch.Tensor, TensorShape("nf", "hs")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 DotsOCRImageInputs = Union[DotsOCRImagePixelInputs,
@@ -86,17 +92,21 @@ class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features(  # noqa: E501
         )
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images),
+                                   num_images=num_images,
+                                   overrides=image_overrides),
         }
 
 
@@ -263,10 +273,12 @@ class DotsVisionAttention(nn.Module):
         self.attn_backend = get_vit_attn_backend(
             self.hidden_size_per_attention_head, torch.get_default_dtype())
         self.use_upstream_fa = False
-        if self.attn_backend != _Backend.FLASH_ATTN and \
-                check_upstream_fa_availability(torch.get_default_dtype()):
-            self.attn_backend = _Backend.FLASH_ATTN
-            self.use_upstream_fa = True
+
+        self.attn_backend, self.flash_attn_varlen_func \
+            = maybe_get_vit_flash_attn_backend(
+                self.attn_backend,
+                self.use_upstream_fa,
+            )
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
                 _Backend.ROCM_AITER_FA
@@ -302,25 +314,18 @@ class DotsVisionAttention(nn.Module):
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
-            if self.attn_backend == _Backend.ROCM_AITER_FA:
-                from aiter import flash_attn_varlen_func
-            else:
-                if self.use_upstream_fa:
-                    from flash_attn import flash_attn_varlen_func
-                else:
-                    from vllm.vllm_flash_attn import flash_attn_varlen_func
             q_ = q.reshape(bs * q.shape[1], q.shape[2], q.shape[3])
             k_ = k.reshape(bs * k.shape[1], k.shape[2], k.shape[3])
             v_ = v.reshape(bs * v.shape[1], v.shape[2], v.shape[3])
-            output = flash_attn_varlen_func(q_,
-                                            k_,
-                                            v_,
-                                            cu_seqlens_q=cu_seqlens,
-                                            cu_seqlens_k=cu_seqlens,
-                                            max_seqlen_q=max_seqlen,
-                                            max_seqlen_k=max_seqlen,
-                                            dropout_p=0.0,
-                                            causal=False)
+            output = self.flash_attn_varlen_func(q_,
+                                                 k_,
+                                                 v_,
+                                                 cu_seqlens_q=cu_seqlens,
+                                                 cu_seqlens_k=cu_seqlens,
+                                                 max_seqlen_q=max_seqlen,
+                                                 max_seqlen_k=max_seqlen,
+                                                 dropout_p=0.0,
+                                                 causal=False)
             context_layer = output.view(bs, -1,
                                         self.num_attention_heads_per_partition,
                                         self.hidden_size_per_attention_head)
@@ -607,7 +612,8 @@ class DotsVisionTransformer(nn.Module):
             self, cu_seqlens: torch.Tensor
     ) -> tuple[Optional[int], Optional[list[int]]]:
         max_seqlen, seqlens = None, None
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if (self.attn_backend == _Backend.FLASH_ATTN
+                or self.attn_backend == _Backend.ROCM_AITER_FA):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -654,6 +660,8 @@ class DotsVisionTransformer(nn.Module):
 )
 class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                          SupportsLoRA):
+    merge_by_field_config = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".attn.qkv_proj.": ".attn.qkv.",
@@ -709,22 +717,6 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             architectures=["Qwen2ForCausalLM"],
         )
 
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. "
-                             f"Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            if mm_input.ndim == 2:
-                return mm_input
-            if mm_input.ndim != 3:
-                raise ValueError(f"{name} should be 2D or batched 3D tensor. "
-                                 f"Got ndim: {mm_input.ndim} "
-                                 f"(shape={mm_input.shape})")
-            return torch.concat(list(mm_input))
-        else:
-            return torch.concat(mm_input)
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[DotsOCRImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -735,28 +727,11 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             return None
 
         if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, "image pixel values")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
             return DotsOCRImagePixelInputs(type="pixel_values",
                                            pixel_values=pixel_values,
                                            image_grid_thw=image_grid_thw)
 
         if image_embeds is not None:
-            image_embeds = self._validate_and_reshape_mm_tensor(
-                image_embeds, "image embeds")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
             return DotsOCRImageEmbeddingInputs(type="image_embeds",
                                                image_embeds=image_embeds,
                                                image_grid_thw=image_grid_thw)

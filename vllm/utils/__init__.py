@@ -130,6 +130,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
     "fp8_inc": torch.float8_e4m3fn,
+    "fp8_ds_mla": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -1854,13 +1855,37 @@ class FlexibleArgumentParser(ArgumentParser):
 
         # Check for --model in command line arguments first
         if args and args[0] == "serve":
-            model_in_cli_args = any(arg == '--model' for arg in args)
-
-            if model_in_cli_args:
-                raise ValueError(
+            try:
+                model_idx = next(
+                    i for i, arg in enumerate(args)
+                    if arg == "--model" or arg.startswith("--model="))
+                logger.warning(
                     "With `vllm serve`, you should provide the model as a "
                     "positional argument or in a config file instead of via "
-                    "the `--model` option.")
+                    "the `--model` option. "
+                    "The `--model` option will be removed in v0.13.")
+
+                if args[model_idx] == "--model":
+                    model_tag = args[model_idx + 1]
+                    rest_start_idx = model_idx + 2
+                else:
+                    model_tag = args[model_idx].removeprefix("--model=")
+                    rest_start_idx = model_idx + 1
+
+                # Move <model> to the front, e,g:
+                # [Before]
+                # vllm serve -tp 2 --model <model> --enforce-eager --port 8001
+                # [After]
+                # vllm serve <model> -tp 2 --enforce-eager --port 8001
+                args = [
+                    "serve",
+                    model_tag,
+                    *args[1:model_idx],
+                    *args[rest_start_idx:],
+                ]
+                print("args", args)
+            except StopIteration:
+                pass
 
         if '--config' in args:
             args = self._pull_args_from_config(args)
@@ -2722,6 +2747,8 @@ class MemorySnapshot:
             self.measure()
 
     def measure(self):
+        from vllm.platforms import current_platform
+
         # we measure the torch peak memory usage via allocated_bytes,
         # rather than `torch.cuda.memory_reserved()` .
         # After `torch.cuda.reset_peak_memory_stats()`,
@@ -2731,6 +2758,24 @@ class MemorySnapshot:
             "allocated_bytes.all.peak", 0)
 
         self.free_memory, self.total_memory = torch.cuda.mem_get_info()
+        shared_sysmem_device_mem_sms = (
+            (8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
+        if current_platform.is_cuda() and \
+            current_platform.get_device_capability() in \
+            shared_sysmem_device_mem_sms:
+            # On UMA (Orin, Thor and Spark) platform,
+            # where both CPU and GPU rely on system memory,
+            # the cudaMemGetInfo function shows the amount of free system memory
+            # rather than what’s actually available.
+            # In the case,
+            # torch.cuda.mem_get_info() only reports "free" memory,
+            # which can be lower than what is actually
+            # available due to not including cache memory.
+            # There’s also a comprehensive reference page
+            # that explains how you can compute the proper value yourself.
+            # https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
+            self.free_memory = psutil.virtual_memory().available
+
         self.cuda_memory = self.total_memory - self.free_memory
 
         # torch.cuda.memory_reserved() is how many bytes
@@ -3431,6 +3476,12 @@ def has_triton_kernels() -> bool:
     """Whether the optional `triton_kernels` package is available."""
 
     return _has_module("triton_kernels")
+
+
+def has_tilelang() -> bool:
+    """Whether the optional `tilelang` package is available."""
+
+    return _has_module("tilelang")
 
 
 def set_process_title(name: str,
