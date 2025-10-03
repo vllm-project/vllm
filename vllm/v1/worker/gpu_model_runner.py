@@ -5,6 +5,7 @@ import copy
 import gc
 import time
 import weakref
+import topstx
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional, Union
 
@@ -352,7 +353,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     # Note: used for model runner override.
     def _sync_device(self) -> None:
         torch.cuda.synchronize()
-
+    @topstx.annotate("GPUModelRunner _update_states", domain="VLLM")
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -575,6 +576,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return cu_num_tokens, arange
 
+    @topstx.annotate("GPUModelRunner _prepare_inputs", domain="VLLM")
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -975,7 +977,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits_indices=logits_indices,
         )
         return metadata
-
+    @topstx.annotate("GPUModelRunner _execute_mm_encoder", domain="VLLM")
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
@@ -1040,7 +1042,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 output,
                 is_embed=pos_info.is_embed,
             )
-
+    @topstx.annotate("GPUModelRunner _gather_mm_embeddings", domain="VLLM")
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1089,7 +1091,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_model(self) -> nn.Module:
         return self.model
-
+    @topstx.annotate("GPUModelRunner apply_grammar_bitmask", domain="VLLM")
     def apply_grammar_bitmask(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1151,7 +1153,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             grammar_bitmask.to(self.device, non_blocking=True),
             indices=out_indices,
         )
-
+    @topstx.annotate("GPUModelRunner sync_and_slice_intermediate_tensors", domain="VLLM")
     def sync_and_slice_intermediate_tensors(
             self, num_tokens: int, intermediate_tensors: IntermediateTensors,
             sync_self: bool) -> IntermediateTensors:
@@ -1185,7 +1187,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if k == "residual" and is_residual_scattered else v[:num_tokens]
             for k, v in self.intermediate_tensors.items()
         })
-
+    @topstx.annotate("GPUModelRunner eplb_step", domain="VLLM")
     def eplb_step(self,
                   is_dummy: bool = False,
                   is_profile: bool = False) -> None:
@@ -1203,7 +1205,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_profile,
             log_stats=self.parallel_config.eplb_log_balancedness,
         )
-
+    @topstx.annotate("GPUModelRunner get_dp_padding", domain="VLLM")
     def get_dp_padding(self,
                        num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
@@ -1228,7 +1230,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                 device="cpu",
                                                 dtype=torch.int32)
         return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
-
+    @topstx.annotate("GPUModelRunner _pool", domain="VLLM")
     def _pool(
         self,
         hidden_states: torch.Tensor,
@@ -1275,6 +1277,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     @torch.inference_mode()
+    @topstx.annotate("GPUModelRunner execute_model", domain="VLLM")
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1405,12 +1408,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = None
         else:
             if self.input_batch.pooling_params:
-                return self._pool(hidden_states, num_scheduled_tokens,
-                                  num_scheduled_tokens_np, finished_sending,
-                                  finished_recving)
-
-            sample_hidden_states = hidden_states[logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states, None)
+                with topstx.annotate("GPUModelRunner _pool", domain="VLLM"):
+                    return self._pool(hidden_states, num_scheduled_tokens,
+                                    num_scheduled_tokens_np, finished_sending,
+                                    finished_recving)
+            with topstx.annotate("GPUModelRunner compute_logits", domain="VLLM"):
+                sample_hidden_states = hidden_states[logits_indices]
+                logits = self.model.compute_logits(sample_hidden_states, None)
         if broadcast_pp_output:
             model_output_broadcast_data = {
                 "logits": logits.contiguous(),
@@ -1564,7 +1568,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_recving=finished_recving,
             num_nans_in_logits=num_nans_in_logits,
         )
-
+    @topstx.annotate("GPUModelRunner propose_draft_token_ids", domain="VLLM")
     def propose_draft_token_ids(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1685,7 +1689,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
-
+    @topstx.annotate("GPUModelRunner kv_connector_no_forward", domain="VLLM")
     def kv_connector_no_forward(
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         # KV send/recv even if no work to do.
@@ -1703,6 +1707,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return output
 
     @staticmethod
+    @topstx.annotate("GPUModelRunner maybe_setup_kv_connector", domain="VLLM")
     def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
@@ -1719,11 +1724,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_connector.start_load_kv(get_forward_context())
 
     @staticmethod
+    @topstx.annotate("GPUModelRunner maybe_wait_for_kv_save", domain="VLLM")
     def maybe_wait_for_kv_save() -> None:
         if has_kv_transfer_group():
             get_kv_transfer_group().wait_for_save()
 
     @staticmethod
+    @topstx.annotate("GPUModelRunner get_finished_kv_transfers", domain="VLLM")
     def get_finished_kv_transfers(
         scheduler_output: "SchedulerOutput",
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
@@ -1731,7 +1738,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids)
         return None, None
-
+    @topstx.annotate("GPUModelRunner propose_ngram_draft_token_ids", domain="VLLM")
     def propose_ngram_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
@@ -1765,7 +1772,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
-
+    @topstx.annotate("GPUModelRunner load_model", domain="VLLM")
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
@@ -1821,7 +1828,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model,
             tensorizer_config=tensorizer_config,
         )
-
+    @topstx.annotate("GPUModelRunner _get_prompt_logprobs_dict", domain="VLLM")
     def _get_prompt_logprobs_dict(
         self,
         hidden_states: torch.Tensor,
@@ -1943,7 +1950,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
         This is to help balance expert-selection
          - during profile_run
-         - during DP rank dummy run 
+         - during DP rank dummy run
         """
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1

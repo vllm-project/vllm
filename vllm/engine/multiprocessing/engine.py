@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
+import topstx
+
 import pickle
 import signal
 from contextlib import contextmanager
@@ -228,7 +231,7 @@ class MQLLMEngine:
             # Send request outputs (if async, done in engine_step callback).
             if not self.use_async_sockets:
                 self._send_outputs(request_outputs)
-
+    @topstx.annotate("MQLLMEngine step", domain="VLLM")
     def engine_step(self) -> List[RequestOutput]:
         """Engine step wrapper with error handling."""
         try:

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that samples the next tokens from the model's outputs."""
-
+import topstx
 import torch
 import torch.nn as nn
 
@@ -21,7 +21,7 @@ class Sampler(nn.Module):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
         self.pin_memory = is_pin_memory_available()
-
+    @topstx.annotate("Sampler forward", domain="VLLM")
     def forward(
         self,
         logits: torch.Tensor,

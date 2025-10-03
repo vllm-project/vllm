@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import topstx
+
 import copy
 import time
 from collections import Counter as collectionsCounter
@@ -1212,7 +1214,7 @@ class LLMEngine:
                 else:
                     seq.append_token_id(sample.output_token, sample.logprobs,
                                         sample.output_embed)
-
+    @topstx.annotate("LLMEngine Step", domain="VLLM")
     def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
@@ -1248,7 +1250,7 @@ class LLMEngine:
         engine = LLMEngine.from_engine_args(engine_args)
         example_inputs = [(0, "What is LLM?",
         SamplingParams(temperature=0.0))]
-    
+
         # Start the engine with an event loop
         while True:
             if example_inputs:

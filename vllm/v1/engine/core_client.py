@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import topstx
+
 import asyncio
 import contextlib
 import queue
@@ -43,7 +45,7 @@ EngineIdentity = bytes
 
 class EngineCoreClient(ABC):
     """
-    EngineCoreClient: subclasses handle different methods for pushing 
+    EngineCoreClient: subclasses handle different methods for pushing
         and pulling from the EngineCore for asyncio / multiprocessing.
 
     Subclasses:
@@ -218,7 +220,7 @@ class EngineCoreClient(ABC):
 
 class InprocClient(EngineCoreClient):
     """
-    InprocClient: client for in-process EngineCore. Intended 
+    InprocClient: client for in-process EngineCore. Intended
     for use in LLMEngine for V0-style add_request() and step()
         EngineCore setup in this process (no busy loop).
 
@@ -228,7 +230,7 @@ class InprocClient(EngineCoreClient):
 
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
-
+    @topstx.annotate("InprocClient get_output", domain="VLLM")
     def get_output(self) -> EngineCoreOutputs:
         outputs, _ = self.engine_core.step()
         return outputs.get(0) or EngineCoreOutputs()
@@ -359,7 +361,7 @@ class MPClient(EngineCoreClient):
 
         * pushes EngineCoreRequests via input_socket
         * pulls EngineCoreOutputs via output_socket
-    
+
         * AsyncMPClient subclass for AsyncLLM usage
         * SyncMPClient subclass for LLM usage
     """
@@ -562,6 +564,7 @@ class SyncMPClient(MPClient):
         # The thread takes on responsibility for closing the socket.
         self.resources.output_socket = None
 
+    @topstx.annotate("SyncMPClient", domain="VLLM")
     def get_output(self) -> EngineCoreOutputs:
         # If an exception arises in process_outputs_socket task,
         # it is forwarded to the outputs_queue so we can raise it
@@ -728,7 +731,7 @@ class AsyncMPClient(MPClient):
 
         resources.output_queue_task = asyncio.create_task(
             process_outputs_socket(), name="EngineCoreOutputQueueTask")
-
+    @topstx.annotate("AsyncMPClient get_output_async", domain="VLLM")
     async def get_output_async(self) -> EngineCoreOutputs:
         self._ensure_output_queue_task()
         # If an exception arises in process_outputs_socket task,

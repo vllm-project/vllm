@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import topstx
+
 from collections.abc import Mapping
 from copy import copy
 from typing import Any, Callable, Optional, Union
@@ -226,6 +228,7 @@ class LLMEngine:
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
+    @topstx.annotate("LLMEngine Step", domain="VLLM")
     def step(self) -> Union[list[RequestOutput], list[PoolingRequestOutput]]:
 
         if self.should_execute_dummy_batch:

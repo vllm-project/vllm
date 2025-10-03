@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import topstx
+
 import os
 import queue
 import signal
@@ -219,7 +221,7 @@ class EngineCore:
             dump_engine_exception(self.vllm_config, scheduler_output,
                                   self.scheduler.make_stats())
             raise err
-
+    @topstx.annotate("EngineCore Step", domain="VLLM")
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -231,13 +233,19 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule()
-        model_output = self.execute_model(scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output)  # type: ignore
+        with topstx.annotate("scheduler schedule", domain="VLLM"):
+            scheduler_output = self.scheduler.schedule()
+        with topstx.annotate("scheduler execute_model", domain="VLLM"):
+            # delay_free_blocks = self.scheduler.req2free_block_ids
+            # self.model_executor.pass_req2free_block_ids(delay_free_blocks)
+            model_output = self.execute_model(scheduler_output)
 
-        return (engine_core_outputs,
-                scheduler_output.total_num_scheduled_tokens > 0)
+        with topstx.annotate("scheduler update_from_output", domain="VLLM"):
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output)  # type: ignore
+
+            return (engine_core_outputs,
+                    scheduler_output.total_num_scheduled_tokens > 0)
 
     def step_with_batch_queue(
             self) -> tuple[Optional[dict[int, EngineCoreOutputs]], bool]:
