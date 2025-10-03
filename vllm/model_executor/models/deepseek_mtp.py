@@ -19,7 +19,7 @@ from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import (DeepseekV2DecoderLayer,
                           get_spec_layer_idx_from_weight_name)
-from .interfaces import SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import maybe_prefix
 
 
@@ -152,11 +152,25 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         return logits
 
 
-class DeepSeekMTP(nn.Module, SupportsPP):
+class DeepSeekMTP(nn.Module, SupportsPP, SupportsLoRA):
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config
+        self.config = config
+        
+        # Dynamic packed_modules_mapping for LoRA support
+        self.fuse_qkv_a_proj = hasattr(
+            config, "q_lora_rank") and config.q_lora_rank is not None
+        if self.fuse_qkv_a_proj:
+            self.packed_modules_mapping["fused_qkv_a_proj"] = [
+                "q_a_proj",
+                "kv_a_proj_with_mqa",
+            ]
+        
         self.model = DeepSeekMultiTokenPredictor(vllm_config=vllm_config,
                                                  prefix=maybe_prefix(
                                                      prefix, "model"))
