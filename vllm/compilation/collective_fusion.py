@@ -943,6 +943,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
+        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
     def register(self, pm_pass: PatternMatcherPass):
         def get_inputs():
@@ -976,18 +977,11 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             output_scale: torch.Tensor,
         ):
             all_reduce = tensor_model_parallel_all_reduce(input)
-            rmsnorm_out_tuple = auto_functionalized(
-                RMS_OP,
-                result=rmsnorm_result,
-                input=all_reduce,
-                weight=weight,
-                epsilon=self.epsilon,
-            )
-
+            rms = self.rmsnorm_matcher(all_reduce, weight)
             quant_out_tuple = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
                 output=quant_result,
-                input=rmsnorm_out_tuple[1],
+                input=rms,
                 output_scale=output_scale,
                 input_scale=input_global_scale,
             )
@@ -1047,6 +1041,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
+        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
     def register(self, pm_pass: PatternMatcherPass):
         def get_inputs():
@@ -1078,28 +1073,17 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
             input_global_scale: torch.Tensor,
         ):
             allreduce_output = tensor_model_parallel_all_reduce(input)
-
-            fused_add_rmsnorm_out_tuple = auto_functionalized(
-                RMS_ADD_OP,
-                input=allreduce_output,
-                residual=residual,
-                weight=weight,
-                epsilon=self.epsilon,
-            )
+            rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
             quant_out_tuple = auto_functionalized(
                 STATIC_FP4_QUANT_OP,
                 output=quant_result,
-                input=fused_add_rmsnorm_out_tuple[1],
+                input=rms,
                 output_scale=output_scale,
                 input_scale=input_global_scale,
             )
 
             # quant_out, allreduce_output, output_scale
-            return (
-                quant_out_tuple[1],
-                fused_add_rmsnorm_out_tuple[2],
-                quant_out_tuple[2],
-            )
+            return quant_out_tuple[1], residual, quant_out_tuple[2]
 
         def replacement(
             quant_result: torch.Tensor,

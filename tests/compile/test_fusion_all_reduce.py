@@ -148,8 +148,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         (TestAllReduceFusedAddRMSNormModel, False),
         (TestAllReduceFusedAddRMSNormStaticQuantFP8Model, True),
         (TestAllReduceFusedAddRMSNormStaticQuantFP8Model, False),
-        # TODO: Enable with torch==2.8.0
-        # (TestAllReduceFusedAddRMSNormStaticQuantFP4Model, False),
+        (TestAllReduceFusedAddRMSNormStaticQuantFP4Model, False),
     ],
 )
 @pytest.mark.parametrize("batch_size", [8])
