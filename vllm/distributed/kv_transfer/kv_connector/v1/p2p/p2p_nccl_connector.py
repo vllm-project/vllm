@@ -264,6 +264,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
             return None
 
+        event = torch.cuda.Event()
+        event.record()
+        # send stream should wait for the current layer's forward() to complete
+        self.p2p_nccl_engine.send_stream.wait_event(event)
+
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
