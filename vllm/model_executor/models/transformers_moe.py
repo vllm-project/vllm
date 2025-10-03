@@ -50,32 +50,34 @@ class TransformersFusedMoE(FusedMoE):
 
         self.custom_routing_function = custom_routing_function
 
-    def forward(self, hidden_states: torch.Tensor, top_k_index: torch.Tensor,
-                top_k_weights: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, topk_ids: torch.Tensor,
+                topk_weights: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         """In Transformers `experts.forward` will have this signature.
 
         We discard any extra kwargs because we cannot use them here."""
-        return torch.ops.vllm.transformers_moe_forward(hidden_states,
-                                                       top_k_index,
-                                                       top_k_weights,
-                                                       self.layer_name)
+        return torch.ops.vllm.transformers_moe_forward(
+            hidden_states,
+            topk_ids.to(torch.int32),
+            topk_weights.to(torch.float32),
+            self.layer_name,
+        )
 
 
 def transformers_moe_forward(hidden_states: torch.Tensor,
-                             top_k_index: torch.Tensor,
-                             top_k_weights: torch.Tensor,
+                             topk_ids: torch.Tensor,
+                             topk_weights: torch.Tensor,
                              layer_name: str) -> torch.Tensor:
-    """Store the `top_k_index` in the layer and call the actual forward."""
+    """Store the `topk_ids` in the layer and call the actual forward."""
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self._top_k_index = top_k_index
+    self._topk_ids = topk_ids
     # Clone hidden_states because it will be mutated in-place in FusedMoE
-    return self.forward_impl(hidden_states.clone(), top_k_weights)
+    return self.forward_impl(hidden_states.clone(), topk_weights)
 
 
 def transformers_moe_forward_fake(hidden_states: torch.Tensor,
-                                  top_k_index: torch.Tensor,
-                                  top_k_weights: torch.Tensor,
+                                  topk_ids: torch.Tensor,
+                                  topk_weights: torch.Tensor,
                                   layer_name: str) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
