@@ -122,7 +122,7 @@ def test_top_k_per_row(
     torch_values, torch_indices = logits.topk(min(top_k, max(row_ends)),
                                               dim=-1)
     mask_lo = torch_indices >= 0
-    mask_hi = torch_indices - (row_ends - row_starts)[:, None] < 0
+    mask_hi = (torch_indices - (row_ends - row_starts)[:, None]) < 0
     mask = torch.full_like(torch_indices,
                            False,
                            dtype=torch.bool,
