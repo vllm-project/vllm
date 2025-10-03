@@ -122,7 +122,15 @@ class ErnieMultiTokenPredictor(nn.Module):
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            # Handle -1 sentinel values from padded speculation
+            # These mark discarded/invalid tokens
+            # Clamp to valid token range since these positions will be masked in
+            # attention
+            vocab_size = self.embed_tokens.weight.size(0)
+            input_ids_clamped = torch.clamp(input_ids,
+                                            min=0,
+                                            max=vocab_size - 1)
+            inputs_embeds = self.embed_tokens(input_ids_clamped)
         return self.layers[str(self.mtp_start_layer_idx + spec_step_idx)](
             inputs_embeds,
             positions,
