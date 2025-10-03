@@ -4228,11 +4228,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for layer_name, mla_module in mla_layers.items():
             if layer_name in kv_cache_spec:
                 continue
-            kv_cache_spec[layer_name] = FullAttentionSpec(
+            # using MLAAttentionSpec to ensure correct
+            # allocation size and layout matching the MLA backend.
+            kv_cache_spec[layer_name] = MLAAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=1,
                 head_size=mla_module.head_size,
-                dtype=self.kv_cache_dtype)
+                dtype=self.kv_cache_dtype,
+                cache_dtype_str=cache_dtype_str)
 
         mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
         if len(mamba_layers) > 0:
