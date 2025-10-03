@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
+                        BatchPrefillWithRaggedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
@@ -18,8 +19,10 @@ from flashinfer.utils import FP4Tensor
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
+from vllm.attention.ops.common import cp_lse_ag_out_ar
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
+from vllm.distributed.parallel_state import get_cp_group
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey, kFp8StaticTensorSym, kNvfp4Quant)
 from vllm.platforms import current_platform
@@ -234,6 +237,9 @@ class FlashInferMetadata:
 
     qo_indptr_gpu: Optional[torch.Tensor] = None
     paged_kv_indptr_gpu: Optional[torch.Tensor] = None
+    
+    # For context parallel
+    cp_kv_recover_idx: Optional[torch.Tensor] = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -256,8 +262,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                      self.kv_cache_spec.block_size)
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+        # NOTE(qcs): Context Parallel do not support graph mode now
         self.enable_cuda_graph = (self.compilation_config.cudagraph_mode.\
-            decode_mode() == CUDAGraphMode.FULL)
+            decode_mode() == CUDAGraphMode.FULL and self.cp_world_size == 1)
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.
@@ -265,6 +272,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 int, BatchDecodeWithPagedKVCacheWrapper] = {}
             self._decode_cudagraph_max_bs = min(
                 max_num_reqs, self.compilation_config.max_capture_size)
+
+        try:
+            self.cp_world_size = get_cp_group().world_size
+            self.cp_rank = get_cp_group().rank_in_group
+        except AssertionError:
+            # CP might not be initialized in testing
+            self.cp_world_size = 1
+            self.cp_rank = 0
 
         self.num_qo_heads = self.model_config.get_num_attention_heads(
             self.vllm_config.parallel_config)
@@ -348,8 +363,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
-            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), get_kv_cache_layout())
+            if self.cp_world_size > 1:
+                self._prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+                    self._get_workspace_buffer(), get_kv_cache_layout())
+            else:
+                self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(), get_kv_cache_layout())
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self,
@@ -413,7 +432,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         max_seq_len = common_attn_metadata.max_seq_len
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        if self.cp_world_size > 1:
+            seq_lens_cpu = seq_lens_cpu // \
+                self.cp_world_size + (self.cp_rank < seq_lens_cpu \
+                                      % self.cp_world_size)
         seq_lens_np = seq_lens_cpu.numpy()
+        num_computed_tokens_cpu = common_attn_metadata.num_computed_tokens_cpu
         block_table_tensor = common_attn_metadata.block_table_tensor
 
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
@@ -495,6 +519,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                  self.cache_dtype,
                                                  self.q_data_type,
                                                  has_sinks=self.has_sinks)
+
+        if self.cp_world_size > 1 and (prefill_use_trtllm
+                                        or decode_use_trtllm):
+            raise NotImplementedError(
+                "Trtllm not support lse, please use flash attention "
+                "or disable attention sinks.")
+
         if self.has_sinks and not (prefill_use_trtllm and decode_use_trtllm):
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
@@ -521,6 +552,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             use_cascade=use_cascade,
+            cp_kv_recover_idx=common_attn_metadata.cp_kv_recover_idx,
         )
 
         qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
@@ -567,23 +599,69 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 qo_indptr_cpu = qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[
                     prefill_start]
                 paged_kv_indptr_cpu = paged_kv_indptr_cpu[prefill_start:]
+                prefill_num_computed_tokens_cpu = num_computed_tokens_cpu[prefill_start:]
                 if not attn_metadata.prefill_use_trtllm:
-                    attn_metadata.prefill_wrapper.plan(
-                        qo_indptr_cpu,
-                        paged_kv_indptr_cpu,
-                        paged_kv_indices,
-                        paged_kv_last_page_len_cpu[prefill_start:],
-                        self.num_qo_heads,
-                        self.num_kv_heads,
-                        self.head_dim,
-                        self.page_size,
-                        causal=True,
-                        sm_scale=self.sm_scale,
-                        window_left=self.window_left,
-                        logits_soft_cap=self.logits_soft_cap,
-                        q_data_type=self.q_data_type,
-                        kv_data_type=self.kv_cache_dtype,
-                    )
+                    if self.cp_world_size > 1:
+                        # NOTE(qcs): no chunked prefill and prefix caching
+                        kv_indptr_cpu = qo_indptr_cpu * self.cp_world_size
+                        # init custom mask for head-tail query order
+                        mask_arr = []
+                        q_pos = common_attn_metadata.query_positions
+                        for i in range(num_prefills):
+                            # |----<C>-----|-<Q0>-|-<Q1>-|
+                            # |---<C+Q*cp_world_size>----|
+                            # cp_world_size = 2
+                            # Q = 2
+                            # C = 8
+                            # cur_q_pos = [0,3]
+                            # context_mask_i.shape = (2, 8)
+                            # upper = [0,1,2,3]
+                            # local_mask_i = [[True, False, False, False], 
+                            #                 [True, True, True, True]] # size=(2, 4)
+                            # mask_i.shape = (2, 12)
+                            cur_q_pos = torch.from_numpy(q_pos[qo_indptr_cpu[i]:qo_indptr_cpu[i+1]])
+                            Q = len(cur_q_pos)
+                            C = prefill_num_computed_tokens_cpu[i]
+                            if Q <= 0:
+                                mask_arr.append(torch.zeros(0, dtype=torch.bool))
+                                continue
+                            context_mask_i = torch.ones((Q, C), dtype=torch.bool)
+                            upper = torch.arange(Q*self.cp_world_size)
+                            local_mask_i = (upper.unsqueeze(0) <= cur_q_pos.unsqueeze(1))
+                            mask_i = torch.cat([context_mask_i, local_mask_i], dim=1)
+                            mask_arr.append(mask_i.flatten())
+                        custom_mask = torch.cat(mask_arr, dim=0).to(self.device)
+
+                        attn_metadata.prefill_wrapper.plan(
+                            qo_indptr_cpu.to(self.device),
+                            kv_indptr_cpu.to(self.device),
+                            self.num_qo_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            custom_mask=custom_mask,
+                            sm_scale=self.sm_scale,
+                            window_left=self.window_left,
+                            logits_soft_cap=self.logits_soft_cap,
+                            q_data_type=self.q_data_type,
+                            kv_data_type=self.kv_cache_dtype,
+                        )
+                    else:
+                        attn_metadata.prefill_wrapper.plan(
+                            qo_indptr_cpu,
+                            paged_kv_indptr_cpu,
+                            paged_kv_indices,
+                            paged_kv_last_page_len_cpu[prefill_start:],
+                            self.num_qo_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.page_size,
+                            causal=True,
+                            sm_scale=self.sm_scale,
+                            window_left=self.window_left,
+                            logits_soft_cap=self.logits_soft_cap,
+                            q_data_type=self.q_data_type,
+                            kv_data_type=self.kv_cache_dtype,
+                        )
                 else:
                     attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
                         self.device, non_blocking=True)
@@ -643,6 +721,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
             # TODO: The cascade wrapper currently does not support setting
             # kv cache dtype to something different from query dtype.
+            return False
+        if self.cp_world_size > 1:
             return False
         return use_cascade_attention(*args, **kwargs)
 
@@ -803,16 +883,17 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                kv_cache[:, 0],
-                kv_cache[:, 1],
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+            if self.cp_world_size == 1:
+                torch.ops._C_cache_ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    kv_cache[:, 0],
+                    kv_cache[:, 1],
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache when the kv_cache_dtype is fp8
@@ -847,18 +928,50 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper is not None
 
             if not attn_metadata.prefill_use_trtllm:
-                assert prefill_wrapper._causal
                 assert prefill_wrapper._window_left == self.window_left
                 assert prefill_wrapper._logits_soft_cap == (
                     self.logits_soft_cap or 0.0)
                 assert prefill_wrapper._sm_scale == self.scale
-                prefill_wrapper.run(
-                    prefill_query,
-                    kv_cache_permute,
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    out=output[num_decode_tokens:],
-                )
+                if self.cp_world_size > 1:
+                    key_across_cp = get_cp_group().all_gather(
+                        key[num_decode_tokens:].contiguous(), dim=0)
+                    value_across_cp = get_cp_group().all_gather(
+                        value[num_decode_tokens:].contiguous(), dim=0)
+                    key_across_cp = torch.index_select(
+                        key_across_cp, 0,
+                        attn_metadata.cp_kv_recover_idx
+                    )
+                    value_across_cp = torch.index_select(
+                        value_across_cp, 0,
+                        attn_metadata.cp_kv_recover_idx
+                    )
+                    torch.ops._C_cache_ops.reshape_and_cache_flash(
+                        key_across_cp,
+                        value_across_cp,
+                        kv_cache[:, 0],
+                        kv_cache[:, 1],
+                        attn_metadata.slot_mapping[num_decode_tokens:],
+                        self.kv_cache_dtype,
+                        layer._k_scale,
+                        layer._v_scale,
+                    )
+                    # TODO(qcs): 考虑 chunked prefill/ prefix cache 情况下
+                    # kvcache的获取与拼接
+                    prefill_wrapper.run(
+                        prefill_query,
+                        key_across_cp,
+                        value_across_cp,
+                        out=output[num_decode_tokens:],
+                    )
+                else:
+                    assert prefill_wrapper._causal
+                    prefill_wrapper.run(
+                        prefill_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output[num_decode_tokens:],
+                    )
             else:
                 # prefill_query may be non-contiguous
                 prefill_query = prefill_query.contiguous()
@@ -933,13 +1046,35 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
                                                            or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
-                decode_wrapper.run(
-                    decode_query,
-                    kv_cache_permute,
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    out=output[:num_decode_tokens],
-                )
+                if self.cp_world_size > 1:
+                    torch.ops._C_cache_ops.reshape_and_cache_flash(
+                        key[:num_decode_tokens],
+                        value[:num_decode_tokens],
+                        kv_cache[:, 0],
+                        kv_cache[:, 1],
+                        attn_metadata.slot_mapping[:num_decode_tokens],
+                        self.kv_cache_dtype,
+                        layer._k_scale,
+                        layer._v_scale,
+                    )
+                    kv_cache_permute = kv_cache.permute(*stride_order)
+                    out, lse = decode_wrapper.run(
+                        decode_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        return_lse=True,
+                    )
+                    output[:num_decode_tokens] =\
+                        cp_lse_ag_out_ar(out, lse, get_cp_group())
+                else:
+                    decode_wrapper.run(
+                        decode_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output[:num_decode_tokens],
+                    )
             else:
                 # decode_query may be non-contiguous
                 decode_query = decode_query.contiguous()
