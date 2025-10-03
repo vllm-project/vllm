@@ -16,13 +16,29 @@ from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 
+# Maximum representable value for FP8 E4M3 format
+FP8_E4M3_MAX = 448.0
+
 
 class AllGatherFP8Pattern:
-    """Optimize AllGather + FP8 quantization by quantizing before AllGather
+    """Optimize AllGather + FP8 quantization by quantizing before AllGather.
 
-    Matches: AllGather(BF16) -> input_to_float8()
-    Where input_to_float8 decomposes into:
-        aminmax -> abs -> max -> clamp -> div -> mul -> clamp -> to(fp8)
+    This pattern transforms:
+        AllGather(BF16) → Quantize(FP8)
+    into:
+        Quantize(FP8) → AllGather(FP8)
+
+    Benefits:
+    - Reduces AllGather communication bandwidth by 2x (BF16→FP8 is 16→8 bit)
+    - Numerically equivalent when using precomputed scales
+      (modelopt quantization)
+
+    Pattern Matching:
+    - Matches: AllGather(BF16) → modelopt's input_to_float8()
+    - Where input_to_float8 decomposes into:
+      to(fp32) → reciprocal(scale) → mul → clamp(-448, 448) → to(fp8)
+    - Only matches when the scale is precomputed (not computed from the
+      gathered tensor), ensuring the transformation is valid
     """
 
     def __init__(self, device: str, dtype: torch.dtype, tp_size: int,
@@ -47,7 +63,10 @@ class AllGatherFP8Pattern:
             # This matches what's in the FX graph from modelopt quant
             gathered_bf16 = torch.ops.vllm.all_gather.default(
                 x,
-                dim=0,  # Actual dimension used in the graph
+                # Only dim=0 is supported because tensor-parallel AllGather
+                # in vLLM always gathers along the sequence dimension (dim=0)
+                # for activation tensors in transformer layers.
+                dim=0,
                 world_size=self.tp_size,
                 group_name=self.tp_group_name,
             )
@@ -57,7 +76,7 @@ class AllGatherFP8Pattern:
             x_f32 = gathered_bf16.to(torch.float32)
             scale_inv = scale.reciprocal()
             x_scaled = x_f32 * scale_inv
-            x_clamped = x_scaled.clamp(min=-448.0, max=448.0)
+            x_clamped = x_scaled.clamp(min=-FP8_E4M3_MAX, max=FP8_E4M3_MAX)
             gathered_fp8 = x_clamped.to(self.fp8_dtype)
 
             return gathered_fp8
@@ -68,7 +87,7 @@ class AllGatherFP8Pattern:
             x_f32 = x.to(torch.float32)
             scale_inv = scale.reciprocal()
             x_scaled = x_f32 * scale_inv
-            x_clamped = x_scaled.clamp(min=-448.0, max=448.0)
+            x_clamped = x_scaled.clamp(min=-FP8_E4M3_MAX, max=FP8_E4M3_MAX)
             x_fp8 = x_clamped.to(self.fp8_dtype)
 
             # Step 2: AllGather FP8 tensors (2x less bandwidth!)
@@ -86,7 +105,24 @@ class AllGatherFP8Pattern:
 
 
 class FP8AllGatherOptPass(VllmPatternMatcherPass):
-    """Optimize AllGather by quantizing to FP8 first (2x bandwidth reduction)"""
+    """Optimize AllGather communication by quantizing to FP8 before gathering.
+
+    This compiler pass reduces tensor-parallel AllGather bandwidth by 2x by
+    transforming AllGather(BF16) → Quantize(FP8) into
+    Quantize(FP8) → AllGather(FP8).
+
+    The optimization is only applied when:
+    - Tensor parallelism is enabled (tp_size > 1)
+    - Model dtype is bfloat16 (required for FP8 output dtype)
+    - The pattern uses precomputed FP8 scales (e.g., from modelopt quantization)
+
+    This pass must run BEFORE AsyncTPPass so that AsyncTP can fuse the resulting
+    vllm_all_gather_fp8 ops with subsequent scaled matrix multiplications.
+
+    Configuration:
+    - Enabled via PassConfig.enable_fp8_allgather_opt
+    - Requires PassConfig.enable_sequence_parallelism to be enabled
+    """
 
     @enable_fake_mode
     def __init__(self, config: VllmConfig):
@@ -135,9 +171,7 @@ class FP8AllGatherOptPass(VllmPatternMatcherPass):
         if self.matched_count > 0:
             logger.info(
                 "FP8 AllGather optimization: replaced %d AllGather "
-                "operation(s) with FP8 quantized versions",
-                self.matched_count)
+                "operation(s) with FP8 quantized versions", self.matched_count)
         else:
-            logger.debug(
-                "FP8 AllGather optimization: "
-                "no matching patterns found in graph")
+            logger.debug("FP8 AllGather optimization: "
+                         "no matching patterns found in graph")
