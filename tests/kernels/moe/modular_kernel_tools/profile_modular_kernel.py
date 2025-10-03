@@ -59,7 +59,7 @@ def profile_modular_kernel(
         "w1": rank_weights.w1,
         "w2": rank_weights.w2,
         "topk_weights": rank_tensors.topk_weights,
-        "topk_ids": rank_tensors.topk_ids,
+        "topk_ids": rank_tensors.topk_ids.to(mk.prepare_finalize.topk_indices_dtype()),
         "expert_map": rank_tensors.expert_map,
         "w1_scale": rank_weights.w1_scale,
         "w2_scale": rank_weights.w2_scale,
