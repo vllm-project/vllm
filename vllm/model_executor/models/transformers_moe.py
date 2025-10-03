@@ -267,5 +267,4 @@ class TransformersMoEForCausalLM(TransformersMoEBase, TransformersForCausalLM):
 class TransformersMoEForMultimodalLM(TransformersMoEBase,
                                      TransformersForMultimodalLM):
 
-    def get_input_embeddings(self, *args, **kwargs) -> torch.Tensor:
-        return SupportsMultiModal.get_input_embeddings(self, *args, **kwargs)
+    get_input_embeddings = SupportsMultiModal.get_input_embeddings
