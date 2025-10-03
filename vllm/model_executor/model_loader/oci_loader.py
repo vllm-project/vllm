@@ -168,6 +168,58 @@ class OciModelLoader(BaseModelLoader):
 
         return registry, repository, reference
 
+    def _normalize_registry(self, registry: str) -> str:
+        """Normalize registry hostname for API calls.
+        
+        Docker Hub uses registry-1.docker.io for API calls instead of docker.io.
+        
+        Args:
+            registry: Registry hostname
+            
+        Returns:
+            Normalized registry hostname
+        """
+        if registry == "docker.io":
+            return "registry-1.docker.io"
+        return registry
+
+    def _authenticated_request(self,
+                               url: str,
+                               registry: str,
+                               repository: str,
+                               headers: dict[str, str],
+                               stream: bool = False) -> requests.Response:
+        """Make an authenticated request to OCI registry.
+        
+        Handles authentication by trying without auth first, then obtaining
+        and using a token if a 401 response is received.
+        
+        Args:
+            url: Request URL
+            registry: Registry hostname
+            repository: Repository name
+            headers: Request headers
+            stream: Whether to stream the response
+            
+        Returns:
+            Response object
+        """
+        # Try without authentication first
+        response = self.session.get(url, headers=headers, stream=stream)
+
+        # If we get 401, parse Www-Authenticate and get token
+        if response.status_code == 401:
+            www_auth = response.headers.get("Www-Authenticate", "")
+            if www_auth:
+                token = self._get_auth_token(registry, repository, www_auth)
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+                    response = self.session.get(url,
+                                                headers=headers,
+                                                stream=stream)
+
+        return response
+
     def _pull_oci_manifest(
             self, model_ref: str,
             cache_dir: str) -> tuple[dict, list[dict], Optional[dict]]:
@@ -184,10 +236,7 @@ class OciModelLoader(BaseModelLoader):
 
         # Parse reference
         registry, repository, reference = self._parse_oci_reference(model_ref)
-
-        # Special case for Docker Hub - use registry-1.docker.io
-        if registry == "docker.io":
-            registry = "registry-1.docker.io"
+        registry = self._normalize_registry(registry)
 
         # Use standard OCI registry URL format
         manifest_url = f"https://{registry}/v2/{repository}/manifests/{reference}"
@@ -197,21 +246,10 @@ class OciModelLoader(BaseModelLoader):
             "application/vnd.docker.distribution.manifest.v2+json"
         }
 
-        # Try without authentication first
+        # Make authenticated request
         try:
-            response = self.session.get(manifest_url, headers=headers)
-
-            # If we get 401, parse Www-Authenticate and get token
-            if response.status_code == 401:
-                www_auth = response.headers.get("Www-Authenticate", "")
-                if www_auth:
-                    token = self._get_auth_token(registry, repository,
-                                                 www_auth)
-                    if token:
-                        headers["Authorization"] = f"Bearer {token}"
-                        response = self.session.get(manifest_url,
-                                                    headers=headers)
-
+            response = self._authenticated_request(manifest_url, registry,
+                                                   repository, headers)
             response.raise_for_status()
             manifest = response.json()
         except Exception as e:
@@ -267,29 +305,18 @@ class OciModelLoader(BaseModelLoader):
 
         # Parse reference
         registry, repository, _ = self._parse_oci_reference(model_ref)
-
-        # Special case for Docker Hub - use registry-1.docker.io
-        if registry == "docker.io":
-            registry = "registry-1.docker.io"
+        registry = self._normalize_registry(registry)
 
         # Use standard OCI registry URL format
         blob_url = f"https://{registry}/v2/{repository}/blobs/{digest}"
         headers: dict[str, str] = {}
 
-        # Try without authentication first
-        response = self.session.get(blob_url, headers=headers, stream=True)
-
-        # If we get 401, parse Www-Authenticate and get token
-        if response.status_code == 401:
-            www_auth = response.headers.get("Www-Authenticate", "")
-            if www_auth:
-                token = self._get_auth_token(registry, repository, www_auth)
-                if token:
-                    headers["Authorization"] = f"Bearer {token}"
-                    response = self.session.get(blob_url,
-                                                headers=headers,
-                                                stream=True)
-
+        # Make authenticated request
+        response = self._authenticated_request(blob_url,
+                                               registry,
+                                               repository,
+                                               headers,
+                                               stream=True)
         response.raise_for_status()
 
         # Write to file
