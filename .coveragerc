@@ -39,3 +39,4 @@ directory = htmlcov
 
 [xml]
 output = coverage.xml
+
