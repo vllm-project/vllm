@@ -36,6 +36,7 @@ class RequestOutputCollector:
         self.aggregate = output_kind == RequestOutputKind.DELTA
         self.output: Optional[Union[RequestOutput, PoolingRequestOutput,
                                     Exception]] = None
+        self._loop = asyncio.get_running_loop()
         self.ready = asyncio.Event()
 
     def put(self, output: Union[RequestOutput, PoolingRequestOutput,
@@ -43,7 +44,7 @@ class RequestOutputCollector:
         """Non-blocking put operation."""
         if self.output is None or isinstance(output, Exception):
             self.output = output
-            self.ready.set()
+            self._loop.call_soon_threadsafe(self.ready.set)
         elif isinstance(self.output, (RequestOutput, PoolingRequestOutput)):
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
