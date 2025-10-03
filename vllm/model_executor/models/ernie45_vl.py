@@ -34,8 +34,11 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from transformers import BatchFeature
 
-from vllm.attention.layer import check_upstream_fa_availability
+from vllm.attention.backends.registry import _Backend
+from vllm.attention.layer import (check_upstream_fa_availability,
+                                  maybe_get_vit_flash_attn_backend)
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
@@ -54,7 +57,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -175,14 +178,18 @@ class Ernie4_5_VisionAttention(nn.Module):
             dtype=torch.get_default_dtype())
 
         self.use_upstream_fa = False
-        if self.attn_backend != _Backend.FLASH_ATTN and \
-            check_upstream_fa_availability(torch.get_default_dtype()):
-            self.attn_backend = _Backend.FLASH_ATTN
-            self.use_upstream_fa = True
+
+        self.attn_backend, self.flash_attn_varlen_func \
+            = maybe_get_vit_flash_attn_backend(
+                self.attn_backend,
+                self.use_upstream_fa,
+            )
 
         if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
-                _Backend.ROCM_AITER_FA
+                _Backend.FLASH_ATTN,
+                _Backend.TORCH_SDPA,
+                _Backend.XFORMERS,
+                _Backend.ROCM_AITER_FA,
         }:
             raise RuntimeError(
                 f"Ernie45-VL does not support {self.attn_backend} backend now."
@@ -238,27 +245,18 @@ class Ernie4_5_VisionAttention(nn.Module):
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
-            # from vllm_flash_attn.flash_attn_interface import (
-            #   flash_attn_varlen_func)
-            if self.attn_backend == _Backend.ROCM_AITER_FA:
-                from aiter import flash_attn_varlen_func
-            else:
-                if self.use_upstream_fa:
-                    from flash_attn import flash_attn_varlen_func
-                else:
-                    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
-            output = flash_attn_varlen_func(q,
-                                            k,
-                                            v,
-                                            cu_seqlens_q=cu_seqlens,
-                                            cu_seqlens_k=cu_seqlens,
-                                            max_seqlen_q=max_seqlen,
-                                            max_seqlen_k=max_seqlen,
-                                            dropout_p=0.0,
-                                            causal=False)
+            output = self.flash_attn_varlen_func(q,
+                                                 k,
+                                                 v,
+                                                 cu_seqlens_q=cu_seqlens,
+                                                 cu_seqlens_k=cu_seqlens,
+                                                 max_seqlen_q=max_seqlen,
+                                                 max_seqlen_k=max_seqlen,
+                                                 dropout_p=0.0,
+                                                 causal=False)
 
             context_layer = rearrange(output,
                                       "(b s) h d -> s b (h d)",
@@ -515,7 +513,8 @@ class Ernie4_5_VisionTransformer(nn.Module):
             self, cu_seqlens: torch.Tensor
     ) -> tuple[Optional[int], Optional[list[int]]]:
         max_seqlen, seqlens = None, None
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if (self.attn_backend == _Backend.FLASH_ATTN
+                or self.attn_backend == _Backend.ROCM_AITER_FA):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -1186,6 +1185,7 @@ class Ernie4_5_VLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1195,16 +1195,21 @@ class Ernie4_5_VLDummyInputsBuilder(
         target_num_frames = \
             self.info.get_num_frames_with_most_features(seq_len, mm_counts)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images),
+                                   num_images=num_images,
+                                   overrides=image_overrides),
             "video":
             self._get_dummy_videos(width=target_width,
                                    height=target_height,
                                    num_frames=target_num_frames,
-                                   num_videos=num_videos)
+                                   num_videos=num_videos,
+                                   overrides=video_overrides)
         }
 
 
