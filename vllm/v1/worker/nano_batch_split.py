@@ -28,11 +28,8 @@ def nano_ubatch_split(
     """
     assert num_tokens_unpadded == num_tokens_padded
     batch_size = int(len(num_scheduled_tokens_per_request))
-    if batch_size == 0:
-        return (None, None)
-
     total_tokens = int(np.sum(num_scheduled_tokens_per_request))
-    if total_tokens <= 1:
+    if batch_size <= 1 or total_tokens <= 1:
         return (None, None)
 
     tokens_list = num_scheduled_tokens_per_request.tolist()
