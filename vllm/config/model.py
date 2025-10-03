@@ -263,7 +263,10 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: Optional[str] = None
     """IOProcessor plugin name to load at model startup"""
-
+    load_customized_openai_context: str = None
+    """
+    To load customized openai context class
+    """
     # Pooler config
     pooler_config: Optional[PoolerConfig] = None
     """Pooler config which controls the behaviour of output pooling in pooling

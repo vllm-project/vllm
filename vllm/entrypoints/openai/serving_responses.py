@@ -38,6 +38,7 @@ from openai.types.responses.response_output_text import (Logprob,
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent)
 from openai_harmony import Message as OpenAIHarmonyMessage
+from vllm.entrypoints.harmony_utils import get_openai_context
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -117,7 +118,7 @@ class OpenAIServingResponses(OpenAIServing):
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.enable_log_outputs = enable_log_outputs
-
+        self.model_config = model_config
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
         if reasoning_parser:
@@ -301,7 +302,10 @@ class OpenAIServingResponses(OpenAIServing):
                         context = StreamingHarmonyContext(
                             messages, available_tools)
                     else:
-                        context = HarmonyContext(messages, available_tools)
+                        if self.model_config.load_customized_openai_context:
+                            context = get_openai_context(self.model_config.load_customized_openai_context)(messages, tool_sessions)
+                        else:
+                            context = HarmonyContext(messages, tool_sessions)
                 else:
                     context = SimpleContext()
                 generator = self._generate_with_builtin_tools(
