@@ -393,6 +393,10 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                         'output_messages'] is not None
                     assert event.response.model_extra['output_messages'][0][
                         'content'] is not None
+                    assert event.response.model_extra[
+                        'input_messages'] is not None
+                    assert event.response.model_extra['input_messages'][0][
+                        'content'] is not None
 
             if current_event_mode != event.type:
                 current_event_mode = event.type

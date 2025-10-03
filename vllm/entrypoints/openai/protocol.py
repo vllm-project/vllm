@@ -1999,6 +1999,7 @@ class ResponsesResponse(OpenAIBaseModel):
     # --8<-- [end:responses-extra-params]
 
     # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
+    # https://github.com/openai/harmony/issues/78
     @field_serializer("output_messages", when_used="json")
     def serialize_output_messages(self, msgs, _info):
         if msgs:
@@ -2016,6 +2017,7 @@ class ResponsesResponse(OpenAIBaseModel):
         return None
 
     # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
+    # https://github.com/openai/harmony/issues/78
     @field_serializer("input_messages", when_used="json")
     def serialize_input_messages(self, msgs, _info):
         if msgs:
