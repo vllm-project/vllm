@@ -741,20 +741,51 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
+        image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
 
         target_width, target_height = (
             self.info.get_image_size_with_most_features())
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts)
+
+        if video_overrides:
+            num_frames_override = video_overrides.num_frames
+            if num_frames_override:
+                if num_frames_override > target_num_frames:
+                    logger.warning(
+                        "video.num_frames override (%d) exceeds model's "
+                        "maximum number of frames (%d), will be ignored",
+                        num_frames_override, target_num_frames)
+                target_num_frames = min(target_num_frames, num_frames_override)
+        target_num_frames = max(target_num_frames, 2)
+
         target_video_size, _ = self.info._get_vision_info(
             image_width=target_width,
             image_height=target_height,
             num_frames=target_num_frames,
             image_processor=self.info.get_video_processor(),
         )
-
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        # NOTE: we need to do this check here since Qwen3-VL resizes video
+        # frames depending on how many frames there are.
+        width, height = target_video_size.width, target_video_size.height
+        if video_overrides:
+            width_override = video_overrides.width
+            if width_override:
+                if width_override > width:
+                    logger.warning(
+                        "video.width override (%d) exceeds model's "
+                        "maximum width (%d), will be ignored", width_override,
+                        width)
+                width = min(width, width_override)
+            height_override = video_overrides.height
+            if height_override:
+                if height_override > height:
+                    logger.warning(
+                        "video.height override (%d) exceeds model's "
+                        "maximum height (%d), will be ignored",
+                        height_override, height)
+                height = min(height, height_override)
 
         return {
             "image":
@@ -764,8 +795,8 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
                                    overrides=image_overrides),
             "video":
             self._get_dummy_videos(
-                width=target_video_size.width,
-                height=target_video_size.height,
+                width=width,
+                height=height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
                 overrides=video_overrides,
@@ -779,6 +810,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         height: int,
         num_frames: int,
         num_videos: int,
+        overrides: Optional[BaseDummyOptions] = None,
     ) -> list[VideoItem]:
         num_frames = max(num_frames, 2)
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
