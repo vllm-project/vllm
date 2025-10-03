@@ -565,7 +565,7 @@ def init_batch_invariance():
         supported_backends = ["FLEX_ATTENTION", "FLASHINFER"]
         if curr_attn_backend not in supported_backends:
             warning = "Forcibly updating attention backend to" \
-                f" {supported_backends[0]}." \
+                f" {supported_backends[0]} for batch_invariant. " \
                 f" Supported backends: {supported_backends}."
             logger.warning(warning)
             os.environ["VLLM_ATTENTION_BACKEND"] = supported_backends[0]
