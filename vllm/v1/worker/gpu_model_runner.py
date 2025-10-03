@@ -2791,31 +2791,35 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 rank_mapping,
             )
 
+        self.model = self._compile_model(self.model)
+        if hasattr(self, "drafter"):
+            self.drafter.model = self._compile_model(self.drafter.model)
+
+    def _compile_model(self, model: nn.Module) -> nn.Module:
         if (
-            self.vllm_config.compilation_config.level == \
+            self.compilation_config.level == \
                 CompilationLevel.DYNAMO_AS_IS and supports_dynamo()
         ):
-            backend = self.vllm_config.compilation_config.init_backend(
-                self.vllm_config)
+            backend = self.compilation_config.init_backend(self.vllm_config)
             compilation_counter.dynamo_as_is_count += 1
-            self.model.compile(fullgraph=True, backend=backend)
-            return
+            model.compile(fullgraph=True, backend=backend)
+            return model
         # for other compilation levels, cudagraph behavior is controlled by
         # CudagraphWraper and CudagraphDispatcher of vllm.
 
         # wrap the model with full cudagraph wrapper if needed.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs() \
-            and not self.parallel_config.enable_dbo:
-            self.model = CUDAGraphWrapper(self.model,
-                                          self.vllm_config,
-                                          runtime_mode=CUDAGraphMode.FULL)
-        elif self.parallel_config.enable_dbo:
-            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-                self.model = UBatchWrapper(self.model, self.vllm_config,
-                                           CUDAGraphMode.FULL, self.device)
-            else:
-                self.model = UBatchWrapper(self.model, self.vllm_config,
-                                           CUDAGraphMode.NONE, self.device)
+        full = self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        dual_batch_overlap = self.parallel_config.enable_dbo
+        if full and not dual_batch_overlap:
+            return CUDAGraphWrapper(model, self.vllm_config,
+                                    CUDAGraphMode.FULL)
+        elif dual_batch_overlap:
+            mode = CUDAGraphMode.FULL if full else CUDAGraphMode.NONE
+            return UBatchWrapper(model, self.vllm_config, mode, self.device)
+
+        logger.info(
+            "Incompatible compilation config - skipping model compilation")
+        return model
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \
