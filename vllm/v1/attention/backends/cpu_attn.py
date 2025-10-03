@@ -14,7 +14,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+                                              CommonAttentionMetadata,
+                                              split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
@@ -328,6 +329,7 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.scheduler_config = vllm_config.scheduler_config
+        self._init_reorder_batch_threshold(1, False)
 
         self.seq_start_loc_cpu = torch.zeros(
             vllm_config.scheduler_config.max_num_seqs + 1,
@@ -348,50 +350,43 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_start_loc_np = query_start_loc_cpu.numpy()
-        num_scheduled_tokens = query_start_loc_np[
-            1:num_reqs + 1] - query_start_loc_np[0:num_reqs]
-        num_decode_req = 0
-        for i in range(common_attn_metadata.num_reqs):
-            if num_scheduled_tokens[i] != 1:
-                break
-            num_decode_req += 1
-        num_prompt_req = num_reqs - num_decode_req
 
-        max_prefill_seq_len = seq_lens_np[num_decode_req:num_reqs].max().item(
-        ) if num_prompt_req > 0 else 0
-        max_decode_seq_len = seq_lens_np[:num_decode_req].max().item(
-        ) if num_prompt_req < num_reqs else 0
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
+            split_decodes_and_prefills(common_attn_metadata,
+                                       decode_threshold=self.reorder_batch_threshold,
+                                       require_uniform=True)
+
+        max_prefill_seq_len = seq_lens_np[num_decodes:num_reqs].max().item(
+        ) if num_prefills > 0 else 0
+        max_decode_seq_len = seq_lens_np[:num_decodes].max().item(
+        ) if num_prefills < num_reqs else 0
         self.seq_start_loc_np[0] = 0
         np.cumsum(seq_lens_np, out=self.seq_start_loc_np[1:num_reqs + 1])
-
-        num_decode_tokens = int(query_start_loc_cpu[num_decode_req].item())
-        num_prefill_tokens = int(query_start_loc_cpu[num_reqs].item() -
-                                 num_decode_tokens)
 
         slot_mapping = common_attn_metadata.slot_mapping.long()
         block_table_tensor = common_attn_metadata.block_table_tensor
         query_start_loc_np = query_start_loc_cpu.numpy()
-        query_start_loc_np[num_decode_req:num_reqs + 1] -= num_decode_tokens
+        query_start_loc_np[num_decodes:num_reqs + 1] -= num_decode_tokens
 
         attn_metadata = TorchSDPAMetadata(
-            num_prefills=num_prompt_req,
+            num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
             # to ensure inference when chunked_prefill is disabled
             seq_lens=seq_lens_cpu.tolist(),
-            seq_lens_tensor=seq_lens_cpu[:num_decode_req],  # decode
+            seq_lens_tensor=seq_lens_cpu[:num_decodes],  # decode
             max_decode_seq_len=max_decode_seq_len,  # decode
-            block_tables=block_table_tensor[:num_decode_req],  # decode
+            block_tables=block_table_tensor[:num_decodes],  # decode
             chunked_prefill=self.scheduler_config.chunked_prefill_enabled,
             max_query_len=max_query_len,
             max_kv_len=max_prefill_seq_len,
-            prefill_query_start_loc=query_start_loc_cpu[
-                num_decode_req:num_reqs + 1],  # prefill
-            kv_start_loc=self.seq_start_loc_cpu[num_decode_req:num_reqs +
+            prefill_query_start_loc=query_start_loc_cpu[num_decodes:num_reqs +
+                                                        1],  # prefill
+            kv_start_loc=self.seq_start_loc_cpu[num_decodes:num_reqs +
                                                 1],  # prefill
             prefill_block_tables=block_table_tensor[
-                num_decode_req:num_reqs],  # prefill
+                num_decodes:num_reqs],  # prefill
             query_start_loc=query_start_loc_cpu[:num_reqs +
                                                 1],  # for logits index
         )
