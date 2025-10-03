@@ -10,11 +10,12 @@ from typing import (Callable, Final, Generic, Literal, Optional, Protocol,
 import torch
 from transformers import PretrainedConfig
 
+from vllm.attention.backends.registry import _Backend
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
 from vllm.logger import init_logger
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
