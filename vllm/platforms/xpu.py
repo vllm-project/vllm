@@ -10,13 +10,15 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
 else:
     ModelConfig = None
     VllmConfig = None
+    _Backend = None
 
 logger = init_logger(__name__)
 
@@ -33,10 +35,11 @@ class XPUPlatform(Platform):
     device_control_env_var: str = "ZE_AFFINITY_MASK"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool, use_sparse) -> str:
+        from vllm.attention.backends.registry import _Backend
         if use_sparse:
             raise NotImplementedError(
                 "Sparse Attention is not supported on XPU.")
