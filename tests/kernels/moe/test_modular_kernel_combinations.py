@@ -216,11 +216,17 @@ def generate_valid_test_cases(world_size: int,
         prepare_finalize_types=MK_MULTI_GPU_PREPARE_FINALIZE_TYPES))
 @meets_multi_gpu_requirements
 def test_modular_kernel_combinations_multigpu(
-        k: int, n: int, e: int, dtype: torch.dtype,
-        quant_config: Optional[TestMoEQuantConfig],
-        prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-        fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
-        chunk_size: Optional[int], world_size: int, pytestconfig):
+    k: int,
+    n: int,
+    e: int,
+    dtype: torch.dtype,
+    quant_config: Optional[TestMoEQuantConfig],
+    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
+    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    chunk_size: Optional[int],
+    world_size: int,
+    pytestconfig,
+):
     assert cuda_device_count_stateless() >= world_size
 
     config = Config(
@@ -246,11 +252,17 @@ def test_modular_kernel_combinations_multigpu(
         world_size=1,
         prepare_finalize_types=MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES))
 def test_modular_kernel_combinations_singlegpu(
-        k: int, n: int, e: int, dtype: torch.dtype,
-        quant_config: Optional[TestMoEQuantConfig],
-        prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-        fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
-        chunk_size: Optional[int], world_size: int, pytestconfig):
+    k: int,
+    n: int,
+    e: int,
+    dtype: torch.dtype,
+    quant_config: Optional[TestMoEQuantConfig],
+    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
+    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    chunk_size: Optional[int],
+    world_size: int,
+    pytestconfig,
+):
     config = Config(
         Ms=Ms,
         K=k,
