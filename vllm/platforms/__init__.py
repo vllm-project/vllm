@@ -9,7 +9,6 @@ from vllm import envs
 from vllm.plugins import load_plugins_by_group
 from vllm.utils import resolve_obj_by_qualname, supports_xccl
 
-from .interface import _Backend  # noqa: F401
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = logging.getLogger(__name__)
