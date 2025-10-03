@@ -183,7 +183,8 @@ class CompilationConfig:
     backend: str = "inductor"
     """The backend for compilation. It needs to be a string:
 
-    - "" (empty string): use the default backend ("inductor" on CUDA-alike platforms).
+    - "" (empty string): use the default backend ("inductor" on CUDA-alike
+    platforms).
     - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
     - "full.module.name": a qualified name which can be used to import the
 
@@ -193,7 +194,7 @@ class CompilationConfig:
     used for the compilation directly (it sees the whole graph). When the
     compilation level is 3, the backend is used for the piecewise compilation
     (it sees a part of the graph)."""
-    custom_ops: list[str] = field(default_factory=lambda: list())
+    custom_ops: list[str] = field(default_factory=list)
     """Fine-grained control over which custom ops to enable/disable. Use 'all'
     to enable all, 'none' to disable all. Also specify a list of custom op
     names to enable (prefixed with a '+'), or disable (prefixed with a '-').
@@ -535,13 +536,16 @@ class CompilationConfig:
             raise ValueError(
                 f"Invalid backend for piecewise compilation: {self.backend}")
 
-        if self.backend == "":
-            self.backend = "inductor"
         if self.use_inductor is not None:
             logger.warning_once(
                 "The 'use_inductor' flag is deprecated and will be\
                     removed in a future release."
                 "Please use the 'backend' option instead.", )
+            self.backend = "inductor" if self.use_inductor else "eager"
+
+        if self.backend == "":
+            self.backend = "inductor"
+
         if count_none + count_all == 0:
             if self.level > 0 and self.backend != "eager":
                 self.custom_ops.insert(0, "none")
