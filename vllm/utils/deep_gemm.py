@@ -51,14 +51,10 @@ def is_deep_gemm_e8m0_used() -> bool:
         logger.info_once("DeepGEMM E8M0 disabled: FlashInfer MOE is enabled.")
         return False
 
-    if current_platform.is_device_capability(100) and \
+    if (current_platform.is_device_capability(100) or \
+            current_platform.is_device_capability(90)) and \
             envs.VLLM_USE_DEEP_GEMM_E8M0:
-        logger.info_once("DeepGEMM E8M0 enabled on Blackwell GPU.")
-        return True
-
-    if current_platform.is_device_capability(90) and \
-            envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER:
-        logger.info_once("DeepGEMM E8M0 enabled on Hopper GPU.")
+        logger.info_once("DeepGEMM E8M0 enabled on current platform.")
         return True
 
     logger.info_once("DeepGEMM E8M0 disabled on current configuration.")
