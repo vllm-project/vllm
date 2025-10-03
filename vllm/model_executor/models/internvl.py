@@ -1226,11 +1226,12 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_image_input(
+    def _process_vision_input(
         self,
-        image_input: Union[InternVLImageInputs, InternVLVideoPixelInputs],
+        image_input: Union[InternVLImageInputs, InternVLVideoInputs],
     ) -> tuple[torch.Tensor, ...]:
-        if image_input["type"] == "image_embeds":
+        if (image_input["type"] == "image_embeds"
+                or image_input["type"] == "video_embeds"):
             return image_input["data"]
 
         assert self.vision_model is not None
@@ -1298,11 +1299,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
+                vision_embeddings = self._process_vision_input(image_input)
                 multimodal_embeddings += vision_embeddings
             if modality == "videos":
                 video_input = modalities["videos"]
-                video_embeddings = self._process_image_input(video_input)
+                video_embeddings = self._process_vision_input(video_input)
                 multimodal_embeddings += video_embeddings
 
         return multimodal_embeddings
