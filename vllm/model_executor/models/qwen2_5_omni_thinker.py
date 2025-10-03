@@ -39,6 +39,7 @@ from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -212,6 +213,7 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
@@ -228,19 +230,26 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         target_num_frames = \
             self.info.get_num_frames_with_most_features(seq_len, mm_counts)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         mm_data = {
             "audio":
             self._get_dummy_audios(length=target_audio_length,
-                                   num_audios=num_audios),
+                                   num_audios=num_audios,
+                                   overrides=audio_overrides),
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images),
+                                   num_images=num_images,
+                                   overrides=image_overrides),
             "video":
             self._get_dummy_videos(width=target_width,
                                    height=target_height,
                                    num_frames=target_num_frames,
-                                   num_videos=num_videos),
+                                   num_videos=num_videos,
+                                   overrides=video_overrides),
         }
 
         return mm_data
