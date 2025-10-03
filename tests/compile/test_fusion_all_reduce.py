@@ -66,8 +66,9 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
     def forward(self, hidden_states, residual):
         view = hidden_states.reshape(-1, self.hidden_size)
         all_reduce = tensor_model_parallel_all_reduce(view)
-        norm, _ = self.norm(all_reduce, residual)
-        return norm
+        norm, res = self.norm(all_reduce, residual)
+
+        return norm, res
 
     def ops_in_model_before(self):
         return [torch.ops.vllm.all_reduce.default]
@@ -98,7 +99,9 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP8Model(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             torch.ops.vllm.all_reduce.default,
-            torch.ops._C.static_scaled_fp8_quant.default,
+            torch.ops._C.static_scaled_fp8_quant.default
+            if self.quant_fp8.enabled()
+            else torch.ops.aten.reciprocal.default,
         ]
 
 
@@ -139,19 +142,21 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "test_model",
+    "test_model, enable_quant_fp8",
     [
-        TestAllReduceRMSNormModel,
-        TestAllReduceFusedAddRMSNormModel,
-        TestAllReduceFusedAddRMSNormStaticQuantFP8Model,
+        (TestAllReduceRMSNormModel, False),
+        (TestAllReduceFusedAddRMSNormModel, False),
+        (TestAllReduceFusedAddRMSNormStaticQuantFP8Model, True),
+        (TestAllReduceFusedAddRMSNormStaticQuantFP8Model, False),
         # TODO: Enable with torch==2.8.0
-        # TestAllReduceFusedAddRMSNormStaticQuantFP4Model,
+        # (TestAllReduceFusedAddRMSNormStaticQuantFP4Model, False),
     ],
 )
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])
 @pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("enable_rms_norm", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 @pytest.mark.skipif(
     not find_spec("flashinfer")
@@ -165,6 +170,8 @@ def test_all_reduce_fusion_pass_replace(
     seq_len: int,
     hidden_size: int,
     dtype: torch.dtype,
+    enable_rms_norm,
+    enable_quant_fp8,
 ):
     num_processes = 2
     if (
@@ -179,7 +186,16 @@ def test_all_reduce_fusion_pass_replace(
     def run_torch_spawn(fn, nprocs):
         torch.multiprocessing.spawn(
             fn,
-            args=(num_processes, test_model, batch_size, seq_len, hidden_size, dtype),
+            args=(
+                num_processes,
+                test_model,
+                batch_size,
+                seq_len,
+                hidden_size,
+                dtype,
+                enable_rms_norm,
+                enable_quant_fp8,
+            ),
             nprocs=nprocs,
         )
 
@@ -194,6 +210,8 @@ def all_reduce_fusion_pass_on_test_model(
     seq_len: int,
     hidden_size: int,
     dtype: torch.dtype,
+    enable_rms_norm,
+    enable_quant_fp8,
 ):
     current_platform.seed_everything(0)
 
@@ -215,9 +233,15 @@ def all_reduce_fusion_pass_on_test_model(
     init_distributed_environment()
     initialize_model_parallel(tensor_model_parallel_size=world_size)
 
+    custom_ops = []
+    if enable_rms_norm:
+        custom_ops.append("+rms_norm")
+    if enable_quant_fp8:
+        custom_ops.append("+quant_fp8")
+
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE, custom_ops=["+rms_norm", "+quant_fp8"]
+            level=CompilationLevel.PIECEWISE, custom_ops=custom_ops
         )
     )
     vllm_config.compilation_config.pass_config = PassConfig(
@@ -239,7 +263,7 @@ def all_reduce_fusion_pass_on_test_model(
         cleanup_pass = PostCleanupPass(vllm_config)
 
         backend = TestBackend(
-            all_reduce_fusion_pass, noop_pass, func_pass, cleanup_pass
+            noop_pass, all_reduce_fusion_pass, func_pass, cleanup_pass
         )
 
         token_num = batch_size * seq_len
