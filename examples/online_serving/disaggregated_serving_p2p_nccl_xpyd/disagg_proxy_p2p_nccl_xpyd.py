@@ -120,6 +120,16 @@ async def forward_request(url, data, request_id):
                     yield content
 
 
+async def forward_profiling_request(url):
+    """Forward start_profile or stop_profile to a vLLM instance."""
+    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+        headers = {
+            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+        }
+        async with session.post(url=url, headers=headers) as response:
+            return response.status == 200
+
+
 @app.route("/v1/completions", methods=["POST"])
 @app.route("/v1/chat/completions", methods=["POST"])
 async def handle_request():
@@ -182,6 +192,144 @@ async def handle_request():
         print("Error occurred in disagg prefill proxy server")
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
+
+
+@app.route("/start_profile", methods=["POST"])
+async def start_profile():
+    """Start profiling on both prefill and decode instances."""
+    try:
+        success_count = 0
+        total_count = 0
+
+        # Forward to all prefill instances
+        global prefill_instances
+        global prefill_cv
+        with prefill_cv:
+            prefill_list = list(prefill_instances.items())
+
+        for prefill_addr, _ in prefill_list:
+            total_count += 1
+            try:
+                success = await forward_profiling_request(
+                    f"http://{prefill_addr}/start_profile"
+                )
+                if success:
+                    success_count += 1
+                    print(f"✅ Started profiling on prefill: {prefill_addr}")
+                else:
+                    print(f"❌ Failed to start profiling on prefill: {prefill_addr}")
+            except Exception as e:
+                print(f"❌ Error starting profiling on prefill {prefill_addr}: {e}")
+
+        # Forward to all decode instances
+        global decode_instances
+        global decode_cv
+        with decode_cv:
+            decode_list = list(decode_instances.items())
+
+        for decode_addr, _ in decode_list:
+            total_count += 1
+            try:
+                success = await forward_profiling_request(
+                    f"http://{decode_addr}/start_profile"
+                )
+                if success:
+                    success_count += 1
+                    print(f"✅ Started profiling on decode: {decode_addr}")
+                else:
+                    print(f"❌ Failed to start profiling on decode: {decode_addr}")
+            except Exception as e:
+                print(f"❌ Error starting profiling on decode {decode_addr}: {e}")
+
+        if success_count == total_count:
+            return {
+                "status": "success",
+                "message": f"Profiling started on all {total_count} instances",
+            }
+        elif success_count > 0:
+            return {
+                "status": "partial",
+                "message": f"Profiling started on {success_count}/{total_count} "
+                f"instances",
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Failed to start profiling on any instances",
+            }, 500
+
+    except Exception as e:
+        print(f"❌ Error in start_profile: {e}")
+        return {"status": "error", "message": str(e)}, 500
+
+
+@app.route("/stop_profile", methods=["POST"])
+async def stop_profile():
+    """Stop profiling on both prefill and decode instances."""
+    try:
+        success_count = 0
+        total_count = 0
+
+        # Forward to all prefill instances
+        global prefill_instances
+        global prefill_cv
+        with prefill_cv:
+            prefill_list = list(prefill_instances.items())
+
+        for prefill_addr, _ in prefill_list:
+            total_count += 1
+            try:
+                success = await forward_profiling_request(
+                    f"http://{prefill_addr}/stop_profile"
+                )
+                if success:
+                    success_count += 1
+                    print(f"✅ Stopped profiling on prefill: {prefill_addr}")
+                else:
+                    print(f"❌ Failed to stop profiling on prefill: {prefill_addr}")
+            except Exception as e:
+                print(f"❌ Error stopping profiling on prefill {prefill_addr}: {e}")
+
+        # Forward to all decode instances
+        global decode_instances
+        global decode_cv
+        with decode_cv:
+            decode_list = list(decode_instances.items())
+
+        for decode_addr, _ in decode_list:
+            total_count += 1
+            try:
+                success = await forward_profiling_request(
+                    f"http://{decode_addr}/stop_profile"
+                )
+                if success:
+                    success_count += 1
+                    print(f"✅ Stopped profiling on decode: {decode_addr}")
+                else:
+                    print(f"❌ Failed to stop profiling on decode: {decode_addr}")
+            except Exception as e:
+                print(f"❌ Error stopping profiling on decode {decode_addr}: {e}")
+
+        if success_count == total_count:
+            return {
+                "status": "success",
+                "message": f"Profiling stopped on all {total_count} instances",
+            }
+        elif success_count > 0:
+            return {
+                "status": "partial",
+                "message": f"Profiling stopped on {success_count}/{total_count} "
+                f"instances",
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Failed to stop profiling on any instances",
+            }, 500
+
+    except Exception as e:
+        print(f"❌ Error in stop_profile: {e}")
+        return {"status": "error", "message": str(e)}, 500
 
 
 if __name__ == "__main__":
