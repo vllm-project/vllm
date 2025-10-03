@@ -60,13 +60,12 @@ class MetricsSnapshot:
     num_requests_running: int = 0
     num_requests_swapped: int = 0
     num_requests_waiting: int = 0
+    # Token totals aggregated across all engines
+    prompt_tokens_total: int = 0
+    generation_tokens_total: int = 0
+    # Calculated throughput (tokens/sec since last measurement)
     prompt_throughput: float = 0.0
     generation_throughput: float = 0.0
-    # Additional metrics for better decode phase detection
-    avg_prompt_tokens: float = 0.0
-    avg_generation_tokens: float = 0.0
-    num_prefill_requests: int = 0
-    num_decode_requests: int = 0
 
 
 class TaskType(Enum):
@@ -465,31 +464,22 @@ async def _fetch_metrics(
 
                 for line in text.split('\n'):
                     if line.startswith('vllm:num_requests_running'):
-                        metrics.num_requests_running = int(
+                        metrics.num_requests_running += int(
                             float(line.split()[1]))
                     elif line.startswith('vllm:num_requests_swapped'):
-                        metrics.num_requests_swapped = int(
+                        metrics.num_requests_swapped += int(
                             float(line.split()[1]))
                     elif line.startswith('vllm:num_requests_waiting'):
-                        metrics.num_requests_waiting = int(
+                        metrics.num_requests_waiting += int(
                             float(line.split()[1]))
-                    elif line.startswith(
-                            'vllm:avg_prompt_throughput_toks_per_s'):
-                        metrics.prompt_throughput = float(line.split()[1])
-                    elif line.startswith(
-                            'vllm:avg_generation_throughput_toks_per_s'):
-                        metrics.generation_throughput = float(line.split()[1])
-                    elif line.startswith('vllm:num_prefills_running'):
-                        metrics.num_prefill_requests = int(
+                    elif line.startswith('vllm:prompt_tokens_total'):
+                        # Aggregate across all engines
+                        metrics.prompt_tokens_total += int(
                             float(line.split()[1]))
-                    elif line.startswith(
-                            'vllm:num_generation_tokens_from_decode_requests'):
-                        # Derive decode requests from generation activity
-                        if (float(line.split()[1]) > 0 and
-                                metrics.num_requests_running > 0):
-                            metrics.num_decode_requests = max(
-                                0, (metrics.num_requests_running -
-                                    metrics.num_prefill_requests))
+                    elif line.startswith('vllm:generation_tokens_total'):
+                        # Aggregate across all engines
+                        metrics.generation_tokens_total += int(
+                            float(line.split()[1]))
 
                 return metrics
     except Exception:
@@ -499,26 +489,32 @@ async def _fetch_metrics(
 
 def _calculate_throughput(current: MetricsSnapshot,
                          previous: MetricsSnapshot) -> MetricsSnapshot:
-    """Calculate throughput changes between two snapshots."""
-    # Throughput values are already provided by the metrics endpoint
-    # We can use them directly or calculate deltas if needed
+    """Calculate throughput based on token deltas between snapshots."""
     time_diff = current.timestamp - previous.timestamp
     if time_diff > 0:
-        # The metrics already contain instantaneous throughput values
-        # Just ensure we have the decode request count
-        current.num_decode_requests = max(
-            0, current.num_requests_running - current.num_prefill_requests)
+        # Calculate throughput as tokens/second
+        prompt_token_delta = (current.prompt_tokens_total -
+                             previous.prompt_tokens_total)
+        generation_token_delta = (current.generation_tokens_total -
+                                 previous.generation_tokens_total)
+
+        current.prompt_throughput = prompt_token_delta / time_diff
+        current.generation_throughput = generation_token_delta / time_diff
+    else:
+        current.prompt_throughput = 0.0
+        current.generation_throughput = 0.0
+
     return current
 
 
 def _detect_decode_phase_start_metrics(
         metrics_history: list[MetricsSnapshot]) -> bool:
-    """Detect decode phase start based on metrics.
+    """Detect decode phase start based on token throughput metrics.
 
     Decode phase is detected when:
     1. There are active requests running
-    2. Most requests are in decode phase (not prefill)
-    3. Generation throughput is significantly higher than prompt throughput
+    2. Generation throughput is significantly higher than prompt throughput
+    3. Generation throughput is substantial (>50 tokens/sec)
     4. The pattern is stable across multiple measurements
     """
     if len(metrics_history) < 3:
@@ -530,37 +526,29 @@ def _detect_decode_phase_start_metrics(
     if not all(m.num_requests_running > 0 for m in recent):
         return False
 
-    # Check if decode requests dominate over prefill requests
-    decode_dominant_count = 0
-    for m in recent:
-        if m.num_requests_running > 0:
-            decode_ratio = m.num_decode_requests / m.num_requests_running
-            # Consider decode phase if >70% of requests are in decode
-            if decode_ratio > 0.7:
-                decode_dominant_count += 1
-
     # Check if generation throughput significantly exceeds prompt throughput
     generation_dominant_count = 0
+
     for m in recent:
         if m.generation_throughput > 0 and m.prompt_throughput >= 0:
             # Generation should be significantly higher during decode phase
             throughput_ratio = (m.generation_throughput /
                                max(m.prompt_throughput, 1.0))
-            if throughput_ratio > 2.0:  # Generation is 2x+ higher than prompt
+            if throughput_ratio > 3.0:  # Generation is 3x+ higher than prompt
                 generation_dominant_count += 1
 
-    # Require both conditions to be met for majority of recent measurements
-    return (decode_dominant_count >= 2 and generation_dominant_count >= 2)
+    # Require both conditions for majority of recent measurements
+    return (generation_dominant_count >= 2)
 
 
 def _detect_decode_phase_end_metrics(metrics_history: list[MetricsSnapshot],
                                     start_time: float) -> bool:
-    """Detect decode phase end based on metrics.
+    """Detect decode phase end based on token throughput metrics.
 
     Decode phase ends when:
     1. No requests are running, OR
-    2. Decode requests drop significantly, OR
-    3. Generation throughput drops significantly compared to decode phase
+    2. Generation throughput drops significantly, OR
+    3. Minimum profiling duration has passed and activity is low
     """
     if len(metrics_history) < 2:
         return False
@@ -576,20 +564,14 @@ def _detect_decode_phase_end_metrics(metrics_history: list[MetricsSnapshot],
     if current_time - start_time < 5.0:  # Minimum 5 seconds
         return False
 
-    # Check if decode activity has significantly reduced
+    # End if generation throughput drops significantly
     current = recent[-1]
-    if current.num_requests_running > 0:
-        decode_ratio = (current.num_decode_requests /
-                        current.num_requests_running)
-        # End if decode requests drop below 30%
-        if decode_ratio < 0.3:
-            return True
+    if current.generation_throughput < 10.0:  # Very low generation activity
+        return True
 
-        # End if generation throughput drops significantly
-        if current.generation_throughput < 10.0:  # Very low generation activity
-            return True
-
-    return False
+    # End if generation throughput becomes lower than prompt throughput
+    return (current.prompt_throughput > 0 and
+            current.generation_throughput < current.prompt_throughput * 0.5)
 
 
 async def _start_profiler(request_func, base_url: str, model_id: str,
@@ -650,7 +632,7 @@ async def _stop_profiler(request_func, base_url: str, model_id: str,
 
         # Use a temporary session for profiler stop
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=60),
+            timeout=aiohttp.ClientTimeout(total=300),
         ) as session:
             profile_output = await request_func(
                 request_func_input=profile_input, session=session
@@ -723,13 +705,12 @@ async def _monitor_and_profile(
         # Check for decode phase start
         if (not decode_profiling_active and
                 _detect_decode_phase_start_metrics(metrics_history)):
-            decode_ratio = (current_snapshot.num_decode_requests /
-                           max(current_snapshot.num_requests_running, 1))
             gen_prompt_ratio = (current_snapshot.generation_throughput /
                                max(current_snapshot.prompt_throughput, 1.0))
-            print(f"Decode phase detected - decode_ratio={decode_ratio:.2f}, "
-                  f"gen/prompt_ratio={gen_prompt_ratio:.2f} - "
-                  f"starting profiler")
+            print(f"Decode phase detected - "
+                  f"gen_tps={current_snapshot.generation_throughput:.1f}, "
+                  f"prompt_tps={current_snapshot.prompt_throughput:.1f}, "
+                  f"ratio={gen_prompt_ratio:.2f} - starting profiler")
             decode_start_time = current_snapshot.timestamp
 
             success = await _start_profiler(
