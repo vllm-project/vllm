@@ -125,7 +125,7 @@ class Mamba2AttentionMetadata:
     current_last_token_block_idx: torch.Tensor
     current_first_token_block_idx: torch.Tensor
     last_computed_token_block_idx: torch.Tensor
-    seq_lens_completed: torch.Tensor
+    context_lens: torch.Tensor
     last_computed_token_block_offset: torch.Tensor
 
     # The following attributes are for triton implementation of causal_conv1d
@@ -166,7 +166,7 @@ class Mamba2AttentionMetadataBuilder(
                 dtype=torch.int32,
                 device=device,
             )
-            self.seq_lens_completed = torch.empty(
+            self.context_lens = torch.empty(
                 (self.decode_cudagraph_max_bs, ),
                 dtype=torch.int32,
                 device=device,
@@ -205,10 +205,10 @@ class Mamba2AttentionMetadataBuilder(
             seq_lens_pending = (
                 torch.roll(common_attn_metadata.query_start_loc, -1, -1) -
                 common_attn_metadata.query_start_loc)[:-1]
-            seq_lens_completed = common_attn_metadata.seq_lens - \
+            context_lens = common_attn_metadata.seq_lens - \
                                  seq_lens_pending
             last_computed_token_block_offset = \
-                seq_lens_completed % mamba_block_size
+                context_lens % mamba_block_size
             # Indices: last_computed <= current_first <= current_last
             # Cases:
             #  last_computed == current_first  if last state was partially
@@ -217,10 +217,10 @@ class Mamba2AttentionMetadataBuilder(
             #                                  only one state will be stored
             # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
             current_last_token_block_idx = cdiv(
-                seq_lens_completed + seq_lens_pending, mamba_block_size) - 1
-            current_first_token_block_idx = cdiv(seq_lens_completed + 1,
+                context_lens + seq_lens_pending, mamba_block_size) - 1
+            current_first_token_block_idx = cdiv(context_lens + 1,
                                                  mamba_block_size) - 1
-            last_computed_token_block_idx = cdiv(seq_lens_completed,
+            last_computed_token_block_idx = cdiv(context_lens,
                                                  mamba_block_size) - 1
             # -1 in case it's non-computed and causes later issues with indexing
             last_computed_token_block_idx = \
@@ -234,7 +234,7 @@ class Mamba2AttentionMetadataBuilder(
             current_first_token_block_idx = None
             last_computed_token_block_idx = None
             last_computed_token_block_offset = None
-            seq_lens_completed = None
+            context_lens = None
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -347,10 +347,10 @@ class Mamba2AttentionMetadataBuilder(
                     self.last_computed_token_block_idx[:num_input_tokens]
                 last_computed_token_block_idx[num_decodes:] = 0
 
-                self.seq_lens_completed[:num_decodes].copy_(seq_lens_completed,
-                                                            non_blocking=True)
-                seq_lens_completed = self.seq_lens_completed[:num_input_tokens]
-                seq_lens_completed[num_decodes:] = 0
+                self.context_lens[:num_decodes].copy_(context_lens,
+                                                      non_blocking=True)
+                context_lens = self.context_lens[:num_input_tokens]
+                context_lens[num_decodes:] = 0
 
                 self.last_computed_token_block_offset[:num_decodes].copy_(
                     last_computed_token_block_offset, non_blocking=True)
@@ -378,7 +378,7 @@ class Mamba2AttentionMetadataBuilder(
             current_last_token_block_idx=current_last_token_block_idx,
             current_first_token_block_idx=current_first_token_block_idx,
             last_computed_token_block_idx=last_computed_token_block_idx,
-            seq_lens_completed=seq_lens_completed,
+            context_lens=context_lens,
             last_computed_token_block_offset=last_computed_token_block_offset,
         )
         return attn_metadata

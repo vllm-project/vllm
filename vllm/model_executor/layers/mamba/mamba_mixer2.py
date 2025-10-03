@@ -594,9 +594,9 @@ class MambaMixer2(MambaBase, CustomOp):
                 attn_metadata.current_first_token_block_idx,
                 [num_decodes, num_prefills],
                 dim=0)
-            _, seq_lens_completed_p = torch.split(
-                attn_metadata.seq_lens_completed, [num_decodes, num_prefills],
-                dim=0)
+            _, context_lens_p = torch.split(attn_metadata.context_lens,
+                                            [num_decodes, num_prefills],
+                                            dim=0)
             _, last_computed_offset_p = torch.split(
                 attn_metadata.last_computed_token_block_offset,
                 [num_decodes, num_prefills],
@@ -605,7 +605,7 @@ class MambaMixer2(MambaBase, CustomOp):
             last_state_idx_d, last_state_idx_p = None, None
             current_last_idx_d, current_last_idx_p = None, None
             _, current_first_idx_p = None, None
-            _, seq_lens_completed_p = None, None
+            _, context_lens_p = None, None
 
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
@@ -650,7 +650,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 current_first_idx=current_first_idx_p,
                 current_last_idx=current_last_idx_p,
                 initial_state_idx=last_state_idx_p,
-                seq_lens_completed=seq_lens_completed_p,
+                context_lens=context_lens_p,
                 block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p).transpose(
