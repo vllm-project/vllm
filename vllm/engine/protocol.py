@@ -19,6 +19,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device, collect_from_async_generator, random_uuid
+from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
@@ -49,12 +50,16 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: PromptType,
+        prompt: Union[EngineCoreRequest, PromptType],
         sampling_params: SamplingParams,
         request_id: str,
+        *,
+        prompt_text: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        data_parallel_rank: Optional[int] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
