@@ -7,10 +7,10 @@ import pytest
 import torch._dynamo
 
 from tests.compile.backend import LazyInitPass, TestBackend
-from tests.v1.attention.utils import (BatchSpec, _Backend,
-                                      create_common_attn_metadata)
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.backends.registry import _Backend
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
@@ -70,7 +70,6 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.kv_cache_dtype,
-                use_mla=False,
             ),
             layer_names=[self.attn.layer_name],
             vllm_config=self.vllm_config,
@@ -262,8 +261,9 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
     monkeypatch.setattr(
         "vllm.attention.selector._cached_get_attn_backend",
         lambda *args, **kwargs: resolve_obj_by_qualname(
-            current_platform.get_attn_backend_cls(
-                backend, head_size, dtype, "fp8", 16, True, False, False)))
+            current_platform.
+            get_attn_backend_cls(backend, head_size, dtype, "fp8", 16, True,
+                                 False, False, False)))
 
     device = torch.device("cuda:0")
     torch.manual_seed(42)

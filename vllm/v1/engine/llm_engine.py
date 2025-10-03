@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from collections.abc import Mapping
 from copy import copy
 from typing import Any, Callable, Optional, Union
@@ -31,8 +32,7 @@ from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (PrometheusStatLogger, StatLoggerBase,
-                                     StatLoggerFactory)
+from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
 from vllm.v1.worker.worker_base import WorkerBase
@@ -74,9 +74,6 @@ class LLMEngine:
         self.cache_config = vllm_config.cache_config
 
         self.log_stats = log_stats
-        self.stat_logger: Optional[StatLoggerBase] = None
-        if self.log_stats:
-            self.stat_logger = PrometheusStatLogger(vllm_config)
 
         executor_backend = (
             self.vllm_config.parallel_config.distributed_executor_backend)
@@ -121,6 +118,15 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=self.log_stats,
         )
+
+        self.logger_manager: Optional[StatLoggerManager] = None
+        if self.log_stats:
+            self.logger_manager = StatLoggerManager(
+                vllm_config=vllm_config,
+                custom_stat_loggers=stat_loggers,
+                enable_default_loggers=log_stats,
+            )
+            self.logger_manager.log_engine_initialized()
 
         if not multiprocess_mode:
             # for v0 compatibility
@@ -221,15 +227,18 @@ class LLMEngine:
                 f"request_id must be a string, got {type(request_id)}")
 
         # Process raw inputs into the request.
-        prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority)
+        request = self.processor.process_inputs(request_id, prompt, params,
+                                                arrival_time, lora_request,
+                                                tokenization_kwargs,
+                                                trace_headers, priority)
+        prompt_text = prompt if isinstance(prompt,
+                                           str) else prompt.get("prompt")
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
         if n == 1:
             # Make a new RequestState and queue.
-            self.output_processor.add_request(request, prompt_str, None, 0)
+            self.output_processor.add_request(request, prompt_text, None, 0)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
             return
@@ -243,7 +252,7 @@ class LLMEngine:
             child_request.sampling_params = params
 
             # Make a new RequestState and queue.
-            self.output_processor.add_request(child_request, prompt_str,
+            self.output_processor.add_request(child_request, prompt_text,
                                               parent_req, idx)
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
@@ -269,10 +278,13 @@ class LLMEngine:
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
         # 4) Record stats
-        if self.stat_logger is not None:
+        if self.logger_manager is not None:
             assert outputs.scheduler_stats is not None
-            self.stat_logger.record(scheduler_stats=outputs.scheduler_stats,
-                                    iteration_stats=iteration_stats)
+            self.logger_manager.record(
+                scheduler_stats=outputs.scheduler_stats,
+                iteration_stats=iteration_stats,
+            )
+            self.do_log_stats_with_interval()
 
         return processed_outputs.request_outputs
 
@@ -314,6 +326,20 @@ class LLMEngine:
                              "skip_tokenizer_init is True")
 
         return self.tokenizer
+
+    def do_log_stats(self) -> None:
+        """Log stats if logging is enabled."""
+        if self.logger_manager:
+            self.logger_manager.log()
+
+    def do_log_stats_with_interval(self) -> None:
+        """Log stats when the time interval has passed."""
+        now = time.time()
+        if not hasattr(self, "_last_log_time"):
+            self._last_log_time = now
+        if now - self._last_log_time >= envs.VLLM_LOG_STATS_INTERVAL:
+            self.do_log_stats()
+            self._last_log_time = now
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""

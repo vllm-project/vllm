@@ -23,15 +23,16 @@ from vllm_test_utils.monitor import monitor
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.transformers_utils.detokenizer_utils import (
     convert_ids_list_to_tokens)
-from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
-                        MemorySnapshot, PlaceholderModule, StoreBoolean,
-                        bind_kv_cache, common_broadcastable_dtype,
-                        current_stream, deprecate_kwargs, get_open_port,
-                        get_tcp_uri, is_lossless_cast, join_host_port,
-                        make_zmq_path, make_zmq_socket, memory_profiling,
-                        merge_async_iterators, sha256, split_host_port,
-                        split_zmq_path, supports_kw, swap_dict_values)
 
+# isort: off
+from vllm.utils import (
+    CacheInfo, FlexibleArgumentParser, LRUCache, MemorySnapshot,
+    PlaceholderModule, bind_kv_cache, common_broadcastable_dtype,
+    current_stream, deprecate_kwargs, get_open_port, get_tcp_uri,
+    is_lossless_cast, join_host_port, make_zmq_path, make_zmq_socket,
+    memory_profiling, merge_async_iterators, sha256, split_host_port,
+    split_zmq_path, supports_kw, swap_dict_values, unique_filepath)
+# isort: on
 from ..utils import create_new_process_for_each_test, error_on_warning
 
 
@@ -785,13 +786,43 @@ def test_model_specification(parser_with_config, cli_config_file,
         parser_with_config.parse_args(['serve', '--config', cli_config_file])
 
     # Test using --model option raises error
-    with pytest.raises(
-            ValueError,
-            match=
-        ("With `vllm serve`, you should provide the model as a positional "
-         "argument or in a config file instead of via the `--model` option."),
-    ):
-        parser_with_config.parse_args(['serve', '--model', 'my-model'])
+    # with pytest.raises(
+    #         ValueError,
+    #         match=
+    #     ("With `vllm serve`, you should provide the model as a positional "
+    #      "argument or in a config file instead of via the `--model` option."),
+    # ):
+    #     parser_with_config.parse_args(['serve', '--model', 'my-model'])
+
+    # Test using --model option back-compatibility
+    # (when back-compatibility ends, the above test should be uncommented
+    # and the below test should be removed)
+    args = parser_with_config.parse_args([
+        'serve',
+        '--tensor-parallel-size',
+        '2',
+        '--model',
+        'my-model',
+        '--trust-remote-code',
+        '--port',
+        '8001',
+    ])
+    assert args.model is None
+    assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code is True
+    assert args.port == 8001
+
+    args = parser_with_config.parse_args([
+        'serve',
+        '--tensor-parallel-size=2',
+        '--model=my-model',
+        '--trust-remote-code',
+        '--port=8001',
+    ])
+    assert args.model is None
+    assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code is True
+    assert args.port == 8001
 
     # Test other config values are preserved
     args = parser_with_config.parse_args([
@@ -1032,3 +1063,15 @@ def test_load_config_file(tmp_path):
     # Assert that the processed arguments match the expected output
     assert processed_args == expected_args
     os.remove(str(config_file_path))
+
+
+def test_unique_filepath():
+    temp_dir = tempfile.mkdtemp()
+    path_fn = lambda i: Path(temp_dir) / f"file_{i}.txt"
+    paths = set()
+    for i in range(10):
+        path = unique_filepath(path_fn)
+        path.write_text("test")
+        paths.add(path)
+    assert len(paths) == 10
+    assert len(list(Path(temp_dir).glob("*.txt"))) == 10

@@ -15,13 +15,15 @@ import torch
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import CpuArchEnum, Platform, PlatformEnum, _Backend
+from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import VllmConfig
 else:
+    _Backend = None
     VllmConfig = None
 
 
@@ -90,14 +92,18 @@ class CpuPlatform(Platform):
         return "cpu"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
+                             has_sink: bool, use_sparse: bool) -> str:
+        from vllm.attention.backends.registry import _Backend
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
             raise NotImplementedError("MLA is not supported on CPU.")
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on CPU.")
         logger.info("Using Torch SDPA backend.")
         if not use_v1:
             raise ValueError("CPU backend only supports V1.")
