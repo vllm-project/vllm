@@ -703,6 +703,15 @@ class EagleProposer:
             # Copy inputs to buffer for cudagraph.
             num_tokens = attn_metadata.num_actual_tokens
             input_ids = tree_input_ids.view(-1)
+
+            # Handle -1 sentinel values from padded speculation for MTP models
+            # which call embed_tokens() and can't handle invalid indices
+            if self.method == "mtp":
+                # Filter out -1 sentinel values that mark discarded/invalid
+                # tokens
+                vocab_size = self.model.model.embed_tokens.weight.size(0)
+                input_ids = torch.clamp(input_ids, min=0, max=vocab_size - 1)
+
             self.input_ids[:num_tokens] = input_ids
             self.positions[:num_tokens] = tree_positions.view(-1)
             self.hidden_states[:num_tokens] = tree_hidden_states.view(

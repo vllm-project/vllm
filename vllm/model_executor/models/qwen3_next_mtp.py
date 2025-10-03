@@ -84,13 +84,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
                                                       eps=config.rms_norm_eps)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        # Handle -1 sentinel values from padded speculation
-        # These mark discarded/invalid tokens
-        # Clamp to valid token range since these positions will be masked in
-        # attention
-        vocab_size = self.embed_tokens.weight.size(0)
-        input_ids_clamped = torch.clamp(input_ids, min=0, max=vocab_size - 1)
-        return self.embed_tokens(input_ids_clamped)
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
