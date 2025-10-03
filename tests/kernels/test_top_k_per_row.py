@@ -69,19 +69,19 @@ def compare_top_k_results(cuda_indices: torch.Tensor,
         cuda_row_values = cuda_values[row_idx][:num_valid].cpu()
         torch_row_values = torch_values[row_idx][:num_valid].cpu()
 
-        cuda_values, torch_values = [], []
+        cuda_only_values, torch_only_values = [], []
         for idx in cuda_set - torch_set:
             cuda_pos = (cuda_row_indices == idx).nonzero(as_tuple=True)[0]
-            cuda_values.append(cuda_row_values[cuda_pos[0]])
+            cuda_only_values.append(cuda_row_values[cuda_pos[0]])
 
         for idx in torch_set - cuda_set:
             torch_pos = (torch_row_indices == idx).nonzero(as_tuple=True)[0]
-            torch_values.append(torch_row_values[torch_pos[0]])
+            torch_only_values.append(torch_row_values[torch_pos[0]])
 
-        if len(cuda_values) != len(torch_values):
+        if len(cuda_only_values) != len(torch_only_values):
             return False
-        if not torch.allclose(torch.tensor(cuda_values),
-                              torch.tensor(torch_values),
+        if not torch.allclose(torch.tensor(cuda_only_values),
+                              torch.tensor(torch_only_values),
                               rtol=tolerance,
                               atol=tolerance):
             return False
@@ -123,10 +123,6 @@ def test_top_k_per_row(
                                               dim=-1)
     mask_lo = torch_indices >= 0
     mask_hi = (torch_indices - (row_ends - row_starts)[:, None]) < 0
-    mask = torch.full_like(torch_indices,
-                           False,
-                           dtype=torch.bool,
-                           device=torch_indices.device)
     mask = mask_lo & mask_hi
     torch_indices = torch_indices.masked_fill(~mask, -1)
 
