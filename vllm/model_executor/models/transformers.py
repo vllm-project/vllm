@@ -622,12 +622,12 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             self.parallel_config)
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
+        logits_soft_cap = getattr(self.text_config, "attn_logit_softcapping",
+                                  None)
         start, end = get_pp_indices(self.text_config.num_hidden_layers,
                                     self.pp_rank, self.pp_size)
 
         attention_instances = {}
-        logits_soft_cap = getattr(self.text_config, "attn_logit_softcapping",
-                                  None)
         for i in range(start, end):
             # Handle interleaved sliding window attention
             per_layer_sliding_window = None
