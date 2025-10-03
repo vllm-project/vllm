@@ -949,9 +949,6 @@ class MultiModalInputs(TypedDict):
     type: Literal["multimodal"]
     """The type of inputs."""
 
-    prompt: str
-    """The processed prompt text."""
-
     prompt_token_ids: list[int]
     """The processed token IDs which includes placeholder tokens."""
 
@@ -979,9 +976,6 @@ class MultiModalEncDecInputs(MultiModalInputs):
     [`EncDecMultiModalProcessor`][vllm.multimodal.processing.EncDecMultiModalProcessor]
     ready to be passed to vLLM internals.
     """
-
-    encoder_prompt: str
-    """The processed encoder prompt text."""
 
     encoder_prompt_token_ids: list[int]
     """The processed token IDs of the encoder prompt."""

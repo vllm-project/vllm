@@ -13,6 +13,7 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
     get_anyres_image_grid_shape, unpad_image)
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -254,6 +255,7 @@ class LlavaOnevisionDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -264,17 +266,22 @@ class LlavaOnevisionDummyInputsBuilder(
             self.info.get_num_frames_with_most_features(seq_len,
                                                         mm_counts)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images),
+                                   num_images=num_images,
+                                   overrides=image_overrides),
             "video":
             self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
+                overrides=video_overrides,
             )
         }
 
