@@ -1469,7 +1469,7 @@ def test_hash_block_tokens_with_prompt_embeds(hash_fn: Callable[[Any], bytes]):
                                                curr_block_token_ids,
                                                extra_keys, prompt_embeds)
 
-    prompt_embeds_bytes = tensor_data(prompt_embeds)
+    prompt_embeds_bytes = tensor_data(prompt_embeds).tobytes()
     expected = hash_fn((parent_block_hash, curr_block_token_ids,
                         prompt_embeds_bytes, extra_keys))
     assert block_hash_with_embeds == expected
@@ -1518,13 +1518,14 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any],
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
 
-    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size])
+    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
     expected_hash1 = hash_fn(
         (kv_cache_utils.NONE_HASH, tuple(prompt_token_ids[:block_size]),
          block1_embeds_bytes, None))
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens])
+    block2_embeds_bytes = tensor_data(
+        prompt_embeds[block_size:num_tokens]).tobytes()
     expected_hash2 = hash_fn(
         (block_hashes[0], tuple(prompt_token_ids[block_size:num_tokens]),
          block2_embeds_bytes, None))
@@ -1556,13 +1557,14 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any],
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
 
-    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size])
+    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
     expected_hash1 = hash_fn(
         (kv_cache_utils.NONE_HASH, tuple(prompt_token_ids[:block_size]),
          block1_embeds_bytes, ("hash1", )))
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens])
+    block2_embeds_bytes = tensor_data(
+        prompt_embeds[block_size:num_tokens]).tobytes()
     expected_hash2 = hash_fn(
         (block_hashes[0], tuple(prompt_token_ids[block_size:num_tokens]),
          block2_embeds_bytes, ("hash2", )))
@@ -1592,13 +1594,14 @@ def test_request_with_prompt_embeds_no_mm(hash_fn: Callable[[Any], bytes]):
     assert len(block_hashes) == 2
 
     # Verify hashes include prompt embeddings but no mm keys
-    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size])
+    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
     expected_hash1 = hash_fn(
         (kv_cache_utils.NONE_HASH, tuple(prompt_token_ids[:block_size]),
          block1_embeds_bytes, None))
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens])
+    block2_embeds_bytes = tensor_data(
+        prompt_embeds[block_size:num_tokens]).tobytes()
     expected_hash2 = hash_fn(
         (block_hashes[0], tuple(prompt_token_ids[block_size:num_tokens]),
          block2_embeds_bytes, None))
