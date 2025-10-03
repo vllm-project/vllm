@@ -208,7 +208,7 @@ def video_to_pixel_values(
         )
         # dynamic_preprocess returns tensors already; take the single tile
         assert len(pil_frame) >= 1
-        frames_tensors.append(pil_frame[0])
+        frames_tensors.append(pil_frame[-1])
 
     return torch.stack(frames_tensors)
 
