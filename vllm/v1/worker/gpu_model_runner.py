@@ -3026,12 +3026,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             Tuple of layer indices if found in draft model config,
             None otherwise.
         """
-        if not (self.speculative_config
-                and self.speculative_config.draft_model_config):
+        if not (self.speculative_config and self.speculative_config.draft_model_config):
             return None
 
         hf_config = self.speculative_config.draft_model_config.hf_config
-        if not hasattr(hf_config, 'eagle_aux_hidden_state_layer_ids'):
+        if not hasattr(hf_config, "eagle_aux_hidden_state_layer_ids"):
             return None
 
         layer_ids = hf_config.eagle_aux_hidden_state_layer_ids

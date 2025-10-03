@@ -248,8 +248,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         multimodal_embeddings: Optional[NestedTensors] = None,
         is_multimodal: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # The llama3 drafter only processes text embeddings
-        return self.model.embed_tokens(input_ids)
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,

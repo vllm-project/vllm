@@ -34,4 +34,5 @@ def update_eagle3(config_dict: dict, vllm_config: dict) -> None:
     vllm_config["architectures"] = ["Eagle3LlamaForCausalLM"]
     if config_dict.get("eagle_aux_hidden_state_layer_ids"):
         vllm_config["eagle_aux_hidden_state_layer_ids"] = config_dict[
-            "eagle_aux_hidden_state_layer_ids"]
+            "eagle_aux_hidden_state_layer_ids"
+        ]
