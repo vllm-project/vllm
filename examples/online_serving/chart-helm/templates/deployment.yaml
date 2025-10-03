@@ -64,9 +64,11 @@ spec:
             {{- include "chart.extraPorts" . | nindent 12 }}
           {{- include "chart.probes" . | indent 10 }}
           resources: {{- include "chart.resources" . | nindent 12 }}
+          {{-   if .Values.extraInit  }}
           volumeMounts:
           - name: {{ .Release.Name }}-storage
             mountPath: /data
+          {{- end }}
 
         {{- with .Values.extraContainers }}
         {{ toYaml . | nindent 8 }}
@@ -92,11 +94,11 @@ spec:
         volumeMounts:
         - name: {{ .Release.Name }}-storage
           mountPath: /data
-      {{- end }}
       volumes:
         - name: {{ .Release.Name }}-storage
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-storage-claim     
+      {{- end }}
 
       {{- with .Values.nodeSelector }}
       nodeSelector:
