@@ -28,7 +28,6 @@ from vllm.model_executor.models.internvl import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
-from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import (
@@ -37,8 +36,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix)
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -289,7 +287,7 @@ class NemotronVLProcessor(InternVLProcessor):
                 max_dynamic_patch=max_dynamic_patch,
                 dynamic_image_size=dynamic_image_size,
             )
-            image_inputs: dict[str, NestedTensors] = {
+            image_inputs = {
                 "pixel_values_flat":
                 torch.cat(pixel_values_lst),
                 "image_num_patches":
@@ -344,6 +342,7 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo])
 class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                                SupportsLoRA):
+    merge_by_field_config = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -414,7 +413,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         return AutoModel.from_config(config.vision_config,
                                      trust_remote_code=True)
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
+    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
         vit_hidden_size = config.vit_hidden_size
         vision_projection_hidden_size = config.projector_hidden_size
         llm_hidden_size = config.text_config.hidden_size
@@ -467,13 +466,9 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
             return None
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
-
             return InternVLImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds),
+                data=image_embeds,
             )
 
         image_token_id = kwargs["image_token_id"]
@@ -481,17 +476,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         self.img_context_token_id = image_token_id.flatten().unique().item()
 
         if pixel_values_flat is not None:
-            if not isinstance(pixel_values_flat, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values_flat)}")
-
-            if not isinstance(image_num_patches, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image_num_patches. "
-                                 f"Got type: {type(image_num_patches)}")
-
-            pixel_values_flat = flatten_bn(pixel_values_flat, concat=True)
-            image_num_patches = flatten_bn(image_num_patches, concat=True)
-
             return InternVLImagePixelInputs(
                 type="pixel_values",
                 pixel_values_flat=pixel_values_flat,
