@@ -18,7 +18,8 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.loggers import AggregatedStatLogger, LoggingStatLogger
+from vllm.v1.metrics.loggers import (AggregatedStatLogger, LoggingStatLogger,
+                                     PerEngineStatLogger, PrometheusStatLogger)
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -417,11 +418,16 @@ async def test_customize_loggers(monkeypatch):
 
         await engine.do_log_stats()
 
-        stat_loggers = engine.logger_manager.per_engine_logger_dict
-        assert len(stat_loggers) == 1
+        stat_loggers = engine.logger_manager.stat_loggers
         assert len(
-            stat_loggers[0]) == 2  # LoggingStatLogger + MockLoggingStatLogger
-        stat_loggers[0][0].log.assert_called_once()
+            stat_loggers
+        ) == 3  # MockLoggingStatLogger + LoggingStatLogger +  Promethus Logger
+        print(f"{stat_loggers=}")
+        stat_loggers[0].per_engine_stat_loggers[0].log.assert_called_once()
+        assert isinstance(stat_loggers[1], PerEngineStatLogger)
+        assert isinstance(stat_loggers[1].per_engine_stat_loggers[0],
+                          LoggingStatLogger)
+        assert isinstance(stat_loggers[2], PrometheusStatLogger)
 
 
 @pytest.mark.asyncio
@@ -443,14 +449,16 @@ async def test_customize_aggregated_loggers(monkeypatch):
 
         await engine.do_log_stats()
 
-        stat_loggers = engine.logger_manager.per_engine_logger_dict
-        assert len(stat_loggers) == 1
-        assert len(
-            stat_loggers[0]) == 2  # LoggingStatLogger + MockLoggingStatLogger
-        aggregated_loggers = engine.logger_manager.aggregated_loggers
-        assert len(aggregated_loggers) == 1
-        aggregated_loggers[0].log.assert_called_once()
-        stat_loggers[0][0].log.assert_called_once()
+        stat_loggers = engine.logger_manager.stat_loggers
+        assert len(stat_loggers) == 4
+        #  MockLoggingStatLogger + MockAggregatedStatLogger
+        # + LoggingStatLogger + PrometheusStatLogger
+        stat_loggers[0].per_engine_stat_loggers[0].log.assert_called_once()
+        stat_loggers[1].log.assert_called_once()
+        assert isinstance(stat_loggers[2], PerEngineStatLogger)
+        assert isinstance(stat_loggers[2].per_engine_stat_loggers[0],
+                          LoggingStatLogger)
+        assert isinstance(stat_loggers[3], PrometheusStatLogger)
 
 
 @pytest.mark.asyncio(scope="module")
