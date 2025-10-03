@@ -913,7 +913,7 @@ class OpenAIServing:
         priority: int = 0,
         **kwargs,
     ):
-        prompt_str, _, _ = self._get_prompt_components(request_prompt)
+        prompt_text, _, _ = self._get_prompt_components(request_prompt)
         orig_priority = priority
         while True:
             self._log_inputs(
@@ -938,7 +938,7 @@ class OpenAIServing:
                 request_id,
                 lora_request=lora_request,
                 priority=priority,
-                prompt_str=prompt_str,
+                prompt_text=prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
                 **kwargs,
             )

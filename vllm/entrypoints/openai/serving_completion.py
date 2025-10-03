@@ -155,7 +155,7 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_str, prompt_token_ids, prompt_embeds = (
+                prompt_text, prompt_token_ids, prompt_embeds = (
                     self._get_prompt_components(engine_prompt))
 
                 input_length = None
@@ -229,7 +229,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
-                        prompt_str=prompt_str,
+                        prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
                     )
 

@@ -274,7 +274,7 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_str, _, _ = (self._get_prompt_components(
+                prompt_text, _, _ = (self._get_prompt_components(
                     request_prompts[i]))
 
                 if self.default_sampling_params is None:
@@ -328,7 +328,7 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
-                        prompt_str=prompt_str,
+                        prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
                     )
 
