@@ -187,7 +187,7 @@ class CompilationConfig:
     backend: str = "inductor"
     """The backend for compilation. It needs to be a string:
 
-    - "" (empty string): use the default backend.
+    - "" (empty string): use the default backend ("inductor" on CUDA-alike platforms).
     - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
     - "full.module.name": a qualified name which can be used to import the
 
