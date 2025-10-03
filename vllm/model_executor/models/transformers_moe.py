@@ -22,6 +22,7 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config.utils import getattr_iter
+from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -40,13 +41,23 @@ class TransformersFusedMoE(FusedMoE):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._top_k_index: torch.Tensor = None
+        self._topk_ids: torch.Tensor = None
 
         def custom_routing_function(hidden_states, gating_output, topk,
                                     renormalize):
-            """Return `top_k_weights` from `gating_output` and the
-            `top_k_index` we stored in the layer earlier."""
-            return gating_output, self._top_k_index
+            """Return `topk_weights` from `gating_output` and the
+            `topk_ids` we stored in the layer earlier."""
+            topk_weights = gating_output
+            topk_ids = self._topk_ids
+            # Handle all gather in expert parallel
+            if topk_ids.size(0) != hidden_states.size(0):
+                dp_metadata = get_forward_context().dp_metadata
+                sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+                is_sp = self.is_sequence_parallel
+                dist_group = get_ep_group() if is_sp else get_dp_group()
+                assert sizes[dist_group.rank_in_group] == topk_ids.shape[0]
+                topk_ids, = dist_group.all_gatherv([topk_ids], 0, sizes)
+            return topk_weights, topk_ids
 
         self.custom_routing_function = custom_routing_function
 
