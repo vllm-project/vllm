@@ -876,25 +876,23 @@ class OpenAIServing:
         self,
         request_id: str,
         engine_prompt: PromptType,
-        sampling_params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         *,
         lora_request: Optional[LoRARequest],
         trace_headers: Optional[Mapping[str, str]],
         priority: int,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
-        """
-        using the Processor to process inputs for AsyncLLM
-        """
+        """Use the Processor to process inputs for AsyncLLM."""
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.max_model_len,
-                                  sampling_params.truncate_prompt_tokens,
+                                  params.truncate_prompt_tokens,
                                   tokenization_kwargs)
 
         processor = await self._get_processor()
         engine_request = processor.process_inputs(
             request_id,
             engine_prompt,
-            sampling_params,
+            params,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
