@@ -190,10 +190,21 @@ def mteb_test_embed_models(hf_runner,
         vllm_extra_kwargs["hf_overrides"][
             "head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
 
+    # Allow changing tp size used by vllm in tests
+    if ci_envs.VLLM_CI_TP_SIZE > 1:
+        vllm_extra_kwargs.pop("tensor_parallel_size", None)
+        vllm_extra_kwargs["tensor_parallel_size"] = ci_envs.VLLM_CI_TP_SIZE
+
+    # Allow changing pp size used by vllm in tests
+    if ci_envs.VLLM_CI_PP_DTYPE > 1:
+        vllm_extra_kwargs.pop("pipeline_parallel_size", None)
+        vllm_extra_kwargs["pipeline_parallel_size"] = ci_envs.VLLM_CI_PP_DTYPE
+
     with vllm_runner(model_info.name,
                      runner="pooling",
                      max_model_len=None,
                      enforce_eager=True,
+                     gpu_memory_utilization=0.8,
                      **vllm_extra_kwargs) as vllm_model:
 
         model_config = vllm_model.llm.llm_engine.model_config
@@ -349,10 +360,21 @@ def mteb_test_rerank_models(hf_runner,
         vllm_extra_kwargs["hf_overrides"][
             "head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
 
+    # Allow changing tp size used by vllm in tests
+    if ci_envs.VLLM_CI_TP_SIZE > 1:
+        vllm_extra_kwargs.pop("tensor_parallel_size", None)
+        vllm_extra_kwargs["tensor_parallel_size"] = ci_envs.VLLM_CI_TP_SIZE
+
+    # Allow changing pp size used by vllm in tests
+    if ci_envs.VLLM_CI_PP_DTYPE > 1:
+        vllm_extra_kwargs.pop("pipeline_parallel_size", None)
+        vllm_extra_kwargs["pipeline_parallel_size"] = ci_envs.VLLM_CI_PP_DTYPE
+
     with vllm_runner(model_info.name,
                      runner="pooling",
                      max_model_len=None,
                      max_num_seqs=8,
+                     gpu_memory_utilization=0.8,
                      enforce_eager=True,
                      **vllm_extra_kwargs) as vllm_model:
 
