@@ -291,7 +291,7 @@ class EagleProposer:
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
-            logits = self.model.compute_logits(sample_hidden_states, None)
+            logits = self.model.compute_logits(sample_hidden_states)
             draft_token_ids_list = self.propose_tree(
                 batch_size=batch_size,
                 logits=logits,
