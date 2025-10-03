@@ -158,7 +158,9 @@ Notes:
   inputs are actually processed at inference time.
 - If a hint exceeds what the model can accept, vLLM clamps it to the model’s
   effective maximum and may log a warning.
-- TODO: Encoder cache size and actual input processing are not affected by these size hints, which should be addressed later.
+
+!!! warning
+    Encoder cache size and actual input processing are not affected by these size hints, which should be addressed later.
 
 ## Multi-modal processor arguments
 
