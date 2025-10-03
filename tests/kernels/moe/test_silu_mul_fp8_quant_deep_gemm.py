@@ -55,7 +55,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
         size=(E, ),
         dtype=torch.int32,
         device="cuda",
-    ) * 0 + T
+    )
 
     # Run the SiLU V2 kernel
     y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(y,
