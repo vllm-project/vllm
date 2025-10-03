@@ -150,11 +150,16 @@ steps:
       queue: cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
-      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT vllm/vllm-openai:nightly"
-      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
-      - "docker push vllm/vllm-openai:nightly"
-      - "docker push vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
+      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64"
+      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 vllm/vllm-openai:nightly-x86_64"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 vllm/vllm-openai:nightly-aarch64"
+      - "docker push vllm/vllm-openai:nightly-x86_64"
+      - "docker push vllm/vllm-openai:nightly-aarch64"
+      - "docker manifest create vllm/vllm-openai:nightly vllm/vllm-openai:nightly-x86_64 vllm/vllm-openai:nightly-aarch64 --amend"
+      - "docker manifest create vllm/vllm-openai:nightly-$BUILDKITE_COMMIT vllm/vllm-openai:nightly-x86_64 vllm/vllm-openai:nightly-aarch64 --amend"
+      - "docker manifest push vllm/vllm-openai:nightly"
+      - "docker manifest push vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
       # Clean up old nightly builds (keep only last 14)
       - "bash .buildkite/scripts/cleanup-nightly-builds.sh"
     plugins:
@@ -163,3 +168,4 @@ steps:
           password-env: DOCKERHUB_TOKEN
     env:
       DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
