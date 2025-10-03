@@ -20,10 +20,12 @@ import torch
 from transformers import AutoModelForCausalLM
 
 from tests.models.utils import check_outputs_equal
+from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 
 
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("model", ["JackFram/llama-160m"])
 @pytest.mark.parametrize("max_model_len", [2048])
 @pytest.mark.parametrize("max_tokens", [1])
