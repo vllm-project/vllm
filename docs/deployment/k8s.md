@@ -48,10 +48,11 @@ First, create a Kubernetes PVC and Secret for downloading and storing Hugging Fa
     metadata:
       name: hf-token-secret
     type: Opaque
-    data:
-      token: $(HF_TOKEN)
+    stringData:
+      token: "REPLACE_WITH_TOKEN"
     EOF
     ```
+Here the token refers to your HuggingFace token, for more information on getting a token, see [the huggingface docs](https://huggingface.co/docs/hub/en/security-tokens)
 
 Next, start the vLLM server as a Kubernetes Deployment and Service:
 
