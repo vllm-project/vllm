@@ -33,6 +33,8 @@ from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
 from vllm.transformers_utils.configs.step3_vl import (Step3TextConfig,
                                                       Step3VisionEncoderConfig,
                                                       Step3VLConfig)
+from vllm.transformers_utils.configs.step_audio import (
+    StepAudio2Config, StepAudio2EncoderConfig)
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
@@ -59,5 +61,7 @@ __all__ = [
     "Step3VLConfig",
     "Step3VisionEncoderConfig",
     "Step3TextConfig",
+    "StepAudio2Config",
+    "StepAudio2EncoderConfig",
     "Qwen3NextConfig",
 ]
