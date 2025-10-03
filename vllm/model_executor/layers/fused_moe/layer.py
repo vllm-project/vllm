@@ -1795,7 +1795,6 @@ class FusedMoE(CustomOp):
                 logical_to_physical_map=logical_to_physical_map,
                 eplb_record_metrics=eplb_record_metrics,
                 logical_replica_count=logical_replica_count,
-                
                 indices_type=indices_type,
             )
 

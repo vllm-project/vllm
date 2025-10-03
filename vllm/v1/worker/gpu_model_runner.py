@@ -2784,7 +2784,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             if self.parallel_config.eplb_config.eplb_load_path is not None:
                 self.eplb_state.rearrange(self.model)
-                self.eplb_state = None
+                if self.parallel_config.eplb_config.eplb_save_dir is None:
+                    self.eplb_state = None
+
         if (
             self.vllm_config.compilation_config.level == \
                 CompilationLevel.DYNAMO_AS_IS and supports_dynamo()

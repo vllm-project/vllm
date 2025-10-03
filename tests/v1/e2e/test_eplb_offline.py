@@ -51,7 +51,7 @@ def test_eplb_model(
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
 
-        # Load EPLBstatistics from disk
+        # Load EPLB statistics from disk
         eplb_config_load = EPLBConfig(
             eplb_load_path="/tmp/global_expert_load_window_i0.safetensors")
         llm = LLM(eplb_config=eplb_config_load, **llm_args)
