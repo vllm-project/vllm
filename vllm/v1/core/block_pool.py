@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
                                          ExternalBlockHash,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
+                                         SingleTypeKVCacheBlocks,
                                          get_block_hash,
                                          make_block_hash_with_group_id,
                                          maybe_convert_block_hash)
@@ -319,7 +320,7 @@ class BlockPool:
                              medium=MEDIUM_GPU))
         return True
 
-    def touch(self, blocks: tuple[tuple[KVCacheBlock, ...], ...]) -> None:
+    def touch(self, blocks: tuple[SingleTypeKVCacheBlocks, ...]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
