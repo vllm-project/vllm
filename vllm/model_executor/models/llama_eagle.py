@@ -73,7 +73,7 @@ class LlamaModel(nn.Module):
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
                                   self.config.hidden_size,
-                                  bias=False)
+                                  bias=getattr(self.config, "bias", False))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
