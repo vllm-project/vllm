@@ -307,13 +307,13 @@ class EngineArgs:
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
     max_model_len: Optional[int] = ModelConfig.max_model_len
-    """ Note: This field is removed from SchedulerConfig. We keep it in CLI
-    and only mapped to CompilationConfig.cudagraph_capture_sizes."""
     cuda_graph_sizes: list[int] = get_field(CompilationConfig,
                                             "cudagraph_capture_sizes")
-    """ Alias for CompilationConfig.max_cudagraph_capture_size."""
+    """ Note: This field is removed from SchedulerConfig. We keep it in CLI
+    and only mapped to CompilationConfig.cudagraph_capture_sizes."""
     cuda_graph_max_size: Optional[int] = get_field(
         CompilationConfig, "max_cudagraph_capture_size")
+    """ Alias for CompilationConfig.max_cudagraph_capture_size."""
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
