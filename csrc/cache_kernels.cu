@@ -16,7 +16,7 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cfloat>  // FLT_MIN
+#include <cfloat>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -479,6 +479,7 @@ __global__ void concat_and_cache_ds_mla_kernel(
 
   // Compute the scale for the tile
   float tile_scale = max_abs / 448.f;
+  tile_scale = fmaxf(tile_scale, FLT_MIN);
 
   // The first lane of each half-warp writes the scale to kv_cache
   if ((lane_idx == 0) || (lane_idx == 16)) {
