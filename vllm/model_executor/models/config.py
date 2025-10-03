@@ -312,6 +312,11 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                             "support for prefix caching: disabling.")
                 cache_config.enable_prefix_caching = False
 
+        # TODO(tdoublep): remove once cascade attention is supported
+        logger.info("Disabling cascade attention since it is not supported "
+                    "for hybrid models.")
+        model_config.disable_cascade_attn = True
+
         # TODO(tdoublep): remove as full cuda graph support is added
         FCG_NOT_SUPPORTED_MODELS = [
             "Lfm2ForCausalLM",
@@ -374,13 +379,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
             block_size=model_config.max_model_len,
         ).page_size_bytes
-
-        # Cascade attn doesn't work with Mamba:
-        # * enable_prefix_caching = True -> fails
-        # * enable_prefix_caching = False -> cascade attention is triggered,
-        #   but always terminates early, not raising any exception
-        # Thus, it's more effective to disable the cascade attention logic:
-        model_config.disable_cascade_attn = True
 
         if cache_config.enable_prefix_caching:
             # With prefix caching, select attention block size to
