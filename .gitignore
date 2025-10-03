@@ -218,3 +218,9 @@ csrc/moe/marlin_moe_wna16/kernel_*
 
 # Ignore ep_kernels_workspace folder
 ep_kernels_workspace/
+
+# Vectorguard Diagnostic Tools
+vectorguard_flowchart.html
+vectorguard_server.py
+integration_test_report.json
+test_vectorguard_integration.py
