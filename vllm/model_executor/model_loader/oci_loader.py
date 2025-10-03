@@ -88,26 +88,62 @@ class OciModelLoader(BaseModelLoader):
 
         return cache_dir
 
-    def _get_anonymous_token(self, registry: str, repository: str) -> str:
-        """Get anonymous authentication token for Docker Hub.
+    def _get_auth_token(self, registry: str, repository: str,
+                        www_authenticate: str) -> Optional[str]:
+        """Get authentication token using OCI-compliant auth discovery.
+        
+        This method parses the Www-Authenticate header to discover the
+        authentication service and obtains a token dynamically, making it
+        compatible with any OCI-compliant registry.
         
         Args:
             registry: Registry hostname
             repository: Repository name
+            www_authenticate: Value of Www-Authenticate header from 401 response
             
         Returns:
-            Authentication token
+            Authentication token, or None if no authentication is required
         """
-        auth_url = "https://auth.docker.io/token"
-        params = {
-            "service": "registry.docker.io",
-            "scope": f"repository:{repository}:pull"
-        }
+        # Parse Www-Authenticate header
+        # Format: Bearer realm="https://auth.example.com/token",service="registry.example.com",scope="repository:user/repo:pull"
+        if not www_authenticate.startswith("Bearer "):
+            logger.warning("Unsupported authentication scheme: %s",
+                           www_authenticate)
+            return None
 
-        response = self.session.get(auth_url, params=params)
-        response.raise_for_status()
+        auth_params = {}
+        # Extract parameters from the header
+        parts = www_authenticate[7:].split(",")  # Skip "Bearer "
+        for part in parts:
+            if "=" in part:
+                key, value = part.strip().split("=", 1)
+                # Remove quotes
+                auth_params[key] = value.strip('"')
 
-        return response.json()["token"]
+        realm = auth_params.get("realm")
+        if not realm:
+            logger.warning("No realm found in Www-Authenticate header")
+            return None
+
+        # Build token request parameters
+        token_params = {}
+        if "service" in auth_params:
+            token_params["service"] = auth_params["service"]
+        if "scope" in auth_params:
+            token_params["scope"] = auth_params["scope"]
+        else:
+            # If no scope provided, use repository pull scope
+            token_params["scope"] = f"repository:{repository}:pull"
+
+        # Request token from auth service
+        try:
+            response = self.session.get(realm, params=token_params)
+            response.raise_for_status()
+            token_data = response.json()
+            return token_data.get("token") or token_data.get("access_token")
+        except Exception as e:
+            logger.warning("Failed to obtain auth token: %s", e)
+            return None
 
     def _parse_oci_reference(self, model_ref: str) -> tuple[str, str, str]:
         """Parse OCI reference into registry, repository, and tag/digest.
@@ -149,20 +185,29 @@ class OciModelLoader(BaseModelLoader):
         # Parse reference
         registry, repository, reference = self._parse_oci_reference(model_ref)
 
-        # Get anonymous token for public registry (MVP)
-        token = self._get_anonymous_token(registry, repository)
-
-        # Pull manifest using Docker Registry HTTP API V2
-        manifest_url = f"https://registry-1.{registry}/v2/{repository}/manifests/{reference}"
+        # Use standard OCI registry URL format
+        manifest_url = f"https://{registry}/v2/{repository}/manifests/{reference}"
         headers = {
             "Accept":
             "application/vnd.oci.image.manifest.v1+json, "
-            "application/vnd.docker.distribution.manifest.v2+json",
-            "Authorization": f"Bearer {token}"
+            "application/vnd.docker.distribution.manifest.v2+json"
         }
 
+        # Try without authentication first
         try:
             response = self.session.get(manifest_url, headers=headers)
+
+            # If we get 401, parse Www-Authenticate and get token
+            if response.status_code == 401:
+                www_auth = response.headers.get("Www-Authenticate", "")
+                if www_auth:
+                    token = self._get_auth_token(registry, repository,
+                                                 www_auth)
+                    if token:
+                        headers["Authorization"] = f"Bearer {token}"
+                        response = self.session.get(manifest_url,
+                                                    headers=headers)
+
             response.raise_for_status()
             manifest = response.json()
         except Exception as e:
@@ -219,14 +264,24 @@ class OciModelLoader(BaseModelLoader):
         # Parse reference
         registry, repository, _ = self._parse_oci_reference(model_ref)
 
-        # Get anonymous token
-        token = self._get_anonymous_token(registry, repository)
+        # Use standard OCI registry URL format
+        blob_url = f"https://{registry}/v2/{repository}/blobs/{digest}"
+        headers: dict[str, str] = {}
 
-        # Download blob using Docker Registry HTTP API V2
-        blob_url = f"https://registry-1.{registry}/v2/{repository}/blobs/{digest}"
-        headers = {"Authorization": f"Bearer {token}"}
-
+        # Try without authentication first
         response = self.session.get(blob_url, headers=headers, stream=True)
+
+        # If we get 401, parse Www-Authenticate and get token
+        if response.status_code == 401:
+            www_auth = response.headers.get("Www-Authenticate", "")
+            if www_auth:
+                token = self._get_auth_token(registry, repository, www_auth)
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+                    response = self.session.get(blob_url,
+                                                headers=headers,
+                                                stream=True)
+
         response.raise_for_status()
 
         # Write to file
@@ -253,24 +308,26 @@ class OciModelLoader(BaseModelLoader):
 
         logger.info("Config extracted successfully")
 
-    def download_oci_model_simple(self, model_ref: str) -> str:
-        """Download OCI model without requiring ModelConfig.
+    def _download_oci_model_if_needed(self, model_ref: str) -> str:
+        """Download OCI model and its components if not already cached.
         
-        This is a simplified version for early config loading.
+        This is the shared logic for both download_model and 
+        download_oci_model_simple.
         
         Args:
             model_ref: OCI model reference
             
         Returns:
-            Path to extracted config directory
+            Path to the extracted config directory
         """
         normalized_ref = self._normalize_oci_reference(model_ref)
         cache_dir = self._get_cache_dir(normalized_ref)
-
         config_dir = os.path.join(cache_dir, "config")
+        manifest_path = os.path.join(cache_dir, "manifest.json")
 
-        # Check if already downloaded
-        if os.path.exists(config_dir) and os.listdir(config_dir):
+        # Check if config directory is already populated and manifest exists
+        if (os.path.exists(config_dir) and os.listdir(config_dir)
+                and os.path.exists(manifest_path)):
             logger.info("OCI model already cached at %s", cache_dir)
             return config_dir
 
@@ -282,7 +339,6 @@ class OciModelLoader(BaseModelLoader):
             normalized_ref, cache_dir)
 
         # Save manifest
-        manifest_path = os.path.join(cache_dir, "manifest.json")
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
 
@@ -301,11 +357,23 @@ class OciModelLoader(BaseModelLoader):
             digest = config_layer.get("digest", "").replace("sha256:", "")
             tar_path = os.path.join(cache_dir, f"config_{digest}.tar")
             self._download_layer(normalized_ref, config_layer, tar_path)
-
             self._extract_config_tar(tar_path, config_dir)
 
         logger.info("Model downloaded successfully to %s", cache_dir)
         return config_dir
+
+    def download_oci_model_simple(self, model_ref: str) -> str:
+        """Download OCI model without requiring ModelConfig.
+        
+        This is a simplified version for early config loading.
+        
+        Args:
+            model_ref: OCI model reference
+            
+        Returns:
+            Path to extracted config directory
+        """
+        return self._download_oci_model_if_needed(model_ref)
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download model from OCI registry.
@@ -313,42 +381,7 @@ class OciModelLoader(BaseModelLoader):
         Args:
             model_config: Model configuration
         """
-        model_ref = model_config.model
-        normalized_ref = self._normalize_oci_reference(model_ref)
-        cache_dir = self._get_cache_dir(normalized_ref)
-
-        logger.info("Downloading OCI model: %s -> %s", model_ref,
-                    normalized_ref)
-
-        # Pull manifest
-        manifest, safetensors_layers, config_layer = self._pull_oci_manifest(
-            normalized_ref, cache_dir)
-
-        # Save manifest
-        manifest_path = os.path.join(cache_dir, "manifest.json")
-        with open(manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2)
-
-        # Download safetensors layers
-        layers_dir = os.path.join(cache_dir, "layers")
-        os.makedirs(layers_dir, exist_ok=True)
-
-        for i, layer in enumerate(safetensors_layers):
-            digest = layer.get("digest", "").replace("sha256:", "")
-            layer_path = os.path.join(layers_dir,
-                                      f"{i:04d}_{digest}.safetensors")
-            self._download_layer(normalized_ref, layer, layer_path)
-
-        # Download and extract config layer if present
-        if config_layer:
-            digest = config_layer.get("digest", "").replace("sha256:", "")
-            tar_path = os.path.join(cache_dir, f"config_{digest}.tar")
-            self._download_layer(normalized_ref, config_layer, tar_path)
-
-            config_dir = os.path.join(cache_dir, "config")
-            self._extract_config_tar(tar_path, config_dir)
-
-        logger.info("Model downloaded successfully to %s", cache_dir)
+        self._download_oci_model_if_needed(model_config.model)
 
     def _get_weights_iterator(
         self, model_config: ModelConfig
