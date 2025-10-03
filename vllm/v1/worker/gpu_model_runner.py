@@ -2247,14 +2247,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + len(sampled_ids)
-            assert end_idx <= self.max_model_len, (
-                "Sampled token IDs exceed the max model length. "
-                f"Total number of tokens: {end_idx} > max_model_len: "
-                f"{self.max_model_len}")
+            assert end_idx <= self.max_model_len + 1, (
+                "Sampled token IDs exceed the max model length + 1. "
+                f"Total number of tokens: {end_idx} > max_model_len + 1: "
+                f"{self.max_model_len + 1}")
 
-            self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = sampled_ids
-            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
+            n_tokens_cache = len(sampled_ids)
+
+            # Sampled token IDs exceed the max model length by 1. This is
+            # legitimate as we can still sample 1 last token when the context
+            # length equals the max model length. Note that we do not need to
+            # cache this token ID as the sequence finishes after this step.
+            # Additionally, the buffers token_ids_cpu and is_token_ids are of
+            # size max model length only.
+            if end_idx == self.max_model_len + 1:
+                n_tokens_cache -= 1
+
+            self.input_batch.token_ids_cpu[req_idx, start_idx:(
+                start_idx + n_tokens_cache)] = sampled_ids[:n_tokens_cache]
+            self.input_batch.is_token_ids[req_idx,
+                                          start_idx:(start_idx +
+                                                     n_tokens_cache)] = True
+
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
 
@@ -3060,7 +3074,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert not uniform_decode
             # Create mixed batch:
             # first half decode tokens, second half one prefill
-            num_decode_tokens = num_tokens // 2
+            num_decode_tokens = min(max_num_reqs - 1, num_tokens // 2)
             num_prefill_tokens = num_tokens - num_decode_tokens
             num_reqs = num_decode_tokens + 1
 
@@ -3072,7 +3086,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_query_len = num_prefill_tokens
         elif uniform_decode:
             assert not create_mixed_batch
-            num_reqs = cdiv(num_tokens, max_query_len)
+            num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
