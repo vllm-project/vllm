@@ -14,13 +14,15 @@ if not current_platform.is_device_capability(100):
     pytest.skip("This test only runs on Blackwell GPUs (SM100).",
                 allow_module_level=True)
 
+
 @pytest.fixture(scope="module", autouse=True)
-def set_test_environment(monkeypatch):
+def set_test_environment():
     """Sets environment variables required for this test module."""
     # Make sure TRTLLM attention is available
-    monkeypatch.setenv("VLLM_HAS_FLASHINFER_CUBIN", "1")
+    os.environ["VLLM_HAS_FLASHINFER_CUBIN"] = "1"
     # Set compilation threads to 16 to speed up startup
-    monkeypatch.setenv("FLASHINFER_NVCC_THREADS", "16")
+    os.environ["FLASHINFER_NVCC_THREADS"] = "16"
+
 
 # dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4,
 # "text_config": {"num_layers": 4, "num_hidden_layers": 4}}
