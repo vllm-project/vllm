@@ -11,9 +11,10 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import Platform, PlatformEnum, _Backend
+from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
 else:
@@ -21,6 +22,7 @@ else:
     ModelConfig = None
     VllmConfig = None
     PoolingParams = None
+    _Backend = None
 
 logger = init_logger(__name__)
 
@@ -46,12 +48,15 @@ class TpuPlatform(Platform):
     ]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink) -> str:
-        if (selected_backend != _Backend.PALLAS
-                and selected_backend != _Backend.PALLAS_VLLM_V1):
+                             has_sink, use_sparse) -> str:
+        from vllm.attention.backends.registry import _Backend
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on TPU.")
+        if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if not use_v1:
@@ -74,10 +79,6 @@ class TpuPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         raise NotImplementedError
-
-    @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return False
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -179,11 +180,6 @@ class TpuPlatform(Platform):
         return True
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        # V1 support on TPU is experimental
-        return True
-
-    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,
@@ -198,6 +194,36 @@ class TpuPlatform(Platform):
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
                                     model_config: "ModelConfig") -> bool:
+        return True
+
+    @classmethod
+    @torch.compile(backend="openxla")
+    def insert_blocks_to_device(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        torch.ops.xla.dynamo_set_buffer_donor_(dst_cache, True)
+        dst_cache[dst_block_indices] = src_cache[src_block_indices].to(
+            dst_cache.device)
+
+    @classmethod
+    @torch.compile(backend="openxla")
+    def swap_out_blocks_to_host(
+        cls,
+        src_cache: torch.Tensor,
+        dst_cache: torch.Tensor,
+        src_block_indices: torch.Tensor,
+        dst_block_indices: torch.Tensor,
+    ) -> None:
+        """ tpu blocks to cpu blocks"""
+        torch.ops.xla.dynamo_set_buffer_donor_(src_cache, True)
+        dst_cache[dst_block_indices] = src_cache[src_block_indices].cpu()
+
+    @classmethod
+    def use_sync_weight_loader(cls) -> bool:
         return True
 
 

@@ -136,8 +136,8 @@ class ShmRingBuffer:
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.total_bytes_of_buffer)
             # initialize the metadata section to 0
-            with memoryview(self.shared_memory.buf[self.metadata_offset:]
-                            ) as metadata_buffer:
+            with self.shared_memory.buf[self.
+                                        metadata_offset:] as metadata_buffer:
                 torch.frombuffer(metadata_buffer, dtype=torch.uint8).fill_(0)
         else:
             # we are opening an existing buffer
@@ -182,14 +182,14 @@ class ShmRingBuffer:
     def get_data(self, current_idx: int):
         start = self.data_offset + current_idx * self.max_chunk_bytes
         end = start + self.max_chunk_bytes
-        with memoryview(self.shared_memory.buf[start:end]) as buf:
+        with self.shared_memory.buf[start:end] as buf:
             yield buf
 
     @contextmanager
     def get_metadata(self, current_idx: int):
         start = self.metadata_offset + current_idx * self.metadata_size
         end = start + self.metadata_size
-        with memoryview(self.shared_memory.buf[start:end]) as buf:
+        with self.shared_memory.buf[start:end] as buf:
             yield buf
 
 
@@ -387,20 +387,20 @@ class MessageQueue:
                     # Release the processor to other threads
                     sched_yield()
 
-                    # if we wait for a long time, log a message
-                    if (time.monotonic() - start_time
-                            > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.debug(
-                            ("No available shared memory broadcast block found"
-                             " in %s second."),
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
-                        )
-                        n_warning += 1
-
                     # if we time out, raise an exception
-                    if (timeout is not None
-                            and time.monotonic() - start_time > timeout):
+                    elapsed = time.monotonic() - start_time
+                    if timeout is not None and elapsed > timeout:
                         raise TimeoutError
+
+                    # if we wait for a long time, log a message
+                    if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
+                        logger.info(
+                            "No available shared memory broadcast block found"
+                            " in %s seconds. This typically happens when some"
+                            " processes are hanging or doing some"
+                            " time-consuming work (e.g. compilation)",
+                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        n_warning += 1
 
                     continue
                 # found a block that is either
@@ -430,7 +430,8 @@ class MessageQueue:
     @contextmanager
     def acquire_read(self,
                      timeout: Optional[float] = None,
-                     cancel: Optional[Event] = None):
+                     cancel: Optional[Event] = None,
+                     indefinite: bool = False):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
@@ -450,23 +451,25 @@ class MessageQueue:
                     # Release the processor to other threads
                     self._read_spin_timer.spin()
 
-                    # if we wait for a long time, log a message
-                    if (time.monotonic() - start_time
-                            > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.debug(
-                            ("No available shared memory broadcast block found"
-                             " in %s second."),
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
-                        )
-                        n_warning += 1
-
                     if cancel is not None and cancel.is_set():
                         raise RuntimeError("cancelled")
 
                     # if we time out, raise an exception
-                    if (timeout is not None
-                            and time.monotonic() - start_time > timeout):
+                    elapsed = time.monotonic() - start_time
+                    if timeout is not None and elapsed > timeout:
                         raise TimeoutError
+
+                    # if we wait for a long time, log a message
+                    if not indefinite and (elapsed
+                                           > VLLM_RINGBUFFER_WARNING_INTERVAL *
+                                           n_warning):
+                        logger.info(
+                            "No available shared memory broadcast block found"
+                            " in %s seconds. This typically happens when some"
+                            " processes are hanging or doing some"
+                            " time-consuming work (e.g. compilation).",
+                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        n_warning += 1
 
                     continue
                 # found a block that is not read by this reader
@@ -501,10 +504,11 @@ class MessageQueue:
 
     def dequeue(self,
                 timeout: Optional[float] = None,
-                cancel: Optional[Event] = None):
+                cancel: Optional[Event] = None,
+                indefinite: bool = False):
         """ Read from message queue with optional timeout (in seconds) """
         if self._is_local_reader:
-            with self.acquire_read(timeout, cancel) as buf:
+            with self.acquire_read(timeout, cancel, indefinite) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
                     # no need to know the size of serialized object

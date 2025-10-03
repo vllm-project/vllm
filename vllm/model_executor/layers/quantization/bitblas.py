@@ -7,9 +7,8 @@ from packaging import version
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
-from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import (QuantizationConfig,
+                                                     QuantizationMethods)
 from vllm.model_executor.layers.quantization.utils.bitblas_utils import (
     BITBLAS_OPTIMIZE_FEATURES, BITBLAS_SUPPORTED_NUM_BITS,
     BITBLAS_SUPPORTED_SYM, MINIMUM_BITBLAS_VERSION)
@@ -202,7 +201,7 @@ class BitBLASLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
-    ):
+    ) -> None:
         """Creates quantized weights for use in linear operations.
 
         The function initializes and returns a dictionary containing quantized 
@@ -211,7 +210,7 @@ class BitBLASLinearMethod(LinearMethodBase):
 
         Args:
             input_size_per_partition: The size of the input partition.
-            output_size_per_partition: The size of the output partition.
+            output_partition_sizes: List of output partition sizes.
             input_size: The total size of the input (unused).
             output_size: The total size of the output (unused).
             params_dtype: 
@@ -222,9 +221,9 @@ class BitBLASLinearMethod(LinearMethodBase):
             scales ('scales'), and zeros ('zeros').
 
         Raises:
-            ValueError: If `params_dtype` is not `torch.float16` or if the 
-            input size per partition is not divisible by the group size in 
-            `quant_config`.
+            ValueError: If `params_dtype` is not `torch.float16` or if the input
+                size per partition is not divisible by the group size
+                in `quant_config`.
         """
         del input_size, output_size  # Unused arguments.
         weight_loader = extra_weight_attrs["weight_loader"]

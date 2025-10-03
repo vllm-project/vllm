@@ -45,7 +45,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -164,8 +163,8 @@ class Exaone4Attention(nn.Module):
         is_sliding = config.layer_types[layer_idx] == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
 
-        # apply rotary embeddings to every layer
-        self.apply_all_layers = not is_sliding
+        # apply rotary embeddings to every layer in full attention models
+        self.apply_rope_all_layers = "sliding_attention" not in config.layer_types
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -201,7 +200,7 @@ class Exaone4Attention(nn.Module):
         k = self.k_norm(k)
         k = k.flatten(-2, -1)
 
-        if self.sliding_window or self.apply_all_layers:
+        if self.sliding_window or self.apply_rope_all_layers:
             q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -485,6 +484,7 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 # compatibility
                 if not lora_config else lora_config.lora_vocab_padding_size,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
@@ -516,10 +516,8 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

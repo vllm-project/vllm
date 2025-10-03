@@ -43,7 +43,6 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .chatglm import ChatGLMBaseModel, ChatGLMModel
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import flatten_bn, merge_multimodal_embeddings
 
 
 class GLMVImagePixelInputs(TensorSchema):
@@ -529,8 +528,9 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(GLM4VMultiModalProcessor,
                                         info=GLM4VProcessingInfo,
                                         dummy_inputs=GLM4VDummyInputsBuilder)
-class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
-                       SupportsMultiModal):
+class GLM4VForCausalLM(ChatGLMBaseModel, SupportsMultiModal, SupportsLoRA,
+                       SupportsPP):
+    merge_by_field_config = True
 
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
@@ -574,14 +574,9 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         pixel_values = kwargs.pop("pixel_values", None)
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
             expected_h = expected_w = self.config.vision_config["image_size"]
             return GLMVImagePixelInputs(type="pixel_values",
-                                        data=flatten_bn(pixel_values,
-                                                        concat=True),
+                                        data=pixel_values,
                                         resolve_bindings={
                                             "h": expected_h,
                                             "w": expected_w
@@ -598,6 +593,8 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
     def get_language_model(self) -> torch.nn.Module:
         return self.transformer
 
+    get_input_embeddings = SupportsMultiModal.get_input_embeddings
+
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -606,28 +603,6 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
 
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.transformer.get_input_embeddings(input_ids)
-
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                multimodal_embeddings=multimodal_embeddings,
-                placeholder_token_id=[
-                    self.config.boi_token_id,
-                    self.config.pad_token_id,
-                    self.config.eoi_token_id,
-                ],
-            )
-
-        return inputs_embeds
 
     def forward(
         self,
@@ -639,14 +614,6 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
 
         hidden_states = self.transformer(input_ids, positions,
                                          intermediate_tensors, inputs_embeds)

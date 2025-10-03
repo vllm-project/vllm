@@ -25,6 +25,12 @@ class XpuCommunicator(DeviceCommunicatorBase):
         super().__init__(cpu_group, device, device_group, unique_name)
         if self.use_all2all:
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+            if all2all_backend != "naive":
+                logger.warning(
+                    "`%s` all2all manager is not supported on XPU."
+                    "Falling back to `naive` all2all manager for XPU.",
+                    all2all_backend)
+                all2all_backend = "naive"
             if all2all_backend == "naive":
                 from .all2all import NaiveAll2AllManager
                 self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
@@ -67,3 +73,22 @@ class XpuCommunicator(DeviceCommunicatorBase):
 
     def broadcast(self, input_: torch.Tensor, src: int = 0) -> None:
         dist.broadcast(input_, src=src, group=self.device_group)
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.all2all_manager is not None
+        hidden_states, router_logits = self.all2all_manager.dispatch(
+            hidden_states, router_logits, is_sequence_parallel)
+        return hidden_states, router_logits
+
+    def combine(self,
+                hidden_states: torch.Tensor,
+                is_sequence_parallel: bool = False) -> torch.Tensor:
+        assert self.all2all_manager is not None
+        hidden_states = self.all2all_manager.combine(hidden_states,
+                                                     is_sequence_parallel)
+        return hidden_states

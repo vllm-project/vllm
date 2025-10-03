@@ -7,7 +7,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import regex as re
 import torch
@@ -16,15 +16,16 @@ from transformers import BatchFeature, InternVLProcessor, PretrainedConfig
 from transformers.activations import ACT2FN
 from transformers.models.got_ocr2.image_processing_got_ocr2_fast import (
     GotOcr2ImageProcessorFast)
+from transformers.models.internvl.video_processing_internvl import (
+    InternVLVideoProcessor)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interns1_vit import InternS1VisionModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItems, NestedTensors)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -32,12 +33,14 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import (
+    cached_video_processor_from_config)
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper,
+                    init_vllm_registered_model, maybe_prefix)
 
 
 class InternS1MultiModalProjector(nn.Module):
@@ -62,51 +65,60 @@ class InternS1MultiModalProjector(nn.Module):
         return hidden_states
 
 
-class InternS1ImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
+class InternS1ImagePixelInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_images * (1 + num_patches), num_channels, height, width)`
+    Dimensions:
+        - bnp: Batch size * number of images * (1 + num_patches)
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
+        - bn: Batch size * number of images
     """
+    type: Literal["pixel_values"] = "pixel_values"
+    pixel_values: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
-class InternS1ImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+class InternS1ImageEmbeddingInputs(TensorSchema):
     """
-    A tensor of shape `(num_images, total_image_feature_size, hidden_size)`
-    or a list of tensors of shape `(total_image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
+    Dimensions:
+        - ni: Number of images
+        - tifs: Total image feature size
+        - hs: Hidden size (must match language model backbone)
     """
+    type: Literal["image_embeds"] = "image_embeds"
+    data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                    TensorShape("ni", "tifs", "hs")]
 
 
 InternS1ImageInputs = Union[InternS1ImagePixelInputs,
                             InternS1ImageEmbeddingInputs]
 
 
-class InternS1VideoPixelInputs(TypedDict):
-    type: Literal["pixel_values_videos"]
-    pixel_values: torch.Tensor
+class InternS1VideoPixelInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_video * num_frames, num_channels, height, width)`
+    Dimensions:
+        - bnv: Batch size * number of videos * number of frames
+        - bn: Batch size * number of images
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
     """
+    type: Literal["pixel_values_videos"] = "pixel_values_videos"
+    pixel_values: Annotated[torch.Tensor, TensorShape("bnv", 3, "h", "w")]
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
-    num_patches: torch.Tensor
-    """Shape: `(batch_size * num_images)`"""
 
-
-class InternS1VideoEmbeddingInputs(TypedDict):
-    type: Literal["video_embeds"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+class InternS1VideoEmbeddingInputs(TensorSchema):
     """
-    A tensor of shape `(num_videos, total_video_feature_size, hidden_size)`
-    or a list of tensors of shape `(total_video_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
+    Dimensions:
+        - nv: Number of videos
+        - tvfs: Total video feature size
+        - hs: Hidden size (must match language model backbone)
     """
+    type: Literal["video_embeds"] = "video_embeds"
+    data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                    TensorShape("nv", "tvfs", "hs")]
 
 
 InternS1VideoInputs = Union[InternS1VideoPixelInputs,
@@ -143,7 +155,12 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
     """ProcessingInfo for InternS1-style models."""
 
     def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
-        return self.ctx.get_hf_processor(InternVLProcessor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(InternVLProcessor, **kwargs)
+        hf_processor.video_processor = cached_video_processor_from_config(
+            self.ctx.model_config,
+            processor_cls=InternVLVideoProcessor,
+            **kwargs)
+        return hf_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
@@ -287,7 +304,7 @@ class InternS1MultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         mm_data = dict(mm_data)
         videos = mm_data.pop("videos", [])
         images = mm_data.pop("images", [])
@@ -325,7 +342,7 @@ class InternS1MultiModalProcessor(
                                         image_placeholder, 1)
 
             num_patches = [len(item) for item in image_pixel_values]
-            image_outputs: dict[str, NestedTensors] = {
+            image_outputs = {
                 "pixel_values": torch.concat(image_pixel_values),
                 "image_num_patches": torch.tensor(num_patches),
                 "image_token_id": torch.tensor(hf_processor.image_token_id),
@@ -353,7 +370,7 @@ class InternS1MultiModalProcessor(
                                         video_placeholder, 1)
 
             num_frames = [len(item) for item in video_pixel_values]
-            video_outputs: dict[str, NestedTensors] = {
+            video_outputs = {
                 "pixel_values_videos": torch.concat(video_pixel_values),
                 "video_num_patches": torch.tensor(num_frames),
                 "video_token_id": torch.tensor(video_token_id),
@@ -365,16 +382,11 @@ class InternS1MultiModalProcessor(
                         prompt)
         text_outputs = tokenizer(prompt, **tok_kwargs, return_tensors="pt")
 
-        combined_outputs = dict(
-            **text_outputs,
-            **image_outputs,
-            **video_outputs,
-        )
-        return BatchFeature(combined_outputs)
+        return BatchFeature({**text_outputs, **image_outputs, **video_outputs})
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: Mapping[str, NestedTensors],
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
 
@@ -470,6 +482,7 @@ class InternS1MultiModalProcessor(
     dummy_inputs=InternS1DummyInputsBuilder)
 class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        SupportsPP, SupportsLoRA):
+    merge_by_field_config = True
 
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
@@ -482,7 +495,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
-        # transformers InternVLProcessor uses <IMG_CONTEXT> as the seperator
+        # transformers InternVLProcessor uses <IMG_CONTEXT> as the separator
         # refer to https://github.com/huggingface/transformers/blob/f90de364c2484c7c325bbe05befdcf487bd75b63/src/transformers/models/internvl/processing_internvl.py#L116
         if modality.startswith("image"):
             return '<IMG_CONTEXT>'
@@ -544,7 +557,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             prefix=prefix,
         )
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
+    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
         return InternS1MultiModalProjector(config)
 
     def pixel_shuffle(self, x, scale_factor=0.5):
@@ -572,26 +585,6 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         vit_embeds = self.multi_modal_projector(vit_embeds)
         return vit_embeds
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-
-        h, w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape)
-
-            if actual_dims != expected_dims:
-                expected_expr = str(expected_dims)
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f" per patch is {expected_expr}. "
-                    f"You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[InternS1ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -602,13 +595,9 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
-
             return InternS1ImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds),
+                data=image_embeds,
             )
 
         image_token_id = kwargs["image_token_id"]
@@ -616,27 +605,21 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.img_context_token_id = image_token_id.flatten().unique().item()
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
-            if not isinstance(image_num_patches, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image_num_patches. "
-                                 f"Got type: {type(image_num_patches)}")
-
-            pixel_values = flatten_bn(pixel_values, concat=True)
-            image_num_patches = flatten_bn(image_num_patches, concat=True)
-
+            h, w = self.config.vision_config.image_size
             return InternS1ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(pixel_values),
+                pixel_values=pixel_values,
                 num_patches=image_num_patches,
+                resolve_bindings={
+                    "h": h,
+                    "w": w,
+                },
             )
 
         raise AssertionError("This line should be unreachable.")
 
     def _parse_and_validate_video_input(
-            self, **kwargs: object) -> Optional[InternS1VideoPixelInputs]:
+            self, **kwargs: object) -> Optional[InternS1VideoInputs]:
         pixel_values_flat_video = kwargs.pop("pixel_values_videos", None)
         video_num_patches = kwargs.pop("video_num_patches", None)
         video_embeds = kwargs.pop("video_embeds", None)
@@ -645,13 +628,9 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         if video_embeds is not None:
-            if not isinstance(video_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of video embeddings. "
-                                 f"Got type: {type(video_embeds)}")
-
-            return InternS1ImageEmbeddingInputs(
+            return InternS1VideoEmbeddingInputs(
                 type="video_embeds",
-                data=flatten_bn(video_embeds),
+                data=video_embeds,
             )
 
         video_token_id = kwargs["video_token_id"]
@@ -659,32 +638,25 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.video_context_token_id = video_token_id.flatten().unique().item()
 
         if pixel_values_flat_video is not None:
-            if not isinstance(pixel_values_flat_video, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values_flat_video)}")
-
-            if not isinstance(video_num_patches, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image_num_patches. "
-                                 f"Got type: {type(video_num_patches)}")
-
-            pixel_values_flat_video = flatten_bn(pixel_values_flat_video,
-                                                 concat=True)
-            video_num_patches = flatten_bn(video_num_patches, concat=True)
-
+            h, w = self.config.vision_config.image_size
             return InternS1VideoPixelInputs(
                 type="pixel_values_videos",
-                pixel_values=self._validate_pixel_values(
-                    pixel_values_flat_video),
                 num_patches=video_num_patches,
+                pixel_values=pixel_values_flat_video,
+                resolve_bindings={
+                    "h": h,
+                    "w": w,
+                },
             )
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_image_input(
+    def _process_vision_input(
         self,
-        image_input: Union[InternS1ImageInputs, InternS1VideoPixelInputs],
+        image_input: Union[InternS1ImageInputs, InternS1VideoInputs],
     ) -> tuple[torch.Tensor, ...]:
-        if image_input["type"] == "image_embeds":
+        if (image_input["type"] == "image_embeds"
+                or image_input["type"] == "video_embeds"):
             return image_input["data"]
 
         assert self.vision_tower is not None
@@ -739,7 +711,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
@@ -747,11 +719,11 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
+                vision_embeddings = self._process_vision_input(image_input)
                 multimodal_embeddings += vision_embeddings
             if modality == "videos":
                 video_input = modalities["videos"]
-                video_embeddings = self._process_image_input(video_input)
+                video_embeddings = self._process_vision_input(video_input)
                 multimodal_embeddings += video_embeddings
 
         return multimodal_embeddings
@@ -760,24 +732,24 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            context_token_ids = [
-                token_id for token_id in (self.img_context_token_id,
-                                          self.video_context_token_id)
-                if token_id is not None
-            ]
-            assert len(context_token_ids) >= 1
+        if multimodal_embeddings is not None and len(
+                multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                context_token_ids,
-            )
-        return inputs_embeds
+
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
+
+        return super().get_input_embeddings(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
 
     def forward(
         self,
@@ -792,14 +764,6 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             input_ids = None
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
-
         forward_kwargs = {
             "input_ids": input_ids,
             "positions": positions,
@@ -813,10 +777,8 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

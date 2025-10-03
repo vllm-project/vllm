@@ -22,9 +22,9 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
+from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding
 from .interfaces_base import default_pooling_type
@@ -42,6 +42,9 @@ class ModernBertEmbeddings(nn.Module):
         self.norm = nn.LayerNorm(config.hidden_size,
                                  eps=config.layer_norm_eps,
                                  bias=config.norm_bias)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.tok_embeddings(input_ids)
 
     def forward(
         self,
@@ -220,6 +223,9 @@ class ModernBertModel(nn.Module):
                                        eps=config.norm_eps,
                                        bias=config.norm_bias)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embeddings.get_input_embeddings(input_ids)
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
@@ -306,7 +312,9 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self.config = config
         self.model = ModernBertModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "modernbert"))
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = nn.Linear(config.hidden_size,
+                                    config.num_labels,
+                                    dtype=vllm_config.model_config.head_dtype)
         self.pooling = ModernBertPooler(config)
 
         pooler_config = vllm_config.model_config.pooler_config
@@ -330,6 +338,9 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
                     vllm_config.model_config),
             ),
         })
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 

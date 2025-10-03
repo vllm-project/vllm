@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+import os
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
@@ -29,6 +30,7 @@ else:
 
 logger = init_logger(__name__)
 
+ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 
 
@@ -87,7 +89,7 @@ class ParallelConfig:
     data_parallel_external_lb: bool = False
     """Whether to use "external" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    wide-EP setup in Kuberentes. Set implicitly when --data-parallel-rank
+    wide-EP setup in Kubernetes. Set implicitly when --data-parallel-rank
     is provided explicitly to vllm serve."""
     data_parallel_hybrid_lb: bool = False
     """Whether to use "hybrid" DP LB mode. Applies only to online serving
@@ -102,6 +104,15 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
+    expert_placement_strategy: ExpertPlacementStrategy = "linear"
+    """The expert placement strategy for MoE layers:\n
+    - "linear": Experts are placed in a contiguous manner. For example, with 4
+      experts and 2 ranks, rank 0 will have experts [0, 1] and rank 1 will have
+      experts [2, 3].\n
+    - "round_robin": Experts are placed in a round-robin manner. For example,
+      with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
+      will have experts [1, 3]. This strategy can help improve load balancing
+      for grouped expert models with no redundant experts."""
     num_redundant_experts: Optional[int] = None
     """`num_redundant_experts` is deprecated and has been replaced with
     `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
@@ -126,6 +137,20 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
+
+    enable_dbo: bool = False
+    """Enable dual batch overlap for the model executor."""
+
+    dbo_decode_token_threshold: int = 32
+    """The threshold for dual batch overlap for batches only containing decodes.
+    If the number of tokens in the request is greater than this threshold,
+    microbatching will be used. Otherwise, the request will be processed in a
+    single batch."""
+    dbo_prefill_token_threshold: int = 512  # TODO(lucas): tune
+    """The threshold for dual batch overlap for batches that contain one or more
+    prefills. If the number of tokens in the request is greater than this
+    threshold, microbatching will be used. Otherwise, the request will be
+    processed in a single batch."""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -168,6 +193,30 @@ class ParallelConfig:
     _data_parallel_master_port_list: list[int] = field(default_factory=list)
     """List of open port auto-queried for data parallel messaging.
     Set to be private as it's not intended to be configured by users.
+    """
+
+    decode_context_parallel_size: int = 1
+    """Number of decode context parallel groups, because the world size does
+    not change by dcp, it simply reuse the GPUs of TP group, and tp_size
+    needs to be divisible by dcp_size."""
+
+    _api_process_count: int = 1
+    """
+    The number of API processes initialized.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
+
+    _api_process_rank: int = 0
+    """
+    The rank of this API process, or `-1` for engine core processes
+    under API server scale-out.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
     """
 
     @property
@@ -229,6 +278,24 @@ class ParallelConfig:
         # If we get here all retries have failed.
         assert last_exc is not None
         raise last_exc
+
+    # The all_reduce at the end of attention (during o_proj) means that
+    # inputs are replicated across each rank of the tensor parallel group.
+    # If using expert-parallelism with DeepEP All2All ops, replicated
+    # tokens results in useless duplicate computation and communication.
+    #
+    # In this case, ensure the input to the experts is sequence parallel
+    # to avoid the excess work.
+    #
+    # Not needed for pplx-kernels as it can handle duplicate input tokens.
+    @property
+    def use_sequence_parallel_moe(self) -> bool:
+        return (envs.VLLM_ALL2ALL_BACKEND
+                in ("allgather_reducescatter", "naive",
+                    "deepep_high_throughput", "deepep_low_latency")
+                and self.enable_expert_parallel
+                and self.tensor_parallel_size > 1
+                and self.data_parallel_size > 1)
 
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup,
@@ -309,6 +376,10 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
+        if self.distributed_executor_backend == "external_launcher":
+            logger.info("Using external launcher for distributed inference.")
+            self.world_size *= self.data_parallel_size
+
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
                 f"data_parallel_size_local ({self.data_parallel_size_local}) "
@@ -316,6 +387,13 @@ class ParallelConfig:
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
+            if self.distributed_executor_backend == "external_launcher":
+                # For external launcher,
+                # we need to set the data parallel rank automatically
+                self.data_parallel_rank = int(os.environ["RANK"]) \
+                    // (self.world_size // self.data_parallel_size)
+                logger.info("Set data_parallel_rank to %d automatically.",
+                            self.data_parallel_rank)
             if not self._data_parallel_master_port_list:
                 self._data_parallel_master_port_list = get_open_ports_list(5)
             self.data_parallel_master_port = \
@@ -338,7 +416,6 @@ class ParallelConfig:
                                  "be set when data_parallel_size > 1")
 
         if self.distributed_executor_backend == "external_launcher":
-            import os
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
@@ -363,8 +440,10 @@ class ParallelConfig:
         else:
             if self.eplb_config.num_redundant_experts != 0:
                 raise ValueError(
-                    "num_redundant_experts should be used with EPLB."
-                    f"{self.eplb_config.num_redundant_experts}.")
+                    "num_redundant_experts is set to "
+                    f"{self.eplb_config.num_redundant_experts} but EPLB is not "
+                    "enabled. Either enable EPLB or unset "
+                    "num_redundant_experts.")
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
@@ -372,10 +451,7 @@ class ParallelConfig:
             from vllm.executor import ray_utils
             backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
-            if current_platform.is_neuron():
-                # neuron uses single process to control multiple devices
-                backend = "uni"
-            elif current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
+            if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):
@@ -405,6 +481,12 @@ class ParallelConfig:
 
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
+
+        if not -1 <= self._api_process_rank < self._api_process_count:
+            raise ValueError(
+                "Invalid value of `_api_process_rank`. "
+                f"Expected to be `-1` or `[0, {self._api_process_count})`, "
+                f"but found: {self._api_process_rank}")
 
     @property
     def use_ray(self) -> bool:
