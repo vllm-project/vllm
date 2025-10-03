@@ -9,6 +9,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import typing
+from typing import Tuple, Union
 
 import torch
 
@@ -36,7 +37,7 @@ def compute_retained_tokens_count(tokens_per_frame: int, num_frames: int,
 
 def compute_retention_mask(
     video_embeds: torch.Tensor,
-    video_size_thw: torch.LongTensor,
+    video_size_thw: Union[torch.LongTensor, Tuple[int, int, int]],
     spatial_merge_size: int,
     q: float,
 ) -> torch.Tensor:
@@ -55,7 +56,7 @@ def compute_retention_mask(
         `torch.Tensor`: The retention mask for the video embeddings of
             `(T * H * W // spatial_merge_size ^ 2)` shape.
     """
-    T, H, W = video_size_thw
+    T, H, W = map(int, video_size_thw)
 
     # Use reshape instead of einops to avoid graph breaks
     video_embeds = video_embeds.reshape(
@@ -64,7 +65,7 @@ def compute_retention_mask(
         W // spatial_merge_size,
         video_embeds.size(-1),
     )
-
+    tokens_per_frame = (H // spatial_merge_size) * (W // spatial_merge_size)
     # Core EVS
     similarity = torch.nn.functional.cosine_similarity(video_embeds[1:, ...],
                                                        video_embeds[:-1, ...],
@@ -81,8 +82,8 @@ def compute_retention_mask(
                           dim=-1,
                           descending=True,
                           stable=True)
-    retain_num_tokens = compute_retained_tokens_count(video_size_thw,
-                                                      spatial_merge_size, q)
+    retain_num_tokens = compute_retained_tokens_count(
+        tokens_per_frame=tokens_per_frame, num_frames=T, q=q)
     topk_indices = order[:retain_num_tokens]
 
     retention_mask = torch.zeros_like(dissimilarity_flat, dtype=torch.bool)
