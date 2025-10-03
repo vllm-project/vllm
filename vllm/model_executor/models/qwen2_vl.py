@@ -41,6 +41,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from transformers.models.qwen2_vl.video_processing_qwen2_vl import (
     Qwen2VLVideoProcessor)
 
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
@@ -50,6 +51,8 @@ from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import (
+    dispatch_rotary_emb_function)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -63,7 +66,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -272,13 +274,11 @@ def apply_rotary_emb_torch(x: torch.Tensor,
 
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
                                 freqs: torch.Tensor) -> torch.Tensor:
+    rotary_emb_function = dispatch_rotary_emb_function()
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
-    apply_rotary_emb = apply_rotary_emb_torch
-    if current_platform.is_cuda():
-        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
-    output = apply_rotary_emb(t_, cos, sin).type_as(t)
+    output = rotary_emb_function(t_, cos, sin).type_as(t)
     return output
 
 
