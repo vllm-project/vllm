@@ -296,6 +296,7 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
             config.vocab_size,
             config.hidden_size,
             quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "embed_out"),
         )
         if self.config.tie_word_embeddings:
             self.embed_out.weight = self.gpt_neox.embed_in.weight
