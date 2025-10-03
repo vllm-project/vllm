@@ -489,9 +489,6 @@ class OpenAIServingResponses(OpenAIServing):
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
 
-        import fbvscode
-        fbvscode.set_trace()
-
         input_messages = None
         output_messages = None
         if self.use_harmony:
@@ -1703,7 +1700,6 @@ class OpenAIServingResponses(OpenAIServing):
                 # in fact it immediately returns.
                 if False:
                     yield
-
 
             final_response = await self.responses_full_generator(
                 request,

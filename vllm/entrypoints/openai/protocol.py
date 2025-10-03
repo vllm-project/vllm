@@ -57,7 +57,8 @@ from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
-                      ValidationInfo, field_validator, model_validator)
+                      ValidationInfo, field_serializer, field_validator,
+                      model_validator)
 from typing_extensions import TypeAlias
 
 from vllm import envs
@@ -1970,12 +1971,6 @@ class ResponsesResponse(OpenAIBaseModel):
     model: str
     object: Literal["response"] = "response"
     output: list[ResponseOutputItem]
-    # These are populated when enable_response_messages is set to True
-    # TODO: Currently an issue where content of harmony messages
-    # TODO: was this fixed?
-    # is not available when these are serialized. Metadata is available
-    input_messages: Optional[list[ChatCompletionMessageParam]] = None
-    output_messages: Optional[list[ChatCompletionMessageParam]] = None
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1994,6 +1989,48 @@ class ResponsesResponse(OpenAIBaseModel):
     truncation: Literal["auto", "disabled"]
     usage: Optional[ResponseUsage] = None
     user: Optional[str] = None
+
+    # --8<-- [start:responses-extra-params]
+    # These are populated when enable_response_messages is set to True
+    # NOTE: custom serialization is needed
+    # see serialize_input_messages and serialize_output_messages
+    input_messages: Optional[list[ChatCompletionMessageParam]] = None
+    output_messages: Optional[list[ChatCompletionMessageParam]] = None
+    # --8<-- [end:responses-extra-params]
+
+    # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
+    @field_serializer("output_messages", when_used="json")
+    def serialize_output_messages(self, msgs, _info):
+        if msgs:
+            serialized = []
+            for m in msgs:
+                if isinstance(m, dict):
+                    serialized.append(m)
+                elif hasattr(m, "__dict__"):
+                    # Fallback to __dict__ representation
+                    serialized.append(m.__dict__)
+                else:
+                    # fallback to pyandic dump
+                    serialized.append(m.model_dump_json())
+            return serialized
+        return None
+
+    # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
+    @field_serializer("input_messages", when_used="json")
+    def serialize_input_messages(self, msgs, _info):
+        if msgs:
+            serialized = []
+            for m in msgs:
+                if isinstance(m, dict):
+                    serialized.append(m)
+                elif hasattr(m, "__dict__"):
+                    # Fallback to __dict__ representation
+                    serialized.append(m.__dict__)
+                else:
+                    # fallback to pyandic dump
+                    serialized.append(m.model_dump_json())
+            return serialized
+        return None
 
     @classmethod
     def from_request(
