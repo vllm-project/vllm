@@ -86,3 +86,16 @@ def test_max_model_len():
         # It can be less if generation finishes due to other reasons (e.g., EOS)
         # before reaching the absolute model length limit.
         assert num_total_tokens <= max_model_len
+
+
+def test_log_stats():
+    llm = LLM(
+        model=MODEL_NAME,
+        disable_log_stats=False,
+        gpu_memory_utilization=0.10,
+        enforce_eager=True,  # reduce test time
+    )
+    outputs = llm.generate(PROMPTS, sampling_params=None)
+
+    # disable_log_stats is False, every output should have metrics
+    assert all(output.metrics is not None for output in outputs)
