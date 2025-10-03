@@ -42,6 +42,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
@@ -111,9 +112,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
-        self.reqs_to_send: dict[ReqId, float] = {}
-        self.reqs_in_batch: set[ReqId] = set()
-        self.reqs_not_processed: set[ReqId] = set()
 
     def add_new_req(
         self,
@@ -200,6 +198,14 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def update_connector_output(
+        self,
+        connector_output: "KVConnectorOutput",
+    ):
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.update_connector_output(
+            connector_output)
+
     def request_finished(
         self,
         request: "Request",
@@ -264,6 +270,93 @@ class NixlConnector(KVConnectorBase_V1):
             self.connector_worker.shutdown()
 
 
+class ReqsNeedSendTracker:
+
+    @dataclass
+    class RequestTimer:
+        """Timer for requests that need to be sent for remote decode."""
+        expiry_time: float
+        """Expiry time to avoid stranded KV blocks that are never fetched."""
+        consumer_count: int
+        """Consumer notification count - with heterogeneous TP, P must wait
+        for all assigned D TP workers to finish reading before safely freeing
+        the blocks."""
+
+    def __init__(self):
+        self._reqs_need_send: dict[ReqId,
+                                   ReqsNeedSendTracker.RequestTimer] = {}
+        self._timeout = envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+
+    def start_timer(self, req_id):
+        self._reqs_need_send[req_id] = self.RequestTimer(
+            time.monotonic() + self._timeout, 0)
+
+    def delete_timer(self, req_id):
+        if req_id not in self._reqs_need_send:
+            return
+        logger.debug("Deleting KV transfer timeout for request %s", req_id)
+        del self._reqs_need_send[req_id]
+
+    def _process_finished_notifs(self, finished_notifs: set[str]) -> set[str]:
+        """Process notifications from D and track consumer completion.
+
+        The notification strings are in format "req_id:tp_ratio".
+
+        Return request IDs that have completed sending to all consumers, to be
+        used by the scheduler via KVConnectorOutput.finished_sending.
+        """
+        finished_sending: set[str] = set()
+        for notif in (finished_notifs or ()):
+            try:
+                req_id, tp_ratio = notif.rsplit(":", 1)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"Invalid notification: {notif}") from e
+
+            # Sent notifications received after we already timed out
+            if req_id not in self._reqs_need_send:
+                logger.debug(
+                    "Already finished or expired KV transfer for request %s",
+                    req_id)
+                continue
+
+            # Wait all consumers (D) to be done reading before freeing.
+            request_timer = self._reqs_need_send[req_id]
+            request_timer.consumer_count += 1
+            if request_timer.consumer_count < int(tp_ratio):
+                continue
+
+            logger.debug(
+                "KV transfer finished for request %s after retrieval by %d "
+                "decode worker(s).", req_id, request_timer.consumer_count)
+            del self._reqs_need_send[req_id]
+            finished_sending.add(req_id)
+
+        return finished_sending
+
+    def _abort_expired_requests(self, finished_sending: set[str]) -> set[str]:
+        """Abort requests that have passed their expiry timeout.
+
+        Adds aborted requests to KVConnectorOutput.finished_sending.
+        """
+        now = time.monotonic()
+        while self._reqs_need_send:
+            req_id, request_timer = next(iter(self._reqs_need_send.items()))
+            # Insertion-ordered dict; oldest first so we can exit early.
+            if now < request_timer.expiry_time:
+                break
+            logger.warning(
+                "Releasing expired KV blocks for request %s which were "
+                "retrieved by %d decode worker(s) within %d seconds.", req_id,
+                request_timer.consumer_count, self._timeout)
+            del self._reqs_need_send[req_id]
+            finished_sending.add(req_id)
+        return finished_sending
+
+    def reqs_finished_sending(self, finished_notifs: set[str]) -> set[str]:
+        finished_sending = self._process_finished_notifs(finished_notifs)
+        return self._abort_expired_requests(finished_sending)
+
+
 class NixlConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
@@ -285,12 +378,8 @@ class NixlConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
         self._reqs_need_save: dict[ReqId, tuple[Request, list[int]]] = {}
-        # Reqs to send and their expiration time
-        self._reqs_need_send: dict[ReqId, float] = {}
-        self._reqs_in_batch: set[ReqId] = set()
-        # Reqs to remove from processed set because they're not to send after
-        # remote prefill or aborted.
-        self._reqs_not_processed: set[ReqId] = set()
+
+        self._reqs_need_send = ReqsNeedSendTracker()
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -338,8 +427,6 @@ class NixlConnectorScheduler:
         if not params:
             return
 
-        if params.get("do_remote_decode"):
-            self._reqs_in_batch.add(request.request_id)
         if self.use_host_buffer and params.get("do_remote_decode"):
             # NOTE: when accelerator is not directly supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
@@ -403,18 +490,19 @@ class NixlConnectorScheduler:
                 save_to_host=True,
             )
 
-        meta.reqs_to_send = self._reqs_need_send
-        meta.reqs_in_batch = self._reqs_in_batch
-        meta.reqs_not_processed = self._reqs_not_processed
-
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
         self._reqs_need_save.clear()
-        self._reqs_in_batch = set()
-        self._reqs_not_processed = set()
-        self._reqs_need_send = {}
 
         return meta
+
+    def update_connector_output(
+        self,
+        connector_output: "KVConnectorOutput",
+    ):
+        connector_output.finished_sending = (
+            self._reqs_need_send.reqs_finished_sending(
+                connector_output.finished_sending))
 
     def request_finished(
         self,
@@ -447,10 +535,10 @@ class NixlConnectorScheduler:
 
         if not params.get("do_remote_decode"):
             return False, None
+
         if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
-            # Also include the case of a P/D Prefill request with immediate
-            # block free (eg abort). Stop tracking this request.
-            self._reqs_not_processed.add(request.request_id)
+            # Request aborted after we delayed freeing the blocks?
+            self._reqs_need_send.delete_timer(request.request_id)
             return False, None
 
         # TODO: check whether block_ids actually ever be 0. If not we could
@@ -459,8 +547,7 @@ class NixlConnectorScheduler:
 
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
-            self._reqs_need_send[request.request_id] = time.perf_counter(
-            ) + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+            self._reqs_need_send.start_timer(request.request_id)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -576,10 +663,6 @@ class NixlConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_metadata: dict[ReqId, ReqMeta] = {}
         self._recving_transfers = defaultdict[ReqId, list[Transfer]](list)
-        # Track the expiration time of requests that are waiting to be sent.
-        self._reqs_to_send: dict[ReqId, float] = {}
-        # Set of requests that have been part of a batch, regardless of status.
-        self._reqs_to_process: set[ReqId] = set()
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
@@ -618,9 +701,6 @@ class NixlConnectorWorker:
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
-        # With heterogeneous TP, P must wait for all assigned D TP workers to
-        # finish reading before safely freeing the blocks.
-        self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
     @staticmethod
@@ -1130,22 +1210,6 @@ class NixlConnectorWorker:
                 assert meta, f"{req_id} not found in recving_metadata list"
                 self.sync_recved_kv_to_device(req_id, meta)
 
-        # Handle timeout to avoid stranding blocks on remote.
-        now = time.perf_counter()
-        while self._reqs_to_send:
-            req_id, expires = next(iter(self._reqs_to_send.items()))
-            # Sorted dict, oldest requests are put first so we can exit early.
-            if now < expires:
-                break
-            count = self.consumer_notification_counts_by_req.pop(req_id, 0)
-            logger.warning(
-                "Releasing expired KV blocks for request %s which were "
-                "retrieved by %d decode worker(s) within %d seconds.", req_id,
-                count, envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
-            self._reqs_to_process.remove(req_id)
-            del self._reqs_to_send[req_id]
-            done_sending.add(req_id)
-
         return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
@@ -1157,23 +1221,8 @@ class NixlConnectorWorker:
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
-                req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
-                if (req_id not in self._reqs_to_send
-                        and req_id not in self._reqs_to_process):
-                    logger.error(
-                        "Potentially invalid KV blocks for "
-                        "unrecognized request %s were retrieved by "
-                        "a decode worker. They may have expired.", req_id)
-                    continue
-
-                self.consumer_notification_counts_by_req[req_id] += 1
-                # Wait all consumers (D) to be done reading before freeing.
-                if self.consumer_notification_counts_by_req[req_id] == int(
-                        tp_ratio):
-                    notified_req_ids.add(req_id)
-                    del self.consumer_notification_counts_by_req[req_id]
-                    self._reqs_to_process.remove(req_id)
-                    self._reqs_to_send.pop(req_id, None)
+                # Note - this is in req_id:tp_ratio format
+                notified_req_ids.add(notif.decode("utf-8"))
         return notified_req_ids
 
     def _pop_done_transfers(
@@ -1234,24 +1283,6 @@ class NixlConnectorWorker:
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
-
-        # Keep around the requests that have been part of a batch. This is
-        # needed because async scheduling pushes the misalignment between the
-        # moment in which requests expiration is set (P side) and the moment in
-        # which blocks are read from D. As P can now more easily lag behind D
-        # while processing the next batch, we make sure to only set an
-        # expiration for requests that have not been read from D yet.
-        for req_id in metadata.reqs_in_batch:
-            self._reqs_to_process.add(req_id)
-
-        # Remove all requests that are not to be processed (eg aborted).
-        for req_id in metadata.reqs_not_processed:
-            self._reqs_to_process.discard(req_id)
-
-        # Add to requests that are waiting to be read and track expiration.
-        for req_id, expiration_time in metadata.reqs_to_send.items():
-            if req_id in self._reqs_to_process:
-                self._reqs_to_send[req_id] = expiration_time
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         logger.debug(
