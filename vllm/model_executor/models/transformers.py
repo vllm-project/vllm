@@ -827,7 +827,7 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # Gemma3 and PG needs `token_type_ids` to work correctly
+        # Gemma3 and PaliGemma needs `token_type_ids` to work correctly
         # Other models will not have `token_type_ids` in kwargs
         kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
         model_output = super().forward(input_ids, positions,
