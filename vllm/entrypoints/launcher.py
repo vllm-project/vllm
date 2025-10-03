@@ -5,7 +5,7 @@ import asyncio
 import signal
 import socket
 from http import HTTPStatus
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 
 
 async def serve_http(app: FastAPI,
-                     sock: Optional[socket.socket],
+                     sock: Optional[Union[socket.socket, list[socket.socket]]],
                      enable_ssl_refresh: bool = False,
                      **uvicorn_kwargs: Any):
     """
@@ -64,8 +64,16 @@ async def serve_http(app: FastAPI,
 
     watchdog_task = loop.create_task(
         watchdog_loop(server, app.state.engine_client))
-    server_task = loop.create_task(
-        server.serve(sockets=[sock] if sock else None))
+
+    # Handle both single socket and list of sockets
+    if sock is None:
+        sockets = None
+    elif isinstance(sock, list):
+        sockets = sock
+    else:
+        sockets = [sock]
+
+    server_task = loop.create_task(server.serve(sockets=sockets))
 
     ssl_cert_refresher = None if not enable_ssl_refresh else SSLCertRefresher(
         ssl_context=config.ssl,
