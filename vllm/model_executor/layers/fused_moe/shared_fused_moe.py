@@ -24,6 +24,10 @@ class SharedFusedMoE(FusedMoE):
     ):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
+        # Disable shared expert overlap if EP is disabled or we are not using
+        # flashinfer + DP since there is nothing to be gained in this case
+        # and it prevents the shared experts from being hidden from
+        # torch.compile.
         self.use_overlapped = use_overlapped and not (
             self.use_ep or self.use_flashinfer_cutlass_kernels
         ) and self.shared_experts is not None
