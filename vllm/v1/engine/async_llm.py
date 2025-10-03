@@ -281,22 +281,32 @@ class AsyncLLM(EngineClient):
         queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
-        prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority, data_parallel_rank)
+        request = self.processor.process_inputs(request_id, prompt, params,
+                                                arrival_time, lora_request,
+                                                tokenization_kwargs,
+                                                trace_headers, priority,
+                                                data_parallel_rank)
+        prompt_text = prompt if isinstance(prompt,
+                                           str) else prompt.get("prompt")
 
         if is_pooling or params.n == 1:
-            await self._add_request(request, prompt_str, None, 0, queue)
+            await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
+        # Get the updated SamplingParams from the request, which
+        # were cloned/updated in processor.process_inputs above.
+        parent_params = request.sampling_params
+        assert parent_params is not None
+
         # Fan out child requests (for n>1).
-        parent_request = ParentRequest(request_id, request.sampling_params)
-        for idx in range(params.n):
-            request_id, params = parent_request.get_child_info(idx)
-            child_request = request if idx == params.n - 1 else copy(request)
+        parent_request = ParentRequest(request_id, parent_params)
+        for idx in range(parent_params.n):
+            request_id, child_params = parent_request.get_child_info(idx)
+            child_request = request if idx == parent_params.n - 1 else copy(
+                request)
             child_request.request_id = request_id
-            child_request.sampling_params = params
-            await self._add_request(child_request, prompt_str, parent_request,
+            child_request.sampling_params = child_params
+            await self._add_request(child_request, prompt_text, parent_request,
                                     idx, queue)
         return queue
 
