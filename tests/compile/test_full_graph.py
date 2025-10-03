@@ -11,8 +11,8 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
-from tests.v1.attention.utils import _Backend
 from vllm import LLM, SamplingParams
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          PassConfig)

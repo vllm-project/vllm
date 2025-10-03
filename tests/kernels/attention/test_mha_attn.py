@@ -10,8 +10,9 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import MultiHeadAttention
-from vllm.attention.selector import _Backend, _cached_get_attn_backend
+from vllm.attention.selector import _cached_get_attn_backend
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
