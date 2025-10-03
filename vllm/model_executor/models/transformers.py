@@ -453,7 +453,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         return MultiModalInputs(
             type="multimodal",
-            prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
