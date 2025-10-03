@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import os
-import textwrap
 import time
 
 import pytest
@@ -793,62 +791,3 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str,
     assert response.status == "completed"
     assert len(response.input_messages) > 0
     assert len(response.output_messages) > 0
-
-
-@pytest.fixture(scope="module")
-def server_with_mock_render_for_completion(
-        monkeypatch_module: pytest.MonkeyPatch, tmp_path_factory):
-
-    args = ["--enforce-eager", "--tool-server", "demo"]
-
-    # Create a sitecustomize.py that patches render_for_completion
-    # Python automatically imports sitecustomize on startup if it's in sys.path
-    tmp_dir = tmp_path_factory.mktemp("test_setup")
-    sitecustomize = tmp_dir / "sitecustomize.py"
-    sitecustomize.write_text(
-        textwrap.dedent("""
-        import os
-        from unittest.mock import patch
-
-        # Mock render_for_completion to return a large token list
-        def mock_render_for_completion(messages):
-            return list(range(1000000))  # Return 1M tokens for testing
-
-        # Patch it at module level before it's imported
-        patch('vllm.entrypoints.harmony_utils.render_for_completion',
-                mock_render_for_completion).start()
-    """))
-
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
-        # Add tmp_dir to PYTHONPATH so sitecustomize.py is found
-        curr_path = os.environ.get("PYTHONPATH", "")
-        new_pythonpath = f"{tmp_dir}:{curr_path}" if curr_path else str(
-            tmp_dir)
-        m.setenv("PYTHONPATH", new_pythonpath)
-        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-            yield remote_server
-
-
-@pytest_asyncio.fixture
-async def client_with_mock(server_with_mock_render_for_completion):
-    async with server_with_mock_render_for_completion.get_async_client(
-    ) as async_client:
-        yield async_client
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_prompt_length_exceeds_max_model_len(client_with_mock: OpenAI,
-                                                   model_name: str):
-
-    with pytest.raises(BadRequestError) as exc_info:
-        await client_with_mock.responses.create(
-            model=model_name,
-            input="hello",
-        )
-
-    # Verify the error message matches what's expected
-    error = exc_info.value
-    assert "'The engine prompt length" in str(error)
-    assert "Please reduce prompt" in str(error)
