@@ -6,13 +6,13 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
 import regex as re
 from fastapi import Request
-from https import HTTPStatus
 from openai_harmony import Message as OpenAIMessage
 from pydantic import TypeAdapter
 
