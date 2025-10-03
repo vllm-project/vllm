@@ -778,7 +778,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             )
         ], mm_item_counts)
 
-        prompt_ids, prompt, _ = self._apply_prompt_updates(
+        prompt_ids, _ = self._apply_prompt_updates(
             result["prompt_token_ids"],
             mantis_mm_repls,
         )
@@ -798,7 +798,6 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
         return MultiModalInputs(
             type="multimodal",
-            prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
