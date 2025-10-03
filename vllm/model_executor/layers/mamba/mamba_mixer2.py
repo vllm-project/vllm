@@ -579,8 +579,6 @@ class MambaMixer2(MambaBase, CustomOp):
         if prefix_caching_enabled:
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
-
-            # Split decodes and prefills:
             last_state_idx_d, last_state_idx_p = torch.split(
                 attn_metadata.last_state_idx, [num_decodes, num_prefills],
                 dim=0)
@@ -594,8 +592,8 @@ class MambaMixer2(MambaBase, CustomOp):
         else:
             last_state_idx_d, last_state_idx_p = None, None
             current_last_idx_d, current_last_idx_p = None, None
-            _, current_first_idx_p = None, None
-            _, context_lens_p = None, None
+            current_first_idx_p = None
+            context_lens_p = None
 
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
