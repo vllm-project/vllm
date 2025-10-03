@@ -490,6 +490,7 @@ class MambaMixer2(MambaBase, CustomOp):
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
         assert self.cache_config is not None
+        mamba_block_size = self.cache_config.mamba_block_size
         prefix_caching_enabled = self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
@@ -507,7 +508,6 @@ class MambaMixer2(MambaBase, CustomOp):
             query_start_loc_p = attn_metadata.query_start_loc_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
-            mamba_block_size = attn_metadata.cache_spec.block_size
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)

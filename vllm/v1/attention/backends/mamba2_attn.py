@@ -15,7 +15,7 @@ from vllm.v1.attention.backends.utils import (PAD_SLOT_ID,
                                               CommonAttentionMetadata,
                                               compute_causal_conv1d_metadata,
                                               split_decodes_and_prefills)
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 def compute_varlen_chunk_metadata(
@@ -132,7 +132,6 @@ class Mamba2AttentionMetadata:
     nums_dict: Optional[dict] = None
     batch_ptr: Optional[torch.Tensor] = None
     token_chunk_offset_ptr: Optional[torch.Tensor] = None
-    cache_spec: Optional[MambaSpec] = None
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -144,8 +143,7 @@ class Mamba2AttentionMetadataBuilder(
         self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models")
-        assert isinstance(kv_cache_spec, MambaSpec)
-        if kv_cache_spec.enable_prefix_caching:
+        if self.vllm_config.cache_config.enable_prefix_caching:
             self.state_indices_tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,
                  cdiv(vllm_config.model_config.max_model_len,
@@ -198,8 +196,7 @@ class Mamba2AttentionMetadataBuilder(
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
-        assert isinstance(self.kv_cache_spec, MambaSpec)
-        if self.kv_cache_spec.enable_prefix_caching:
+        if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
 
@@ -331,7 +328,7 @@ class Mamba2AttentionMetadataBuilder(
             state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
-            if self.kv_cache_spec.enable_prefix_caching:
+            if self.vllm_config.cache_config.enable_prefix_caching:
                 self.current_last_token_block_idx[:num_decodes].copy_(
                     current_last_token_block_idx, non_blocking=True)
                 current_last_token_block_idx = \
@@ -370,7 +367,6 @@ class Mamba2AttentionMetadataBuilder(
             seq_lens=seq_lens,
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
-            cache_spec=self.kv_cache_spec,
             has_initial_states_p=has_initial_states_p,
             seq_idx_p=seq_idx_p,
             state_indices_tensor=state_indices_tensor,

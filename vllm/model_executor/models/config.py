@@ -411,6 +411,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # with mamba layers, use FlashInfer instead).
             attn_block_size = 16 * cdiv(mamba_page_size,
                                         16 * attn_page_size_1_token)
+            cache_config.mamba_block_size = model_config.max_model_len
 
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
