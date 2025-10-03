@@ -305,7 +305,7 @@ class Hermes2ProToolParser(ToolParser):
                    isinstance(args,str):
                     try:
                         json.loads(args)
-                    except:
+                    except Exception:
                         del current_tool_call["arguments"]
                 logger.debug("Parsed tool call %s", current_tool_call)
             except partial_json_parser.core.exceptions.MalformedJSON:
