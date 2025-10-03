@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
 import json
 import sys
 import time
@@ -75,7 +74,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
+from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of, make_async,
                         merge_async_iterators, random_uuid)
 
 logger = init_logger(__name__)
@@ -273,26 +272,6 @@ class OpenAIServing:
             async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
             self._async_tokenizer_pool[tokenizer] = async_tokenizer
         return async_tokenizer
-
-    async def _async_apply_mistral_chat_template(
-        self,
-        tokenizer: MistralTokenizer,
-        messages: list[ChatCompletionMessageParam],
-        chat_template: Optional[str],
-        tools: Optional[list[dict[str, Any]]],
-        **kwargs: Any,
-    ) -> list[int]:
-        """
-        Async wrapper for apply_mistral_chat_template that offloads blocking
-        tokenization to a background thread so we don't block the event loop.
-        """
-
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self._tokenizer_executor,
-            lambda: apply_mistral_chat_template(
-                tokenizer, messages, chat_template, tools, **kwargs),
-        )
 
     async def _preprocess(
         self,
@@ -754,6 +733,32 @@ class OpenAIServing:
                     tokenizer=tokenizer,
                 )
 
+    async def _apply_chat_template(
+            self, tokenizer: AnyTokenizer,
+            messages: list[ChatCompletionMessageParam],
+            conversation: list[ConversationMessage],
+            chat_template_kwargs: dict[str, Any]) -> Union[str, list[int]]:
+        request_prompt: Union[str, list[int]]
+
+        if tokenizer is None:
+            request_prompt = "placeholder"
+        elif isinstance(tokenizer, MistralTokenizer):
+            apply_mistral_async = make_async(apply_mistral_chat_template,
+                                             executor=self._tokenizer_executor)
+            request_prompt = await apply_mistral_async(
+                tokenizer,
+                messages=messages,
+                **chat_template_kwargs,
+            )
+        else:
+            request_prompt = apply_hf_chat_template(
+                tokenizer=tokenizer,
+                conversation=conversation,
+                model_config=self.model_config,
+                **chat_template_kwargs,
+            )
+        return request_prompt
+
     async def _preprocess_chat(
         self,
         request: Union[ChatLikeRequest, ResponsesRequest],
@@ -798,23 +803,12 @@ class OpenAIServing:
         )
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
-        request_prompt: Union[str, list[int]]
-
-        if tokenizer is None:
-            request_prompt = "placeholder"
-        elif isinstance(tokenizer, MistralTokenizer):
-            request_prompt = await self._async_apply_mistral_chat_template(
-                tokenizer,
-                messages=messages,
-                **_chat_template_kwargs,
-            )
-        else:
-            request_prompt = apply_hf_chat_template(
-                tokenizer=tokenizer,
-                conversation=conversation,
-                model_config=model_config,
-                **_chat_template_kwargs,
-            )
+        request_prompt = await self._apply_chat_template(
+            tokenizer,
+            messages,
+            conversation,
+            _chat_template_kwargs,
+        )
 
         mm_data = await mm_data_future
 

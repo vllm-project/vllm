@@ -3,13 +3,14 @@
 
 import asyncio
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 
 @pytest.fixture()
@@ -31,31 +32,27 @@ def serving() -> OpenAIServing:
     return serving
 
 
-@pytest.fixture()
-def large_user_message() -> dict[str, str]:
-    words_needed = 200_000
-    content = " ".join([f"word{i+1}" for i in range(words_needed)])
-    return {"role": "user", "content": content}
-
-
 @pytest.mark.asyncio
-@patch('vllm.entrypoints.openai.serving_engine.apply_mistral_chat_template')
 async def test_async_mistral_tokenizer_does_not_block_event_loop(
-        mock_apply_mistral_chat_template, serving: OpenAIServing,
-        large_user_message: dict[str, str]):
+        serving: OpenAIServing):
     expected_tokens = [1, 2, 3]
 
     # Mock the blocking version to sleep
-    def mock_tokenizer(*args, **kwargs):
+    def mocked_apply_chat_template(*_args, **_kwargs):
         time.sleep(2)
         return expected_tokens
 
-    mock_apply_mistral_chat_template.side_effect = mock_tokenizer
+    mock_tokenizer = Mock(spec=MistralTokenizer)
+    mock_tokenizer.apply_chat_template.side_effect = mocked_apply_chat_template
 
     task = asyncio.create_task(
-        serving._async_apply_mistral_chat_template(None, [large_user_message],
-                                                   chat_template=None,
-                                                   tools=None))
+        serving._apply_chat_template(tokenizer=mock_tokenizer,
+                                     messages=[],
+                                     conversation=[],
+                                     chat_template_kwargs={
+                                         "chat_template": None,
+                                         "tools": []
+                                     }))
 
     # Ensure the event loop is not blocked
     blocked_count = 0
