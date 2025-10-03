@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
@@ -97,6 +98,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
+    VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
@@ -616,8 +618,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # All possible options loaded dynamically from _Backend enum
     "VLLM_ATTENTION_BACKEND":
     env_with_choices("VLLM_ATTENTION_BACKEND", None,
-                     lambda: list(__import__('vllm.platforms.interface', \
-                        fromlist=['_Backend'])._Backend.__members__.keys())),
+                     lambda: list(__import__(
+                         'vllm.attention.backends.registry',
+                         fromlist=['_Backend'])._Backend.__members__.keys())),
 
     # If set, vllm will use flashinfer sampler
     "VLLM_USE_FLASHINFER_SAMPLER":
@@ -730,6 +733,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Whether to allow HTTP redirects when fetching from media URLs.
+    # Default to True
+    "VLLM_MEDIA_URL_ALLOW_REDIRECTS":
+    lambda: bool(int(os.getenv("VLLM_MEDIA_URL_ALLOW_REDIRECTS", "1"))),
 
     # Max number of workers for the thread pool handling
     # media bytes loading. Set to 1 to disable parallel processing.
@@ -888,6 +896,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLED_KERNELS":
     lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
         "VLLM_DISABLED_KERNELS"].split(","),
+
+    # Disable pynccl (using torch.distributed instead)
+    "VLLM_DISABLE_PYNCCL":
+    lambda:
+    (os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")),
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":
