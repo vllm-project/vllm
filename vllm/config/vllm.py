@@ -475,6 +475,10 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
+        if (self.reasoning_config is not None
+                and self.model_config is not None):
+            self.reasoning_config.initialize_token_ids(self.model_config)
+
         if (envs.VLLM_USE_V1
                 and not self.scheduler_config.disable_hybrid_kv_cache_manager):
             # logger should only print warning message for hybrid models. As we
