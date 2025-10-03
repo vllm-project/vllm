@@ -464,7 +464,7 @@ def make_fused_experts(
         print(f"Making BatchedTritonOrDeepGemmExperts {kwargs} ...")
         experts = BatchedTritonOrDeepGemmExperts(**kwargs)
     elif fused_experts_type == DeepGemmExperts:
-        print("Making DeepGemmExperts {quant_config} ...")
+        print(f"Making DeepGemmExperts {quant_config} ...")
         experts = DeepGemmExperts(quant_config)
     elif fused_experts_type == TritonExperts:
         kwargs = quant_kwargs
