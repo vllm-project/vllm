@@ -10,6 +10,8 @@ image:
   # -- Container launch command
   command: ["vllm", "serve", "/data/", "--served-model-name", "opt-125m", "--enforce-eager", "--dtype", "bfloat16", "--block-size", "16", "--host", "0.0.0.0", "--port", "8000"]
 
+imagePullSecrets: []
+
 # -- Container port
 containerPort: 8000
 # -- Service name
@@ -117,3 +119,6 @@ livenessProbe:
 labels:
   environment: "test"
   release: "test"
+
+pvWithModels: ""
+modelsPath: ""
