@@ -41,12 +41,13 @@ def main(args):
     total_calls = 0
     for func in stats.stats:
         if "hash_of_block" in func[2]:
-            total_time = stats.stats[func][3]
-            total_calls = stats.stats[func][0]
+            total_time += stats.stats[func][3]
+            total_calls += stats.stats[func][0]
     percentage = (total_time / stats.total_tt) * 100
     print(
         f"Hashing took {total_time:.2f} seconds,{percentage:.2f}% of the total runtime."
     )
+    print(f"Total calls to hash_of_block: {total_calls}")
 
 
 if __name__ == "__main__":
