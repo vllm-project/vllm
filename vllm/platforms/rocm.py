@@ -14,10 +14,13 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
+else:
+    _Backend = None
 
 logger = init_logger(__name__)
 
@@ -182,11 +185,10 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> _Backend:
+                             dtype: torch.dtype) -> "_Backend":
+        from vllm.attention.backends.registry import _Backend
         if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
                 and on_gfx9()):
-            # Note: AITER FA is only supported for Qwen-VL models.
-            # TODO: Add support for other VL models in their model class.
             return _Backend.ROCM_AITER_FA
         if on_gfx9():
             return _Backend.FLASH_ATTN
@@ -195,7 +197,11 @@ class RocmPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla,
-                             has_sink) -> str:
+                             has_sink, use_sparse) -> str:
+        from vllm.attention.backends.registry import _Backend
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on ROCm.")
         if use_mla:
             if not use_v1:
                 raise RuntimeError(
@@ -327,17 +333,7 @@ class RocmPlatform(Platform):
             cache_config.block_size = 16
 
         if parallel_config.worker_cls == "auto":
-            if vllm_config.speculative_config:
-                if not use_v1:
-                    raise NotImplementedError(
-                        "Speculative decoding is not supported on vLLM V0.")
-                parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
-            else:
-                if use_v1:
-                    parallel_config.worker_cls = \
-                        "vllm.v1.worker.gpu_worker.Worker"
-                else:
-                    parallel_config.worker_cls = "vllm.worker.worker.Worker"
+            parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
         if (use_v1 and use_aiter_rms_norm and not is_eager_execution
                 and "-rms_norm" not in compilation_config.custom_ops):

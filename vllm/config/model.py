@@ -19,7 +19,8 @@ import vllm.envs as envs
 from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
                                     MultiModalConfig)
 from vllm.config.pooler import PoolerConfig
-from vllm.config.utils import assert_hashable, config
+from vllm.config.scheduler import RunnerType
+from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
@@ -40,7 +41,6 @@ if TYPE_CHECKING:
     import vllm.model_executor.models as me_models
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
-    from vllm.config.scheduler import RunnerType
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.v1.sample.logits_processor import LogitsProcessor
 else:
@@ -52,13 +52,12 @@ else:
                            "vllm.model_executor.models")
     LoadConfig = Any
     ParallelConfig = Any
-    RunnerType = Any
     QuantizationMethods = Any
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
 
-RunnerOption = Literal["auto", "generate", "pooling", "draft"]
+RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify", "reward"]
 ConvertOption = Literal["auto", ConvertType]
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
@@ -277,7 +276,9 @@ class ModelConfig:
     multimodal_config: Optional[MultiModalConfig] = None
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
-    limit_mm_per_prompt: InitVar[Optional[dict[str, int]]] = None
+    limit_mm_per_prompt: InitVar[Optional[dict[str, Union[int,
+                                                          dict[str,
+                                                               int]]]]] = None
     media_io_kwargs: InitVar[Optional[dict[str, dict[str, Any]]]] = None
     mm_processor_kwargs: InitVar[Optional[dict[str, Any]]] = None
     mm_processor_cache_gb: InitVar[Optional[float]] = None
@@ -668,17 +669,41 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
-        if getattr(self, "runner_type", self.runner) == "pooling":
-            return "TransformersModel"
+        prefix = "Transformers"
+        prefix += "MoE" if self.get_num_experts() > 1 else ""
+        # Check if the architecture we're wrapping has defaults
+        runner = None
+        convert = None
+        if defaults := try_match_architecture_defaults(self.architectures[0]):
+            _, (runner, convert) = defaults
+        # Overwrite with user-specified values
+        if self.runner != "auto":
+            runner = self.runner
+        if self.convert not in {"auto", "none"}:
+            convert = self.convert
+        # Fall back to default values if still not set
+        if runner is None:
+            runner = "generate"
+        if convert in {None, "none"}:
+            convert = "embed"
+        # Resolve Transformers backend pooling classes
+        if runner == "pooling":
+            if convert == "embed":
+                return prefix + "EmbeddingModel"
+            if convert == "classify":
+                return prefix + "ForSequenceClassification"
+        # Resolve Transformers backend generate classes
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
-            return "TransformersForMultimodalLM"
-        return "TransformersForCausalLM"
+            return prefix + "ForMultimodalLM"
+        return prefix + "ForCausalLM"
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers backend class."""
-        return self.architecture == self._get_transformers_backend_cls()
+        used_cls = self._model_info.architecture
+        transformers_backend_cls = self._get_transformers_backend_cls()
+        return used_cls == transformers_backend_cls
 
     @property
     def registry(self):
@@ -1004,17 +1029,7 @@ class ModelConfig:
             self.enforce_eager = True
 
     def _verify_with_expert_parallelism(self) -> None:
-        num_expert_names = [
-            "moe_num_experts",  # Dbrx
-            "num_experts",  # Jamba
-            "n_routed_experts",  # DeepSeek
-            "num_local_experts",  # Mixtral
-        ]
-        num_experts = 0
-        for name in num_expert_names:
-            num_experts = getattr(self.hf_text_config, name, 0)
-            if num_experts > 0:
-                break
+        num_experts = self.get_num_experts()
         if num_experts < 1:
             raise ValueError(
                 "Number of experts in the model must be greater than 0 "
@@ -1082,14 +1097,14 @@ class ModelConfig:
         if not hasattr(self.hf_text_config, "model_type"):
             return False
         elif self.hf_text_config.model_type in \
-            ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp',
+            ('deepseek_v2', 'deepseek_v3', 'deepseek_v32', 'deepseek_mtp',
               'kimi_k2', 'longcat_flash'):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == 'eagle':
             # if the model is an EAGLE module, check for the
             # underlying architecture
             return self.hf_text_config.model.model_type in \
-                    ('deepseek_v2', 'deepseek_v3') \
+                    ('deepseek_v2', 'deepseek_v3', 'deepseek_v32') \
                 and self.hf_text_config.kv_lora_rank is not None
         return False
 
@@ -1198,6 +1213,21 @@ class ModelConfig:
     def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
+
+    def get_num_experts(self) -> int:
+        """Returns the number of experts in the model."""
+        num_expert_names = [
+            "num_experts",  # Jamba
+            "moe_num_experts",  # Dbrx
+            "n_routed_experts",  # DeepSeek
+            "num_local_experts",  # Mixtral
+        ]
+        num_experts = getattr_iter(self.hf_text_config, num_expert_names, 0)
+        if isinstance(num_experts, list):
+            # Ernie VL's remote code uses list[int]...
+            # The values are always the same so we just take the first one.
+            return num_experts[0]
+        return num_experts
 
     def get_layers_start_end_indices(
             self, parallel_config: ParallelConfig) -> tuple[int, int]:
@@ -1334,11 +1364,13 @@ class ModelConfig:
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
+                config_format=self.config_format,
             )
         else:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
+                config_format=self.config_format,
             )
 
         if config is None:

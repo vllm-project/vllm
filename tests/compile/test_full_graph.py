@@ -11,8 +11,8 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
-from tests.v1.attention.utils import _Backend
 from vllm import LLM, SamplingParams
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          PassConfig)
@@ -137,6 +137,21 @@ def test_custom_compile_config(
     model, model_kwargs = model_info
     print(f"MODEL={model}")
     run_model(compilation_config, model, model_kwargs)
+
+
+@pytest.mark.parametrize(
+    "optimization_level",
+    [CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE],
+)
+def test_fp8_kv_scale_compile(optimization_level: int):
+    model = "Qwen/Qwen2-0.5B"
+    model_kwargs = {
+        "quantization": "fp8",
+        "kv_cache_dtype": "fp8_e4m3",
+        "calculate_kv_scales": True,
+        "max_model_len": 512,
+    }
+    run_model(optimization_level, model, model_kwargs)
 
 
 def test_inductor_graph_partition_attn_fusion(caplog_vllm):

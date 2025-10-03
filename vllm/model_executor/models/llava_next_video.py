@@ -11,6 +11,7 @@ from transformers import (BatchFeature, LlavaNextVideoConfig,
                           LlavaNextVideoProcessor)
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -150,6 +151,7 @@ class LlavaNextVideoDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_videos = mm_counts.get("video", 0)
 
@@ -158,6 +160,8 @@ class LlavaNextVideoDummyInputsBuilder(
         target_num_frames = \
             self.info.get_num_frames_with_most_features(seq_len, mm_counts)
 
+        video_overrides = mm_options.get("video") if mm_options else None
+
         return {
             "video":
             self._get_dummy_videos(
@@ -165,6 +169,7 @@ class LlavaNextVideoDummyInputsBuilder(
                 height=target_height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
+                overrides=video_overrides,
             )
         }
 
@@ -349,27 +354,16 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              "w": expected_w,
                                          })
 
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
-        if strategy == "default":
-            return image_features[:, 1:]
-        elif strategy == "full":
-            return image_features
-
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
-
     def _video_pixels_to_features(
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values)
-        image_features = self._select_image_features(
-            image_features,
-            strategy=self.config.vision_feature_select_strategy,
+        image_features = vision_tower(
+            pixel_values,
+            feature_select_strategy=self.config.vision_feature_select_strategy,
         )
         image_features = self.vision_resampler(image_features)
         image_features = self.multi_modal_projector(image_features)
