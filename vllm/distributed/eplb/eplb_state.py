@@ -52,10 +52,9 @@ def save_eplb_state(tensor: torch.Tensor, save_dir: Path,
                     dir_iter: int) -> None:
     try:
         file_path = f"{save_dir}/global_expert_load_window_i{dir_iter}.safetensors"  # noqa: E501
-        torch.save(
-            {
-                "global_expert_load_window": tensor,
-            }, file_path)
+        torch.save({
+            "global_expert_load_window": tensor,
+        }, file_path)
         logger.info("Successfully saved to %s.", file_path)
     except Exception as e:
         logger.error("An error occurred while saving the tensor: %s.", e)
@@ -65,6 +64,7 @@ def load_eplb_state(eplb_load_path: Path) -> torch.Tensor:
     loaded_tensors = torch.load(eplb_load_path)
     logger.info("Successfully loaded %s.", eplb_load_path)
     return loaded_tensors["global_expert_load_window"]
+
 
 @dataclass
 class EplbState:
@@ -147,11 +147,11 @@ class EplbState:
     See:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
-    eplb_load_path: Path | None
+    eplb_load_path: Optional[Path] = None
     """
     Path for loading eplb initial state.
     """
-    eplb_save_dir: Path | None
+    eplb_save_dir: Optional[Path] = None
     """
     Path where eplb states will be saved.
     """

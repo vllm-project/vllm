@@ -711,6 +711,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input: bool = False,
             activation: str = "silu",
             enable_eplb: bool = False,
+            eplb_record_metrics: bool = False,
             expert_load_view: Optional[torch.Tensor] = None,
             logical_to_physical_map: Optional[torch.Tensor] = None,
             logical_replica_count: Optional[torch.Tensor] = None
@@ -774,6 +775,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
+        eplb_record_metrics: bool = False,
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,

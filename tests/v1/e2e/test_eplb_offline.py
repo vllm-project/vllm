@@ -9,6 +9,7 @@ from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import EPLBConfig
 
+
 @pytest.fixture
 def sampling_config():
     return SamplingParams(temperature=0, max_tokens=10, ignore_eos=False)
