@@ -290,7 +290,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: "BatchFeature",
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         # HF Processors always return a mask but vLLM doesn't need it
@@ -304,7 +304,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_fields["image_embeds"] = MultiModalFieldConfig.flat_from_sizes(
             "image", num_image_patches)
 
-        # Keep `num_patches` as batched, as it always has `bs` as first dim
+        # Keep these as batched, as they always have batch size as first dim
         mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
         mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched("image")
         mm_fields["num_image_patches"] = MultiModalFieldConfig.batched("image")
@@ -318,13 +318,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         In contrast to the base class, this method always adds
         `return_mm_token_type_ids` to the processor data
         """
-        processor_data: dict[str, object] = {"return_mm_token_type_ids": True}
-        passthrough_data = dict[str, object]()
-
-        for items in mm_items.values():
-            processor_data.update(items.get_processor_data())
-            passthrough_data.update(items.get_passthrough_data())
-
+        processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
+        processor_data["return_mm_token_type_ids"] = True
         return processor_data, passthrough_data
 
     def apply(
@@ -353,6 +348,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             prompt = hf_processor.decode(prompt)
 
         # Bypass cached processor and always apply to the full set of mm inputs
+        # NOTE: we can't just set caching=False because base class method
+        # transforms outputs to `MultiModalKwargs` which is not going to
+        # work for Transformers. We have a lot of logic tied to
+        # `mm_tokens_per_modality` below
         prompt_ids, processed_data, _ = self._apply_hf_processor_text_mm(
             prompt_text=prompt,
             mm_items=mm_items,
