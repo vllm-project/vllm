@@ -4224,7 +4224,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     dtypes=mamba_module.get_state_dtype(),
                     block_size=mamba_block_size,
                     enable_prefix_caching=self.vllm_config.cache_config.
-                        enable_prefix_caching,
+                    enable_prefix_caching,
                     page_size_padded=page_size_padded,
                     mamba_type=mamba_module.mamba_type,
                     num_speculative_blocks=(
