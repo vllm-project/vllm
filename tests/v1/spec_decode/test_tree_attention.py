@@ -6,9 +6,10 @@ from typing import Optional
 
 import torch
 
-from tests.v1.attention.utils import (_Backend, create_standard_kv_cache_spec,
+from tests.v1.attention.utils import (create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
+from vllm.attention.backends.registry import _Backend
 from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
