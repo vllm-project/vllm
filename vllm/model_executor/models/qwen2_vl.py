@@ -41,7 +41,9 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from transformers.models.qwen2_vl.video_processing_qwen2_vl import (
     Qwen2VLVideoProcessor)
 
-from vllm.attention.layer import check_upstream_fa_availability
+from vllm.attention.backends.registry import _Backend
+from vllm.attention.layer import (check_upstream_fa_availability,
+                                  maybe_get_vit_flash_attn_backend)
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
@@ -50,6 +52,8 @@ from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import (
+    dispatch_rotary_emb_function)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -63,7 +67,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -272,13 +275,11 @@ def apply_rotary_emb_torch(x: torch.Tensor,
 
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
                                 freqs: torch.Tensor) -> torch.Tensor:
+    rotary_emb_function = dispatch_rotary_emb_function()
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
-    apply_rotary_emb = apply_rotary_emb_torch
-    if current_platform.is_cuda():
-        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
-    output = apply_rotary_emb(t_, cos, sin).type_as(t)
+    output = rotary_emb_function(t_, cos, sin).type_as(t)
     return output
 
 
@@ -319,11 +320,12 @@ class Qwen2VisionAttention(nn.Module):
             head_size=self.hidden_size_per_attention_head,
             dtype=torch.get_default_dtype())
         self.use_upstream_fa = False
-        if self.attn_backend != _Backend.FLASH_ATTN and \
-            check_upstream_fa_availability(
-                torch.get_default_dtype()):
-            self.attn_backend = _Backend.FLASH_ATTN
-            self.use_upstream_fa = True
+
+        self.attn_backend, self.flash_attn_varlen_func \
+            = maybe_get_vit_flash_attn_backend(
+                self.attn_backend,
+                self.use_upstream_fa,
+            )
 
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
@@ -331,6 +333,7 @@ class Qwen2VisionAttention(nn.Module):
         }:
             raise RuntimeError(
                 f"Qwen2-VL does not support {self.attn_backend} backend now.")
+
         self.is_flash_attn_backend = self.attn_backend in {
             _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
         }
@@ -383,25 +386,18 @@ class Qwen2VisionAttention(nn.Module):
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
-            if self.attn_backend == _Backend.ROCM_AITER_FA:
-                from aiter import flash_attn_varlen_func
-            else:
-                if self.use_upstream_fa:
-                    from flash_attn import flash_attn_varlen_func
-                else:
-                    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
-            output = flash_attn_varlen_func(q,
-                                            k,
-                                            v,
-                                            cu_seqlens_q=cu_seqlens,
-                                            cu_seqlens_k=cu_seqlens,
-                                            max_seqlen_q=max_seqlen,
-                                            max_seqlen_k=max_seqlen,
-                                            dropout_p=0.0,
-                                            causal=False)
+            output = self.flash_attn_varlen_func(q,
+                                                 k,
+                                                 v,
+                                                 cu_seqlens_q=cu_seqlens,
+                                                 cu_seqlens_k=cu_seqlens,
+                                                 max_seqlen_q=max_seqlen,
+                                                 max_seqlen_k=max_seqlen,
+                                                 dropout_p=0.0,
+                                                 causal=False)
 
             context_layer = rearrange(output,
                                       "(b s) h d -> s b (h d)",
