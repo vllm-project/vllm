@@ -455,8 +455,6 @@ class MambaMixer2(MambaBase, CustomOp):
         self.cache_config = cache_config
         self.prefix = prefix
 
-        assert self.cache_config is not None
-
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -490,6 +488,7 @@ class MambaMixer2(MambaBase, CustomOp):
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
+
         assert self.cache_config is not None
         prefix_caching_enabled = self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
