@@ -90,10 +90,14 @@ class KVConnectorOutput:
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them.
     invalid_block_ids: set[int] = field(default_factory=set)
+    # IDs of requests that encountered unrecoverable transfer failures.
+    # These requests should be aborted.
+    failed_req_ids: set[str] = field(default_factory=set)
 
     def is_empty(self):
         return (not self.finished_sending and not self.finished_recving
-                and not self.kv_connector_stats and not self.invalid_block_ids)
+                and not self.kv_connector_stats and not self.invalid_block_ids
+                and not self.failed_req_ids)
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.

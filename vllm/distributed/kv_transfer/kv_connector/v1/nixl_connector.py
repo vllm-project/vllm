@@ -234,6 +234,11 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
 
+    def get_failed_request_ids(self) -> set[str]:
+        """Get request IDs that encountered unrecoverable NIXL failures."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_failed_request_ids()
+
     def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
         assert self.connector_worker is not None
         return self.connector_worker.get_kv_connector_stats()
@@ -582,6 +587,8 @@ class NixlConnectorWorker:
         self._invalid_block_ids: set[int] = set()
         # requests that failed during transfer initiation
         self._failed_initiation_reqs: set[ReqId] = set()
+        # requests that encountered unrecoverable failures
+        self._failed_req_ids: set[ReqId] = set()
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
@@ -1249,6 +1256,7 @@ class NixlConnectorWorker:
                                 "state %s. Failing request (would require "
                                 "reprefilling %d tokens).", req_id, xfer_state,
                                 len(meta.local_block_ids) * self.block_size)
+                            self._failed_req_ids.add(req_id)
 
                         # clean up metadata after handling failure
                         self._recving_metadata.pop(req_id, None)
@@ -1482,6 +1490,7 @@ class NixlConnectorWorker:
                     "Failing request (would require reprefilling %d tokens).",
                     request_id, e,
                     len(local_block_ids) * self.block_size)
+                self._failed_req_ids.add(request_id)
 
             self._failed_initiation_reqs.add(request_id)
             self.xfer_stats.record_failed_transfer()
@@ -1556,6 +1565,17 @@ class NixlConnectorWorker:
         invalid_blocks = self._invalid_block_ids.copy()
         self._invalid_block_ids.clear()
         return invalid_blocks
+
+    def get_failed_request_ids(self) -> set[str]:
+        """
+        Return and clear the set of request IDs that encountered
+        unrecoverable transfer failures.
+
+        These requests should be aborted by the scheduler.
+        """
+        failed_reqs = self._failed_req_ids.copy()
+        self._failed_req_ids.clear()
+        return failed_reqs
 
     def shutdown(self):
         """Shutdown the connector worker."""

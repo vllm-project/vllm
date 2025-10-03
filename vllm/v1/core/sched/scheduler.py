@@ -892,6 +892,14 @@ class Scheduler(SchedulerInterface):
             failed_kv_load_req_ids = self._handle_invalid_blocks(
                 kv_connector_output.invalid_block_ids)
 
+        # handle requests that encountered unrecoverable transfer failures
+        if kv_connector_output and kv_connector_output.failed_req_ids:
+            self.finish_requests(list(kv_connector_output.failed_req_ids),
+                                 RequestStatus.FINISHED_ABORTED)
+            logger.info(
+                "Aborted %d requests due to unrecoverable KV transfer failures",
+                len(kv_connector_output.failed_req_ids))
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.

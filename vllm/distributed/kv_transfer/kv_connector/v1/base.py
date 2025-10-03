@@ -249,6 +249,17 @@ class KVConnectorBase_V1(ABC):
         """
         return set()
 
+    def get_failed_request_ids(self) -> set[str]:
+        """
+        Get the set of request IDs that encountered unrecoverable transfer
+        failures and should be aborted.
+
+        Returns:
+            Set of request IDs that should be aborted.
+            Empty set if no unrecoverable failures occurred.
+        """
+        return set()
+
     def shutdown(self):
         """
         Shutdown the connector. This is called when the worker process
