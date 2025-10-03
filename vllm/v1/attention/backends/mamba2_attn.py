@@ -181,6 +181,10 @@ class Mamba2AttentionMetadataBuilder(
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
+        context_lens, context_lens_p = None, None
+        current_first_idx, current_first_idx_p = None, None
+        last_computed_offset, last_computed_offset_p = None, None
+
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
@@ -190,10 +194,10 @@ class Mamba2AttentionMetadataBuilder(
             seq_lens_pending = (
                 torch.roll(common_attn_metadata.query_start_loc, -1, -1) -
                 common_attn_metadata.query_start_loc)[:-1]
-            context_lens_p = common_attn_metadata.seq_lens - \
+            context_lens = common_attn_metadata.seq_lens - \
                                  seq_lens_pending
-            last_computed_offset_p = \
-                context_lens_p % mamba_block_size
+            last_computed_offset = \
+                context_lens % mamba_block_size
             # Indices: last_computed <= current_first <= current_last
             # Cases:
             #  last_computed == current_first  if last state was partially
@@ -201,24 +205,21 @@ class Mamba2AttentionMetadataBuilder(
             #  current_first == current_last   if no block crossing occurs, and
             #                                  only one state will be stored
             # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
-            current_last_idx = cdiv(context_lens_p + seq_lens_pending,
+            current_last_idx = cdiv(context_lens + seq_lens_pending,
                                     mamba_block_size) - 1
-            current_first_idx_p = cdiv(context_lens_p + 1,
-                                       mamba_block_size) - 1
-            last_state_idx = cdiv(context_lens_p, mamba_block_size) - 1
+            current_first_idx = cdiv(context_lens + 1, mamba_block_size) - 1
+            last_state_idx = cdiv(context_lens, mamba_block_size) - 1
             # -1 in case it's non-computed and causes later issues with indexing
             last_state_idx = \
                 last_state_idx.clamp(min=0)
+
         else:
             # Always return just a single block per each request:
             state_indices_tensor = common_attn_metadata.block_table_tensor[:,
                                                                            0]
             # Additional cache-related varaiables:
             current_last_idx = None
-            current_first_idx_p = None
             last_state_idx = None
-            last_computed_offset_p = None
-            context_lens_p = None
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -237,6 +238,16 @@ class Mamba2AttentionMetadataBuilder(
 
             query_start_loc_p = common_attn_metadata.query_start_loc[
                 -num_prefills - 1:] - num_decode_tokens
+
+            if self.vllm_config.cache_config.enable_prefix_caching:
+                assert context_lens is not None
+                context_lens_p = context_lens[num_reqs - num_prefills:num_reqs]
+                assert last_computed_offset is not None
+                last_computed_offset_p = last_computed_offset[
+                    num_reqs - num_prefills:num_reqs]
+                assert current_first_idx is not None
+                current_first_idx_p = current_first_idx[num_reqs -
+                                                        num_prefills:num_reqs]
 
             num_computed_tokens_p = \
                 common_attn_metadata.num_computed_tokens_cpu[
