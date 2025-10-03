@@ -1878,7 +1878,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         tokenizer = self.info.get_tokenizer()
 
         new_token_ids, match_result = self._apply_token_matches(
@@ -1896,11 +1896,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # Since it is inefficient to search for all possible tokenizations
         # of the search text in the prompt, we instead perform string-based
         # updates on the decoded token IDs, then encode them back.
-        if all(
+        if not all(
                 all(update_idx is not None for update_idx in update_idxs)
                 for update_idxs in match_result.values()):
-            new_text = decode_tokens(tokenizer, new_token_ids)
-        else:
             new_text, match_result = self._apply_text_matches(
                 decode_tokens(tokenizer, token_ids),
                 mm_prompt_updates,
@@ -1928,7 +1926,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             dict(matched_updates),
         )
 
-        return new_token_ids, new_text, placeholders
+        return new_token_ids, placeholders
 
     def _validate_mm_kwargs(
         self,
@@ -1976,7 +1974,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_kwargs: MultiModalKwargsOptionalItems,
         mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
@@ -1986,21 +1984,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_prompt_updates,
             )
             self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
-
-            tokenizer = self.info.get_tokenizer()
-            prompt = decode_tokens(tokenizer, prompt_ids)
         else:
-            (
-                prompt_ids,
-                prompt,
-                mm_placeholders,
-            ) = self._apply_prompt_updates(
+            prompt_ids, mm_placeholders = self._apply_prompt_updates(
                 prompt_ids,
                 mm_prompt_updates,
             )
             self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
-        return prompt_ids, prompt, mm_placeholders
+        return prompt_ids, mm_placeholders
 
     def apply(
         self,
@@ -2042,7 +2033,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         # NOTE: tokenization_kwargs are not required to init processor
-        prompt_ids, prompt, mm_placeholders = self._maybe_apply_prompt_updates(
+        prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
             mm_items=mm_items,
             prompt_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
@@ -2057,7 +2048,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return MultiModalInputs(
             type="multimodal",
-            prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
             mm_hashes=mm_info.hashes,
@@ -2100,19 +2090,15 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenizer = self.info.get_tokenizer()
         decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_data)
         if isinstance(decoder_prompt_raw, str):
-            decoder_prompt = decoder_prompt_raw
             decoder_prompt_ids = encode_tokens(tokenizer,
                                                decoder_prompt_raw,
                                                add_special_tokens=False)
         else:
-            decoder_prompt = decode_tokens(tokenizer, decoder_prompt_raw)
             decoder_prompt_ids = decoder_prompt_raw
 
         mm_inputs = MultiModalEncDecInputs(
-            encoder_prompt=encoder_inputs["prompt"],
             encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
             **encoder_inputs)
-        mm_inputs["prompt"] = decoder_prompt
         mm_inputs["prompt_token_ids"] = decoder_prompt_ids
         return mm_inputs
 

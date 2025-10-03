@@ -13,6 +13,7 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
     get_anyres_image_grid_shape, unpad_image)
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -254,6 +255,7 @@ class LlavaOnevisionDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -264,17 +266,22 @@ class LlavaOnevisionDummyInputsBuilder(
             self.info.get_num_frames_with_most_features(seq_len,
                                                         mm_counts)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images),
+                                   num_images=num_images,
+                                   overrides=image_overrides),
             "video":
             self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
+                overrides=video_overrides,
             )
         }
 
@@ -577,27 +584,16 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return mm_input_by_modality
 
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
-        if strategy == "default":
-            return image_features[:, 1:]
-        elif strategy == "full":
-            return image_features
-
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
-
     def _image_pixels_to_features(
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values)
-        return self._select_image_features(
-            image_features,
-            strategy=self.config.vision_feature_select_strategy,
+        return vision_tower(
+            pixel_values,
+            feature_select_strategy=self.config.vision_feature_select_strategy,
         )
 
     # Based on: https://github.com/haotian-liu/LLaVA/blob/main/llava/model/llava_arch.py
@@ -750,13 +746,11 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        video_features = vision_tower(pixel_values)
-        video_features = self._select_image_features(
-            video_features,
-            strategy=self.config.vision_feature_select_strategy,
+        video_features = vision_tower(
+            pixel_values,
+            feature_select_strategy=self.config.vision_feature_select_strategy,
         )
         video_features = self.multi_modal_projector(video_features)
         video_features = self.apply_pooling(video_features)

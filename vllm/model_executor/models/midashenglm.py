@@ -36,6 +36,7 @@ from torch.nn.functional import scaled_dot_product_attention
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -426,8 +427,7 @@ class DashengAudioTransformer(nn.Module):
             assert x_length.ndim == 1, "Lengths are of size (B,)"
             scaled_lengths = (x_length / (self.hop_length * 4)).long()
             mask = self._to_mask(max_length=t, lengths=scaled_lengths)
-            split_masks = mask.logical_not().split(target_length_in_patches,
-                                                   dim=-1)
+            split_masks = mask.split(target_length_in_patches, dim=-1)
         else:
             mask = None
             split_masks = [None] * len(input_splits)
@@ -540,13 +540,17 @@ class MiDashengLMDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
+
+        audio_overrides = mm_options.get("audio") if mm_options else None
 
         return {
             "audio":
             self._get_dummy_audios(length=self.info.get_max_audio_len(),
-                                   num_audios=num_audios)
+                                   num_audios=num_audios,
+                                   overrides=audio_overrides)
         }
 
 

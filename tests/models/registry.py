@@ -207,6 +207,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "DeepseekV3ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3",  # noqa: E501
                                          trust_remote_code=True),
+    "DeepseekV32ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3.2-Exp"),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT",
                                             min_transformers_version="4.54"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT",
@@ -298,9 +299,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MixtralForCausalLM": _HfExamplesInfo("mistralai/Mixtral-8x7B-Instruct-v0.1",  # noqa: E501
                                           {"tiny": "TitanML/tiny-mixtral"}),  # noqa: E501
-    "MotifForCausalLM": _HfExamplesInfo("Motif-Technologies/Motif-2.6B",
-                                        trust_remote_code=True,
-                                        v0_only=True),
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
@@ -659,9 +657,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
-    "TransformersModel": _HfExamplesInfo("Qwen/Qwen3-Embedding-0.6B"),
+    "TransformersEmbeddingModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5", min_transformers_version="4.57.0.dev0"),  # noqa: E501
+    "TransformersForSequenceClassification": _HfExamplesInfo("papluca/xlm-roberta-base-language-detection", min_transformers_version="4.57.0.dev0"),  # noqa: E501
     "TransformersForCausalLM": _HfExamplesInfo("hmellor/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
     "TransformersForMultimodalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersMoEForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924", min_transformers_version="4.57.0.dev0"),  # noqa: E501
+    "TransformersMoEForMultimodalLM": _HfExamplesInfo("Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="4.57.0.dev0"),  # noqa: E501
+    "TransformersMoEEmbeddingModel": _HfExamplesInfo("Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"),  # noqa: E501
+    "TransformersMoEForSequenceClassification": _HfExamplesInfo("Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"),  # noqa: E501
 }
 
 _EXAMPLE_MODELS = {

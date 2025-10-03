@@ -31,7 +31,6 @@ from vllm.utils.flashinfer import (can_use_trtllm_attention,
                                    flashinfer_disable_q_quantization,
                                    supports_trtllm_attention,
                                    use_trtllm_attention)
-from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
@@ -190,6 +189,7 @@ class FlashInferBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
@@ -694,7 +694,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # TODO: The cascade wrapper currently does not support setting
             # kv cache dtype to something different from query dtype.
             return False
-        return use_cascade_attention(*args, **kwargs)
+        # TODO: Cascade attention doesn't work, disable it for now
+        # return use_cascade_attention(*args, **kwargs)
+        return False
 
 
 class FlashInferImpl(AttentionImpl):

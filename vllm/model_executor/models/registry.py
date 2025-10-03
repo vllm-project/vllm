@@ -70,6 +70,7 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
+    "DeepseekV32ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
     "Dots1ForCausalLM": ("dots1", "Dots1ForCausalLM"),
     "Ernie4_5ForCausalLM": ("ernie45", "Ernie4_5ForCausalLM"),
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
@@ -119,7 +120,6 @@ _TEXT_GENERATION_MODELS = {
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
-    "MotifForCausalLM": ("motif", "MotifForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
@@ -307,9 +307,14 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
-    "TransformersModel": ("transformers", "TransformersModel"),
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
-    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
+    "TransformersMoEForCausalLM": ("transformers_moe", "TransformersMoEForCausalLM"),  # noqa: E501
+    "TransformersMoEForMultimodalLM": ("transformers_moe", "TransformersMoEForMultimodalLM"),  # noqa: E501
+    "TransformersEmbeddingModel": ("transformers_pooling", "TransformersEmbeddingModel"),  # noqa: E501
+    "TransformersForSequenceClassification": ("transformers_pooling", "TransformersForSequenceClassification"),  # noqa: E501
+    "TransformersMoEForSequenceClassification": ("transformers_pooling", "TransformersMoEForSequenceClassification"),  # noqa: E501
+    "TransformersMoEEmbeddingModel": ("transformers_pooling", "TransformersMoEEmbeddingModel"),  # noqa: E501
 }
 # yapf: enable
 
@@ -332,6 +337,7 @@ _SUBPROCESS_COMMAND = [
 ]
 
 _PREVIOUSLY_SUPPORTED_MODELS = {
+    "MotifForCausalLM": "0.10.2",
     "Phi3SmallForCausalLM": "0.9.2",
     "Phi4FlashForCausalLM": "0.10.2",
     # encoder-decoder models except whisper
