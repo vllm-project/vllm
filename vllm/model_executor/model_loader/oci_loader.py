@@ -185,6 +185,10 @@ class OciModelLoader(BaseModelLoader):
         # Parse reference
         registry, repository, reference = self._parse_oci_reference(model_ref)
 
+        # Special case for Docker Hub - use registry-1.docker.io
+        if registry == "docker.io":
+            registry = "registry-1.docker.io"
+
         # Use standard OCI registry URL format
         manifest_url = f"https://{registry}/v2/{repository}/manifests/{reference}"
         headers = {
@@ -263,6 +267,10 @@ class OciModelLoader(BaseModelLoader):
 
         # Parse reference
         registry, repository, _ = self._parse_oci_reference(model_ref)
+
+        # Special case for Docker Hub - use registry-1.docker.io
+        if registry == "docker.io":
+            registry = "registry-1.docker.io"
 
         # Use standard OCI registry URL format
         blob_url = f"https://{registry}/v2/{repository}/blobs/{digest}"

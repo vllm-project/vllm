@@ -82,7 +82,7 @@ llm = LLM(
 
 The model reference follows the standard OCI reference format:
 
-```
+```bash
 [registry/]repository[:tag|@digest]
 ```
 
