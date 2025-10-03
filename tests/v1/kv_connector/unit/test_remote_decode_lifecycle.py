@@ -92,7 +92,7 @@ def test_basic_lifecycle():
     # (3b): execute_model()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_sending=[request_id])
+        finished_sending={request_id})
 
     # (3c): update_from_output()
     scheduler.update_from_output(scheduler_output, model_runner_output)
@@ -139,7 +139,7 @@ def test_short_prompt_lifecycle():
     scheduler_output = scheduler.schedule()
     # Use create_model_runner_output to pass kv_connector_output along
     model_runner_output = create_model_runner_output(
-        reqs=[request], finished_sending=[request.request_id])
+        reqs=[request], finished_sending={request.request_id})
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
 
@@ -195,6 +195,6 @@ def test_prefix_cache_lifecycle():
     scheduler_output = scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_sending=[request_remote.request_id])
+        finished_sending={request_remote.request_id})
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
