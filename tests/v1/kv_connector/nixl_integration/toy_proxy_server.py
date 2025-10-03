@@ -225,11 +225,30 @@ async def _handle_completions(api: str, request: Request):
 
         # Stream response from decode service
         async def generate_stream():
+            chunk_count = 0
             async for chunk in stream_service_response(decode_client_info,
                                                        api,
                                                        req_data,
                                                        request_id=request_id):
+                chunk_count += 1
+                # parse SSE data to log key fields
+                chunk_str = chunk.decode('utf-8')
+                if chunk_str.startswith('data: '):
+                    import json
+                    try:
+                        data = json.loads(chunk_str[6:])
+                        if isinstance(data, dict) and 'choices' in data:
+                            for choice in data['choices']:
+                                finish_reason = choice.get('finish_reason')
+                                if finish_reason:
+                                    logger.info(
+                                        "Chunk %d request %s: finish_reason=%s",
+                                        chunk_count, request_id, finish_reason)
+                    except json.JSONDecodeError:
+                        pass
                 yield chunk
+            logger.info("Decode stream completed: %d chunks for request %s",
+                        chunk_count, request_id)
 
         return StreamingResponse(generate_stream(),
                                  media_type="application/json")
