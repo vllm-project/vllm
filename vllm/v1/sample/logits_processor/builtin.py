@@ -297,19 +297,25 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                 return i
         return -1
 
-    def _init_state_entry(self, prompt_tok_ids: list[int],
+    def _init_state_entry(self, prompt_tok_ids: Optional[list[int]],
                           thinking_token_budget: int) -> dict[str, Any]:
         """Initializes the tracking state for a given sequence index."""
-        last_start = self._find_last_sequence_index(prompt_tok_ids,
-                                                    self.think_start_token_ids)
-        last_end = self._find_last_sequence_index(prompt_tok_ids,
-                                                  self.think_end_token_ids)
-        in_think = last_start > last_end
-        if in_think:
-            think_count = len(prompt_tok_ids) - (
-                last_start + len(self.think_start_token_ids))
-        else:
+        if prompt_tok_ids is None:
+            last_start = -1
+            last_end = -1
+            in_think = False
             think_count = 0
+        else:
+            last_start = self._find_last_sequence_index(
+                prompt_tok_ids, self.think_start_token_ids)
+            last_end = self._find_last_sequence_index(prompt_tok_ids,
+                                                      self.think_end_token_ids)
+            in_think = last_start > last_end
+            if in_think:
+                think_count = len(prompt_tok_ids) - (
+                    last_start + len(self.think_start_token_ids))
+            else:
+                think_count = 0
 
         return {
             "in_think": in_think,  # Currently in thinking mode
