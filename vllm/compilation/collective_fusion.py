@@ -751,7 +751,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         def pattern(residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor):
             allreduce_output = tensor_model_parallel_all_reduce(input)
             rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
-            return allreduce_output, residual
+            return rms, residual
 
         def replacement(
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
@@ -892,7 +892,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
             rms, res = self.rmsnorm_matcher(allreduce_output, weight, residual)
             quant, _ = self.quant_matcher(rms, scale)
 
-            return quant, allreduce_output
+            return quant, res
 
         def replacement(
             residual: torch.Tensor,
