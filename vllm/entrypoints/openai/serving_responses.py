@@ -445,6 +445,19 @@ class OpenAIServingResponses(OpenAIServing):
 
         return messages, [prompt_token_ids], [engine_prompt]
 
+    async def _initialize_tool_sessions(self, request: ResponsesRequest,
+                                        context: ConversationContext,
+                                        exit_stack: AsyncExitStack):
+        # we should only initialize the tool session if the request needs tools
+        if len(request.tools) == 0:
+            return
+        mcp_tools = {
+            tool.server_label: tool
+            for tool in request.tools if tool.type == "mcp"
+        }
+        await context.init_tool_sessions(self.tool_server, exit_stack,
+                                         request.request_id, mcp_tools)
+
     async def responses_full_generator(
         self,
         request: ResponsesRequest,
@@ -461,12 +474,8 @@ class OpenAIServingResponses(OpenAIServing):
 
         async with AsyncExitStack() as exit_stack:
             try:
-                mcp_tools = {
-                    tool.server_label: tool
-                    for tool in request.tools if tool.type == "mcp"
-                }
-                await context.init_tool_sessions(self.tool_server, exit_stack,
-                                                 request.request_id, mcp_tools)
+                await self._initialize_tool_sessions(request, context,
+                                                     exit_stack)
                 async for _ in result_generator:
                     pass
             except asyncio.CancelledError:
@@ -1650,12 +1659,10 @@ class OpenAIServingResponses(OpenAIServing):
         async with AsyncExitStack() as exit_stack:
             processer = None
             if self.use_harmony:
-                mcp_tools = {
-                    tool.server_label: tool
-                    for tool in request.tools if tool.type == "mcp"
-                }
-                await context.init_tool_sessions(self.tool_server, exit_stack,
-                                                 request.request_id, mcp_tools)
+                # TODO: in streaming, we noticed this bug:
+                # https://github.com/vllm-project/vllm/issues/25697
+                await self._initialize_tool_sessions(request, context,
+                                                     exit_stack)
                 processer = self._process_harmony_streaming_events
             else:
                 processer = self._process_simple_streaming_events
