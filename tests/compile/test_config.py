@@ -148,14 +148,12 @@ def test_splitting_ops_dynamic():
     # When use_inductor_graph_partition=True
     torch_version = torch.__version__
     if _is_torch_equal_or_newer(torch_version, '2.9.0.dev'):
-        # inductor graph partition is only available in PyTorch 2.9+.
-        # this is a fast config check so we are not using pytest.skip.
         config = VllmConfig(compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             use_inductor_graph_partition=True,
-            splitting_ops=["silly_attention"]))
-        # should preserve user-specified splitting_ops
-        assert config.compilation_config.splitting_ops == ["silly_attention"]
+            splitting_ops=["vllm.unified_attention"]))
+        # with inductor partition we disregard user-specified splitting_ops
+        assert config.compilation_config.splitting_ops == []
 
     # When attn_fusion pass enabled.
     config = VllmConfig(compilation_config=CompilationConfig(
@@ -197,7 +195,7 @@ def test_splitting_ops_dynamic():
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         ))
         assert config.compilation_config.splitting_ops == []
-        # enable_attn_fusion is directly support under
+        # enable_attn_fusion is directly supported under
         # use_inductor_graph_partition=True, and cudagraph_mode
         # is unchanged.
         assert config.compilation_config.cudagraph_mode == \
@@ -212,9 +210,8 @@ def test_resolve_operator_overload():
 
     assert (_resolve_operator_overload("aten.mm.default")
             is torch.ops.aten.mm.default)
-    assert _parse_operator_name("flash_attention") == ("flash_attention",
-                                                       "flash_attention",
-                                                       "default")
+    with pytest.raises(ValueError):
+        _parse_operator_name("flash_attention")
     assert (_resolve_operator_overload("aten::addmm.default")
             is torch.ops.aten.addmm.default)
 

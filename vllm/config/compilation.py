@@ -723,19 +723,17 @@ class CompilationConfig:
 def _parse_operator_name(op_name: str) -> tuple[str, str, str]:
     if not op_name:
         raise ValueError("Operator name must be non-empty")
-    if "::" in op_name:
-        namespace, remainder = op_name.split("::", 1)
-    else:
-        parts = op_name.split(".")
-        if len(parts) < 2:
-            # Accept bare op names (e.g. 'flash_attention') by treating the
-            # string as both namespace and operator, matching torch.ops usage.
-            namespace, remainder = op_name, op_name
-        else:
-            namespace, remainder = parts[0], ".".join(parts[1:])
+
+    parts = op_name.split(".")
+    if len(parts) < 2:
+        raise ValueError(
+            f"Operator name '{op_name}' must include a namespace and operator")
+
+    namespace, remainder = parts[0], ".".join(parts[1:])
     if not remainder:
         raise ValueError(
-            f"Operator name '{op_name}' must include an operator identifier", )
+            f"Operator name '{op_name}' must include an operator identifier")
+
     if "." in remainder:
         operator, overload = remainder.split(".", 1)
     else:
@@ -751,31 +749,34 @@ def _resolve_operator_overload(op_name: str):
     namespace, operator, overload = _parse_operator_name(op_name)
     try:
         namespace_obj = getattr(torch.ops, namespace)
-    except AttributeError as exc:
-        raise ValueError(f"Unknown operator namespace '{namespace}'") from exc
-
-    try:
         operator_obj = getattr(namespace_obj, operator)
     except AttributeError as exc:
+        if not hasattr(torch.ops, namespace):
+            raise ValueError(
+                f"Unknown operator namespace '{namespace}'") from exc
         raise ValueError(
-            f"Unknown operator '{namespace}::{operator}'", ) from exc
+            f"Unknown operator '{namespace}::{operator}'") from exc
 
     if isinstance(operator_obj, OpOverload):
         if overload not in ("default", ""):
             raise ValueError(
                 f"Operator '{namespace}::{operator}' has no overload "
-                f"'{overload}'", )
+                f"'{overload}'")
         return operator_obj
 
+    target_overload = overload or "default"
     if isinstance(operator_obj, OpOverloadPacket):
         try:
-            return getattr(operator_obj, overload)
+            return getattr(operator_obj, target_overload)
         except AttributeError as exc:
             raise ValueError(
                 f"Operator '{namespace}::{operator}' has no overload "
-                f"'{overload}'", ) from exc
+                f"'{target_overload}'") from exc
 
-    raise ValueError(f"Unsupported operator type for '{op_name}'")
+    try:
+        return getattr(operator_obj, target_overload)
+    except (AttributeError, TypeError) as exc:
+        raise ValueError(f"Unsupported operator type for '{op_name}'") from exc
 
 
 @contextlib.contextmanager
@@ -788,15 +789,6 @@ def _inductor_partition_rule_context(op_names: list[str]):
 
     unique_names = list(dict.fromkeys(op_names))
     overloads = [_resolve_operator_overload(name) for name in unique_names]
-
-    clear_fn = getattr(inductor_scheduler, "clear_should_partition_rules",
-                       None)
-    if callable(clear_fn):
-        clear_fn()
-    else:
-        logger.debug(
-            "Inductor scheduler does not expose clear_should_partition_rules; "
-            "partition rules may persist across compilations.", )
 
     def _always_partition(*_args, **_kwargs):
         return True
@@ -811,5 +803,5 @@ def _inductor_partition_rule_context(op_names: list[str]):
     try:
         yield
     finally:
-        if callable(clear_fn):
-            clear_fn()
+        logger.debug("Partition rules remain registered; "
+                     "PyTorch does not expose a clear API.")
