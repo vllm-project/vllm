@@ -210,8 +210,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.rotary_embedding import (
-    DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 from vllm.utils.flashinfer import has_nvidia_artifactory
@@ -958,7 +956,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
-        rotary_emb: Optional[RotaryEmbedding],
         q_pad_num_heads: Optional[int] = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
@@ -977,7 +974,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
-        self.rotary_emb = rotary_emb
         self.q_pad_num_heads = q_pad_num_heads
 
         if use_flashinfer_prefill():
@@ -1526,7 +1522,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
-        positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -1581,32 +1576,14 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
-            if envs.VLLM_ENABLE_FUSED_ROPE_MLA_KV_WRITE:
-                assert isinstance(self.rotary_emb,
-                                  DeepseekScalingRotaryEmbedding)
-                assert positions is not None
-
-                ops.concat_and_cache_mla_rope_fused(
-                    positions,
-                    q[..., self.qk_nope_head_dim:],
-                    k_pe.squeeze(1),
-                    k_c_normed,
-                    self.rotary_emb.cos_sin_cache,
-                    self.rotary_emb.is_neox_style,
-                    attn_metadata.slot_mapping,
-                    kv_cache,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                )
-            else:
-                ops.concat_and_cache_mla(
-                    k_c_normed,
-                    k_pe.squeeze(1),
-                    kv_cache,
-                    attn_metadata.slot_mapping.flatten(),
-                    kv_cache_dtype=self.kv_cache_dtype,
-                    scale=layer._k_scale,
-                )
+            ops.concat_and_cache_mla(
+                k_c_normed,
+                k_pe.squeeze(1),
+                kv_cache,
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype=self.kv_cache_dtype,
+                scale=layer._k_scale,
+            )
 
         if fp8_attention:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())

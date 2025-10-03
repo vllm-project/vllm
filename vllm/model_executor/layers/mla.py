@@ -5,7 +5,6 @@ from typing import Optional
 
 import torch
 
-import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import CustomOp
@@ -101,7 +100,6 @@ class MultiHeadLatentAttention(CustomOp):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             kv_b_proj=self.kv_b_proj,
-            rotary_emb=self.rotary_emb,
         )
 
         self.prefix = prefix
@@ -144,19 +142,15 @@ class MultiHeadLatentAttention(CustomOp):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        # RoPE can be fused while writing the KV-cache
-        if not envs.VLLM_ENABLE_FUSED_ROPE_MLA_KV_WRITE:
-            q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim:], k_pe)
+        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
+            positions, q[..., self.qk_nope_head_dim:], k_pe)
 
         attn_out = self.mla_attn(
             q,
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0],
-                          self.num_heads * self.v_head_dim),
-            positions=positions,
-        )
+                          self.num_heads * self.v_head_dim))
         return self.o_proj(attn_out)[0]
 
     def forward_cuda(self, *args, **kwargs):

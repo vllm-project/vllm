@@ -206,7 +206,6 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
-    VLLM_ENABLE_FUSED_ROPE_MLA_KV_WRITE: bool = False
 
 
 def get_default_cache_root():
@@ -1484,10 +1483,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
-
-    "VLLM_ENABLE_FUSED_ROPE_MLA_KV_WRITE":
-    lambda: bool(
-        int(os.getenv("VLLM_ENABLE_FUSED_ROPE_MLA_KV_WRITE", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

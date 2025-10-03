@@ -223,7 +223,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
-        positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
 
