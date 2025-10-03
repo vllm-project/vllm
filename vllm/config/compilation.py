@@ -782,11 +782,11 @@ def _inductor_partition_rule_context(op_names: list[str]):
         inductor_scheduler.register_should_partition_rule(
             overload, _always_partition)
 
-    logger.debug("Registered inductor partition rules for ops: %s",
+    logger.info("Registered inductor partition rules for ops: %s",
                  unique_names)
 
     try:
         yield
     finally:
-        logger.debug("Partition rules remain registered; "
-                     "PyTorch does not expose a clear API.")
+        logger.info("Partition rules remain registered; "
+                    "PyTorch does not expose a clear API.")
