@@ -33,7 +33,7 @@ if current_platform.is_cuda():
         )
     ]
 
-    if current_platform.is_device_capability((10, 0)):
+    if current_platform.is_device_capability((10, 0)) and has_flashinfer():
         MODELS_FP8 += [
             (
                 "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
@@ -97,7 +97,6 @@ def test_attn_quant(
 
     # Disable, compile cache to make sure custom passes run.
     # Otherwise, we can't verify fusion happened through the logs.
-    # Log capture also doesn't work with multiprocessing yet.
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     # To capture subprocess logs, we need to know whether spawn or fork is used.
@@ -170,7 +169,6 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
 
     # Disable, compile cache to make sure custom passes run.
     # Otherwise, we can't verify fusion happened through the logs.
-    # Log capture also doesn't work with multiprocessing yet.
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     # To capture subprocess logs, we need to know whether spawn or fork is used.
