@@ -156,22 +156,7 @@ class Mamba2AttentionMetadataBuilder(
                 dtype=torch.int32,
                 device=device,
             )
-            self.current_first_idx_p = torch.empty(
-                (self.decode_cudagraph_max_bs, ),
-                dtype=torch.int32,
-                device=device,
-            )
             self.last_state_idx = torch.empty(
-                (self.decode_cudagraph_max_bs, ),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.context_lens_p = torch.empty(
-                (self.decode_cudagraph_max_bs, ),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.last_computed_offset_p = torch.empty(
                 (self.decode_cudagraph_max_bs, ),
                 dtype=torch.int32,
                 device=device,
@@ -334,28 +319,11 @@ class Mamba2AttentionMetadataBuilder(
                     self.current_last_idx[:num_input_tokens]
                 current_last_idx[num_decodes:] = 0
 
-                self.current_first_idx_p[:num_decodes].copy_(
-                    current_first_idx_p, non_blocking=True)
-                current_first_idx_p = \
-                    self.current_first_idx_p[:num_input_tokens]
-                current_first_idx_p[num_decodes:] = 0
-
                 self.last_state_idx[:num_decodes].copy_(last_state_idx,
                                                         non_blocking=True)
                 last_state_idx = \
                     self.last_state_idx[:num_input_tokens]
                 last_state_idx[num_decodes:] = 0
-
-                self.context_lens_p[:num_decodes].copy_(context_lens_p,
-                                                        non_blocking=True)
-                context_lens_p = self.context_lens_p[:num_input_tokens]
-                context_lens_p[num_decodes:] = 0
-
-                self.last_computed_offset_p[:num_decodes].copy_(
-                    last_computed_offset_p, non_blocking=True)
-                last_computed_offset_p = \
-                    self.last_computed_offset_p[:num_input_tokens]
-                last_computed_offset_p[num_decodes:] = 0
 
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,
