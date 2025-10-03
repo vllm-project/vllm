@@ -197,7 +197,7 @@ class CompilationConfig:
     used for the compilation directly (it sees the whole graph). When the
     compilation level is 3, the backend is used for the piecewise compilation
     (it sees a part of the graph)."""
-    custom_ops: list[str] = field(default_factory=lambda: ['all'])
+    custom_ops: list[str] = field(default_factory=lambda: list())
     """Fine-grained control over which custom ops to enable/disable. Use 'all'
     to enable all, 'none' to disable all. Also specify a list of custom op
     names to enable (prefixed with a '+'), or disable (prefixed with a '-').
@@ -229,7 +229,7 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
 
     # Inductor capture
-    use_inductor: bool = True
+    use_inductor: Optional[bool] = None
     """
     Whether to use inductor compilation.
 
@@ -469,9 +469,6 @@ class CompilationConfig:
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
 
-        if len(self.custom_ops) == 0:
-            self.custom_ops = ['all']
-
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
         #    https://github.com/pytorch/pytorch/issues/147924
@@ -562,11 +559,16 @@ class CompilationConfig:
 
         if self.backend == "":
             self.backend = "inductor"
-
-        logger.warning_once(
-            "The 'use_inductor' flag is deprecated and will be\
-                 removed in a future release."
-            "Please use the 'backend' option instead.", )
+        if self.use_inductor is not None:
+            logger.warning_once(
+                "The 'use_inductor' flag is deprecated and will be\
+                    removed in a future release."
+                "Please use the 'backend' option instead.", )
+        if count_none + count_all == 0:
+            if self.level > 0 and self.backend != "eager":
+                self.custom_ops.insert(0, "none")
+            else:
+                self.custom_ops.insert(0, "all")
 
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         """
