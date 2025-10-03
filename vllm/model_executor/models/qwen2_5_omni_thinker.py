@@ -63,7 +63,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import decode_tokens, encode_tokens
+from vllm.transformers_utils.tokenizer import encode_tokens
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -316,7 +316,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         mm_kwargs: MultiModalKwargsItems,
         mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         """
         Qwen2.5-Omni reimplements this function to handle `use_audio_in_video`.
         """
@@ -341,28 +341,20 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
-                use_audio_in_video=use_audio_in_video)
-
-            tokenizer = self.info.get_tokenizer()
-            prompt = decode_tokens(tokenizer, prompt_ids)
+                use_audio_in_video=use_audio_in_video,
+            )
         else:
-            (
-                prompt_ids,
-                prompt,
-                mm_placeholders,
-            ) = self._apply_prompt_updates(
+            prompt_ids, mm_placeholders = self._apply_prompt_updates(
                 prompt_ids,
                 mm_prompt_updates,
             )
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
-                use_audio_in_video=use_audio_in_video)
+                use_audio_in_video=use_audio_in_video,
+            )
 
-        tokenizer = self.info.get_tokenizer()
-        prompt = decode_tokens(tokenizer, prompt_ids)
-
-        return prompt_ids, prompt, mm_placeholders
+        return prompt_ids, mm_placeholders
 
     def _get_prompt_updates(
         self,

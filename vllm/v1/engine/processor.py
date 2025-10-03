@@ -334,9 +334,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
-    ) -> tuple[Optional[str], EngineCoreRequest]:
-
-        # TODO(woosuk): Support pooling models.
+    ) -> EngineCoreRequest:
         self._validate_lora(lora_request)
         self._validate_params(params)
 
@@ -395,8 +393,6 @@ class Processor:
         # discriminated unions of TypedDicts, because of how it handles
         # inheritance of TypedDict. If we explicitly extract the items we want
         # we can avoid type errors from using `dict.get` later in the method.
-        prompt_str: Optional[str] = None if decoder_inputs[
-            "type"] == "embeds" else decoder_inputs.get("prompt")
         prompt_token_ids = decoder_inputs[
             "prompt_token_ids"] if decoder_inputs["type"] != "embeds" else None
         prompt_embeds = decoder_inputs["prompt_embeds"] if decoder_inputs[
@@ -442,7 +438,7 @@ class Processor:
                         identifier=decoder_mm_hashes[modality][idx],
                         mm_position=decoder_mm_positions[modality][idx]))
 
-        return prompt_str, EngineCoreRequest(
+        return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,

@@ -219,7 +219,6 @@ class PaliGemmaMultiModalProcessor(
         if len(prompt_token_ids) and prompt_token_ids[-1] != newline_token_id:
             prompt_token_ids.append(newline_token_id)
             mm_inputs["prompt_token_ids"] = prompt_token_ids
-            mm_inputs["prompt"] += newline_prompt
 
         return mm_inputs
 

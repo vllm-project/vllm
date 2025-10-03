@@ -461,7 +461,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         self,
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         # align to hf behavior when there are images
         if len(mm_prompt_updates):
             tokenizer = self.info.get_tokenizer()
@@ -496,14 +496,14 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                 for ele in sublist for e in ele
             ]
 
-        token_ids, text, placeholders = super()._apply_prompt_updates(
+        token_ids, placeholders = super()._apply_prompt_updates(
             token_ids=token_ids,
             mm_prompt_updates=mm_prompt_updates,
         )
 
         # Keep the behavior in line with HF processor
-        if text.startswith("<s> <|image|>"):
-            text = text.replace("<s> <|image|>", "<s><|image|>", 1)
+        if token_ids[:2] == tokenizer.encode("<s> <|image|>",
+                                             add_special_tokens=False):
             token_ids = [token_ids[0], *token_ids[2:]]
             placeholders = {
                 modality: [
@@ -518,7 +518,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                 for modality, ps in placeholders.items()
             }
 
-        return token_ids, text, placeholders
+        return token_ids, placeholders
 
 
 @MULTIMODAL_REGISTRY.register_processor(Phi3VMultiModalProcessor,

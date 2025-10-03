@@ -94,10 +94,15 @@ class EngineClient(ABC):
         #    this happens again in generation, so the double expansion causes
         #    a mismatch.
         # TODO - would be ideal to handle this more gracefully.
-        prompt_token_ids = prompt.get("prompt_token_ids")
-        multi_modal_data = prompt.get("multi_modal_data")
+        if isinstance(prompt, str):
+            prompt_text = prompt
+            prompt_token_ids = []
+            multi_modal_data = None
+        else:
+            prompt_text = prompt.get("prompt")
+            prompt_token_ids = prompt.get("prompt_token_ids", [])
+            multi_modal_data = prompt.get("multi_modal_data")
 
-        prompt_text = processed_inputs.get("prompt")
         mm_processor_kwargs = processed_inputs.get("mm_processor_kwargs")
 
         tokenized_length = len(prompt_token_ids)

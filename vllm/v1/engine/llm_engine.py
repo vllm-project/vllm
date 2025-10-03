@@ -227,15 +227,18 @@ class LLMEngine:
                 f"request_id must be a string, got {type(request_id)}")
 
         # Process raw inputs into the request.
-        prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority)
+        request = self.processor.process_inputs(request_id, prompt, params,
+                                                arrival_time, lora_request,
+                                                tokenization_kwargs,
+                                                trace_headers, priority)
+        prompt_text = prompt if isinstance(prompt,
+                                           str) else prompt.get("prompt")
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
         if n == 1:
             # Make a new RequestState and queue.
-            self.output_processor.add_request(request, prompt_str, None, 0)
+            self.output_processor.add_request(request, prompt_text, None, 0)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
             return
@@ -249,7 +252,7 @@ class LLMEngine:
             child_request.sampling_params = params
 
             # Make a new RequestState and queue.
-            self.output_processor.add_request(child_request, prompt_str,
+            self.output_processor.add_request(child_request, prompt_text,
                                               parent_req, idx)
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
