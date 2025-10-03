@@ -481,7 +481,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.pipeline_parallel()
         self.tensor_parallel()
 
-        # Input embeddings
+        # Input embeddings. Scaling might be used for some models
         self.embed_scale = getattr(self.model.get_input_embeddings(),
                                    "embed_scale", 1.0)
         if not isinstance(self.model.get_input_embeddings(), PPMissingLayer):
@@ -626,6 +626,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                                     self.pp_rank, self.pp_size)
 
         attention_instances = {}
+        logits_soft_cap = getattr(self.text_config, "attn_logit_softcapping",
+                                  None)
         for i in range(start, end):
             # Handle interleaved sliding window attention
             per_layer_sliding_window = None
@@ -642,8 +644,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
-                logits_soft_cap=getattr(self.text_config,
-                                        "attn_logit_softcapping", None),
+                logits_soft_cap=logits_soft_cap,
                 per_layer_sliding_window=per_layer_sliding_window,
                 prefix=f"{i}.attn",
                 attn_type=attn_type)
@@ -751,7 +752,9 @@ class TransformersForCausalLM(TransformersBase):
             self.lm_head = PPMissingLayer()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings()(input_ids)
+        inputs_embeds = self.model.get_input_embeddings()(input_ids)
+        inputs_embeds = inputs_embeds * self.embed_scale
+        return inputs_embeds
 
     def compute_logits(
         self,
@@ -824,7 +827,9 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        kwargs = kwargs.get("token_type_ids") or {}
+        # Gemma3 and PG needs `token_type_ids` to work correctly
+        # Other models will not have `token_type_ids` in kwargs
+        kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
         model_output = super().forward(input_ids, positions,
                                        intermediate_tensors, inputs_embeds,
                                        **kwargs)
@@ -899,6 +904,7 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
+        inputs_embeds = inputs_embeds * self.embed_scale
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
