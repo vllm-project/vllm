@@ -34,6 +34,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from transformers import BatchFeature
 
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import (check_upstream_fa_availability,
                                   maybe_get_vit_flash_attn_backend)
 from vllm.config import VllmConfig
@@ -55,7 +56,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
