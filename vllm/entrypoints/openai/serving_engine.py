@@ -7,8 +7,7 @@ import traceback
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import (Any, Callable, ClassVar, Generic, NamedTuple, Optional,
-                    TypeVar, Union)
+from typing import Any, Callable, ClassVar, Generic, Optional, TypeVar, Union
 
 import torch
 from fastapi import Request
@@ -69,6 +68,7 @@ from vllm.entrypoints.renderer import (BaseRenderer, CompletionRenderer,
 # yapf: enable
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.parse import PromptComponents, get_prompt_components
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
@@ -138,12 +138,6 @@ def is_text_tokens_prompt(prompt: RequestPrompt) -> TypeIs[TextTokensPrompt]:
 def is_embeds_prompt(prompt: RequestPrompt) -> TypeIs[EmbedsPrompt]:
     return (isinstance(prompt, dict) and "prompt_token_ids" not in prompt
             and "prompt_embeds" in prompt)
-
-
-class PromptComponents(NamedTuple):
-    text: Optional[str] = None
-    token_ids: Optional[list[int]] = None
-    embeds: Optional[torch.Tensor] = None
 
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
@@ -971,25 +965,12 @@ class OpenAIServing:
 
     def _get_prompt_components(
         self,
-        inputs: Union[RequestPrompt, PromptType],
+        prompt: Union[RequestPrompt, PromptType],
     ) -> PromptComponents:
-        if isinstance(inputs, str):
-            return PromptComponents(text=inputs)
-        if isinstance(inputs, list):
-            return PromptComponents(token_ids=inputs)
-        if isinstance(inputs, dict):
-            return PromptComponents(
-                text=inputs.get("prompt"),  # type: ignore[arg-type]
-                token_ids=inputs.get(
-                    "prompt_token_ids"),  # type: ignore[arg-type]
-                embeds=inputs.get("prompt_embeds"),
-            )
+        if isinstance(prompt, list):
+            return PromptComponents(token_ids=prompt)
 
-        return PromptComponents(
-            text=getattr(inputs, "prompt", None),
-            token_ids=getattr(inputs, "prompt_token_ids", None),
-            embeds=getattr(inputs, "prompt_embeds", None),
-        )
+        return get_prompt_components(prompt)  # type: ignore[arg-type]
 
     def _log_inputs(
         self,

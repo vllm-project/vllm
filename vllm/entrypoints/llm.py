@@ -37,6 +37,7 @@ from vllm.entrypoints.utils import (_validate_truncation_size,
                                     log_non_default_args)
 from vllm.inputs import (DataPrompt, PromptType, SingletonPrompt, TextPrompt,
                          TokensPrompt)
+from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -1596,8 +1597,8 @@ class LLM:
         params: Union[SamplingParams, PoolingParams],
         lora_request: Optional[LoRARequest] = None,
         priority: int = 0,
-        prompt_text: Optional[str] = None,
     ) -> None:
+        prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
 
         engine_request, tokenization_kwargs = self._process_inputs(
