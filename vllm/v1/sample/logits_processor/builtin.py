@@ -319,7 +319,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
         return {
             "in_think": in_think,  # Currently in thinking mode
-            "in_end": False,  # Currently forcing end tokens
+            "in_end": in_think and thinking_token_budget == 0,
             "check_count_down": thinking_token_budget,
             "think_count": think_count,  # Number of tokens in thinking section
             "end_count": 0,  # Number of end tokens forced so far
