@@ -118,6 +118,9 @@ class Request:
         # The number of requests being preempted by the scheduler
         self.num_preemptions = 0
 
+        # rate limiting for WAITING_FOR_REMOTE_KVS log spam
+        self.remote_kvs_log_counter = 0
+
         self.block_hashes: list[BlockHash] = []
         self.get_hash_new_full_blocks: Optional[Callable[
             [], list[BlockHash]]] = None

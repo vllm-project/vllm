@@ -348,9 +348,11 @@ class Scheduler(SchedulerInterface):
                     if is_ready:
                         request.status = RequestStatus.WAITING
                     else:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request.request_id)
+                        if request.remote_kvs_log_counter % 10000 == 0:
+                            logger.debug(
+                                "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                                request.request_id)
+                        request.remote_kvs_log_counter += 1
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
