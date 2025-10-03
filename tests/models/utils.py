@@ -430,16 +430,25 @@ def dummy_hf_overrides(
 
     update_dict = {
         "num_layers": num_layers,
-        "num_experts": num_experts,
-        "num_experts_per_tok": 2,
-        "num_local_experts": num_experts,
-        # Otherwise there will not be any expert layers
-        "first_k_dense_replace": 0,
-        # To avoid OOM on DeepSeek-V3
-        "n_routed_experts": num_experts,
         # For Gemma-3n
         "num_kv_shared_layers": 1,
     }
+
+    class DummyConfig:
+        hf_text_config = text_config
+
+    # Only set MoE related config when the model has MoE layers.
+    # Otherwise all models detected as MoE by _get_transformers_backend_cls.
+    if ModelConfig.get_num_experts(DummyConfig) > 0:
+        update_dict.update({
+            "num_experts": num_experts,
+            "num_experts_per_tok": 2,
+            "num_local_experts": num_experts,
+            # Otherwise there will not be any expert layers
+            "first_k_dense_replace": 0,
+            # To avoid OOM on DeepSeek-V3
+            "n_routed_experts": num_experts,
+        })
 
     # Update num_hidden_layers for non-Longcat architectures
     if model_arch != "LongcatFlashForCausalLM" \
