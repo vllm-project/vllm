@@ -195,6 +195,10 @@ For Llama 4 model, use `--tool-call-parser llama4_pythonic --chat-template examp
 
 Supported models:
 
+* `ibm-granite/granite-4.0-h-small`
+
+    Recommended flags: `--tool-call-parser hermes`
+
 * `ibm-granite/granite-3.0-8b-instruct`
 
     Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
