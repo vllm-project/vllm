@@ -10,7 +10,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 
-from .fp8_collective_ops import vllm_all_gather_fp8
 from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
@@ -91,7 +90,8 @@ class AllGatherFP8Pattern:
             x_fp8 = x_clamped.to(self.fp8_dtype)
 
             # Step 2: AllGather FP8 tensors (2x less bandwidth!)
-            gathered_fp8 = vllm_all_gather_fp8(
+            # Use regular all_gather - it supports FP8 via pynccl updates
+            gathered_fp8 = torch.ops.vllm.all_gather.default(
                 x_fp8,
                 dim=0,
                 world_size=self.tp_size,
