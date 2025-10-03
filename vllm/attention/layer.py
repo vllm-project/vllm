@@ -344,37 +344,25 @@ class Attention(nn.Module, AttentionLayerBase):
                 if value is not None:
                     value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
-                forward_context: ForwardContext = get_forward_context()
-                attn_metadata = forward_context.attn_metadata
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                self.impl.forward(self,
-                                  query,
-                                  key,
-                                  value,
-                                  self_kv_cache,
-                                  attn_metadata,
-                                  output=output)
+                if not self.attn_backend.include_kv_cache:
+                     unified_kv_cache_update(
+                        key, value, output, self.layer_name)
+                unified_attention_with_output(
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name)
             else:
-                if self.attn_backend.include_kv_cache:
-                    torch.ops.vllm.unified_attention_with_output(
-                        query,
-                        key,
-                        value,
-                        output,
-                        self.layer_name,
-                        include_kv_cache_update=True)
-                else:
+                if not self.attn_backend.include_kv_cache:
                     torch.ops.vllm.unified_kv_cache_update(
                         key, value, output, self.layer_name)
-                    torch.ops.vllm.unified_attention_with_output(
-                        query,
-                        key,
-                        value,
-                        output,
-                        self.layer_name,
-                        include_kv_cache_update=False)
+                torch.ops.vllm.unified_attention_with_output(
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name)
             return output.view(-1, hidden_size)
         else:
             assert self.attn_backend.include_kv_cache, "Attention backend does not support kv cache"  # noqa: E501
@@ -722,16 +710,15 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
     output_block_scale: Optional[torch.Tensor] = None,
-    include_kv_cache_update: bool = True,
 ) -> None:
-    # if include_kv_cache_update:
-    wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
+    if self.attn_backend.include_kv_cache:
+        wait_for_kv_layer_from_connector(layer_name)
     self.impl.forward(self,
                       query,
                       key,
@@ -740,10 +727,10 @@ def unified_attention_with_output(
                       attn_metadata,
                       output=output,
                       output_scale=output_scale,
-                      output_block_scale=output_block_scale,
-                      should_do_kv_cache_update=include_kv_cache_update)
+                      output_block_scale=output_block_scale)
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    if self.attn_backend.include_kv_cache:
+        maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
 
 def unified_attention_with_output_fake(
@@ -754,7 +741,6 @@ def unified_attention_with_output_fake(
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
     output_block_scale: Optional[torch.Tensor] = None,
-    include_kv_cache_update: bool = True,
 ) -> None:
     return
 
