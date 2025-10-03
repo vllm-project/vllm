@@ -10,6 +10,8 @@ from mistral_common.protocol.instruct.tool_calls import (Function,
                                                          FunctionCall, Tool,
                                                          ToolCall)
 
+from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.transformers_utils.tokenizer_base import TokenizerBase
 from vllm.transformers_utils.tokenizers.mistral import (
     make_mistral_chat_completion_request)
 
@@ -186,3 +188,20 @@ def test_make_mistral_chat_completion_request_list_content(
     actual_request = make_mistral_chat_completion_request(
         openai_request["messages"], openai_request["tools"])
     assert actual_request == expected_mistral_request
+
+
+def test_convert_ids_to_tokens():
+    tokenizer = get_tokenizer("mistralai/Mistral-7B-Instruct-v0.1",
+                              revision="main",
+                              tokenizer_mode="mistral")
+    assert isinstance(tokenizer, TokenizerBase)
+
+    ids: list[int] = tokenizer.encode("Hello World")
+
+    # Test single id
+    contents = tokenizer.convert_ids_to_tokens(ids[1])
+    assert contents == '▁Hello'
+
+    # Test list of integers
+    contents = tokenizer.convert_ids_to_tokens(ids)
+    assert contents == ['<s>', '▁Hello', '▁World']

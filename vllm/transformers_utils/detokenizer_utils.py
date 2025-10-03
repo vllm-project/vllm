@@ -72,6 +72,8 @@ def convert_prompt_ids_to_tokens(
     new_tokens = tokenizer.convert_ids_to_tokens(
         prompt_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2:],
         skip_special_tokens=skip_special_tokens)
+    # Since we're passing a list of IDs, we know we'll get back a list of tokens
+    assert isinstance(new_tokens, list)
     read_offset = len(new_tokens)
     prefix_offset = max(
         read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
@@ -155,7 +157,7 @@ def detokenize_incrementally(
     if 0 <= new_token_id < len(tokenizer):
         # Put new_token_id in a list so skip_special_tokens is respected
         new_tokens = tokenizer.convert_ids_to_tokens(
-            [new_token_id], skip_special_tokens=skip_special_tokens)
+            new_token_id, skip_special_tokens=skip_special_tokens)
         if isinstance(new_tokens, str):
             new_tokens = [new_tokens]
     else:
