@@ -5,6 +5,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import Optional, Union, cast
 
 import jinja2
@@ -269,6 +270,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
             for i, final_res in enumerate(final_res_batch):
                 assert final_res is not None
+                # check for aborted requests due to unrecoverable errors
+                for output in final_res.outputs:
+                    if output.finish_reason == "abort":
+                        return self.create_error_response(
+                            "Request aborted due to an internal error.",
+                            err_type="InternalServerError",
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
                 # The output should contain the input text
                 # We did not pass it into vLLM engine to avoid being redundant
@@ -341,6 +349,15 @@ class OpenAIServingCompletion(OpenAIServing):
 
         try:
             async for prompt_idx, res in result_generator:
+                # check for aborted requests due to unrecoverable errors
+                for output in res.outputs:
+                    if output.finish_reason == "abort":
+                        yield self.create_streaming_error_response(
+                            "Request aborted due to an internal error.",
+                            err_type="InternalServerError",
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+                        return
+
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
 

@@ -12,6 +12,7 @@ import jinja2
 import partial_json_parser
 import regex as re
 from fastapi import Request
+from https import HTTPStatus
 from openai_harmony import Message as OpenAIMessage
 from pydantic import TypeAdapter
 
@@ -572,6 +573,14 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             async for res in result_generator:
+                # check for aborted requests due to unrecoverable errors
+                for output in res.outputs:
+                    if output.finish_reason == "abort":
+                        yield self.create_streaming_error_response(
+                            "Request aborted due to an internal error.",
+                            err_type="InternalServerError",
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+                        return
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
@@ -1165,6 +1174,13 @@ class OpenAIServingChat(OpenAIServing):
         try:
             async for res in result_generator:
                 final_res = res
+                # check for aborted requests due to unrecoverable errors
+                for output in res.outputs:
+                    if output.finish_reason == "abort":
+                        return self.create_error_response(
+                            "Request aborted due to an internal error.",
+                            err_type="InternalServerError",
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
