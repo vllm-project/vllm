@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional
 import httpx
 
 from vllm.distributed.disaggregated import GenerationResponseT
+from vllm.outputs import RequestOutput
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
@@ -19,11 +20,12 @@ class DisaggregatedRequestManager(ABC):
         self._vllm_config = vllm_config
 
     @abstractmethod
-    def dispatch_request(
-        self, request: Request, shared_http_clients: dict[str,
-                                                          httpx.AsyncClient]
+    async def dispatch_request(
+        self,
+        request: Request,
+        local_output: Optional[RequestOutput],
+        client: httpx.AsyncClient,
+        local_executed: bool = False
     ) -> tuple[bool, Optional[GenerationResponseT]]:
         # First flag to indicate if the request is successfully dispatched
-        # TODO switch to GenerateRequest when available
-        # TODO where is this client coming from?
         pass
