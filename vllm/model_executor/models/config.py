@@ -292,6 +292,10 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
 
+        # Set mamba block size to max_model_len (this may get
+        # override by prefix caching logic later)
+        cache_config.mamba_block_size = model_config.max_model_len
+
         # TODO(@tdoublep) find a better way to do this than whitelist
         MAMBA2_MODELS = [
             "BambaForCausalLM",
@@ -411,8 +415,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # with mamba layers, use FlashInfer instead).
             attn_block_size = 16 * cdiv(mamba_page_size,
                                         16 * attn_page_size_1_token)
-            cache_config.mamba_block_size = model_config.max_model_len
 
+        print("cache_config.mamba_block_size: ", cache_config.mamba_block_size)
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
         # too small.
