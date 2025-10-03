@@ -751,39 +751,17 @@ def _parse_operator_name(op_name: str) -> tuple[str, str, str]:
 
 def _resolve_operator_overload(op_name: str):
     import torch
-    from torch._ops import OpOverload, OpOverloadPacket
 
     namespace, operator, overload = _parse_operator_name(op_name)
-    try:
-        namespace_obj = getattr(torch.ops, namespace)
-        operator_obj = getattr(namespace_obj, operator)
-    except AttributeError as exc:
-        if not hasattr(torch.ops, namespace):
-            raise ValueError(
-                f"Unknown operator namespace '{namespace}'") from exc
-        raise ValueError(
-            f"Unknown operator '{namespace}::{operator}'") from exc
-
-    if isinstance(operator_obj, OpOverload):
-        if overload not in ("default", ""):
-            raise ValueError(
-                f"Operator '{namespace}::{operator}' has no overload "
-                f"'{overload}'")
-        return operator_obj
-
     target_overload = overload or "default"
-    if isinstance(operator_obj, OpOverloadPacket):
-        try:
-            return getattr(operator_obj, target_overload)
-        except AttributeError as exc:
-            raise ValueError(
-                f"Operator '{namespace}::{operator}' has no overload "
-                f"'{target_overload}'") from exc
 
     try:
-        return getattr(operator_obj, target_overload)
-    except (AttributeError, TypeError) as exc:
-        raise ValueError(f"Unsupported operator type for '{op_name}'") from exc
+        return getattr(getattr(getattr(torch.ops, namespace), operator),
+                       target_overload)
+    except AttributeError as exc:
+        raise ValueError(f"Cannot resolve operator '{op_name}': "
+                         f"namespace='{namespace}', operator='{operator}', "
+                         f"overload='{target_overload}'") from exc
 
 
 @contextlib.contextmanager
