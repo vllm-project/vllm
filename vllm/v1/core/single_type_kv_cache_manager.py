@@ -566,7 +566,7 @@ class MambaManager(SingleTypeKVCacheManager):
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
         # Here unused blocks may be freed up for running requests.
-        # Future enhancement: Free up all blocks that aren't needed by Mamba2
+        # TODO(@s3woz) Free up all blocks that aren't needed by Mamba2
         #  (for which find_longest_cache_hit returns block_pool.null_block)
         pass
 
