@@ -1,17 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any, Optional
+
 import torch
-from typing import Optional
+
 
 class EagleMixin:
+    compute_logits: Any
+
     def propose_chain(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.compute_logits(hidden_states)
         draft_token_ids = logits.argmax(dim=-1)
         return draft_token_ids
-    
+
+
 class Eagle3Mixin:
+    lm_head: Any
+    logits_processor: Any
+    draft_id_to_target_id: Optional[Any]
+    config: Any
+
     def compute_draft_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor:
         # Computes draft logits from hidden states.
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
@@ -36,7 +48,7 @@ class Eagle3Mixin:
         ), float('-inf'))
         logits_new[:, targets] = logits
         return logits_new
-    
+
     def propose_chain(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.compute_draft_logits(hidden_states)
         draft_token_ids = logits.argmax(dim=-1)
