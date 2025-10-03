@@ -11,6 +11,7 @@ from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.registry import _Backend
+from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
@@ -25,7 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
+from vllm.utils import is_torch_equal_or_newer
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -257,14 +258,6 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
 
-    # Mock the _cached_get_attn_backend function to avoid cached results
-    monkeypatch.setattr(
-        "vllm.attention.selector._cached_get_attn_backend",
-        lambda *args, **kwargs: resolve_obj_by_qualname(
-            current_platform.
-            get_attn_backend_cls(backend, head_size, dtype, "fp8", 16, True,
-                                 False, False, False)))
-
     device = torch.device("cuda:0")
     torch.manual_seed(42)
 
@@ -304,7 +297,8 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
     # Run model directly without compilation and fusion
     vllm_config_unfused = copy.deepcopy(vllm_config)
     with set_current_vllm_config(vllm_config_unfused), set_forward_context(
-            attn_metadata=None, vllm_config=vllm_config_unfused):
+            attn_metadata=None, vllm_config=vllm_config_unfused
+    ), global_force_attn_backend_context_manager(backend):
         model_unfused = model_class(num_qo_heads=num_qo_heads,
                                     num_kv_heads=num_kv_heads,
                                     head_size=head_size,
@@ -324,7 +318,8 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
     vllm_config.compilation_config.pass_config = PassConfig(
         enable_attn_fusion=True, enable_noop=True)
     with set_current_vllm_config(vllm_config), set_forward_context(
-            attn_metadata=None, vllm_config=vllm_config):
+            attn_metadata=None, vllm_config=vllm_config
+    ), global_force_attn_backend_context_manager(backend):
         model_fused = model_class(num_qo_heads=num_qo_heads,
                                   num_kv_heads=num_kv_heads,
                                   head_size=head_size,
