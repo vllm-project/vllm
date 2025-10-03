@@ -30,7 +30,7 @@ class SharedFusedMoE(FusedMoE):
         # from being hidden from torch.compile.
         self.use_overlapped = use_overlapped and not (
             self.use_ep or self.use_flashinfer_cutlass_kernels
-        ) and self.shared_experts is not None
+        ) and self._shared_experts is not None
 
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
