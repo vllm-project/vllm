@@ -571,6 +571,8 @@ class NixlConnectorWorker:
 
         # invalid blocks from failed NIXL operations
         self._invalid_block_ids: set[int] = set()
+        # requests that failed during transfer initiation
+        self._failed_initiation_reqs: set[ReqId] = set()
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
@@ -1109,6 +1111,14 @@ class NixlConnectorWorker:
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
+
+        # mark requests done xfering that failed during initiation
+        failed_initiation = set()
+        if self._failed_initiation_reqs:
+            failed_initiation = self._failed_initiation_reqs.copy()
+            done_recving.update(self._failed_initiation_reqs)
+            self._failed_initiation_reqs.clear()
+
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -1117,6 +1127,10 @@ class NixlConnectorWorker:
 
         if self.use_host_buffer:
             for req_id in done_recving:
+                if req_id in failed_initiation:
+                    # don't sync failed requests
+                    self._recving_metadata.pop(req_id, None)
+                    continue
                 meta = self._recving_metadata.pop(req_id)
                 assert meta, f"{req_id} not found in recving_metadata list"
                 self.sync_recved_kv_to_device(req_id, meta)
@@ -1290,8 +1304,8 @@ class NixlConnectorWorker:
                     "NIXL send_notif failed for request %s: %s. "
                     "P worker blocks will be freed after timeout. "
                     "This may indicate network issues.", request_id, e)
-                # Note: No blocks to mark invalid (full prefix cache hit).
-                # P worker will eventually timeout and free blocks.
+                # TODO(weaton): We may consider further action here,
+                # but requests should eventually timeout on P side.
                 self.xfer_stats.record_failed_notification()
             return
 
@@ -1351,6 +1365,7 @@ class NixlConnectorWorker:
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
+        handle = None
         try:
             handle = self.nixl_wrapper.make_prepped_xfer(
                 "READ",
@@ -1372,7 +1387,11 @@ class NixlConnectorWorker:
                 "NIXL transfer setup/initiation failed for request %s: %s. "
                 "Marking blocks as invalid for retry.", request_id, e)
             self._invalid_block_ids.update(local_block_ids)
+            self._failed_initiation_reqs.add(request_id)
             self.xfer_stats.record_failed_transfer()
+            # release handle if it was created before failure
+            if handle is not None:
+                self.nixl_wrapper.release_xfer_handle(handle)
 
     def _get_block_descs_ids(self,
                              engine_id: str,
