@@ -18,6 +18,7 @@ from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.layers.cross_attention import CrossAttention
 from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
                          VllmConfig)
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -691,6 +692,7 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
@@ -698,9 +700,13 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         audio_len = feature_extractor.chunk_length * sampling_rate
         num_audios = mm_counts.get("audio", 0)
 
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         return {
             "audio":
-            self._get_dummy_audios(length=audio_len, num_audios=num_audios)
+            self._get_dummy_audios(length=audio_len,
+                                   num_audios=num_audios,
+                                   overrides=audio_overrides)
         }
 
 

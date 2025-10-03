@@ -24,6 +24,7 @@ from transformers.models.pixtral.modeling_pixtral import (
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -228,28 +229,33 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
         dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         dummy_images = dummy_mm_data.get("image", [])
         tokenization_kwargs = {"truncation": False}
 
