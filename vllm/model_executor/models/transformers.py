@@ -498,6 +498,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 self.ignore_unexpected_suffixes.append(".bias")
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
+        self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(
                 self.config,
@@ -510,7 +511,6 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
-        self.text_config._attn_implementation = "vllm"
         self.attention_instances = self.create_attention_instances()
 
         # Input embeddings
