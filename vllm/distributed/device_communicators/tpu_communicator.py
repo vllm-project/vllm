@@ -98,5 +98,5 @@ class TpuCommunicator(DeviceCommunicatorBase):
 
 if USE_TPU_INFERENCE:
     from tpu_inference.distributed.device_communicators import (
-        TpuCommunicator as TpuCommonsCommunicator)
-    TpuCommunicator = TpuCommonsCommunicator  # type: ignore
+        TpuCommunicator as TpuInferenceCommunicator)
+    TpuCommunicator = TpuInferenceCommunicator  # type: ignore

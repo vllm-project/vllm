@@ -341,6 +341,6 @@ class TPUWorker:
 
 
 if USE_TPU_INFERENCE:
-    from tpu_inference.worker import TPUWorker as TPUCommonsWorker
+    from tpu_inference.worker import TPUWorker as TPUInferenceWorker
 
-    TPUWorker = TPUCommonsWorker  # type: ignore
+    TPUWorker = TPUInferenceWorker  # type: ignore

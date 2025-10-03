@@ -228,8 +228,8 @@ class TpuPlatform(Platform):
 
 
 try:
-    from tpu_inference.platforms import TpuPlatform as TpuCommonsPlatform
-    TpuPlatform = TpuCommonsPlatform  # type: ignore
+    from tpu_inference.platforms import TpuPlatform as TpuInferencePlatform
+    TpuPlatform = TpuInferencePlatform  # type: ignore
     USE_TPU_INFERENCE = True
 except ImportError:
     logger.info("tpu_inference not found, using vLLM's TpuPlatform")
