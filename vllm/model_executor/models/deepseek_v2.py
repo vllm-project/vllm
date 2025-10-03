@@ -643,7 +643,6 @@ def sparse_attn_indexer(
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
             )
-            k = min(topk_tokens, logits.shape[-1])
             num_rows = logits.shape[0]
             topk_indices = torch.empty(num_rows,
                                        topk_tokens,
@@ -655,7 +654,7 @@ def sparse_attn_indexer(
                                       device=logits.device)
             torch.ops._C.top_k_per_row(logits, chunk.cu_seqlen_ks,
                                        chunk.cu_seqlen_ke, topk_indices,
-                                       topk_values, num_rows, k,
+                                       topk_values, num_rows,
                                        logits.stride(0), logits.stride(1))
 
             topk_indices -= chunk.cu_seqlen_ks[:, None]
@@ -705,7 +704,6 @@ def sparse_attn_indexer(
             device=padded_q_fp8_decode_tokens.device) % next_n
         index_end_pos = (decode_metadata.seq_lens[row_indices] - next_n +
                          next_n_offset + 1).unsqueeze(1)
-        k = min(topk_tokens, logits.shape[-1])
         num_rows = logits.shape[0]
         topk_indices = torch.empty(num_rows,
                                    topk_tokens,
@@ -722,7 +720,6 @@ def sparse_attn_indexer(
             topk_indices,
             topk_values,
             num_rows,
-            k,
             logits.stride(0),
             logits.stride(1)
         )

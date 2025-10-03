@@ -328,8 +328,8 @@ void apply_repetition_penalties_(
 
 void top_k_per_row(const torch::Tensor& logits, const torch::Tensor& rowStarts,
                    const torch::Tensor& rowEnds, torch::Tensor& indices,
-                   torch::Tensor& values, int64_t numRows, int64_t topK,
-                   int64_t stride0, int64_t stride1) {
+                   torch::Tensor& values, int64_t numRows, int64_t stride0,
+                   int64_t stride1) {
   // Compute the results on the device.
   constexpr int kNumThreadsPerBlock = 512;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
