@@ -154,6 +154,9 @@ def test_splitting_ops_dynamic():
             splitting_ops=["vllm.unified_attention"]))
         # with inductor partition we disregard user-specified splitting_ops
         assert config.compilation_config.splitting_ops == []
+        assert config.compilation_config.partition_rule_ops == [
+            "vllm.unified_attention"
+        ]
 
     # When attn_fusion pass enabled.
     config = VllmConfig(compilation_config=CompilationConfig(

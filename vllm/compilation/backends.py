@@ -180,10 +180,9 @@ class CompilerManager:
         else:
             maybe_key = \
                 f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
-        ops = self.compilation_config.splitting_ops
         if self.compilation_config.use_inductor_graph_partition:
-            # Use splitting_ops configured in set_splitting_ops_for_v1()
-            context = _inductor_partition_rule_context(ops or [])
+            partition_ops = self.compilation_config.partition_rule_ops or []
+            context = _inductor_partition_rule_context(partition_ops)
         else:
             context = nullcontext()
 
