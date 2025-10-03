@@ -96,9 +96,6 @@ class TransformersMoEBase(TransformersBase):
         self.check_version("4.57.0.dev0", "MoE models support")
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        if self.parallel_config.enable_expert_parallel:
-            raise NotImplementedError(
-                "Transformers backend does not support expert parallel yet.")
         if self.parallel_config.enable_eplb:
             raise NotImplementedError(
                 "Transformers backend does not support expert parallel load "
