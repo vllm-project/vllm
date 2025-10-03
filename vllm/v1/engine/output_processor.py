@@ -248,16 +248,15 @@ class RequestState:
         if prompt_token_ids is None and self.prompt_embeds is not None:
             prompt_token_ids = [0] * len(self.prompt_embeds)
 
-        return RequestOutput(
-            request_id=request_id,
-            prompt=self.prompt,
-            prompt_token_ids=prompt_token_ids,
-            prompt_logprobs=prompt_logprobs,
-            outputs=cast(list[CompletionOutput], outputs),
-            finished=finished,
-            kv_transfer_params=kv_transfer_params,
-            num_cached_tokens=self.num_cached_tokens,
-        )
+        return RequestOutput(request_id=request_id,
+                             prompt=self.prompt,
+                             prompt_token_ids=prompt_token_ids,
+                             prompt_logprobs=prompt_logprobs,
+                             outputs=cast(list[CompletionOutput], outputs),
+                             finished=finished,
+                             kv_transfer_params=kv_transfer_params,
+                             num_cached_tokens=self.num_cached_tokens,
+                             metrics=self.stats)
 
     def _new_completion_output(
         self,
