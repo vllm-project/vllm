@@ -43,7 +43,6 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .chatglm import ChatGLMBaseModel, ChatGLMModel
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import flatten_bn
 
 
 class GLMVImagePixelInputs(TensorSchema):
@@ -529,8 +528,9 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(GLM4VMultiModalProcessor,
                                         info=GLM4VProcessingInfo,
                                         dummy_inputs=GLM4VDummyInputsBuilder)
-class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
-                       SupportsMultiModal):
+class GLM4VForCausalLM(ChatGLMBaseModel, SupportsMultiModal, SupportsLoRA,
+                       SupportsPP):
+    merge_by_field_config = True
 
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
@@ -574,14 +574,9 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         pixel_values = kwargs.pop("pixel_values", None)
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
             expected_h = expected_w = self.config.vision_config["image_size"]
             return GLMVImagePixelInputs(type="pixel_values",
-                                        data=flatten_bn(pixel_values,
-                                                        concat=True),
+                                        data=pixel_values,
                                         resolve_bindings={
                                             "h": expected_h,
                                             "w": expected_w
@@ -597,6 +592,8 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
 
     def get_language_model(self) -> torch.nn.Module:
         return self.transformer
+
+    get_input_embeddings = SupportsMultiModal.get_input_embeddings
 
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
