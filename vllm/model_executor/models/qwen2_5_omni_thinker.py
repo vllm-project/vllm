@@ -69,8 +69,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, WeightsMapper,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 
 try:
     import flash_attn
@@ -324,9 +323,15 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
-        use_audio_in_video = (all(
-            item["use_audio_in_video"].data
-            for item in mm_kwargs["video"]) if "video" in mm_kwargs else False)
+        use_audio_in_video = False
+        if "video" in mm_kwargs:
+            video_items = [
+                item for item in mm_kwargs["video"] if item is not None
+            ]
+            # only check video items (if there are any)
+            if video_items:
+                use_audio_in_video = all(item["use_audio_in_video"].data
+                                         for item in video_items)
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
@@ -865,24 +870,26 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 multimodal_embeddings += audio_embeddings
         return multimodal_embeddings
 
+    # TODO (ywang96): support overlapping modality embeddings so that
+    # `use_audio_in_video` will work on V1.
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
 
-            # TODO (ywang96): support overlapping modality embeddings so that
-            # `use_audio_in_video` will work on V1.
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings, [
-                    self.config.image_token_index,
-                    self.config.video_token_index,
-                    self.config.audio_token_index
-                ])
-        return inputs_embeds
+        return super().get_input_embeddings(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
 
     def get_multimodal_embeddings_v0(
             self, **kwargs: object) -> Optional[NestedTensors]:
@@ -906,26 +913,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             multimodal_embeddings.append((video_embeds, "video"))
         return multimodal_embeddings
 
-    def get_input_embeddings_v0(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-
-        for embeddings, modality in multimodal_embeddings:
-            if modality == "audio":
-                placeholder_token_id = self.config.audio_token_index
-            if modality == "image":
-                placeholder_token_id = self.config.image_token_index
-            if modality == "video":
-                placeholder_token_id = self.config.video_token_index
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, embeddings, placeholder_token_id)
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -936,14 +923,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings_v0(**kwargs)
-            inputs_embeds = self.get_input_embeddings_v0(
-                input_ids, multimodal_embeddings)
-            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
