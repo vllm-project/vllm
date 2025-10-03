@@ -276,7 +276,8 @@ def apply_rotary_emb_torch(x: torch.Tensor,
 
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
                                 freqs: torch.Tensor) -> torch.Tensor:
-    rotary_emb_function = dispatch_rotary_emb_function()
+    rotary_emb_function = dispatch_rotary_emb_function(
+        default=apply_rotary_emb_torch)
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
