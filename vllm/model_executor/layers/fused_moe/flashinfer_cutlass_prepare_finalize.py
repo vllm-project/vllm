@@ -10,6 +10,8 @@ from vllm.distributed.device_communicators.base_device_communicator import (
     All2AllManagerBase)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
@@ -44,6 +46,9 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
+
+    def output_is_reduced(self) -> bool:
+        return False
 
     def _apply_router_weight_on_input(
         self,
@@ -197,6 +202,7 @@ class FlashInferAllGatherMoEPrepareAndFinalize(
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
+        assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP)
 
         if self.use_dp:
             fused_expert_output = get_dp_group().reduce_scatterv(

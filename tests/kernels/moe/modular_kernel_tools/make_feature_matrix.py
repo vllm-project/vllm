@@ -130,7 +130,7 @@ def make_feature_matrix(csv_file_path: str):
                         fused_moe_chunk_size=None)
 
         success = None
-        if config.is_valid():
+        if config.is_valid()[0]:
             print(f"Running config : {config.describe()} ...")
             try:
                 weights: WeightTensors = WeightTensors.make(config)
