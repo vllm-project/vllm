@@ -20,10 +20,13 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless, import_pynvml
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
+else:
+    _Backend = None
 
 logger = init_logger(__name__)
 
@@ -202,7 +205,8 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> _Backend:
+                             dtype: torch.dtype) -> "_Backend":
+        from vllm.attention.backends.registry import _Backend
 
         # For Blackwell GPUs, force TORCH_SDPA for now.
         # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
@@ -230,6 +234,7 @@ class CudaPlatformBase(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink, use_sparse) -> str:
+        from vllm.attention.backends.registry import _Backend
         if use_mla:
             if not use_v1:
                 raise RuntimeError(
