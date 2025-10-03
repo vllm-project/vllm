@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.attention import AttentionType
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -26,7 +27,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.model_executor.models.vision import get_vit_attn_backend
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import current_platform
 from vllm.utils import GiB_bytes, direct_register_custom_op
 
 logger = init_logger(__name__)

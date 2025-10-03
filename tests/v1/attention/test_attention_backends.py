@@ -8,11 +8,11 @@ import pytest
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
-from tests.v1.attention.utils import (BatchSpec, _Backend,
-                                      create_common_attn_metadata,
+from tests.v1.attention.utils import (BatchSpec, create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
+from vllm.attention.backends.registry import _Backend
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
