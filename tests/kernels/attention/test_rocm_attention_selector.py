@@ -19,7 +19,7 @@ def clear_cache():
 @pytest.mark.skip(reason="Skipped for now. Should be revisited.")
 def test_selector(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
-        m.setenv(STR_BACKEND_ENV_VAR, "ROCM_AITER_FA")
+        m.setenv(STR_BACKEND_ENV_VAR, "ROCM_ATTN")
 
         # Set the current platform to ROCm using monkeypatch
         monkeypatch.setattr("vllm.attention.selector.current_platform",
@@ -27,8 +27,8 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
 
         # Test standard ROCm attention
         backend = get_attn_backend(16, torch.float16, torch.float16, 16, False)
-        assert (backend.get_name() == "ROCM_AITER_FA"
-                or backend.get_name() == "ROCM_ATTN")
+        assert (backend.get_name() == "ROCM_ATTN"
+                or backend.get_name() == "TRITON_ATTN")
 
         # MLA test for deepseek related
 

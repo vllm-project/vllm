@@ -32,7 +32,7 @@ DEVICE_MLA_BACKENDS = {
 
 DEVICE_REGULAR_ATTN_BACKENDS = {
     "cuda": ["XFORMERS", "FLASHINFER", "FLASH_ATTN"],
-    "hip": ["ROCM_AITER_FA"],
+    "hip": ["ROCM_ATTN"],
     "cpu": ["TORCH_SDPA"],
 }
 
