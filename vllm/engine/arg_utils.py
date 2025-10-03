@@ -376,7 +376,7 @@ class EngineArgs:
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    limit_mm_per_prompt: dict[str, int] = \
+    limit_mm_per_prompt: dict[str, Union[int, dict[str, int]]] = \
         get_field(MultiModalConfig, "limit_per_prompt")
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str,
@@ -1131,6 +1131,10 @@ class EngineArgs:
         device_config = DeviceConfig(
             device=cast(Device, current_platform.device_type))
 
+        model_config = self.create_model_config()
+        self.model = model_config.model
+        self.tokenizer = model_config.tokenizer
+
         (self.model, self.tokenizer,
          self.speculative_config) = maybe_override_with_speculators(
              model=self.model,
@@ -1139,7 +1143,6 @@ class EngineArgs:
              trust_remote_code=self.trust_remote_code,
              vllm_speculative_config=self.speculative_config,
          )
-        model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
         #   and fall back to V0 for experimental or unsupported features.
@@ -1160,11 +1163,12 @@ class EngineArgs:
 
         # Set default arguments for V1 Engine.
         self._set_default_args(usage_context, model_config)
-        # Disable chunked prefill for POWER (ppc64le)/ARM/s390x CPUs in V1
+        # Disable chunked prefill for POWER (ppc64le)/ARM/s390x/RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture(
-        ) in (CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM):
-            logger.info("Chunked prefill is not supported for ARM and POWER "
-                        "and S390X CPUs; "
+        ) in (CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM,
+              CpuArchEnum.RISCV):
+            logger.info("Chunked prefill is not supported for ARM and POWER, "
+                        "S390X and RISC-V CPUs; "
                         "disabling it for V1 backend.")
             self.enable_chunked_prefill = False
         assert self.enable_chunked_prefill is not None
@@ -1367,6 +1371,7 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
+            is_encoder_decoder=model_config.is_encoder_decoder,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
