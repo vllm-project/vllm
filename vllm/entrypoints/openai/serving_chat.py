@@ -686,7 +686,7 @@ class OpenAIServingChat(OpenAIServing):
                         delta_text = output.text
 
                     if not delta_text and not output.token_ids and \
-                        not previous_num_tokens[i]:
+                        not previous_num_tokens[i] and not output.finish_reason:
                         # Chunked prefill case, don't return empty chunks
                         continue
 

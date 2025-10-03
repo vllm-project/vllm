@@ -407,7 +407,8 @@ class OpenAIServingCompletion(OpenAIServing):
                             has_echoed[i] = True
 
                         if (not delta_text and not delta_token_ids
-                                and not previous_num_tokens[i]):
+                                and not previous_num_tokens[i]
+                                and not output.finish_reason):
                             # Chunked prefill case, don't return empty chunks
                             continue
 
